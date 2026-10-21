@@ -272,7 +272,7 @@ await doc.transact('クリッピング', tx => tx.setProps(layer, { clip_to_belo
 
 ## ソースから再ビルド
 
-Rust stable、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。
+Rust **1.99.1**（`rust-toolchain.toml`）、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**（`crates/alto-wasm/Cargo.toml` の `wasm-bindgen` と同じピン）、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。`sh scripts/check.sh` はリリース wasm を組み直し、`examples/browser-playground/pkg` と `packages/alto-sdk/dist/pkg` が一致しなければ失敗します。
 
 ```sh
 rustup target add wasm32-unknown-unknown
