@@ -1,6 +1,22 @@
-# M7・M8 最終検証結果
+# M7・M8 検証結果
 
-2026-10-21、今のソースから作り直した WASM と SDK を、この Mac 上で検証しました。SDK v0.4.0 / Worker protocol 4。Playground の `pkg` と SDK の `dist/pkg` は同じバイト列です。
+## 2026-10-22：現在の配布版
+
+固定ツールチェーン（rustc 1.99.1 / wasm-bindgen 0.2.129）とaarch64-apple-darwinのホストでWASMを再生成し、PlaygroundとSDKに同じバイト列を配布しました。CIのバイト比較もarm64 macOSを使用します。本体は **4,313,895 bytes**、SHA-256は `e29c7306aed94d786715d0ccf5f8802b9c75c867e3e0a52287e506f2c0fdbe55`、Node zlibの標準gzipで **1,088,017 bytes** です。[build.json](build.json) の数値は `scripts/check-build-metadata.mjs` で配布ファイルと照合します。
+
+- `cargo test --workspace --locked`：Rust **91件成功**。nativeとwasm32のClippy、SDKビルド、Storage Session単体テスト **7件**も成功。
+- 空の`ALTO_TARGET_DIR`からのクリーンビルドも、両配布先と4ファイルすべてバイト一致。`sh scripts/check.sh` の再生成比較、検証記録の照合、ハッシュ一覧の検証も通過。
+- Codex内蔵ブラウザ（macOS）で現在の配布版を実行：機能 **13件**、M5 **8件**、M6 **10件**、M7 **9件**、M8 **6件**がすべて成功。機能テストには、ジャーナル追記前の障害と追記後の応答喪失を注入し、編集停止・緊急退避・改訂の復旧を確認する2件を追加しました。
+- 3840×2160・20ラスター層のB1〜B7が設定目標を達成。B1描画p95 **4.4 ms**、B2ズーム **147.6 ms**、B3入力から描画p95 **5.1 ms**、B4全面Undo **13 ms**、B5保存/読込 **825.9/1048.4 ms**、B6 GPU/WASMピーク **483.75/240.81 MiB**、B7復旧と初回描画 **1387 ms**。B6のGPU上限は512 MiB、B7目標は1500 msであり、余裕は小さい。一回の実測であり、他の端末を保証する値ではありません。
+- Storage Workerの起動後障害、読めない応答、無応答は保留要求を `STORAGE` エラーで終了し、書き込みを自動再送しません。応答が失われた書き込みの成否は確定できないため、復旧にはEngine Workerの再起動とジャーナル読み込みが必要です。
+- 編集のパッチはジャーナルの書き込み確認後に通知します。保存障害後は編集を停止し、SDKはメモリ内の `.alto` 退避と確認済みジャーナルからの復旧を提供します。Playgroundでは退避・復旧ボタンを表示します。復旧結果と障害前の表示のハッシュが違う場合は通知します。
+- CI用のChrome自動検証では機能13件、M5 8件、M6 10件、M7 9件、M8 6件がこのMacで成功しました。SwiftShaderのソフトウェアWebGPUでも同じ5スイートが成功しました。GitHub ActionsにはSwiftShaderでの5スイートと結果JSONの保存を設定しましたが、この変更を含むGitHub上の実行結果は未確認です。上記はローカルのテストとブラウザ実測です。
+
+以下のJSON、画像、細かな画素比較およびHeadless Chromeの数値は、**2026-10-21時点の旧配布版**の記録です。今回のブラウザ操作結果をそれらのファイルに上書きしていません。
+
+## 2026-10-21：旧配布版の記録
+
+2026-10-21、当時のソースから作り直した WASM と SDK を、この Mac 上で検証しました。SDK v0.4.0 / Worker protocol 4。Playground の `pkg` と SDK の `dist/pkg` は同じバイト列でした。
 
 ## 合否
 
@@ -93,7 +109,7 @@ PlaygroundのUIでも、テキストツールのドラッグ選択→入力→Ba
 
 ## 配布物
 
-本体WASM 4,162,722 bytes / gzip 1,047,959 bytes。SDK distとPlaygroundのWASMはバイト一致。SHA-256：`51e7fdee1480eedc1699ac8f525442131f22c470f178a3fb826e7d50e21f8832`。
+2026-10-21時点の本体WASMは4,162,722 bytes / gzip 1,047,959 bytes。SDK distとPlaygroundのWASMはバイト一致。SHA-256：`51e7fdee1480eedc1699ac8f525442131f22c470f178a3fb826e7d50e21f8832`。
 
 比較用の `examples/vector-comparison` は今回ビルドしていません。4,223,713 bytes / gzip 984,224 bytes。SHA-256：`a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b`。
 

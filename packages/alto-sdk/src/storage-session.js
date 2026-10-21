@@ -5,12 +5,15 @@ export function createStorageSession({
   createWorker,
   loadInline,
   onInline = () => {},
+  onFailure = () => {},
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (id) => clearTimeout(id),
   timeoutMs = 3000,
+  requestTimeoutMs = 120000,
 }) {
   let mode = "starting";
   let closing = false;
+  let failure = null;
   let worker = null;
   let inline = null;
   let timer = null;
@@ -34,6 +37,23 @@ export function createStorageSession({
     }
   }
 
+  function failRunning(why) {
+    if (mode !== "running") return;
+    mode = "failed";
+    failure = Error("STORAGE: " + why);
+    const dead = worker;
+    worker = null;
+    dead?.terminate();
+    for (const entry of pending.values()) {
+      clearTimer(entry.timer);
+      entry.reject(failure);
+    }
+    pending.clear();
+    try { onFailure(failure); } catch {}
+    // A write may have reached OPFS before its reply was lost. Replaying it
+    // inline could append the same record twice, so this session fails closed.
+  }
+
   async function failStart(why) {
     if (mode !== "starting" || closing) return;
     closing = true;
@@ -41,7 +61,15 @@ export function createStorageSession({
     const dead = worker;
     worker = null;
     dead?.terminate();
-    inline = await loadInline();
+    try {
+      inline = await loadInline();
+    } catch (error) {
+      failure = Error("STORAGE: inline journal unavailable: " + error);
+      mode = "failed";
+      resolveReady();
+      try { onFailure(failure); } catch {}
+      return;
+    }
     const queued = [...pending.values()];
     pending.clear();
     mode = "inline";
@@ -67,6 +95,7 @@ export function createStorageSession({
     const entry = pending.get(data.id);
     if (!entry || mode !== "running") return;
     pending.delete(data.id);
+    clearTimer(entry.timer);
     data.ok
       ? entry.resolve(data.value)
       : entry.reject(Error("STORAGE: " + data.error));
@@ -76,7 +105,12 @@ export function createStorageSession({
     worker = createWorker();
     worker.onmessage = (event) => onMessage(event.data);
     worker.onerror = () => {
-      void failStart("storage worker failed to start");
+      if (mode === "running") failRunning("storage worker failed");
+      else void failStart("storage worker failed to start");
+    };
+    worker.onmessageerror = () => {
+      if (mode === "running") failRunning("storage worker reply could not be read");
+      else void failStart("storage worker reply could not be read");
     };
     worker.postMessage({ t: "ping", id: 0 });
     timer = setTimer(() => {
@@ -88,20 +122,26 @@ export function createStorageSession({
 
   return {
     get state() {
-      return mode === "running" || mode === "inline" ? mode : "starting";
+      return mode;
     },
     async request(t, payload = {}, transfer = []) {
       const message = { t, ...payload };
       if (mode !== "running") await ready;
+      if (mode === "failed") throw failure;
       if (mode === "inline") return callInline(message);
       const id = sequence++;
       const sent = { ...message, id };
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject, message: sent });
+        const timer = setTimer(
+          () => failRunning("storage worker did not answer request " + id),
+          requestTimeoutMs,
+        );
+        pending.set(id, { resolve, reject, message: sent, timer });
         try {
           worker.postMessage(sent, transfer);
         } catch (error) {
           pending.delete(id);
+          clearTimer(timer);
           reject(Error("STORAGE: " + error));
         }
       });

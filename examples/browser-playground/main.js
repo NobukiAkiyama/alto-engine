@@ -331,6 +331,54 @@ $("#discard").onclick = () =>
     attach(await engine.createDocument({ width: 1920, height: 1080 }));
     await doc.transact("レイヤー追加", (tx) => (selected = tx.addRaster()));
   });
+function showStorageFailure(error) {
+  gesture = null;
+  $("#storage-failure").hidden = false;
+  $("#recovery-result").hidden = true;
+  for (const selector of ["header", "nav", "main"])
+    $(selector).inert = true;
+  status("保存障害：編集を停止しました");
+  fail(error);
+}
+$("#emergency-export").onclick = () => run(async () => {
+  // The picker needs a user gesture; request it before awaiting the Worker.
+  const destination = await engine.storage.pickSaveFile({ suggestedName: "alto-emergency.alto" });
+  const bytes = await engine.exportEmergencyBytes();
+  if (destination.writeArchive)
+    await destination.writeArchive(new Blob([bytes]).stream());
+  else {
+    const writer = await destination.createWritable();
+    try {
+      await writer.write(bytes);
+      await writer.close();
+    } catch (error) {
+      await writer.abort();
+      throw error;
+    }
+  }
+  status("現在の内容を退避しました。記録から復旧できます");
+});
+$("#recover-storage").onclick = () => run(async () => {
+  $("#recover-storage").disabled = true;
+  try {
+    const result = await engine.recoverAfterStorageFailure();
+    $("#storage-failure").hidden = true;
+    for (const selector of ["header", "nav", "main"])
+      $(selector).inert = false;
+    $("#error").textContent = "";
+    attach(result.document);
+    const notice = $("#recovery-result");
+    notice.classList.toggle("warning", result.matchesDisplay !== true);
+    notice.textContent = result.matchesDisplay === false
+      ? `障害前の表示（改訂 ${result.beforeRevision}）と復旧結果（改訂 ${result.recoveredRevision}）が異なります。退避ファイルも確認してください。`
+      : result.matchesDisplay === true
+        ? `記録から改訂 ${result.recoveredRevision} を復旧しました。障害前の表示と一致しています。`
+        : `記録から改訂 ${result.recoveredRevision} を復旧しました。障害前の表示と比較できないため、内容を確認してください。`;
+    notice.hidden = false;
+  } finally {
+    $("#recover-storage").disabled = false;
+  }
+});
 for (const [id, bench] of [
   ["test", false],
   ["benchmark", true],
@@ -353,6 +401,7 @@ for (const [id, bench] of [
       }
     });
 window.addEventListener("keydown", (e) => {
+  if (engine?.storageFailure) return;
   if (
     (e.ctrlKey || e.metaKey) &&
     e.key.toLowerCase() === "z" &&
@@ -366,9 +415,10 @@ window.addEventListener("keydown", (e) => {
 try {
   engine = await AltoEngine.create({ canvas: $("#canvas") });
   engine.on("error", fail);
+  engine.on("storageFailure", showStorageFailure);
   engine.on("diagnostic", (d) => fail(JSON.stringify(d)));
   engine.on("frame", (f) =>
-    status(
+    !engine.storageFailure && status(
       `${f.pending ? "合成中 " + f.pending + " タイル · " : ""}${f.cpuMs.toFixed(1)} ms · GPU ${(f.gpuBytes / 1048576).toFixed(0)} MiB · WASM ${(f.wasmBytes / 1048576).toFixed(0)} MiB`,
     ),
   );
@@ -377,6 +427,14 @@ try {
   engine.on("canvasReplaced", () => {
     bindCanvas();
     attach(engine.document);
+  });
+  engine.on("recovered", () => {
+    if (!engine.storageFailure) {
+      $("#storage-failure").hidden = true;
+      $("#error").textContent = "";
+      for (const selector of ["header", "nav", "main"])
+        $(selector).inert = false;
+    }
   });
   bindCanvas();
   new ResizeObserver(() => {

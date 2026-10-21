@@ -333,6 +333,61 @@ export async function runTests(engine, benchmark, log) {
         "truncation warning missing",
       );
     });
+    await test("failed append freezes edits and preserves live emergency export", async () => {
+      const before = doc.view.revision;
+      const name = doc.view.node(brushLayer).name;
+      const baseline = await engine.unstable.saveBytes();
+      await engine.unstable.injectStorageFault("beforeAppend");
+      let failed = false;
+      try {
+        await doc.transact("unconfirmed edit", (tx) =>
+          tx.setProps(brushLayer, { name: "Unconfirmed paint" }),
+        );
+      } catch (error) {
+        failed = error.code === "STORAGE";
+      }
+      assert(failed && engine.storageFailure, "append failure was not surfaced");
+      assert(!document.querySelector("#storage-failure").hidden, "recovery controls were not shown");
+      assert(document.querySelector("main").inert, "editor was not disabled");
+      assert(doc.view.revision === before, "unconfirmed patch reached the view");
+      const emergency = await engine.exportEmergencyBytes();
+      assert(emergency.length > 100, "emergency export failed");
+      let blocked = false;
+      try { await doc.undo(); } catch (error) { blocked = error.code === "STORAGE"; }
+      assert(blocked, "editing continued after storage failure");
+      await event(engine, "recovered", () =>
+        document.querySelector("#recover-storage").click(),
+      );
+      await delay(0);
+      doc = engine.document;
+      assert(document.querySelector("#storage-failure").hidden, "recovery controls remained open");
+      assert(!document.querySelector("main").inert, "editor remained disabled");
+      assert(!document.querySelector("#recovery-result").hidden, "recovery result was not shown");
+      assert(doc.view.revision === before, "confirmed journal changed unexpectedly");
+      assert(doc.view.node(brushLayer).name === name, "unconfirmed edit was replayed");
+      doc = await engine.openDocument(new Blob([emergency]));
+      assert(doc.view.node(brushLayer).name === "Unconfirmed paint", "emergency export lost live edit");
+      doc = await engine.openDocument(new Blob([baseline]));
+    });
+    await test("lost append reply replays once and reports a changed recovery", async () => {
+      const before = doc.view.revision;
+      await engine.unstable.injectStorageFault("afterAppend");
+      let failed = false;
+      try {
+        await doc.transact("reply lost", (tx) =>
+          tx.setProps(brushLayer, { name: "Confirmed despite lost reply" }),
+        );
+      } catch (error) {
+        failed = error.code === "STORAGE";
+      }
+      assert(failed && engine.storageFailure, "lost reply was not surfaced");
+      assert(doc.view.revision === before, "unacknowledged patch reached the view");
+      const recovered = await engine.recoverAfterStorageFailure();
+      doc = recovered.document;
+      assert(recovered.matchesDisplay === false, "recovery difference was hidden");
+      assert(doc.view.revision === before + 1, "lost reply replayed twice or not at all");
+      assert(doc.view.node(brushLayer).name === "Confirmed despite lost reply", "journal edit missing");
+    });
     await test("PNG/JPEG decoding to raster layers", async () => {
       const c = new OffscreenCanvas(64, 64),
         ctx = c.getContext("2d");

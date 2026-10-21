@@ -42,6 +42,6 @@ cargo_home=${CARGO_HOME:-$HOME/.cargo}
 mkdir -p "$CARGO_TARGET_DIR"
 target_dir=$(CDPATH= cd "$CARGO_TARGET_DIR" && pwd)
 export RUSTFLAGS="--remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${sysroot}=/sysroot --remap-path-prefix=${root}=/src --remap-path-prefix=${target_dir}=/target"
-cargo build -p alto-wasm --target wasm32-unknown-unknown --release
+cargo build -p alto-wasm --target wasm32-unknown-unknown --release --locked
 wasm-bindgen "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/alto_wasm.wasm" \
   --out-dir "$out" --target web

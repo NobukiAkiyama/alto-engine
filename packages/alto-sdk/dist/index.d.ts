@@ -582,6 +582,8 @@ export declare class AltoEngine extends Events {
     private options;
     document: DocumentHandle | null;
     recoveryAvailable: boolean;
+    /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
+    storageFailure: AltoError | null;
     private constructor();
     static create(options: {
         canvas: HTMLCanvasElement;
@@ -605,6 +607,15 @@ export declare class AltoEngine extends Events {
     /** Opens the folder form, reading only objects reachable from the document and its history. */
     openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
     recover(): Promise<DocumentHandle>;
+    /** Exports the live runtime without touching the failed journal or marking it saved. */
+    exportEmergencyBytes(): Promise<Uint8Array>;
+    /** Recreates both workers and replays the confirmed journal after a storage failure. */
+    recoverAfterStorageFailure(): Promise<{
+        document: DocumentHandle;
+        beforeRevision: number | null;
+        recoveredRevision: number;
+        matchesDisplay: boolean | null;
+    }>;
     readonly assets: {
         /** Imports an OpenType/TrueType font (.otf/.ttf/.ttc). Add it with tx.addFont(). */
         importFont: (file: Blob, options?: {
@@ -649,6 +660,8 @@ export declare class AltoEngine extends Events {
         destroyGpu: () => Promise<any>;
         crash: () => Promise<void>;
         corruptJournalTail: () => Promise<any>;
+        /** Fault injection for recovery tests only. */
+        injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<any>;
         saveBytes: () => Promise<Uint8Array<any>>;
     };
     private restart;

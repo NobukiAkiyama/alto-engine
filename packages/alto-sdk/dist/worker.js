@@ -12,6 +12,19 @@ self.addEventListener("error", (e) => {
   });
 });
 let journalBacklog = [];
+let injectedStorageFault = null;
+const readableAfterFailure = new Set([
+  "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
+  "selectionOutline", "textInfo", "textHitTest", "textCaret",
+  "textSelection", "textNavigate", "versionLog", "versionDiff",
+  "vectorStats", "vectorPathSvg",
+]);
+let storageFailure = null;
+function freezeStorage(error) {
+  if (storageFailure) return;
+  storageFailure = structured(error);
+  postMessage({ t: "storageFailure", value: storageFailure });
+}
 let runtime,
   canvas,
   budget = 512,
@@ -32,12 +45,20 @@ const journal = createStorageSession({
   onInline(why) {
     postMessage({ t: "diagnostic-storage", value: "inline journal: " + why });
   },
+  onFailure(error) {
+    freezeStorage(error);
+  },
 });
-function io(t, payload = {}, transfer = []) {
-  return journal.request(t, payload, transfer);
+async function io(t, payload = {}, transfer = []) {
+  try {
+    return await journal.request(t, payload, transfer);
+  } catch (error) {
+    freezeStorage(error);
+    throw error;
+  }
 }
 function structured(error) {
-  const message = String(error);
+  const message = error instanceof Error ? error.message : String(error);
   const code =
     [
       "INVALID_ARGUMENT",
@@ -60,8 +81,20 @@ async function flushJournal() {
   let b;
   while ((b = runtime.takeJournal()).length) journalBacklog.push(b);
   while (journalBacklog.length) {
+    if (injectedStorageFault === "beforeAppend") {
+      injectedStorageFault = null;
+      const error = Error("STORAGE: injected failure before append");
+      freezeStorage(error);
+      throw error;
+    }
     const a = journalBacklog[0].slice();
     await io("append", { bytes: a.buffer }, [a.buffer]);
+    if (injectedStorageFault === "afterAppend") {
+      injectedStorageFault = null;
+      const error = Error("STORAGE: injected lost reply after append");
+      freezeStorage(error);
+      throw error;
+    }
     journalBacklog.shift();
   }
 }
@@ -74,6 +107,10 @@ async function checkpoint() {
 let savedToken = 0;
 const saves = new Map();
 async function execute(m) {
+  // The in-memory runtime may be ahead of the last confirmed journal write.
+  // Keep it available for an emergency export, but accept no more edits.
+  if (storageFailure && !readableAfterFailure.has(m.t))
+    throw Error("STORAGE: 保存状態を確認できません。現在の内容を退避してから復旧してください");
   switch (m.t) {
     case "init":
       if (m.protocol !== 4) throw Error("CONFLICT: protocol mismatch");
@@ -99,15 +136,15 @@ async function execute(m) {
           }),
         ),
       );
-      postMessage({ t: "patch", value: s });
       await flushJournal();
+      postMessage({ t: "patch", value: s });
       return s;
     }
     case "undo":
     case "redo": {
       const s = JSON.parse(runtime[m.t]());
-      postMessage({ t: "patch", value: s });
       await flushJournal();
+      postMessage({ t: "patch", value: s });
       return s;
     }
     case "beginBrush":
@@ -124,8 +161,8 @@ async function execute(m) {
       return true;
     case "endBrush": {
       const s = JSON.parse(await runtime.endBrush());
-      postMessage({ t: "patch", value: s });
       await flushJournal();
+      postMessage({ t: "patch", value: s });
       return s;
     }
     case "cancelBrush":
@@ -145,8 +182,8 @@ async function execute(m) {
                 !!m.useSelection,
               );
       const state = JSON.parse(result);
-      postMessage({ t: "patch", value: state });
       await flushJournal();
+      postMessage({ t: "patch", value: state });
       return state;
     }
     case "selectionOutline":
@@ -161,6 +198,8 @@ async function execute(m) {
           m.mime,
         ),
       );
+    case "emergencyExport":
+      return runtime.savePackage();
     case "save": {
       const state = JSON.parse(runtime.view());
       const bytes = runtime.savePackage();
@@ -198,9 +237,9 @@ async function execute(m) {
       return runtime.releaseImport(m.hash);
     case "pruneVersions": {
       const state = JSON.parse(runtime.pruneVersions());
-      postMessage({ t: "patch", value: state });
       await flushJournal();
       await checkpoint();
+      postMessage({ t: "patch", value: state });
       return state;
     }
     case "textInfo":
@@ -218,10 +257,10 @@ async function execute(m) {
         runtime.commit(m.message, m.time, m.author, !!m.allowEmpty),
       );
       const state = JSON.parse(runtime.view());
-      postMessage({ t: "patch", value: state });
       // Commits are not journaled operations: checkpoint so a crash keeps them.
       await flushJournal();
       await checkpoint();
+      postMessage({ t: "patch", value: state });
       return { commit, state };
     }
     case "versionLog":
@@ -230,8 +269,8 @@ async function execute(m) {
       return JSON.parse(runtime.versionDiff(m.from, m.to));
     case "restoreVersion": {
       const state = JSON.parse(runtime.restoreVersion(m.hash));
-      postMessage({ t: "patch", value: state });
       await flushJournal();
+      postMessage({ t: "patch", value: state });
       return state;
     }
     case "saved": {
@@ -274,6 +313,11 @@ async function execute(m) {
       );
     case "corruptJournalTail":
       return io("corruptTail");
+    case "injectStorageFault":
+      if (m.position !== "beforeAppend" && m.position !== "afterAppend")
+        throw Error("INVALID_ARGUMENT: storage fault position");
+      injectedStorageFault = m.position;
+      return true;
     case "parseVectorPath": return JSON.parse(runtime.parseVectorPath(m.svg));
     case "vectorPathSvg": return runtime.vectorPathSvg(JSON.stringify(m.data));
     case "vectorStats": return JSON.parse(runtime.vectorStats());

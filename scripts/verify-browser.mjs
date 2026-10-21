@@ -1,8 +1,29 @@
-// Drives the Playground's existing suites against the WASM just built into the tree.
+// Run the shipped Playground suites in a fresh headless Chrome profile.
+// --functional omits the hardware-dependent B1-B7 benchmark for CI.
+// ALTO_BROWSER_GPU=swiftshader runs WebGPU on a software adapter in CI.
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { platform } from "node:os";
+import { createReadStream, existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { platform, tmpdir } from "node:os";
+import { extname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
+const functionalOnly = process.argv.includes("--functional");
+const reportDir = process.env.ALTO_BROWSER_REPORT_DIR || "verification";
+const externalReports = !!process.env.ALTO_BROWSER_REPORT_DIR;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const mime = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".wasm": "application/wasm",
+  ".png": "image/png",
+  ".otf": "font/otf",
+  ".ttf": "font/ttf",
+  ".alto": "application/zip",
+};
 
 function chromeBin() {
   if (process.env.CHROME) return process.env.CHROME;
@@ -11,116 +32,82 @@ function chromeBin() {
       ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
       : platform() === "win32"
         ? ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"]
-        : [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-          ];
-  return candidates.find((path) => existsSync(path)) || candidates[0];
+        : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium"];
+  const found = candidates.find(existsSync);
+  if (!found) throw Error("Chrome not found; set CHROME to its executable path");
+  return found;
 }
 
-const chrome = chromeBin();
-const port = 9333;
-const profile = "/tmp/alto-verify-chrome";
-const pageUrl = "http://127.0.0.1:8765/examples/browser-playground/";
-
-const proc = spawn(
-  chrome,
-  [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    "--headless=new",
-    "--enable-unsafe-webgpu",
-    ...(platform() === "darwin" ? ["--use-angle=metal"] : []),
-    "--no-first-run",
-    "--disable-gpu-sandbox",
-    "--window-size=1280,800",
-    "about:blank",
-  ],
-  { stdio: "ignore" },
-);
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function browserWs() {
-  for (let i = 0; i < 50; i++) {
+async function startServer() {
+  const server = createServer(async (req, res) => {
     try {
-      const version = await fetch(`http://127.0.0.1:${port}/json/version`).then(
-        (r) => r.json(),
-      );
-      const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) =>
-        r.json(),
-      );
-      const page = pages.find((p) => p.type === "page");
-      return { version, page };
+      const pathname = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+      let path = resolve(root, "." + pathname);
+      if (path !== root && !path.startsWith(root + sep)) {
+        res.writeHead(403).end();
+        return;
+      }
+      if ((await stat(path)).isDirectory()) path = join(path, "index.html");
+      res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
+      createReadStream(path).on("error", () => res.destroy()).pipe(res);
     } catch {
-      await sleep(200);
+      res.writeHead(404).end();
     }
-  }
-  throw new Error("Chrome debugging port did not open");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  return server;
 }
 
-function connect(url) {
+async function browserPage(profile, proc, chromeError) {
+  for (let i = 0; i < 160; i++) {
+    if (chromeError()) throw Error("Chrome failed to start: " + chromeError());
+    if (proc.exitCode !== null) throw Error("Chrome exited with " + proc.exitCode);
+    try {
+      const port = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
+      const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
+      const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json());
+      const page = pages.find((p) => p.type === "page");
+      if (page) return { version, page };
+    } catch {}
+    await sleep(250);
+  }
+  throw Error("Chrome debugging port did not open");
+}
+
+async function connect(url) {
   const ws = new WebSocket(url);
-  let id = 0;
   const pending = new Map();
-  ws.addEventListener("message", (ev) => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) {
-      pending.get(msg.id)(msg);
-      pending.delete(msg.id);
-    }
+  let id = 0;
+  ws.addEventListener("message", ({ data }) => {
+    const message = JSON.parse(data);
+    const request = pending.get(message.id);
+    if (!request) return;
+    clearTimeout(request.timer);
+    pending.delete(message.id);
+    if (message.error) request.reject(Error(JSON.stringify(message.error)));
+    else request.resolve(message);
   });
-  const send = (method, params = {}) =>
-    new Promise((resolve, reject) => {
-      const my = ++id;
-      pending.set(my, resolve);
-      ws.send(JSON.stringify({ id: my, method, params }));
-      setTimeout(() => reject(new Error("cdp timeout " + method)), 600000);
-    });
-  return new Promise((resolve, reject) => {
-    ws.addEventListener("open", () => resolve({ ws, send }));
-    ws.addEventListener("error", () => reject(new Error("websocket failed")));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error("Chrome WebSocket did not open")), 15000);
+    ws.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    ws.addEventListener("error", () => { clearTimeout(timer); reject(Error("Chrome WebSocket failed")); }, { once: true });
   });
+  return {
+    close: () => ws.close(),
+    send: (method, params = {}) => new Promise((resolve, reject) => {
+      const requestId = ++id;
+      const timer = setTimeout(() => {
+        pending.delete(requestId);
+        reject(Error("CDP timeout: " + method));
+      }, 600000);
+      pending.set(requestId, { resolve, reject, timer });
+      ws.send(JSON.stringify({ id: requestId, method, params }));
+    }),
+  };
 }
-
-const { version, page } = await browserWs();
-console.log(version.Browser);
-const { send } = await connect(page.webSocketDebuggerUrl);
-await send("Page.enable");
-await send("Runtime.enable");
-const nav = await send("Page.navigate", { url: pageUrl });
-if (nav.result?.errorText) throw new Error(nav.result.errorText);
-for (let i = 0; i < 80; i++) {
-  const ready = await send("Runtime.evaluate", {
-    expression: "!!window.altoEngine && !!navigator.gpu",
-    returnByValue: true,
-  });
-  if (ready.result?.result?.value) break;
-  await sleep(250);
-  if (i === 59) throw new Error("engine did not start");
-}
-
-async function run(expression) {
-  const msg = await send("Runtime.evaluate", {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  const details = msg.result?.exceptionDetails;
-  if (details) {
-    throw new Error(details.text + " " + (details.exception?.description || ""));
-  }
-  return msg.result?.result?.value;
-}
-
-await run(`
-  if (!document.querySelector('#recovery').hidden)
-    document.querySelector('#discard').click();
-  'ok'
-`);
-await sleep(500);
 
 const suites = [
   ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line));`],
@@ -131,27 +118,105 @@ const suites = [
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
 ];
 
-await mkdir("verification", { recursive: true });
+let server, chrome, client, profile;
 const summary = [];
-for (const [name, body] of suites) {
-  console.log("RUN", name);
-  try {
-    await run(`(async () => { ${body} })()`);
-    const report = await run(
-      `document.querySelector('#test-results').dataset.report || ''`,
-    );
-    const out = `verification/rebuild-${name}.json`;
-    await writeFile(out, report.endsWith("\n") ? report : report + "\n");
-    const parsed = JSON.parse(report);
-    const failed = (parsed.results || []).filter((r) => r.pass === false);
-    console.log(name, "results", (parsed.results || []).length, "failed", failed.length);
-    summary.push({ name, ok: failed.length === 0, count: (parsed.results || []).length });
-  } catch (error) {
-    console.log("FAIL", name, error.message);
-    summary.push({ name, ok: false, error: String(error.message) });
-    break;
+try {
+  await mkdir(reportDir, { recursive: true });
+  server = await startServer();
+  const address = server.address();
+  const pageUrl = `http://127.0.0.1:${address.port}/examples/browser-playground/`;
+  profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
+  let launchError = null;
+  let stderr = "";
+  chrome = spawn(chromeBin(), [
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profile}`,
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    ...(process.env.ALTO_BROWSER_GPU === "swiftshader"
+      ? ["--use-webgpu-adapter=swiftshader", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader"]
+      : platform() === "darwin" ? ["--use-angle=metal"] : []),
+    "--no-first-run",
+    "--disable-gpu-sandbox",
+    "--window-size=1280,800",
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  chrome.on("error", (error) => { launchError = error; });
+  chrome.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+  const { version, page } = await browserPage(profile, chrome, () => launchError);
+  console.log(version.Browser);
+  client = await connect(page.webSocketDebuggerUrl);
+  const { send } = client;
+  const evaluate = async (expression) => {
+    const message = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+    const details = message.result?.exceptionDetails;
+    if (details) throw Error(details.text + " " + (details.exception?.description || ""));
+    return message.result?.result?.value;
+  };
+  await send("Page.enable");
+  await send("Runtime.enable");
+  const navigation = await send("Page.navigate", { url: pageUrl });
+  if (navigation.result?.errorText) throw Error(navigation.result.errorText);
+  let ready = false;
+  for (let i = 0; i < 240; i++) {
+    ready = !!(await evaluate("!!window.altoEngine && !!navigator.gpu").catch(() => false));
+    if (ready) break;
+    await sleep(250);
   }
+  if (!ready) {
+    const error = await evaluate("document.querySelector('#error')?.textContent || ''").catch(() => "");
+    throw Error("Engine did not start: " + error + "\n" + stderr);
+  }
+  const adapter = await evaluate(`(async () => {
+    const info = (await navigator.gpu.requestAdapter())?.info;
+    return info ? { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description } : null;
+  })()`);
+  console.log("WebGPU adapter", JSON.stringify(adapter));
+  await evaluate(`if (!document.querySelector('#recovery').hidden) document.querySelector('#discard').click()`);
+  for (let i = 0; i < 120; i++) {
+    if (await evaluate("!!window.altoEngine.document")) break;
+    await sleep(250);
+    if (i === 119) throw Error("Document did not open");
+  }
+
+  for (const [name, body] of suites) {
+    if (functionalOnly && name === "benchmark") continue;
+    console.log("RUN", name);
+    await evaluate("document.querySelector('#test-results').dataset.report = ''");
+    let suiteError = null;
+    try {
+      await evaluate(`(async () => { ${body} })()`);
+    } catch (error) {
+      suiteError = error;
+    }
+    const report = await evaluate("document.querySelector('#test-results').dataset.report || ''");
+    if (report) {
+      const file = externalReports ? join(reportDir, `${name}.json`) : join(reportDir, `rebuild-${name}.json`);
+      await writeFile(file, report.endsWith("\n") ? report : report + "\n");
+    }
+    const parsed = report ? JSON.parse(report) : null;
+    const results = parsed?.results || [];
+    const failed = results.filter((result) => result.pass === false);
+    const ok = !suiteError && results.length > 0 && failed.length === 0;
+    console.log(name, "results", results.length, "failed", failed.length);
+    summary.push({ name, ok, count: results.length, error: suiteError?.message });
+    if (!ok) break;
+  }
+} catch (error) {
+  console.error("Browser verification failed:", error);
+  summary.push({ name: "startup", ok: false, error: String(error) });
+} finally {
+  if (externalReports) await writeFile(join(reportDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  client?.close();
+  if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
+    chrome.kill();
+    await new Promise((resolve) => {
+      chrome.once("exit", resolve);
+      setTimeout(resolve, 5000);
+    });
+  }
+  if (server) await new Promise((resolve) => server.close(resolve));
+  if (profile) await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 console.log(JSON.stringify(summary, null, 2));
-proc.kill();
-process.exit(summary.every((s) => s.ok) ? 0 : 1);
+if (!summary.length || summary.some((suite) => !suite.ok)) process.exitCode = 1;

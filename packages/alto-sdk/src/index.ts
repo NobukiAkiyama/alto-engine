@@ -349,6 +349,12 @@ class Events {
     for (const f of this.listeners.get(name) || []) f(value);
   }
 }
+const readableAfterStorageFailure = new Set([
+  "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
+  "selectionOutline", "textInfo", "textHitTest", "textCaret",
+  "textSelection", "textNavigate", "versionLog", "versionDiff",
+  "vectorStats", "vectorPathSvg",
+]);
 function nodeId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   let timestamp = BigInt(Date.now());
@@ -663,6 +669,7 @@ export class ToolSession {
   }
   async flush() {
     await this.ready;
+    if (this.doc.engine.storageFailure) throw this.doc.engine.storageFailure;
     if (!this.samples.length) return;
     const a = new Float32Array(this.samples);
     this.samples = [];
@@ -795,6 +802,7 @@ export class DocumentHandle {
   };
   readonly tools = {
     begin: (tool: "brush" | "eraser", options: BrushOptions) => {
+      if (this.engine.storageFailure) throw this.engine.storageFailure;
       if (this.activeTool)
         throw new AltoError("CONFLICT", "ツールが使用中です");
       return (this.activeTool = new ToolSession(this, tool, options));
@@ -924,6 +932,8 @@ export class AltoEngine extends Events {
   private options: any;
   document: DocumentHandle | null = null;
   recoveryAvailable = false;
+  /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
+  storageFailure: AltoError | null = null;
   private constructor(options: any) {
     super();
     this.options = options;
@@ -997,6 +1007,12 @@ export class AltoEngine extends Events {
       } else {
         if (data.t === "patch") {
           this.document?.apply(data.value);
+        } else if (data.t === "storageFailure") {
+          if (!this.storageFailure) {
+            this.storageFailure = new AltoError("STORAGE", data.value.message);
+            if (this.document) this.document.activeTool = null;
+            this.emit("storageFailure", this.storageFailure);
+          }
         } else if (data.t === "frame") this.emit("frame", data.value);
         else if (data.t === "gpuLost") {
           if (this.document) this.document.activeTool = null;
@@ -1052,6 +1068,8 @@ export class AltoEngine extends Events {
     payload: any = {},
     transfer: Transferable[] = [],
   ): Promise<any> {
+    if (this.storageFailure && !readableAfterStorageFailure.has(t))
+      return Promise.reject(this.storageFailure);
     const id = this.sequence++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -1063,7 +1081,10 @@ export class AltoEngine extends Events {
     this.worker.postMessage(message, transfer);
   }
   mutate<T>(fn: () => Promise<T>): Promise<T> {
-    const p = this.mutation.then(fn);
+    const p = this.mutation.then(() => {
+      if (this.storageFailure) throw this.storageFailure;
+      return fn();
+    });
     this.mutation = p.catch(() => {});
     return p;
   }
@@ -1133,6 +1154,34 @@ export class AltoEngine extends Events {
       rotation: 0,
     });
     return this.document;
+  }
+  /** Exports the live runtime without touching the failed journal or marking it saved. */
+  async exportEmergencyBytes(): Promise<Uint8Array> {
+    return new Uint8Array(await this.request("emergencyExport"));
+  }
+  /** Recreates both workers and replays the confirmed journal after a storage failure. */
+  async recoverAfterStorageFailure() {
+    if (!this.storageFailure)
+      throw new AltoError("CONFLICT", "保存障害は発生していません");
+    const before = this.document && {
+      revision: this.document.view.revision,
+      stateHash: this.document.view.stateHash,
+    };
+    const failure = this.storageFailure;
+    try {
+      await this.restart();
+    } catch (error) {
+      this.storageFailure ||= failure;
+      throw error;
+    }
+    if (!this.document)
+      throw new AltoError("NOT_FOUND", "復旧できる記録がありません");
+    return {
+      document: this.document,
+      beforeRevision: before?.revision ?? null,
+      recoveredRevision: this.document.view.revision,
+      matchesDisplay: before ? before.stateHash === this.document.view.stateHash : null,
+    };
   }
   readonly assets = {
     /** Imports an OpenType/TrueType font (.otf/.ttf/.ttc). Add it with tx.addFont(). */
@@ -1251,6 +1300,9 @@ export class AltoEngine extends Events {
     destroyGpu: () => this.request("destroyGpu"),
     crash: () => this.restart(),
     corruptJournalTail: () => this.request("corruptJournalTail"),
+    /** Fault injection for recovery tests only. */
+    injectStorageFault: (position: "beforeAppend" | "afterAppend") =>
+      this.request("injectStorageFault", { position }),
     saveBytes: async () => {
       if (this.document?.activeTool) await this.document.activeTool.end();
       return new Uint8Array((await this.request("save")).bytes);
@@ -1266,6 +1318,7 @@ export class AltoEngine extends Events {
     const replacement = this.canvas.cloneNode(false) as HTMLCanvasElement;
     this.canvas.replaceWith(replacement);
     this.canvas = replacement;
+    this.storageFailure = null;
     await this.start();
     if (this.document || this.recoveryAvailable) await this.recover();
     this.emit("canvasReplaced", replacement);

@@ -4,9 +4,15 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # The checked-in WASM package is built on arm64 macOS. Keep the exact-byte
+    # rebuild check on the same Rust host target as the release build.
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -14,10 +20,27 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: packages/alto-sdk/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
+      - name: Confirm release build host
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
       - run: sh scripts/check.sh
+      - name: Run browser correctness suites
+        env:
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
+          ALTO_BROWSER_GPU: swiftshader
+        run: node scripts/verify-browser.mjs --functional
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alto-browser-reports
+          path: ${{ runner.temp }}/alto-browser
+          if-no-files-found: ignore

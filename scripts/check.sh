@@ -3,9 +3,9 @@ set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TARGET_DIR="${ALTO_TARGET_DIR:-target}"
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --target wasm32-unknown-unknown -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
 # The shipped wasm package is a build artifact. Rebuild it with the pinned
 # rustc and wasm-bindgen CLI and fail if the committed bytes differ.
 bindgen_version=$(sed -n 's/^wasm-bindgen *= *"=\([0-9][0-9.]*\)".*/\1/p' crates/alto-wasm/Cargo.toml)
@@ -28,6 +28,10 @@ for dest in examples/browser-playground/pkg packages/alto-sdk/dist/pkg; do
 done
 rm -rf "$pkg_out"
 [ "$pkg_status" -eq 0 ]
+pnpm --dir packages/alto-sdk install --frozen-lockfile
+pnpm --dir packages/alto-sdk build
+node --test packages/alto-sdk/src/storage-session.test.js
+node scripts/check-build-metadata.mjs
 # SHA256SUMS must not name a gitignored path. verification/*.log matches *.log
 # and is not in the tree; listing it makes `sha256sum -c` fail on a clean checkout.
 while IFS= read -r line || [ -n "$line" ]; do
@@ -40,6 +44,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     exit 1
   fi
 done < SHA256SUMS
-sha256sum -c SHA256SUMS
-pnpm --dir packages/alto-sdk install --frozen-lockfile
-pnpm --dir packages/alto-sdk build
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c SHA256SUMS
+else
+  shasum -a 256 -c SHA256SUMS
+fi
