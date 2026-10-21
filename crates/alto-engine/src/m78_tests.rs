@@ -421,6 +421,18 @@ fn parked_tile_with_a_bad_hash_is_corrupt() {
     }
     e.save_package(d).unwrap();
     assert!(e.tamper_parked_tile(&old));
+    assert!(
+        e.tile_checked(&old)
+            .unwrap_err()
+            .to_string()
+            .contains("CORRUPT_DATA")
+    );
+    assert!(
+        e.save_package(d)
+            .unwrap_err()
+            .to_string()
+            .contains("CORRUPT_DATA")
+    );
     assert!(e.tile(&old).is_none());
     let err = e.take_fault_error().unwrap();
     assert!(err.contains("corrupt") || err.contains("hash"), "{err}");

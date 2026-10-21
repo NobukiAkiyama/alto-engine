@@ -868,7 +868,8 @@ export class AltoEngine extends Events {
         this.raf = requestAnimationFrame(loop);
     }
     request(t, payload = {}, transfer = []) {
-        if (this.storageFailure && !readableAfterStorageFailure.has(t))
+        if (this.storageFailure && !readableAfterStorageFailure.has(t) &&
+            !(t === "open" && this.storageFailure.code === "CORRUPT_DATA"))
             return Promise.reject(this.storageFailure);
         const id = this.sequence++;
         return new Promise((resolve, reject) => {
@@ -918,12 +919,17 @@ export class AltoEngine extends Events {
             blob = await source.getFile();
         const bytes = await blob.arrayBuffer();
         const state = await this.request("open", { bytes }, [bytes]);
+        const reopeningAfterDamage = this.storageFailure?.code === "CORRUPT_DATA";
+        if (reopeningAfterDamage)
+            this.storageFailure = null;
         this.document = new DocumentHandle(this, state);
         this.viewport.set({
             center: [state.document.meta.width / 2, state.document.meta.height / 2],
             zoom: 1,
             rotation: 0,
         });
+        if (reopeningAfterDamage)
+            this.emit("recovered", null);
         return this.document;
     }
     /** Opens the folder form, reading only objects reachable from the document and its history. */
@@ -1102,6 +1108,10 @@ export class AltoEngine extends Events {
         destroyGpu: () => this.request("destroyGpu"),
         crash: () => this.restart(),
         corruptJournalTail: () => this.request("corruptJournalTail"),
+        corruptCheckpoint: () => this.request("corruptCheckpoint"),
+        corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),
+        corruptBothCheckpoints: () => this.request("corruptBothCheckpoints"),
+        legacyCheckpoint: () => this.request("legacyCheckpoint"),
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position) => this.request("injectStorageFault", { position }),
         saveBytes: async () => {
@@ -1123,8 +1133,18 @@ export class AltoEngine extends Events {
         this.canvas = replacement;
         this.storageFailure = null;
         await this.start();
-        if (this.document || this.recoveryAvailable)
-            await this.recover();
+        try {
+            if (this.document || this.recoveryAvailable)
+                await this.recover();
+        }
+        catch (cause) {
+            const message = cause instanceof Error ? cause.message : String(cause);
+            this.document = null;
+            this.storageFailure = new AltoError("CORRUPT_DATA", message);
+            this.emit("canvasReplaced", replacement);
+            this.emit("storageFailure", this.storageFailure);
+            throw this.storageFailure;
+        }
         this.emit("canvasReplaced", replacement);
         this.emit("recovered", null);
     }

@@ -89,11 +89,17 @@ fn empty() -> TileMap {
     }
 }
 type Decoded = BTreeMap<TileKey, Arc<TileData>>;
-pub fn decode(map: &TileMap, store: &dyn TileStore) -> Decoded {
-    map.tiles
-        .iter()
-        .filter_map(|(k, h)| store.get(h).map(|t| (*k, t)))
-        .collect()
+pub fn decode(map: &TileMap, store: &dyn TileStore) -> Result<Decoded, EngineError> {
+    let mut decoded = Decoded::new();
+    for (key, hash) in &map.tiles {
+        if let Some(tile) = store
+            .get_checked(hash)
+            .map_err(alto_store::StoreError::Corrupt)?
+        {
+            decoded.insert(*key, tile);
+        }
+    }
+    Ok(decoded)
 }
 fn generated_selection(
     engine: &mut Engine,
@@ -144,23 +150,33 @@ fn generated_selection(
     let old = previous
         .as_ref()
         .map(|m| decode(m, engine))
+        .transpose()?
         .unwrap_or_default();
     let chosen = {
-        let read = |x: i32, y: i32| -> Option<[u8; 4]> {
+        let read = |x: i32, y: i32| -> Result<Option<[u8; 4]>, EngineError> {
             let key = TileKey {
                 tx: x.div_euclid(256),
                 ty: y.div_euclid(256),
             };
-            let hash = map.tiles.get(&key)?;
-            let tile = engine.tile(hash)?;
+            let Some(hash) = map.tiles.get(&key) else {
+                return Ok(None);
+            };
+            let Some(tile) = engine
+                .get_checked(hash)
+                .map_err(alto_store::StoreError::Corrupt)?
+            else {
+                return Ok(None);
+            };
             let i = (y.rem_euclid(256) * 256 + x.rem_euclid(256)) as usize * 4;
-            Some(tile.pixels[i..i + 4].try_into().unwrap_or([0, 0, 0, 0]))
+            Ok(Some(
+                tile.pixels[i..i + 4].try_into().unwrap_or([0, 0, 0, 0]),
+            ))
         };
         let mut chosen = Vec::new();
         if kind == "contiguous" {
             let sx = spec["x"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
             let sy = spec["y"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
-            let seed = read(sx - offset.0, sy - offset.1)
+            let seed = read(sx - offset.0, sy - offset.1)?
                 .ok_or_else(|| invalid("Seed is outside the layer"))?;
             let mut queue = vec![(sx, sy)];
             let mut seen = BTreeSet::new();
@@ -168,7 +184,7 @@ fn generated_selection(
                 if !seen.insert((x, y)) {
                     continue;
                 }
-                let Some(color) = read(x - offset.0, y - offset.1) else {
+                let Some(color) = read(x - offset.0, y - offset.1)? else {
                     continue;
                 };
                 if color
@@ -192,7 +208,10 @@ fn generated_selection(
                 spec["a"].as_u64().unwrap_or(255) as u8,
             ];
             for (key, hash) in &map.tiles {
-                let tile = engine.tile(hash).ok_or(EngineError::MissingTile(*hash))?;
+                let tile = engine
+                    .get_checked(hash)
+                    .map_err(alto_store::StoreError::Corrupt)?
+                    .ok_or(EngineError::MissingTile(*hash))?;
                 for i in 0..(256 * 256) {
                     let px = &tile.pixels[i * 4..i * 4 + 4];
                     if px
@@ -405,6 +424,7 @@ impl Engine {
         let old = previous
             .as_ref()
             .map(|m| decode(m, self))
+            .transpose()?
             .unwrap_or_default();
         let number = |k: &str, default: f64| {
             spec.get(k)
@@ -581,6 +601,7 @@ impl Engine {
         let decoded = selection
             .as_ref()
             .map(|m| decode(m, self))
+            .transpose()?
             .unwrap_or_default();
         let mut mask = empty();
         for ty in r[1]..r[3] {
@@ -645,7 +666,7 @@ impl Engine {
         let Some(map) = &self.document(h)?.selection else {
             return Ok(String::new());
         };
-        let decoded = decode(map, self);
+        let decoded = decode(map, self)?;
         let mut path = String::new();
         use std::fmt::Write;
         for (key, tile) in &decoded {
@@ -769,7 +790,7 @@ mod tests {
             let ops = e.selection_ops(h, &spec).unwrap();
             commit(&mut e, h, ops);
             let map = e.document(h).unwrap().selection.as_ref().unwrap();
-            let decoded = decode(map, &e);
+            let decoded = decode(map, &e).unwrap();
             assert_eq!(sample(&decoded, 255, 100), 112);
             assert_eq!(sample(&decoded, 256, 100), 143);
             assert_eq!(sample(&decoded, 240, 100), 0);

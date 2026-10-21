@@ -333,6 +333,42 @@ export async function runTests(engine, benchmark, log) {
         "truncation warning missing",
       );
     });
+    await test("damaged latest checkpoint falls back to the previous generation", async () => {
+      const before = await engine.unstable.saveBytes();
+      const previousHash = doc.view.snapshotHash;
+      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.createDocument({ width: 64, height: 64 });
+      await engine.unstable.corruptCheckpoint();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === previousHash, "previous checkpoint was not opened");
+      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "fallback warning missing");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "fallback pixels changed");
+    });
+    await test("checkpoint CRC failure falls back without losing the older journal", async () => {
+      const before = await engine.unstable.saveBytes();
+      const previousHash = doc.view.snapshotHash;
+      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.createDocument({ width: 64, height: 64 });
+      await engine.unstable.corruptCheckpointCrc();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === previousHash, "CRC fallback opened the wrong generation");
+      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "CRC fallback warning missing");
+    });
+    await test("V1 checkpoint opens and the next checkpoint migrates to V2", async () => {
+      const hash = doc.view.snapshotHash;
+      await engine.unstable.legacyCheckpoint();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === hash, "V1 checkpoint did not open");
+      const bytes = await engine.unstable.saveBytes();
+      doc = await engine.openDocument(new Blob([bytes]));
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === hash, "V2 migration changed the document");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "migration pixels changed");
+    });
     await test("failed append freezes edits and preserves live emergency export", async () => {
       const before = doc.view.revision;
       const name = doc.view.node(brushLayer).name;
@@ -419,6 +455,22 @@ export async function runTests(engine, benchmark, log) {
         "second engine acquired the journal",
       );
     });
+    await test("two damaged journals freeze editing until an external file opens", async () => {
+      const backup = await engine.unstable.saveBytes();
+      const hash = doc.view.snapshotHash;
+      await engine.unstable.corruptBothCheckpoints();
+      let rejected = false;
+      try { await engine.unstable.crash(); }
+      catch (error) { rejected = error.code === "CORRUPT_DATA"; }
+      assert(rejected && engine.storageFailure?.code === "CORRUPT_DATA", "damage was hidden");
+      assert(engine.document === null, "stale document remained editable");
+      assert(!document.querySelector("#storage-failure").hidden, "damage controls were not shown");
+      assert(!document.querySelector("#open-recovery-file").hidden, "external recovery was not offered");
+      doc = await engine.openDocument(new Blob([backup]));
+      assert(doc.view.snapshotHash === hash, "external recovery changed the document");
+      assert(!engine.storageFailure, "editing stayed frozen after external recovery");
+      assert(document.querySelector("#storage-failure").hidden, "damage controls stayed open");
+    });
     log("ALL " + results.length + " TESTS PASSED");
   } catch (e) {
     results.push({ pass: false, error: String(e) });
@@ -439,6 +491,8 @@ export async function runTests(engine, benchmark, log) {
   }
 }
 async function benches(engine, log, results) {
+  const profiling = new URLSearchParams(location.search).has("profile");
+  if (profiling) await engine.request("setProfiling", { enabled: true });
   let doc = await engine.createDocument({ width: 3840, height: 2160 });
   const layers = [];
   log("Preparing 4K × 20 translucent raster layers…");
@@ -490,6 +544,7 @@ async function benches(engine, log, results) {
   engine.viewport.set({ center: [1920, 1080], zoom: 0.5 });
   frame = await settled(engine);
   const zoom = performance.now() - start;
+  if (profiling) log("B2 profile: " + JSON.stringify(frame.profile));
   record("B2 zoom ms", zoom, 250, zoom <= 250);
   engine.viewport.set({ zoom: 1 });
   await settled(engine);

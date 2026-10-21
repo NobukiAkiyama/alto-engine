@@ -334,12 +334,20 @@ $("#discard").onclick = () =>
 function showStorageFailure(error) {
   gesture = null;
   $("#storage-failure").hidden = false;
+  const damaged = error.code === "CORRUPT_DATA";
+  $("#storage-failure p").textContent = damaged
+    ? "復旧記録の両世代を読み取れません。編集を停止しました。保存済みの .alto ファイルを開いて再開してください。"
+    : "保存状態を確認できません。最後の編集が記録されていない可能性があります。編集を停止しました。現在の内容を退避してから復旧してください。";
+  $("#emergency-export").hidden = damaged;
+  $("#recover-storage").hidden = damaged;
+  $("#open-recovery-file").hidden = !damaged;
   $("#recovery-result").hidden = true;
   for (const selector of ["header", "nav", "main"])
     $(selector).inert = true;
   status("保存障害：編集を停止しました");
   fail(error);
 }
+$("#open-recovery-file").onclick = () => $("#alto-file").click();
 $("#emergency-export").onclick = () => run(async () => {
   // The picker needs a user gesture; request it before awaiting the Worker.
   const destination = await engine.storage.pickSaveFile({ suggestedName: "alto-emergency.alto" });
@@ -426,7 +434,7 @@ try {
   engine.on("gpuRestored", () => status("GPUを復旧しました"));
   engine.on("canvasReplaced", () => {
     bindCanvas();
-    attach(engine.document);
+    if (engine.document) attach(engine.document);
   });
   engine.on("recovered", () => {
     if (!engine.storageFailure) {

@@ -101,8 +101,12 @@ async function flushJournal() {
 
 async function checkpoint() {
   const b = runtime.savePackage();
-  await io("checkpoint", { bytes: b.buffer }, [b.buffer]);
+  await persistCheckpoint(b);
   journalBacklog = [];
+}
+async function persistCheckpoint(bytes) {
+  const opaque = JSON.parse(runtime.recoveryOpaque());
+  await io("checkpoint", { bytes: bytes.buffer, opaque }, [bytes.buffer]);
 }
 let savedToken = 0;
 const saves = new Map();
@@ -227,7 +231,7 @@ async function execute(m) {
     case "openFolder": {
       const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
       const base = runtime.checkpointBytes();
-      await io("checkpoint", { bytes: base.buffer }, [base.buffer]);
+      await persistCheckpoint(base);
       journalBacklog = [];
       return s;
     }
@@ -278,9 +282,7 @@ async function execute(m) {
       if (!saved) throw Error("INVALID_ARGUMENT: save token expired");
       const state = JSON.parse(runtime.markSaved(saved.hash));
       if (state.document.revision === saved.revision) {
-        await io("checkpoint", { bytes: saved.bytes.buffer }, [
-          saved.bytes.buffer,
-        ]);
+        await persistCheckpoint(saved.bytes);
         journalBacklog = [];
       }
       saves.delete(m.token);
@@ -288,16 +290,37 @@ async function execute(m) {
     }
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
-      await io("checkpoint", { bytes: m.bytes }, [m.bytes]);
+      await persistCheckpoint(new Uint8Array(m.bytes));
       journalBacklog = [];
       return s;
     }
     case "recover": {
-      const recovery = await io("load");
-      if (!recovery) throw Error("NOT_FOUND: recovery journal");
-      runtime.openPackage(recovery.base);
-      for (const r of recovery.records) runtime.replayRecord(r);
+      const candidates = await io("loadCandidates");
+      if (!candidates.length) {
+        const state = await io("inspect");
+        throw Error(state.latestGeneration
+          ? "CORRUPT_DATA: no usable recovery generation"
+          : "NOT_FOUND: recovery journal");
+      }
+      let recovery = null;
+      let lastError;
+      for (const candidate of candidates) {
+        try {
+          if (candidate.metadata)
+            runtime.openRecoveryPackage(candidate.base, JSON.stringify(candidate.metadata.opaque));
+          else runtime.openPackage(candidate.base);
+          for (const r of candidate.records) runtime.replayRecord(r);
+          recovery = candidate;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!recovery) throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
+      await io("activate", { generation: recovery.generation });
       const s = JSON.parse(runtime.view());
+      if (recovery.generation !== recovery.latestGeneration)
+        s.warnings.push("新しい復旧記録が破損していたため、前の世代を開きました");
       if (recovery.truncated)
         s.warnings.push("最後の不完全な記録を除いて復旧しました");
       return s;
@@ -313,6 +336,18 @@ async function execute(m) {
       );
     case "corruptJournalTail":
       return io("corruptTail");
+    case "corruptCheckpoint":
+      return io("corruptCheckpoint");
+    case "corruptCheckpointCrc":
+      return io("corruptCheckpointCrc");
+    case "corruptBothCheckpoints":
+      return io("corruptBothCheckpoints");
+    case "legacyCheckpoint": {
+      const bytes = runtime.savePackage();
+      await io("checkpointLegacy", { bytes: bytes.buffer }, [bytes.buffer]);
+      journalBacklog = [];
+      return true;
+    }
     case "injectStorageFault":
       if (m.position !== "beforeAppend" && m.position !== "afterAppend")
         throw Error("INVALID_ARGUMENT: storage fault position");
@@ -328,13 +363,22 @@ async function execute(m) {
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
+    case "setProfiling":
+      runtime.setProfiling(!!m.enabled);
+      return true;
     case "waitFrame": {
       let frame;
+      const profiles = [];
       do {
         frame = JSON.parse(runtime.tick(8));
+        if (frame.profile) profiles.push(frame.profile);
         if (frame.pending) await new Promise((r) => setTimeout(r, 0));
       } while (frame.pending);
       await runtime.gpuIdle();
+      if (profiles.length) {
+        frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
+          [key, profiles.reduce((sum, profile) => sum + profile[key], 0)]));
+      }
       return { ...frame, viewVersion };
     }
     case "view":

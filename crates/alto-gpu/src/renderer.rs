@@ -78,6 +78,18 @@ pub struct FrameReport {
     pub composed: u32,
     pub pending: u32,
     pub gpu_bytes: u64,
+    pub profile: Option<RenderProfile>,
+}
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RenderProfile {
+    pub compose_ms: f64,
+    pub commands_ms: f64,
+    pub get_ms: f64,
+    pub write_ms: f64,
+    pub uploads: u32,
+    pub atlas_hits: u32,
+    pub upload_bytes: u64,
+    pub pyramid_hits: u32,
 }
 struct AtlasSlot {
     hash: ContentHash,
@@ -132,12 +144,15 @@ pub struct Renderer {
     vector: Option<vector::VectorResources>,
     /// Small text through the glyph atlas (true) or always through the vector path.
     glyph_atlas: bool,
+    profiling: bool,
+    profile_now: fn() -> f64,
+    profile: RenderProfile,
 }
-fn rgba_pixels(tile: &TileData) -> Vec<u8> {
+fn rgba_pixels(tile: &TileData) -> std::borrow::Cow<'_, [u8]> {
     if tile.format == alto_core::PixelFormat::R8 {
-        tile.pixels.iter().flat_map(|v| [*v, *v, *v, 255]).collect()
+        std::borrow::Cow::Owned(tile.pixels.iter().flat_map(|v| [*v, *v, *v, 255]).collect())
     } else {
-        tile.pixels.to_vec()
+        std::borrow::Cow::Borrowed(&tile.pixels)
     }
 }
 fn texture(
@@ -371,6 +386,9 @@ impl Renderer {
             m5: None,
             vector: None,
             glyph_atlas: true,
+            profiling: false,
+            profile_now: || 0.0,
+            profile: RenderProfile::default(),
         })
     }
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -393,6 +411,9 @@ impl Renderer {
     }
     pub fn glyph_atlas(&self) -> bool {
         self.glyph_atlas
+    }
+    pub fn set_profiling(&mut self, enabled: bool) {
+        self.profiling = enabled;
     }
     /// Switches small text between the glyph atlas and the vector path; display tiles
     /// are rebuilt.
@@ -439,6 +460,9 @@ impl Renderer {
         previews: &HashMap<ContentHash, wgpu::Texture>,
     ) -> Result<u32> {
         if let Some(&slot) = self.atlas_map.get(&hash) {
+            if self.profiling {
+                self.profile.atlas_hits += 1;
+            }
             self.atlas_slots[slot as usize]
                 .as_mut()
                 .ok_or("INTERNAL: atlas slot")?
@@ -446,11 +470,19 @@ impl Renderer {
             pinned.insert(slot);
             return Ok(slot);
         }
+        let get_start = if self.profiling {
+            (self.profile_now)()
+        } else {
+            0.0
+        };
         let pixels = if previews.contains_key(&hash) {
             None
         } else {
-            store.get(&hash)
+            store.get_checked(&hash)?
         };
+        if self.profiling {
+            self.profile.get_ms += (self.profile_now)() - get_start;
+        }
         if pixels.is_none() && !previews.contains_key(&hash) {
             return Ok(u32::MAX);
         }
@@ -495,6 +527,11 @@ impl Renderer {
                 },
             );
         } else if let Some(tile) = pixels {
+            let write_start = if self.profiling {
+                (self.profile_now)()
+            } else {
+                0.0
+            };
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.atlas,
@@ -518,6 +555,13 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
+            if self.profiling {
+                self.profile.write_ms += (self.profile_now)() - write_start;
+                self.profile.upload_bytes += (256 * 256 * 4) as u64;
+            }
+        }
+        if self.profiling {
+            self.profile.uploads += 1;
         }
         self.atlas_slots[slot] = Some(AtlasSlot {
             hash,
@@ -790,6 +834,9 @@ impl Renderer {
         self.m5 = None;
         self.vector = None;
         if self.downsample_cached(scene, key, slot as u32)? {
+            if self.profiling {
+                self.profile.pyramid_hits += 1;
+            }
             self.cache_slots[slot] = Some(key);
             self.cache_map.insert(
                 key,
@@ -805,7 +852,15 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compose tile"),
             });
+        let commands_start = if self.profiling {
+            (self.profile_now)()
+        } else {
+            0.0
+        };
         let (commands, entries) = self.commands(scene, key, store, &mut encoder)?;
+        if self.profiling {
+            self.profile.commands_ms += (self.profile_now)() - commands_start;
+        }
         let cb = buffer(
             &self.device,
             "scene commands",
@@ -896,6 +951,8 @@ impl Renderer {
             return Err("GPU_LOST".into());
         }
         self.frame += 1;
+        self.profile_now = now;
+        self.profile = RenderProfile::default();
         let start = now();
         let zoom = view.zoom.max(0.01);
         let vector_scene = scene.nodes.iter().any(|n| {
@@ -951,7 +1008,11 @@ impl Renderer {
                 if composed > 0 && now() - start >= budget_ms {
                     break;
                 }
+                let compose_start = if self.profiling { now() } else { 0.0 };
                 self.compose(scene, *key, store)?;
+                if self.profiling {
+                    self.profile.compose_ms += now() - compose_start;
+                }
                 composed += 1;
             }
         }
@@ -1076,6 +1137,7 @@ impl Renderer {
         Ok(FrameReport {
             composed,
             pending,
+            profile: self.profiling.then_some(self.profile),
             gpu_bytes: self.vector_bytes()
                 + self.m5.as_ref().map_or(0, |m| m.bytes())
                 + (self.atlas_slots.len() as u64 + 256) * 262144
@@ -1173,14 +1235,14 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("brush"),
             });
-        let selection_tiles: HashMap<_, _> = selection
-            .map(|(m, _, _)| {
-                m.tiles
-                    .iter()
-                    .filter_map(|(k, h)| store.get(h).map(|t| (*k, t)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut selection_tiles = HashMap::new();
+        if let Some((m, _, _)) = selection {
+            for (key, hash) in &m.tiles {
+                if let Some(tile) = store.get_checked(hash)? {
+                    selection_tiles.insert(*key, tile);
+                }
+            }
+        }
         for (key, dabs) in affected {
             if let std::collections::btree_map::Entry::Vacant(entry) = stroke.tiles.entry(key) {
                 let base = texture(
@@ -1202,7 +1264,8 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
                 let before = tiles.get(&key).copied();
-                let data = before.and_then(|h| store.get(&h)).unwrap_or_else(|| {
+                let previous = before.map(|h| store.get_checked(&h)).transpose()?.flatten();
+                let data = previous.unwrap_or_else(|| {
                     Arc::new(TileData {
                         format: if stroke.mask {
                             alto_core::PixelFormat::R8

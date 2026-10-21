@@ -660,6 +660,10 @@ export declare class AltoEngine extends Events {
         destroyGpu: () => Promise<any>;
         crash: () => Promise<void>;
         corruptJournalTail: () => Promise<any>;
+        corruptCheckpoint: () => Promise<any>;
+        corruptCheckpointCrc: () => Promise<any>;
+        corruptBothCheckpoints: () => Promise<any>;
+        legacyCheckpoint: () => Promise<any>;
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<any>;
         saveBytes: () => Promise<Uint8Array<any>>;

@@ -1,6 +1,10 @@
 # M7・M8 検証結果
 
-## 2026-10-22：現在の配布版
+## 2026-10-22：縮小表示・復旧高速化後の配布版
+
+WASMは4,281,045 bytes、gzip 1,088,734 bytes、SHA-256 `9e73147b63eacbc17d5bbcf9ebc81b49a331db2834ca5bd8bacdf5a448376992`。PlaygroundとSDKの配布WASMは一致する。Rust94件、SwiftShaderのブラウザ機能17件とM5/M6/M7/M8の33件、MetalのB1–B7を新規Chromeプロファイル3回で確認した。B2は206.1–207.7 ms、B7は1257.9–1282.5 msで各目標内。破損した復旧記録の前世代への復帰、両世代破損時の停止と外部ファイルからの再開を含む。[実装と生データ](PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。
+
+## 2026-10-22：変更前の配布版
 
 固定ツールチェーン（rustc 1.99.1 / wasm-bindgen 0.2.129）とaarch64-apple-darwinのホストでWASMを再生成し、PlaygroundとSDKに同じバイト列を配布しました。CIのバイト比較もarm64 macOSを使用します。本体は **4,313,895 bytes**、SHA-256は `e29c7306aed94d786715d0ccf5f8802b9c75c867e3e0a52287e506f2c0fdbe55`、Node zlibの標準gzipで **1,088,017 bytes** です。[build.json](build.json) の数値は `scripts/check-build-metadata.mjs` で配布ファイルと照合します。
 

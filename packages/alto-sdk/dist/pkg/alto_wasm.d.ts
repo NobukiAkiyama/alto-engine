@@ -26,12 +26,17 @@ export class Runtime {
     markSaved(hash: string): string;
     openFolder(framed: Uint8Array): string;
     openPackage(bytes: Uint8Array): string;
+    /**
+     * Only called by the journal worker after verifying the checkpoint digest.
+     */
+    openRecoveryPackage(bytes: Uint8Array, opaque: string): string;
     parseVectorPath(svg: string): string;
     protocolVersion(): number;
     pruneVersions(): string;
     readTileLevel(level: number, tx: number, ty: number): Promise<Uint8Array>;
     readTile(tx: number, ty: number): Promise<Uint8Array>;
     recoverGpu(): Promise<string>;
+    recoveryOpaque(): string;
     redo(): string;
     releaseImport(hash: string): boolean;
     replayRecord(bytes: Uint8Array): string;
@@ -46,6 +51,7 @@ export class Runtime {
      */
     setGlyphAtlas(enabled: boolean): void;
     setMask(layer: string, source: string): string;
+    setProfiling(enabled: boolean): void;
     takeJournal(): Uint8Array;
     textCaret(id: string, offset: number): string;
     textHitTest(id: string, x: number, y: number): number;
@@ -106,12 +112,14 @@ export interface InitOutput {
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openFolder: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
     readonly runtime_readTile: (a: number, b: number, c: number) => any;
     readonly runtime_readTileLevel: (a: number, b: number, c: number, d: number) => any;
     readonly runtime_recoverGpu: (a: number) => any;
+    readonly runtime_recoveryOpaque: (a: number) => [number, number, number, number];
     readonly runtime_redo: (a: number) => [number, number, number, number];
     readonly runtime_releaseImport: (a: number, b: number, c: number) => [number, number, number];
     readonly runtime_replayRecord: (a: number, b: number, c: number) => [number, number, number, number];
@@ -123,6 +131,7 @@ export interface InitOutput {
     readonly runtime_setEffects: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly runtime_setGlyphAtlas: (a: number, b: number) => void;
     readonly runtime_setMask: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly runtime_setProfiling: (a: number, b: number) => void;
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_textHitTest: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -151,8 +160,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__64: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__65: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__67: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__68: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
