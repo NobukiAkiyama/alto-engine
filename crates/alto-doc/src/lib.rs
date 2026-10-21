@@ -599,7 +599,79 @@ impl Document {
         }
         false
     }
+    fn ancestor_locked(&self, id: NodeId) -> Result<bool, DocError> {
+        let mut cursor = self.node(id)?.parent;
+        let mut hops = 0;
+        while let Some(current) = cursor {
+            hops += 1;
+            if hops > 128 {
+                return Err(DocError::Invalid("Group nesting exceeds 128".into()));
+            }
+            let node = self.node(current)?;
+            if node.props.locked {
+                return Ok(true);
+            }
+            cursor = node.parent;
+        }
+        Ok(false)
+    }
+    /// A locked node rejects every edit except a `SetProps` that clears its own
+    /// `locked` flag. That exception is what makes undo of a lock possible, and
+    /// it is also how a caller explicitly unlocks in the same patch. A locked
+    /// ancestor rejects the clear as well: the child cannot unlock itself out
+    /// of a locked group.
+    fn enforce_lock(&self, op: &Op) -> Result<(), DocError> {
+        fn locked() -> DocError {
+            DocError::Invalid("layer is locked".into())
+        }
+        let editable = |doc: &Self, id: NodeId| -> Result<(), DocError> {
+            if doc.node(id)?.props.locked || doc.ancestor_locked(id)? {
+                Err(locked())
+            } else {
+                Ok(())
+            }
+        };
+        match op {
+            Op::InsertNode { parent, .. } | Op::RestoreSubtree { parent, .. } => {
+                editable(self, *parent)
+            }
+            Op::RemoveNode { id }
+            | Op::SetMask { layer: id, .. }
+            | Op::SetTiles { layer: id, .. }
+            | Op::SetAdjustment { id, .. }
+            | Op::SetVector { id, .. }
+            | Op::SetVectorMask { id, .. }
+            | Op::SetClipPath { id, .. }
+            | Op::SetText { id, .. } => editable(self, *id),
+            Op::MoveNode { id, parent, .. } => {
+                editable(self, *id)?;
+                editable(self, *parent)
+            }
+            Op::SetProps { id, patch } => {
+                if patch.locked == Some(false) {
+                    if self.ancestor_locked(*id)? {
+                        Err(locked())
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    editable(self, *id)
+                }
+            }
+            Op::ReplaceNode { id, node } => {
+                if self.ancestor_locked(*id)? {
+                    return Err(locked());
+                }
+                if self.node(*id)?.props.locked && node.props.locked {
+                    return Err(locked());
+                }
+                Ok(())
+            }
+            Op::SetSelection { .. } | Op::SetAsset { .. } | Op::SetMeta { .. } => Ok(()),
+        }
+    }
     fn apply(&mut self, op: Op) -> Result<(Op, ChangeSet), DocError> {
+        self.enforce_lock(&op)?;
         let mut change = ChangeSet::default();
         let inverse = match op {
             Op::InsertNode {
@@ -1408,6 +1480,146 @@ mod tests {
             panic!("raster expected")
         };
         assert_eq!(tiles.tiles.get(&key), Some(&hash));
+    }
+
+    #[test]
+    fn lock_rejects_edits_and_a_clearing_patch_unlocks() {
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let layer = Node::raster("Paint");
+        let id = layer.id;
+        let child = Node::raster("Child");
+        let child_id = child.id;
+        editor
+            .transact(
+                "add",
+                vec![
+                    Op::InsertNode {
+                        node: layer,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: Node::group("Group"),
+                        parent: root,
+                        index: 1,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        let group = editor.doc.node(root).unwrap().children().unwrap()[1];
+        editor
+            .transact(
+                "child",
+                vec![Op::InsertNode {
+                    node: child,
+                    parent: group,
+                    index: 0,
+                }],
+                1,
+            )
+            .unwrap();
+        let lock = |id| Op::SetProps {
+            id,
+            patch: PropPatch {
+                locked: Some(true),
+                ..Default::default()
+            },
+        };
+        editor
+            .transact("lock", vec![lock(id), lock(group)], 2)
+            .unwrap();
+        let rev = editor.doc.revision;
+        let stroke = Op::SetTiles {
+            layer: id,
+            changes: vec![],
+        };
+        assert!(
+            editor
+                .transact("stroke", vec![stroke], rev)
+                .unwrap_err()
+                .to_string()
+                .contains("locked")
+        );
+        assert!(
+            editor
+                .transact(
+                    "opacity",
+                    vec![Op::SetProps {
+                        id,
+                        patch: PropPatch {
+                            opacity: Some(0.5),
+                            ..Default::default()
+                        },
+                    }],
+                    rev,
+                )
+                .is_err()
+        );
+        assert!(
+            editor
+                .transact("remove", vec![Op::RemoveNode { id }], rev)
+                .is_err()
+        );
+        assert!(
+            editor
+                .transact(
+                    "child stroke",
+                    vec![Op::SetTiles {
+                        layer: child_id,
+                        changes: vec![],
+                    }],
+                    rev,
+                )
+                .is_err(),
+            "a locked group blocks its children"
+        );
+        assert!(
+            editor
+                .transact(
+                    "child unlock",
+                    vec![Op::SetProps {
+                        id: child_id,
+                        patch: PropPatch {
+                            locked: Some(false),
+                            ..Default::default()
+                        },
+                    }],
+                    rev,
+                )
+                .is_err(),
+            "a child cannot unlock itself out of a locked group"
+        );
+        editor
+            .transact(
+                "unlock",
+                vec![Op::SetProps {
+                    id,
+                    patch: PropPatch {
+                        locked: Some(false),
+                        ..Default::default()
+                    },
+                }],
+                rev,
+            )
+            .unwrap();
+        assert!(!editor.doc.node(id).unwrap().props.locked);
+        editor.undo().unwrap();
+        assert!(editor.doc.node(id).unwrap().props.locked);
+        editor.undo().unwrap();
+        assert!(!editor.doc.node(id).unwrap().props.locked);
+        let rev = editor.doc.revision;
+        editor
+            .transact(
+                "stroke",
+                vec![Op::SetTiles {
+                    layer: id,
+                    changes: vec![],
+                }],
+                rev,
+            )
+            .unwrap();
     }
 
     proptest! {

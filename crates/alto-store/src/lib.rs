@@ -56,6 +56,8 @@ pub fn commit_path(h: &ContentHash) -> String {
 pub fn is_immutable(path: &str) -> bool {
     path.starts_with("objects/") || path.starts_with("snapshots/") || path.starts_with("commits/")
 }
+/// Native folder saves only. wasm32 has no `folder` module, so this must not be compiled there.
+#[cfg(not(target_arch = "wasm32"))]
 fn addressed(name: &str, data: &[u8]) -> bool {
     if let Some(rest) = name.strip_prefix("objects/") {
         let Some(hash) = rest

@@ -517,7 +517,42 @@ fn subtree(doc: &Document, id: NodeId, out: &mut Vec<Node>) {
     }
 }
 
+/// Emits `locked: value` for every node in `doc` that is itself locked.
+/// Parents first so an unlock clears a group before its children. Children
+/// first so a relock marks children while the parent is still editable.
+fn set_lock_flags(doc: &Document, id: NodeId, value: bool, parents_first: bool, ops: &mut Vec<Op>) {
+    let Some(node) = doc.nodes.get(&id) else {
+        return;
+    };
+    let emit = |ops: &mut Vec<Op>| {
+        if node.props.locked {
+            ops.push(Op::SetProps {
+                id,
+                patch: PropPatch {
+                    locked: Some(value),
+                    ..Default::default()
+                },
+            });
+        }
+    };
+    if parents_first {
+        emit(ops);
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            set_lock_flags(doc, *child, value, parents_first, ops);
+        }
+    }
+    if !parents_first {
+        emit(ops);
+    }
+}
+
 /// Operations that turn `current` into `target` in one undoable transaction.
+///
+/// Locked nodes reject edits, so the sequence unlocks the current tree before
+/// rebuilding it and writes the target lock flags last. Undo then clears those
+/// flags before it puts the previous tree back.
 pub fn restore_ops(current: &Document, target: &Document) -> Result<Vec<Op>, String> {
     if current.root != target.root {
         return Err("the version belongs to a different document lineage".into());
@@ -528,19 +563,22 @@ pub fn restore_ops(current: &Document, target: &Document) -> Result<Vec<Op>, Str
     ) else {
         return Err("missing root".into());
     };
-    let mut ops: Vec<Op> = cur_root
-        .children()
-        .unwrap_or(&[])
-        .iter()
-        .map(|id| Op::RemoveNode { id: *id })
-        .collect();
+    let mut ops = Vec::new();
+    set_lock_flags(current, current.root, false, true, &mut ops);
+    ops.extend(
+        cur_root
+            .children()
+            .unwrap_or(&[])
+            .iter()
+            .map(|id| Op::RemoveNode { id: *id }),
+    );
     let p = &tgt_root.props;
     ops.push(Op::SetProps {
         id: target.root,
         patch: PropPatch {
             name: Some(tgt_root.name.clone()),
             visible: Some(p.visible),
-            locked: Some(p.locked),
+            locked: Some(false),
             opacity: Some(p.opacity),
             blend: Some(p.blend),
             transform: Some(p.transform),
@@ -589,12 +627,16 @@ pub fn restore_ops(current: &Document, target: &Document) -> Result<Vec<Op>, Str
     for (index, child) in tgt_root.children().unwrap_or(&[]).iter().enumerate() {
         let mut nodes = vec![];
         subtree(target, *child, &mut nodes);
+        for node in &mut nodes {
+            node.props.locked = false;
+        }
         ops.push(Op::RestoreSubtree {
             nodes,
             parent: target.root,
             index,
         });
     }
+    set_lock_flags(target, target.root, true, false, &mut ops);
     Ok(ops)
 }
 
@@ -983,6 +1025,68 @@ mod tests {
         );
         let other = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
         assert!(restore_ops(&e.doc, &other).is_err());
+    }
+
+    #[test]
+    fn restore_ops_rebuild_a_locked_tree_and_undo() {
+        let mut e = editor();
+        let root = e.doc.root;
+        let a = Node::raster("A");
+        let ia = a.id;
+        tx(
+            &mut e,
+            "a",
+            vec![Op::InsertNode {
+                node: a,
+                parent: root,
+                index: 0,
+            }],
+        );
+        let v1 = e.doc.clone();
+        tx(
+            &mut e,
+            "lock",
+            vec![
+                Op::SetProps {
+                    id: ia,
+                    patch: PropPatch {
+                        locked: Some(true),
+                        ..Default::default()
+                    },
+                },
+                Op::SetProps {
+                    id: root,
+                    patch: PropPatch {
+                        locked: Some(true),
+                        ..Default::default()
+                    },
+                },
+            ],
+        );
+        let v2 = e.doc.clone();
+        let rev = e.doc.revision;
+        assert!(
+            e.transact(
+                "blocked",
+                vec![Op::SetTiles {
+                    layer: ia,
+                    changes: vec![],
+                }],
+                rev,
+            )
+            .is_err()
+        );
+        let ops = restore_ops(&e.doc, &v1).unwrap();
+        tx(&mut e, "restore", ops);
+        assert_eq!(
+            e.doc.snapshot_bytes().unwrap(),
+            v1.snapshot_bytes().unwrap()
+        );
+        e.undo().unwrap();
+        assert_eq!(
+            e.doc.snapshot_bytes().unwrap(),
+            v2.snapshot_bytes().unwrap()
+        );
     }
 
     #[test]
