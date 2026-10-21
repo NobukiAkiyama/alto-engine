@@ -48,12 +48,16 @@ impl Commit {
         if self.parents.len() > 16 || self.intents.len() > 4096 {
             return Err("too many commit parents or intents".into());
         }
-        if self
-            .author
-            .as_ref()
-            .is_some_and(|a| a.chars().count() > 256)
+        if let Some(author) = &self.author
+            && (author.is_empty()
+                || author.chars().count() > 256
+                || author
+                    .chars()
+                    .any(|c| c.is_control() || c == '<' || c == '>'))
         {
-            return Err("author name too long".into());
+            return Err(
+                "author name must be a single line of at most 256 characters without < or >".into(),
+            );
         }
         Ok(())
     }
@@ -1004,6 +1008,11 @@ mod tests {
         );
         let mut bad = c.clone();
         bad.message = "x\u{7}".into();
+        assert!(bad.validate().is_err());
+        bad = c.clone();
+        bad.author = Some("Mallory\nreset refs/heads/main".into());
+        assert!(bad.validate().is_err());
+        bad.author = Some("A <injected>".into());
         assert!(bad.validate().is_err());
     }
 }

@@ -56,6 +56,30 @@ pub fn commit_path(h: &ContentHash) -> String {
 pub fn is_immutable(path: &str) -> bool {
     path.starts_with("objects/") || path.starts_with("snapshots/") || path.starts_with("commits/")
 }
+fn addressed(name: &str, data: &[u8]) -> bool {
+    if let Some(rest) = name.strip_prefix("objects/") {
+        let Some(hash) = rest
+            .split('/')
+            .nth(1)
+            .and_then(|s| s.parse::<ContentHash>().ok())
+        else {
+            return false;
+        };
+        return decode_object(data)
+            .map(|(tag, pixels)| object_hash(tag, &pixels) == hash)
+            .unwrap_or(false);
+    }
+    let Some(stem) = name
+        .strip_prefix("snapshots/")
+        .or_else(|| name.strip_prefix("commits/"))
+        .and_then(|s| s.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    stem.parse::<ContentHash>()
+        .map(|hash| ContentHash::of(data) == hash)
+        .unwrap_or(false)
+}
 pub const GITATTRIBUTES: &str = "# Alto folder package. Objects are compressed, content-addressed and never rewritten.\nobjects/** binary\n*.json text eol=lf\ndocument.json diff=alto\n";
 /// Logical entries shared by the ZIP and folder forms; manifest.json is the commit point.
 pub fn package_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -271,8 +295,9 @@ pub fn decode_entries(mut entries: BTreeMap<String, Vec<u8>>) -> Result<Package>
         head,
     })
 }
-/// The folder form (`.altoproj/`) on a native file system. Content-addressed files are
-/// written only when missing; `manifest.json` is replaced last and read back.
+/// The folder form (`.altoproj/`) on a native file system. Content-addressed files stay
+/// when their bytes match the name, and are replaced when they do not. `manifest.json`
+/// is replaced last and read back.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod folder {
     use super::*;
@@ -334,9 +359,19 @@ pub mod folder {
                 return Err(StoreError::Io(format!("invalid path {name}")));
             }
             let path = dir.join(name);
-            if is_immutable(name) && path.exists() {
-                report.skipped += 1;
-                continue;
+            if is_immutable(name) {
+                if !addressed(name, data) {
+                    return Err(StoreError::Corrupt(format!(
+                        "content does not match {name}"
+                    )));
+                }
+                if path.exists() {
+                    let existing = std::fs::read(&path).map_err(io)?;
+                    if addressed(name, &existing) {
+                        report.skipped += 1;
+                        continue;
+                    }
+                }
             }
             replace(dir, name, data)?;
             report.written += 1;
@@ -431,6 +466,40 @@ mod tests {
         let read = decode_entries(folder::read(&dir).unwrap()).unwrap();
         assert!(read.warnings.iter().any(|w| w.contains("manifest damaged")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_corrupt_object_is_replaced_by_the_bytes_that_match_its_name() {
+        let pixels = vec![7; 262144];
+        let h = object_hash(4, &pixels);
+        let commit = b"{\"snapshot\":\"x\",\"created_at\":1}\n".to_vec();
+        let ch = ContentHash::of(&commit);
+        let parts = PackageParts {
+            snapshot: b"{\"nodes\":[]}\n".to_vec(),
+            objects: BTreeMap::from([(h, encode_object(4, &pixels))]),
+            commits: BTreeMap::from([(ch, commit)]),
+            head: Some(ch),
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!("alto-folder-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let entries = folder_entries(&parts).unwrap();
+        folder::write(&dir, &entries, None).unwrap();
+        let path = dir.join(object_path(&h));
+        let original = std::fs::read(&path).unwrap();
+        let mut damaged = original.clone();
+        damaged[20] ^= 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+        let manifest = ContentHash::of(&std::fs::read(dir.join("manifest.json")).unwrap());
+        folder::write(&dir, &entries, Some(manifest)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mut forged = entries.clone();
+        forged.get_mut(&object_path(&h)).unwrap()[20] ^= 0xff;
+        let elsewhere =
+            std::env::temp_dir().join(format!("alto-folder-forged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        assert!(folder::write(&elsewhere, &forged, None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
     #[test]
     fn stored_zip_and_object_hash_roundtrip() {

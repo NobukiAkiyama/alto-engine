@@ -56,11 +56,11 @@ impl Opened {
     pub fn from_entries(entries: BTreeMap<String, Vec<u8>>) -> Result<Self> {
         let package = alto_store::decode_entries(entries.clone()).map_err(|e| e.to_string())?;
         let doc = Document::from_snapshot_bytes(&package.snapshot).map_err(|e| e.to_string())?;
-        let commits = package
-            .commits
-            .iter()
-            .filter_map(|(h, b)| Commit::parse(b).ok().map(|c| (*h, c)))
-            .collect();
+        let mut commits = BTreeMap::new();
+        for (h, b) in &package.commits {
+            let c = Commit::parse(b).map_err(|e| format!("commit {h}: {e}"))?;
+            commits.insert(*h, c);
+        }
         Ok(Self {
             package,
             entries,
@@ -396,6 +396,47 @@ fn referenced(snapshot: &[u8], available: &BTreeSet<String>) -> BTreeSet<String>
         .collect()
 }
 
+fn one_line(label: &str, value: &str) -> Result<()> {
+    if value.chars().any(|c| c.is_control()) {
+        return Err(format!("{label} must be a single line"));
+    }
+    Ok(())
+}
+
+fn identity(label: &str, value: &str, email: bool) -> Result<()> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_control() || c == '<' || c == '>')
+        || (email && value.contains(' '))
+    {
+        return Err(format!("{label} must be a single line"));
+    }
+    Ok(())
+}
+
+/// A branch name that can be placed after `refs/heads/` without becoming another command.
+fn check_branch_name(name: &str) -> Result<()> {
+    let component =
+        |part: &str| part.is_empty() || part.starts_with('.') || part.ends_with(".lock");
+    if name.is_empty()
+        || name == "@"
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.ends_with('.')
+        || name.contains("//")
+        || name.contains("..")
+        || name.contains("@{")
+        || name.split('/').any(component)
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\u{7f}')
+        })
+    {
+        return Err(format!("branch name is not a single git ref: {name}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SyncReport {
     pub created: Vec<(ContentHash, String)>,
@@ -416,6 +457,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         .map(str::to_string)
         .or_else(|| current.as_ref().map(|s| s.trim().to_string()))
         .unwrap_or_else(|| "main".into());
+    check_branch_name(&branch)?;
     let reference = format!("refs/heads/{branch}");
     let tip = git(&root, &["rev-parse", "--verify", "--quiet", &reference])
         .ok()
@@ -455,12 +497,15 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         .filter(|k| k.starts_with("objects/"))
         .cloned()
         .collect();
+    one_line("path", &prefix)?;
     let name = git(&root, &["config", "user.name"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "Alto".into());
     let email = git(&root, &["config", "user.email"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "alto@localhost".into());
+    identity("committer", &name, false)?;
+    identity("email", &email, true)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -513,6 +558,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         }
         message += &format!("\n\nAlto-Commit: {h}\nAlto-Snapshot: {}\n", c.snapshot);
         let who = c.author.clone().unwrap_or_else(|| name.clone());
+        identity("author", &who, false)?;
         let _ = write!(stream, "commit {reference}\nmark :{}\n", n + 1);
         let _ = writeln!(
             stream,
@@ -567,6 +613,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
             if alto_store::is_immutable(&path) && present.contains(&path) {
                 continue;
             }
+            one_line("path", &path)?;
             file(&mut stream, &path, &data);
             present.insert(path);
         }
