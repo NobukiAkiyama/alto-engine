@@ -26,7 +26,8 @@ fn sparse(p:vec2f)->vec4f {
  if c.info.x==0u{let v=sparse(p);out=vec4f(v.rgb*v.a,v.a);}
  else if c.info.x==1u{
   var src=load_b(p);if c.settings.z>0.5{src*=textureLoad(clip_base,vec2i(id.xy),0).a;}
-  out=blend(load_a(p),src,u32(c.settings.y));
+  let straight=select(vec3f(0.0),src.rgb/max(src.a,0.000001),src.a>0.0);
+  out=blend(load_a(p),vec4f(straight,src.a),u32(c.settings.y));
  }else if c.info.x==2u{
   var sum=vec4f(0);var total=0.0;let radius=i32(c.settings.w);let sigma=max(c.settings.x,0.333333);
   for(var i=-64;i<=64;i++){if abs(i)>radius{continue;}let weight=exp(-f32(i*i)/(2.0*sigma*sigma));var delta=vec2f(f32(i)*c.out_region.z,0);if c.info.w==1u{delta=delta.yx;}sum+=load_a(p+delta)*weight;total+=weight;}
@@ -38,7 +39,7 @@ fn sparse(p:vec2f)->vec4f {
  }else if c.info.x==5u{out=mix(load_a(p),load_b(p),sparse(p).r);}
  else if c.info.x==7u{var amount=c.settings.x;if c.settings.y>0.5{amount*=sparse(p).r;}if c.settings.z>0.5{amount*=textureLoad(clip_base,vec2i(id.xy),0).a;}let original=load_a(p);var filtered=load_b(p);if c.settings.w>0.5{let d=original.rgb/max(original.a,0.000001);let f=filtered.rgb/max(filtered.a,0.000001);var color=d*f;if u32(c.settings.w)==2u{color=1.0-(1.0-d)*(1.0-f);}filtered=vec4f(color*original.a,original.a);}out=mix(original,filtered,amount);}
  else if c.info.x==8u{out=load_a(p);if c.region_a.z>c.out_region.z{out=a_linear(p);}}
- else if c.info.x==9u{let base=load_a(p);let src=load_b(p);let d=base.rgb/max(base.a,0.000001);let s=src.rgb/max(src.a,0.000001);var blended=s;if u32(c.settings.y)==1u{blended=d*s;}if u32(c.settings.y)==2u{blended=1.0-(1.0-d)*(1.0-s);}out=vec4f(mix(d,blended,src.a)*base.a,base.a);}
+ else if c.info.x==9u{let base=load_a(p);let src=load_b(p);let d=base.rgb/max(base.a,0.000001);let s=src.rgb/max(src.a,0.000001);let mode=u32(c.settings.y);let blended=mix_color(s,d,select(0u,mode,mode<=2u));out=vec4f(mix(d,blended,src.a)*base.a,base.a);}
  else if c.info.x==10u{let base=load_a(p);let filtered=load_b(p);out=vec4f(filtered.rgb/max(filtered.a,0.000001)*base.a,base.a);}
  else if c.info.x==11u{out=load_a(p)*load_b(p).r;}
  else if c.info.x==12u{out=mix(load_a(p),load_b(p),textureLoad(clip_base,vec2i(id.xy),0).r);}

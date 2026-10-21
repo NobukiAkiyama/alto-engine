@@ -4,6 +4,9 @@ use std::collections::HashMap;
 pub mod glyph_atlas;
 pub mod renderer;
 
+#[cfg(test)]
+mod blend_ref;
+
 pub type RIdx = usize;
 pub type TargetId = usize;
 

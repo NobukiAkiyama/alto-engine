@@ -55,6 +55,8 @@ pub struct Engine {
     tiles: MemoryTileStore,
     blobs: BTreeMap<ContentHash, Vec<u8>>,
     imported: std::collections::BTreeSet<ContentHash>,
+    /// Blobs stored by import and not yet referenced by a committed transaction.
+    pending_blobs: std::collections::BTreeSet<ContentHash>,
     versions: BTreeMap<DocHandle, versions::VersionStore>,
     empty_versions: versions::VersionStore,
     text: text::TextCache,
@@ -76,6 +78,7 @@ impl Engine {
             tiles: MemoryTileStore::default(),
             blobs: BTreeMap::new(),
             imported: std::collections::BTreeSet::new(),
+            pending_blobs: std::collections::BTreeSet::new(),
             versions: BTreeMap::new(),
             empty_versions: Default::default(),
             text: Default::default(),
@@ -149,6 +152,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .transact(intent, ops, base_revision)?;
         self.maintain();
+        self.settle_pending();
         Ok(changes)
     }
     pub fn undo(&mut self, handle: DocHandle) -> Result<Option<ChangeSet>, EngineError> {
@@ -158,6 +162,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .undo()?;
         self.maintain();
+        self.settle_pending();
         Ok(c)
     }
     pub fn redo(&mut self, handle: DocHandle) -> Result<Option<ChangeSet>, EngineError> {
@@ -167,6 +172,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .redo()?;
         self.maintain();
+        self.settle_pending();
         Ok(c)
     }
 
@@ -388,6 +394,14 @@ impl Engine {
         self.blobs.entry(h).or_insert(bytes);
         h
     }
+    /// Stores bytes that an import will reference from a later `SetAsset`.
+    /// `maintain` keeps the blob. A finished transaction drops it unless a
+    /// document, the undo stack, or a version now references it.
+    pub fn put_import_blob(&mut self, bytes: Vec<u8>) -> ContentHash {
+        let hash = self.put_blob(bytes);
+        self.pending_blobs.insert(hash);
+        hash
+    }
     fn encoded(&self, h: ContentHash) -> Option<Vec<u8>> {
         if let Some(t) = self.tile(&h) {
             Some(alto_store::encode_object(
@@ -594,6 +608,21 @@ impl Engine {
                 }
             }
         }
+        let mut current = self.live_hashes();
+        let mut reachable = current.clone();
+        for v in self.versions.values() {
+            reachable.extend(v.retained.iter().copied());
+        }
+        current.extend(self.pending_blobs.iter().copied());
+        reachable.extend(self.pending_blobs.iter().copied());
+        if self.backed {
+            self.tiles.separate(&current, &reachable);
+        } else {
+            self.tiles.retain(&reachable);
+        }
+        self.blobs.retain(|hash, _| reachable.contains(hash));
+    }
+    fn live_hashes(&self) -> std::collections::BTreeSet<ContentHash> {
         let mut current = self.imported.clone();
         for editor in self.documents.values() {
             for n in editor.doc.nodes.values() {
@@ -607,16 +636,22 @@ impl Engine {
                 op_hashes(&op, &mut current);
             }
         }
-        let mut reachable = current.clone();
+        current
+    }
+    fn settle_pending(&mut self) {
+        if self.pending_blobs.is_empty() {
+            return;
+        }
+        let mut referenced = self.live_hashes();
         for v in self.versions.values() {
-            reachable.extend(v.retained.iter().copied());
+            referenced.extend(v.retained.iter().copied());
         }
-        if self.backed {
-            self.tiles.separate(&current, &reachable);
-        } else {
-            self.tiles.retain(&reachable);
+        let pending = std::mem::take(&mut self.pending_blobs);
+        for hash in pending {
+            if !referenced.contains(&hash) {
+                self.blobs.remove(&hash);
+            }
         }
-        self.blobs.retain(|hash, _| reachable.contains(hash));
     }
 }
 #[cfg(test)]
@@ -657,6 +692,92 @@ mod package_tests {
             e.blobs.get(&hash).map(Vec::as_slice),
             Some(b"font-bytes".as_slice())
         );
+    }
+    #[test]
+    fn imported_font_survives_maintain_until_set_asset() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let font = e
+            .import_font(
+                include_bytes!("../../../tests/fonts/AltoTestLatin.ttf").to_vec(),
+                0,
+            )
+            .unwrap();
+        let hash = font.record.hash;
+        e.maintain();
+        assert!(e.blobs.contains_key(&hash));
+        e.transact(
+            d,
+            "font",
+            vec![Op::SetAsset {
+                id: font.record.id,
+                record: Some(font.record),
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(e.blobs.contains_key(&hash));
+        assert!(e.pending_blobs.is_empty());
+    }
+    #[test]
+    fn imported_font_is_dropped_when_a_transaction_ends_without_it() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let font = e
+            .import_font(
+                include_bytes!("../../../tests/fonts/AltoTestLatin.ttf").to_vec(),
+                0,
+            )
+            .unwrap();
+        let hash = font.record.hash;
+        e.maintain();
+        assert!(e.blobs.contains_key(&hash));
+        let root = e.document(d).unwrap().root;
+        e.transact(
+            d,
+            "other",
+            vec![Op::InsertNode {
+                node: Node::raster("x"),
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(!e.blobs.contains_key(&hash));
+        assert!(e.pending_blobs.is_empty());
+    }
+    #[test]
+    fn encoded_image_blob_survives_maintain_until_set_asset() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let hash = e.put_import_blob(b"encoded-image".to_vec());
+        e.maintain();
+        assert_eq!(
+            e.blobs.get(&hash).map(Vec::as_slice),
+            Some(b"encoded-image".as_slice())
+        );
+        let id = alto_core::AssetId::new();
+        e.transact(
+            d,
+            "image",
+            vec![Op::SetAsset {
+                id,
+                record: Some(alto_doc::AssetRecord {
+                    id,
+                    hash,
+                    kind: alto_doc::AssetKind::EncodedImage {
+                        mime: "image/png".into(),
+                    },
+                    byte_len: 14,
+                    dims: Some((8, 8)),
+                }),
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(e.blobs.contains_key(&hash));
+        assert!(e.pending_blobs.is_empty());
     }
     #[test]
     fn fresh_engine_package_and_journal_restore_exactly() {

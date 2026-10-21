@@ -182,9 +182,11 @@ pub struct CurvePoint {
 }
 
 /// A layer or adjustment effect. The JSON shape is the document format:
-/// `{"type":"gaussian_blur","radius":12}`. Unknown types and fields do not parse.
+/// `{"type":"gaussian_blur","radius":12}`. Unknown types do not parse. Extra
+/// fields are ignored so a document that opened on the untyped format still
+/// opens; they are not written back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
     GaussianBlur {
         #[serde(default = "blur_radius")]
@@ -546,6 +548,23 @@ pub struct PropPatch {
     pub mask_transform: Option<Affine2>,
     pub effects: Option<Vec<Effect>>,
 }
+impl PropPatch {
+    /// An unlock is only the `locked` flag. Other fields in the same patch would
+    /// edit a locked layer through the one exception that lets a caller unlock.
+    fn clears_lock_only(&self) -> bool {
+        self.locked == Some(false)
+            && self.name.is_none()
+            && self.visible.is_none()
+            && self.opacity.is_none()
+            && self.blend.is_none()
+            && self.transform.is_none()
+            && self.clip_to_below.is_none()
+            && self.mask_enabled.is_none()
+            && self.mask_linked.is_none()
+            && self.mask_transform.is_none()
+            && self.effects.is_none()
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TileChange {
     pub key: TileKey,
@@ -718,11 +737,29 @@ impl Document {
         }
         Ok(false)
     }
-    /// A locked node rejects every edit except a `SetProps` that clears its own
-    /// `locked` flag. That exception is what makes undo of a lock possible, and
-    /// it is also how a caller explicitly unlocks in the same patch. A locked
-    /// ancestor rejects the clear as well: the child cannot unlock itself out
-    /// of a locked group.
+    fn descendant_locked(&self, id: NodeId) -> Result<bool, DocError> {
+        fn walk(doc: &Document, id: NodeId, hops: u32) -> Result<bool, DocError> {
+            if hops > 128 {
+                return Err(DocError::Invalid("Group nesting exceeds 128".into()));
+            }
+            let Some(children) = doc.node(id)?.children().map(|c| c.to_vec()) else {
+                return Ok(false);
+            };
+            for child in children {
+                if doc.node(child)?.props.locked || walk(doc, child, hops + 1)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        walk(self, id, 0)
+    }
+    /// A locked node rejects every edit except a `SetProps` whose only change is
+    /// `locked: false`. Other fields in that patch are rejected: unlock first,
+    /// then edit. A locked ancestor rejects the clear as well. `ReplaceNode`
+    /// does not bypass a lock by supplying an unlocked replacement, and
+    /// `RemoveNode` fails when any descendant is locked. Inverse ops of the
+    /// transaction that produced them skip this check.
     fn enforce_lock(&self, op: &Op) -> Result<(), DocError> {
         fn locked() -> DocError {
             DocError::Invalid("layer is locked".into())
@@ -738,43 +775,45 @@ impl Document {
             Op::InsertNode { parent, .. } | Op::RestoreSubtree { parent, .. } => {
                 editable(self, *parent)
             }
-            Op::RemoveNode { id }
-            | Op::SetMask { layer: id, .. }
+            Op::SetMask { layer: id, .. }
             | Op::SetTiles { layer: id, .. }
             | Op::SetAdjustment { id, .. }
             | Op::SetVector { id, .. }
             | Op::SetVectorMask { id, .. }
             | Op::SetClipPath { id, .. }
             | Op::SetText { id, .. } => editable(self, *id),
+            Op::RemoveNode { id } => {
+                editable(self, *id)?;
+                if self.descendant_locked(*id)? {
+                    Err(locked())
+                } else {
+                    Ok(())
+                }
+            }
             Op::MoveNode { id, parent, .. } => {
                 editable(self, *id)?;
                 editable(self, *parent)
             }
             Op::SetProps { id, patch } => {
-                if patch.locked == Some(false) {
-                    if self.ancestor_locked(*id)? {
-                        Err(locked())
-                    } else {
-                        Ok(())
-                    }
+                let locked_node = self.node(*id)?.props.locked;
+                let ancestor = self.ancestor_locked(*id)?;
+                if !ancestor && (!locked_node || patch.clears_lock_only()) {
+                    Ok(())
                 } else {
-                    editable(self, *id)
+                    Err(locked())
                 }
             }
-            Op::ReplaceNode { id, node } => {
-                if self.ancestor_locked(*id)? {
-                    return Err(locked());
-                }
-                if self.node(*id)?.props.locked && node.props.locked {
-                    return Err(locked());
-                }
-                Ok(())
-            }
+            Op::ReplaceNode { id, .. } => editable(self, *id),
             Op::SetSelection { .. } | Op::SetAsset { .. } | Op::SetMeta { .. } => Ok(()),
         }
     }
-    fn apply(&mut self, op: Op) -> Result<(Op, ChangeSet), DocError> {
-        self.enforce_lock(&op)?;
+    /// `enforce` is false for an inverse of an op this transaction already
+    /// applied. The forward op passed the lock check (or was itself an inverse);
+    /// applying the inverse must not trip over a lock that op created.
+    fn apply(&mut self, op: Op, enforce: bool) -> Result<(Op, ChangeSet), DocError> {
+        if enforce {
+            self.enforce_lock(&op)?;
+        }
         let mut change = ChangeSet::default();
         let inverse = match op {
             Op::InsertNode {
@@ -1385,36 +1424,46 @@ impl Editor {
     /// Applies `ops` to the live document. A failed op or a failed graph check
     /// rolls the completed ops back, so the caller does not keep a second copy
     /// of the document just to discard a rejected edit.
-    fn replay(&mut self, ops: Vec<Op>) -> Result<(Vec<AppliedOp>, ChangeSet), DocError> {
+    fn replay(
+        &mut self,
+        ops: Vec<Op>,
+        enforce: bool,
+    ) -> Result<(Vec<AppliedOp>, ChangeSet), DocError> {
         let revision = self.doc.revision;
         let mut applied = Vec::with_capacity(ops.len());
         let mut changes = ChangeSet::default();
         for op in ops {
-            match self.doc.apply(op.clone()) {
+            match self.doc.apply(op.clone(), enforce) {
                 Ok((inverse, change)) => {
                     applied.push(AppliedOp { op, inverse });
                     changes.merge(change);
                 }
                 Err(e) => {
-                    self.revert(&applied);
+                    let revert_err = self.revert(&applied).err();
                     self.doc.revision = revision;
-                    return Err(e);
+                    return Err(revert_err.unwrap_or(e));
                 }
             }
         }
         if let Err(e) = self.doc.validate_graph() {
-            self.revert(&applied);
+            let revert_err = self.revert(&applied).err();
             self.doc.revision = revision;
-            return Err(e);
+            return Err(revert_err.unwrap_or(e));
         }
         Ok((applied, changes))
     }
-    fn revert(&mut self, applied: &[AppliedOp]) {
+    /// Rolls back completed ops. Lock checks are off: the inverse of an op this
+    /// transaction applied is part of that transaction. Any other failure is
+    /// returned; this does not panic.
+    fn revert(&mut self, applied: &[AppliedOp]) -> Result<(), DocError> {
         for item in applied.iter().rev() {
             self.doc
-                .apply(item.inverse.clone())
-                .expect("inverse of an applied edit");
+                .apply(item.inverse.clone(), false)
+                .map_err(|error| {
+                    DocError::Invalid(format!("inverse of an applied edit: {error}"))
+                })?;
         }
+        Ok(())
     }
     pub fn transact(
         &mut self,
@@ -1431,7 +1480,7 @@ impl Editor {
         if ops.is_empty() {
             return Ok(ChangeSet::default());
         }
-        let (applied, changes) = self.replay(ops)?;
+        let (applied, changes) = self.replay(ops, true)?;
         self.doc.revision += 1;
         self.seq += 1;
         let tx = Transaction {
@@ -1458,7 +1507,7 @@ impl Editor {
             .rev()
             .map(|item| item.inverse.clone())
             .collect();
-        let (_, changes) = self.replay(inverses)?;
+        let (_, changes) = self.replay(inverses, false)?;
         self.doc.revision += 1;
         self.undo.pop();
         if self.log.last().is_some_and(|e| e.seq == tx.seq) {
@@ -1474,7 +1523,7 @@ impl Editor {
             return Ok(None);
         };
         let ops = tx.ops.iter().map(|item| item.op.clone()).collect();
-        let (_, changes) = self.replay(ops)?;
+        let (_, changes) = self.replay(ops, true)?;
         self.doc.revision += 1;
         self.redo.pop();
         self.log_tx(&tx, "");
@@ -1775,6 +1824,211 @@ mod tests {
     }
 
     #[test]
+    fn locked_insert_rolls_back_when_a_later_op_fails() {
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let mut layer = Node::raster("Locked");
+        layer.props.locked = true;
+        let id = layer.id;
+        let err = editor
+            .transact(
+                "insert then edit",
+                vec![
+                    Op::InsertNode {
+                        node: layer,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::SetProps {
+                        id,
+                        patch: PropPatch {
+                            opacity: Some(0.2),
+                            ..Default::default()
+                        },
+                    },
+                ],
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+        assert!(editor.doc.node(id).is_err());
+        assert_eq!(editor.doc.nodes.len(), 1);
+        assert_eq!(editor.doc.revision, 0);
+        assert!(editor.undo().unwrap().is_none());
+    }
+
+    #[test]
+    fn undo_removes_a_node_inserted_already_locked() {
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let mut layer = Node::raster("Locked");
+        layer.props.locked = true;
+        let id = layer.id;
+        editor
+            .transact(
+                "insert locked",
+                vec![Op::InsertNode {
+                    node: layer,
+                    parent: root,
+                    index: 0,
+                }],
+                0,
+            )
+            .unwrap();
+        assert!(editor.doc.node(id).unwrap().props.locked);
+        editor.undo().unwrap();
+        assert!(editor.doc.node(id).is_err());
+        editor.redo().unwrap();
+        assert!(editor.doc.node(id).unwrap().props.locked);
+    }
+
+    #[test]
+    fn unlock_patch_cannot_carry_other_fields() {
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let layer = Node::raster("Paint");
+        let id = layer.id;
+        editor
+            .transact(
+                "add",
+                vec![Op::InsertNode {
+                    node: layer,
+                    parent: root,
+                    index: 0,
+                }],
+                0,
+            )
+            .unwrap();
+        editor
+            .transact(
+                "lock",
+                vec![Op::SetProps {
+                    id,
+                    patch: PropPatch {
+                        locked: Some(true),
+                        ..Default::default()
+                    },
+                }],
+                1,
+            )
+            .unwrap();
+        let err = editor
+            .transact(
+                "unlock and fade",
+                vec![Op::SetProps {
+                    id,
+                    patch: PropPatch {
+                        locked: Some(false),
+                        opacity: Some(0.4),
+                        ..Default::default()
+                    },
+                }],
+                2,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+        let node = editor.doc.node(id).unwrap();
+        assert!(node.props.locked);
+        assert_eq!(node.props.opacity, 1.0);
+        editor
+            .transact(
+                "unlock then fade",
+                vec![
+                    Op::SetProps {
+                        id,
+                        patch: PropPatch {
+                            locked: Some(false),
+                            ..Default::default()
+                        },
+                    },
+                    Op::SetProps {
+                        id,
+                        patch: PropPatch {
+                            opacity: Some(0.4),
+                            ..Default::default()
+                        },
+                    },
+                ],
+                2,
+            )
+            .unwrap();
+        let node = editor.doc.node(id).unwrap();
+        assert!(!node.props.locked);
+        assert_eq!(node.props.opacity, 0.4);
+    }
+
+    #[test]
+    fn replace_and_remove_respect_locks() {
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let group = Node::group("Group");
+        let group_id = group.id;
+        let mut child = Node::raster("Child");
+        child.props.locked = true;
+        let child_id = child.id;
+        let sibling = Node::raster("Sibling");
+        let sibling_id = sibling.id;
+        editor
+            .transact(
+                "tree",
+                vec![
+                    Op::InsertNode {
+                        node: group,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: child,
+                        parent: group_id,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: sibling,
+                        parent: root,
+                        index: 1,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        editor
+            .transact(
+                "lock sibling",
+                vec![Op::SetProps {
+                    id: sibling_id,
+                    patch: PropPatch {
+                        locked: Some(true),
+                        ..Default::default()
+                    },
+                }],
+                1,
+            )
+            .unwrap();
+        let mut replacement = editor.doc.node(sibling_id).unwrap().clone();
+        replacement.name = "Renamed".into();
+        replacement.props.locked = false;
+        let err = editor
+            .transact(
+                "replace",
+                vec![Op::ReplaceNode {
+                    id: sibling_id,
+                    node: replacement,
+                }],
+                2,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+        assert_eq!(editor.doc.node(sibling_id).unwrap().name, "Sibling");
+        assert!(editor.doc.node(sibling_id).unwrap().props.locked);
+        let err = editor
+            .transact("remove group", vec![Op::RemoveNode { id: group_id }], 2)
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+        assert!(editor.doc.node(child_id).is_ok());
+        assert!(editor.doc.node(group_id).is_ok());
+    }
+
+    #[test]
     fn isolated_groups_stop_at_the_compositor_limit() {
         let mut editor = editor();
         let mut parent = editor.doc.root;
@@ -1860,11 +2114,83 @@ mod tests {
     }
 
     #[test]
-    fn effect_rejects_unknown_fields() {
-        let err = serde_json::from_value::<Effect>(serde_json::json!({"type":"invert","extra":1}))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("extra"), "{err}");
+    fn old_effect_shapes_open_and_round_trip() {
+        let shapes = [
+            r#"{"type":"gaussian_blur","radius":12}"#,
+            r#"{"type":"gaussian_blur"}"#,
+            r#"{"type":"gaussian_blur","radius":12,"legacy":true}"#,
+            r#"{"type":"color_adjust","brightness":0.25,"contrast":1.5,"saturation":0.5}"#,
+            r#"{"type":"color_adjust"}"#,
+            r#"{"type":"levels","in_black":0.1,"in_white":0.9,"gamma":1.2,"out_black":0.0,"out_white":1.0}"#,
+            r#"{"type":"hue_saturation","hue":20.0,"saturation":1.25,"lightness":-0.2}"#,
+            r#"{"type":"invert"}"#,
+            r#"{"type":"invert","selection":null,"note":"stored on the untyped format"}"#,
+            r#"{"type":"curves","points":[{"x":0.0,"y":0.0},{"x":1.0,"y":1.0}]}"#,
+            r#"{"type":"curves","channel":"red","points":[{"x":0,"y":0},{"x":0.5,"y":0.25},{"x":1,"y":1}]}"#,
+        ];
+        for raw in shapes {
+            let effect: Effect = serde_json::from_str(raw).unwrap();
+            effect.validate().unwrap();
+            let again: Effect =
+                serde_json::from_str(&serde_json::to_string(&effect).unwrap()).unwrap();
+            assert_eq!(effect, again, "{raw}");
+        }
+        assert_eq!(
+            serde_json::from_str::<Effect>(r#"{"type":"gaussian_blur"}"#).unwrap(),
+            Effect::GaussianBlur {
+                radius: 8.0,
+                selection: None
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Effect>(
+                r#"{"type":"curves","points":[{"x":0,"y":0},{"x":1,"y":1}]}"#
+            )
+            .unwrap(),
+            Effect::Curves {
+                channel: CurveChannel::Master,
+                points: vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 1.0, y: 1.0 }],
+                selection: None,
+            }
+        );
+        assert!(serde_json::from_str::<Effect>(r#"{"type":"not_an_effect"}"#).is_err());
+
+        let mut editor = editor();
+        let root = editor.doc.root;
+        let mut layer = Node::raster("Old");
+        layer.props.effects = vec![Effect::GaussianBlur {
+            radius: 12.0,
+            selection: None,
+        }];
+        editor
+            .transact(
+                "add",
+                vec![Op::InsertNode {
+                    node: layer,
+                    parent: root,
+                    index: 0,
+                }],
+                0,
+            )
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&editor.doc.snapshot_bytes().unwrap()).unwrap();
+        let nodes = value["nodes"].as_array_mut().unwrap();
+        let layer_json = nodes.iter_mut().find(|node| node["name"] == "Old").unwrap();
+        layer_json["props"]["effects"][0]["vendor"] = serde_json::json!("alto-0.3");
+        let opened = Document::from_snapshot_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let opened_layer = opened
+            .nodes
+            .values()
+            .find(|node| node.name == "Old")
+            .unwrap();
+        assert_eq!(
+            opened_layer.props.effects,
+            vec![Effect::GaussianBlur {
+                radius: 12.0,
+                selection: None
+            }]
+        );
     }
 
     proptest! {

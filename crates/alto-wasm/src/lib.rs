@@ -485,7 +485,7 @@ impl Runtime {
                 }
             }
         }
-        let hash = self.engine.put_blob(encoded.to_vec());
+        let hash = self.engine.put_import_blob(encoded.to_vec());
         let record = AssetRecord {
             id: AssetId::new(),
             hash,

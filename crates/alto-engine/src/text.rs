@@ -100,7 +100,7 @@ impl Engine {
             .into());
         }
         let byte_len = bytes.len() as u64;
-        let hash = self.put_blob(bytes);
+        let hash = self.put_import_blob(bytes);
         let warnings = info.warnings();
         Ok(ImportedFont {
             record: AssetRecord {
