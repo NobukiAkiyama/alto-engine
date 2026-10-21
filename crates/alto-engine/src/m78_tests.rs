@@ -151,19 +151,9 @@ fn restricted_fonts_warn_and_invalid_fonts_are_rejected() {
         .unwrap();
     let offset = u32::from_be_bytes(bytes[os2 + 8..os2 + 12].try_into().unwrap()) as usize;
     bytes[offset + 8..offset + 10].copy_from_slice(&2u16.to_be_bytes());
-    let f = e.import_font(bytes, 0).unwrap();
-    assert_eq!(f.warnings.len(), 1);
-    e.transact(
-        d,
-        "font",
-        vec![Op::SetAsset {
-            id: f.record.id,
-            record: Some(f.record),
-        }],
-        0,
-    )
-    .unwrap();
-    assert!(e.font_warnings(d).unwrap()[0].contains("埋め込みが禁止"));
+    let err = e.import_font(bytes, 0).unwrap_err().to_string();
+    assert!(err.contains("埋め込みが禁止"), "{err}");
+    assert!(e.font_warnings(d).unwrap().is_empty());
 }
 
 fn paint(e: &mut Engine, d: DocHandle, layer: alto_core::NodeId, key: TileKey, v: u8) {

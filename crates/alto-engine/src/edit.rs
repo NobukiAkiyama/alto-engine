@@ -605,15 +605,12 @@ impl Engine {
             let mut effects = node.props.effects.clone();
             let mut effects_changed = false;
             for effect in &mut effects {
-                if let Some(value) = effect.get("selection")
-                    && let Ok(map) = serde_json::from_value::<TileMap>(value.clone())
-                {
+                if let Some(map) = effect.selection().cloned() {
                     let moved = remap_map(self, &map, |x, y| {
                         map_px(x + offset.0, y + offset.1)
                             .map(|(nx, ny)| (nx - ancestor.0, ny - ancestor.1))
                     })?;
-                    effect["selection"] = serde_json::to_value(moved)
-                        .map_err(|e| DocError::Serialization(e.to_string()))?;
+                    *effect.selection_mut() = Some(moved);
                     effects_changed = true;
                 }
             }
@@ -1371,6 +1368,7 @@ mod tests {
         let id = layer(&mut engine, handle);
         let mut node = engine.document(handle).unwrap().node(id).unwrap().clone();
         node.props.blend = BlendMode::Overlay;
+        node.props.transform = alto_core::Affine2([0.1, 0.0, 0.0, 1.0, 0.3, 4.5]);
         let revision = engine.document(handle).unwrap().revision;
         engine
             .transact(
@@ -1383,6 +1381,8 @@ mod tests {
         let scene = engine.render_scene(handle).unwrap();
         assert_eq!(scene.nodes[1].blend, RenderBlend::Overlay);
         assert_eq!(scene.nodes[1].blend as u32, 3);
+        assert_eq!(scene.nodes[1].transform[0], 0.1);
+        assert_eq!(scene.nodes[1].transform[4], 0.3);
         engine.undo(handle).unwrap();
         assert_eq!(
             engine.render_scene(handle).unwrap().nodes[1].blend,
@@ -1396,14 +1396,14 @@ mod tests {
                 vec![Op::SetProps {
                     id,
                     patch: PropPatch {
-                        effects: Some(vec![serde_json::json!({
-                            "type": "levels",
-                            "in_black": 0.0,
-                            "in_white": 1.0,
-                            "gamma": 1.0,
-                            "out_black": 0.0,
-                            "out_white": 1.0
-                        })]),
+                        effects: Some(vec![alto_doc::Effect::Levels {
+                            in_black: 0.0,
+                            in_white: 1.0,
+                            gamma: 1.0,
+                            out_black: 0.0,
+                            out_white: 1.0,
+                            selection: None,
+                        }]),
                         ..PropPatch::default()
                     },
                 }],

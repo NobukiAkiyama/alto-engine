@@ -189,17 +189,24 @@ pub fn read_entries(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut f = archive
             .by_index(i)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        total = total.saturating_add(f.size());
-        if total > 2_147_483_648 {
+        let budget = 2_147_483_648u64.saturating_sub(total);
+        if f.size() > budget {
             return Err(StoreError::Corrupt("package exceeds 2 GiB".into()));
         }
         let name = f.name().to_string();
         if name.contains("..") || name.starts_with('/') || entries.contains_key(&name) {
             return Err(StoreError::Corrupt("invalid or duplicate path".into()));
         }
+        // `size()` is the header. A lying small size must not decompress without a cap.
         let mut data = Vec::new();
-        f.read_to_end(&mut data)
+        (&mut f)
+            .take(budget + 1)
+            .read_to_end(&mut data)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if data.len() as u64 > budget {
+            return Err(StoreError::Corrupt("package exceeds 2 GiB".into()));
+        }
+        total += data.len() as u64;
         entries.insert(name, data);
     }
     Ok(entries)

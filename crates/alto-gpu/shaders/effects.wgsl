@@ -20,29 +20,6 @@ fn sparse(p:vec2f)->vec4f {
  if t.slot==0xffffffffu{return vec4f(1,0,0.2,1);}
  return textureLoad(atlas,vec2i(floor(q))-key*256,i32(t.slot),0);
 }
-fn lum3(c:vec3f)->f32 { return dot(c,vec3f(0.2126,0.7152,0.0722)); }
-fn clip_color(c:vec3f)->vec3f { let l=lum3(c); let n=min(c.r,min(c.g,c.b)); let x=max(c.r,max(c.g,c.b)); var o=c; if n<0.0 { o=vec3f(l)+(c-vec3f(l))*l/max(l-n,0.000001); } if x>1.0 { o=vec3f(l)+(o-vec3f(l))*(1.0-l)/max(x-l,0.000001); } return clamp(o,vec3f(0),vec3f(1)); }
-fn set_lum(c:vec3f,l:f32)->vec3f { return clip_color(c+(vec3f(l)-vec3f(lum3(c)))); }
-fn set_sat(c:vec3f,s:f32)->vec3f { var a=c; let mn=min(a.r,min(a.g,a.b)); let mx=max(a.r,max(a.g,a.b)); if mx<=mn { return vec3f(0); } return (a-vec3f(mn))*s/max(mx-mn,0.000001); }
-fn soft_channel(ss:f32,dd:f32)->f32 { let d2=select(sqrt(dd),((16.0*dd-12.0)*dd+4.0)*dd,dd<=0.25); if ss<=0.5 { return dd-(1.0-2.0*ss)*dd*(1.0-dd); } return dd+(2.0*ss-1.0)*(d2-dd); }
-fn dodge(ss:f32,dd:f32)->f32 { if ss>=1.0 { return 1.0; } return min(1.0, dd/max(1.0-ss,0.000001)); }
-fn burn(ss:f32,dd:f32)->f32 { if ss<=0.0 { return 0.0; } return 1.0-min(1.0,(1.0-dd)/max(ss,0.000001)); }
-fn blend(dst:vec4f,src:vec4f,mode:u32)->vec4f {
- let s=src.rgb/max(src.a,0.000001);let d=dst.rgb/max(dst.a,0.000001);var mixed=s;
- if mode==1u{mixed=s*d;}else if mode==2u{mixed=1.0-(1.0-s)*(1.0-d);}
- else if mode==3u{mixed=select(1.0-2.0*(1.0-s)*(1.0-d),2.0*s*d,d<vec3f(0.5));}
- else if mode==4u{mixed=min(s,d);}else if mode==5u{mixed=max(s,d);}
- else if mode==6u{mixed=vec3f(dodge(s.r,d.r),dodge(s.g,d.g),dodge(s.b,d.b));}
- else if mode==7u{mixed=vec3f(burn(s.r,d.r),burn(s.g,d.g),burn(s.b,d.b));}
- else if mode==8u{mixed=select(1.0-2.0*(1.0-d)*(1.0-s),2.0*d*s,s<vec3f(0.5));}
- else if mode==9u{mixed=vec3f(soft_channel(s.r,d.r),soft_channel(s.g,d.g),soft_channel(s.b,d.b));}
- else if mode==10u{mixed=abs(d-s);}else if mode==11u{mixed=d+s-2.0*d*s;}
- else if mode==12u{mixed=set_lum(set_sat(s,max(d.r,max(d.g,d.b))-min(d.r,min(d.g,d.b))),lum3(d));}
- else if mode==13u{mixed=set_lum(set_sat(d,max(s.r,max(s.g,s.b))-min(s.r,min(s.g,s.b))),lum3(d));}
- else if mode==14u{mixed=set_lum(s,lum3(d));}else if mode==15u{mixed=set_lum(d,lum3(s));}
- else if mode==16u{mixed=min(vec3f(1.0),s+d);}
- return vec4f((1.0-src.a)*dst.rgb+(1.0-dst.a)*src.rgb+dst.a*src.a*mixed,src.a+dst.a*(1.0-src.a));
-}
 @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id:vec3u){
  if any(id.xy>=textureDimensions(output)){return;}
  let p=c.out_region.xy+(vec2f(id.xy)+0.5)*c.out_region.z;var out=vec4f(0);

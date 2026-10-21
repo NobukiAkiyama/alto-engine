@@ -1,6 +1,6 @@
 //! Extends the M4 sample with editable masks, clipping, an adjustment and Gaussian blur.
 use alto_core::{PixelFormat, TileKey};
-use alto_doc::{Isolation, Node, NodeKind, Op, PropPatch, TileChange};
+use alto_doc::{Effect, Isolation, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_engine::{DocHandle, Engine};
 use alto_raster::TileData;
 use serde_json::json;
@@ -37,7 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let NodeKind::Group { isolation, .. } = &mut group.kind {
         *isolation = Isolation::Isolated;
     }
-    group.props.effects = vec![json!({"type":"gaussian_blur","radius":12})];
+    group.props.effects = vec![Effect::GaussianBlur {
+        radius: 12.0,
+        selection: None,
+    }];
     let group_id = group.id;
     let mut stripes = Node::raster("クリップしたストライプ");
     stripes.props.clip_to_below = true;
@@ -113,7 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     commit(&mut engine, h, ops)?;
     let mut adjustment = Node::raster("右半分の色調整");
     adjustment.kind = NodeKind::Adjustment {
-        adjustment: json!({"type":"color_adjust","brightness":0.04,"contrast":1.12,"saturation":1.35}),
+        adjustment: Effect::ColorAdjust {
+            brightness: 0.04,
+            contrast: 1.12,
+            saturation: 1.35,
+            selection: None,
+        },
     };
     adjustment.props.mask = engine.document(h)?.selection.clone();
     let index = engine

@@ -24,58 +24,58 @@ pub fn render_mask(map: &TileMap, linked: bool) -> RMask {
             .collect(),
     }
 }
-fn number_of(v: &Value, k: &str) -> f32 {
-    v[k].as_f64().unwrap_or(0.0) as f32
-}
-pub fn render_effect(v: &Value) -> REffect {
-    let number = |k: &str, default: f64| v[k].as_f64().unwrap_or(default) as f32;
-    let kind = match v["type"].as_str() {
-        Some("gaussian_blur") => REffectKind::GaussianBlur {
-            radius: number("radius", 8.0),
+pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
+    let f = |n: f64| n as f32;
+    let kind = match effect {
+        alto_doc::Effect::GaussianBlur { radius, .. } => {
+            REffectKind::GaussianBlur { radius: f(*radius) }
+        }
+        alto_doc::Effect::Levels {
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            ..
+        } => REffectKind::Levels {
+            in_black: f(*in_black),
+            in_white: f(*in_white),
+            gamma: f(*gamma),
+            out_black: f(*out_black),
+            out_white: f(*out_white),
         },
-        Some("levels") => REffectKind::Levels {
-            in_black: number("in_black", 0.0),
-            in_white: number("in_white", 1.0),
-            gamma: number("gamma", 1.0),
-            out_black: number("out_black", 0.0),
-            out_white: number("out_white", 1.0),
+        alto_doc::Effect::Curves { points, .. } => REffectKind::Curves {
+            points: points.iter().map(|p| (f(p.x), f(p.y))).collect(),
         },
-        Some("curves") => REffectKind::Curves {
-            points: v["points"]
-                .as_array()
-                .map(|points| {
-                    points
-                        .iter()
-                        .map(|p| (number_of(p, "x"), number_of(p, "y")))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![(0.0, 0.0), (1.0, 1.0)]),
+        alto_doc::Effect::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+            ..
+        } => REffectKind::HueSaturation {
+            hue: f(*hue),
+            saturation: f(*saturation),
+            lightness: f(*lightness),
         },
-        Some("hue_saturation") => REffectKind::HueSaturation {
-            hue: number("hue", 0.0),
-            saturation: number("saturation", 1.0),
-            lightness: number("lightness", 0.0),
-        },
-        Some("invert") => REffectKind::Invert,
-        _ => REffectKind::ColorAdjust {
-            brightness: number("brightness", 0.0),
-            contrast: number("contrast", 1.0),
-            saturation: number("saturation", 1.0),
+        alto_doc::Effect::Invert { .. } => REffectKind::Invert,
+        alto_doc::Effect::ColorAdjust {
+            brightness,
+            contrast,
+            saturation,
+            ..
+        } => REffectKind::ColorAdjust {
+            brightness: f(*brightness),
+            contrast: f(*contrast),
+            saturation: f(*saturation),
         },
     };
     REffect {
         kind,
-        selection: v
-            .get("selection")
-            .and_then(|v| serde_json::from_value::<TileMap>(v.clone()).ok())
-            .map(|m| render_mask(&m, true)),
+        selection: effect.selection().map(|m| render_mask(m, true)),
     }
 }
-pub fn effect_hashes(value: &Value, hashes: &mut BTreeSet<ContentHash>) {
-    if let Some(m) = value
-        .get("selection")
-        .and_then(|v| serde_json::from_value::<TileMap>(v.clone()).ok())
-    {
+pub fn effect_hashes(effect: &alto_doc::Effect, hashes: &mut BTreeSet<ContentHash>) {
+    if let Some(m) = effect.selection() {
         hashes.extend(m.tiles.values().copied());
     }
 }
@@ -615,7 +615,7 @@ impl Engine {
         &mut self,
         h: DocHandle,
         id: NodeId,
-        mut effects: Vec<Value>,
+        mut effects: Vec<alto_doc::Effect>,
         use_selection: bool,
     ) -> Result<Vec<Op>, EngineError> {
         if effects.len() > 32 {
@@ -626,8 +626,8 @@ impl Engine {
         }
         if use_selection && self.document(h)?.selection.is_some() {
             let mask = self.mask_for_node(h, id, false, true)?;
-            for e in effects.iter_mut().filter(|e| e.get("selection").is_none()) {
-                e["selection"] = serde_json::to_value(&mask).expect("mask serializes");
+            for e in effects.iter_mut().filter(|e| e.selection().is_none()) {
+                *e.selection_mut() = Some(mask.clone());
             }
         }
         for e in &effects {
@@ -726,7 +726,10 @@ mod tests {
             .effect_ops(
                 h,
                 id,
-                vec![json!({"type":"gaussian_blur","radius":12})],
+                vec![alto_doc::Effect::GaussianBlur {
+                    radius: 12.0,
+                    selection: None,
+                }],
                 true,
             )
             .unwrap();
@@ -798,7 +801,10 @@ mod tests {
             vec![Op::SetProps {
                 id,
                 patch: PropPatch {
-                    effects: Some(vec![json!({"type":"gaussian_blur","radius":-1})]),
+                    effects: Some(vec![alto_doc::Effect::GaussianBlur {
+                        radius: -1.0,
+                        selection: None,
+                    }]),
                     ..Default::default()
                 },
             }],

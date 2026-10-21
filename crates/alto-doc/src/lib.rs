@@ -95,7 +95,7 @@ pub struct LayerProps {
     #[serde(default)]
     pub clip_path: Option<Box<ClipPath>>,
     pub clip_to_below: bool,
-    pub effects: Vec<serde_json::Value>,
+    pub effects: Vec<Effect>,
 }
 fn enabled() -> bool {
     true
@@ -155,120 +155,193 @@ pub fn validate_mask(map: &TileMap) -> Result<(), DocError> {
     }
     Ok(())
 }
-pub fn validate_effect(value: &serde_json::Value) -> Result<(), DocError> {
-    let Some(obj) = value.as_object() else {
-        return Err(DocError::Invalid("Unknown effect type".into()));
-    };
-    let kind = obj.get("type").and_then(|v| v.as_str());
-    let allowed: &[&str] = match kind {
-        Some("gaussian_blur") => &["type", "radius", "selection"],
-        Some("color_adjust") => &["type", "brightness", "contrast", "saturation", "selection"],
-        Some("levels") => &[
-            "type",
-            "in_black",
-            "in_white",
-            "gamma",
-            "out_black",
-            "out_white",
-            "selection",
-        ],
-        Some("hue_saturation") => &["type", "hue", "saturation", "lightness", "selection"],
-        Some("invert") => &["type", "selection"],
-        Some("curves") => &["type", "channel", "points", "selection"],
-        _ => return Err(DocError::Invalid("Unknown effect type".into())),
-    };
-    if let Some(key) = obj.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(DocError::Invalid(format!("Unknown effect field {key}")));
+fn blur_radius() -> f64 {
+    8.0
+}
+fn zero_f64() -> f64 {
+    0.0
+}
+fn one_f64() -> f64 {
+    1.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CurveChannel {
+    #[default]
+    Master,
+    Red,
+    Green,
+    Blue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CurvePoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A layer or adjustment effect. The JSON shape is the document format:
+/// `{"type":"gaussian_blur","radius":12}`. Unknown types and fields do not parse.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Effect {
+    GaussianBlur {
+        #[serde(default = "blur_radius")]
+        radius: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+    ColorAdjust {
+        #[serde(default = "zero_f64")]
+        brightness: f64,
+        #[serde(default = "one_f64")]
+        contrast: f64,
+        #[serde(default = "one_f64")]
+        saturation: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+    Levels {
+        #[serde(default = "zero_f64")]
+        in_black: f64,
+        #[serde(default = "one_f64")]
+        in_white: f64,
+        #[serde(default = "one_f64")]
+        gamma: f64,
+        #[serde(default = "zero_f64")]
+        out_black: f64,
+        #[serde(default = "one_f64")]
+        out_white: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+    HueSaturation {
+        #[serde(default = "zero_f64")]
+        hue: f64,
+        #[serde(default = "one_f64")]
+        saturation: f64,
+        #[serde(default = "zero_f64")]
+        lightness: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+    Invert {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+    Curves {
+        #[serde(default)]
+        channel: CurveChannel,
+        points: Vec<CurvePoint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<TileMap>,
+    },
+}
+
+impl Effect {
+    pub fn selection(&self) -> Option<&TileMap> {
+        match self {
+            Self::GaussianBlur { selection, .. }
+            | Self::ColorAdjust { selection, .. }
+            | Self::Levels { selection, .. }
+            | Self::HueSaturation { selection, .. }
+            | Self::Invert { selection }
+            | Self::Curves { selection, .. } => selection.as_ref(),
+        }
     }
-    let finite = |key: &str, default: f64, min: f64, max: f64| {
-        let n = value
-            .get(key)
-            .map_or(Some(default), |v| v.as_f64())
-            .ok_or_else(|| DocError::Invalid(format!("Invalid {key}")))?;
-        if !n.is_finite() || !(min..=max).contains(&n) {
-            return Err(DocError::Invalid(format!("Invalid {key}")));
+    pub fn selection_mut(&mut self) -> &mut Option<TileMap> {
+        match self {
+            Self::GaussianBlur { selection, .. }
+            | Self::ColorAdjust { selection, .. }
+            | Self::Levels { selection, .. }
+            | Self::HueSaturation { selection, .. }
+            | Self::Invert { selection }
+            | Self::Curves { selection, .. } => selection,
         }
-        Ok(())
-    };
-    match value.get("type").and_then(|v| v.as_str()) {
-        Some("gaussian_blur") => finite("radius", 8.0, 0.0, 64.0)?,
-        Some("color_adjust") => {
-            finite("brightness", 0.0, -1.0, 1.0)?;
-            finite("contrast", 1.0, 0.0, 4.0)?;
-            finite("saturation", 1.0, 0.0, 4.0)?;
-        }
-        Some("levels") => {
-            finite("in_black", 0.0, 0.0, 1.0)?;
-            finite("in_white", 1.0, 0.0, 1.0)?;
-            finite("gamma", 1.0, 0.1, 10.0)?;
-            finite("out_black", 0.0, 0.0, 1.0)?;
-            finite("out_white", 1.0, 0.0, 1.0)?;
-            let black = value
-                .get("in_black")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let white = value
-                .get("in_white")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0);
-            if black >= white {
-                return Err(DocError::Invalid("Invalid levels range".into()));
+    }
+    pub fn validate(&self) -> Result<(), DocError> {
+        let finite = |name: &str, n: f64, min: f64, max: f64| {
+            if n.is_finite() && (min..=max).contains(&n) {
+                Ok(())
+            } else {
+                Err(DocError::Invalid(format!("Invalid {name}")))
+            }
+        };
+        match self {
+            Self::GaussianBlur { radius, .. } => finite("radius", *radius, 0.0, 64.0)?,
+            Self::ColorAdjust {
+                brightness,
+                contrast,
+                saturation,
+                ..
+            } => {
+                finite("brightness", *brightness, -1.0, 1.0)?;
+                finite("contrast", *contrast, 0.0, 4.0)?;
+                finite("saturation", *saturation, 0.0, 4.0)?;
+            }
+            Self::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+                ..
+            } => {
+                finite("in_black", *in_black, 0.0, 1.0)?;
+                finite("in_white", *in_white, 0.0, 1.0)?;
+                finite("gamma", *gamma, 0.1, 10.0)?;
+                finite("out_black", *out_black, 0.0, 1.0)?;
+                finite("out_white", *out_white, 0.0, 1.0)?;
+                if in_black >= in_white {
+                    return Err(DocError::Invalid("Invalid levels range".into()));
+                }
+            }
+            Self::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+                ..
+            } => {
+                finite("hue", *hue, -180.0, 180.0)?;
+                finite("saturation", *saturation, 0.0, 4.0)?;
+                finite("lightness", *lightness, -1.0, 1.0)?;
+            }
+            Self::Invert { .. } => {}
+            Self::Curves { points, .. } => {
+                if !(2..=16).contains(&points.len()) {
+                    return Err(DocError::Invalid("Curve point count".into()));
+                }
+                let mut previous = -1.0;
+                for point in points {
+                    if !(0.0..=1.0).contains(&point.x)
+                        || !(0.0..=1.0).contains(&point.y)
+                        || point.x <= previous
+                    {
+                        return Err(DocError::Invalid("Invalid curve point".into()));
+                    }
+                    previous = point.x;
+                }
             }
         }
-        Some("hue_saturation") => {
-            finite("hue", 0.0, -180.0, 180.0)?;
-            finite("saturation", 1.0, 0.0, 4.0)?;
-            finite("lightness", 0.0, -1.0, 1.0)?;
+        if let Some(map) = self.selection() {
+            validate_mask(map)?;
         }
-        Some("invert") => {}
-        Some("curves") => validate_curves(value)?,
-        _ => return Err(DocError::Invalid("Unknown effect type".into())),
+        Ok(())
     }
-    if let Some(v) = value.get("selection").filter(|v| !v.is_null()) {
-        let map: TileMap =
-            serde_json::from_value(v.clone()).map_err(|e| DocError::Invalid(e.to_string()))?;
-        validate_mask(&map)?;
-    }
-    Ok(())
 }
 
-fn validate_curves(value: &serde_json::Value) -> Result<(), DocError> {
-    let channel = value
-        .get("channel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("master");
-    if !matches!(channel, "master" | "red" | "green" | "blue") {
-        return Err(DocError::Invalid("Invalid curve channel".into()));
-    }
-    let points = value
-        .get("points")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| DocError::Invalid("Curve points required".into()))?;
-    if !(2..=16).contains(&points.len()) {
-        return Err(DocError::Invalid("Curve point count".into()));
-    }
-    let mut previous = -1.0;
-    for point in points {
-        let x = point
-            .get("x")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| DocError::Invalid("Invalid curve point".into()))?;
-        let y = point
-            .get("y")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| DocError::Invalid("Invalid curve point".into()))?;
-        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) || x <= previous {
-            return Err(DocError::Invalid("Invalid curve point".into()));
-        }
-        previous = x;
-    }
-    Ok(())
+pub fn validate_effect(effect: &Effect) -> Result<(), DocError> {
+    effect.validate()
 }
 
-pub fn extended_effect(value: &serde_json::Value) -> bool {
+pub fn extended_effect(effect: &Effect) -> bool {
     matches!(
-        value.get("type").and_then(|v| v.as_str()),
-        Some("levels" | "curves" | "hue_saturation" | "invert")
+        effect,
+        Effect::Levels { .. }
+            | Effect::Curves { .. }
+            | Effect::HueSaturation { .. }
+            | Effect::Invert { .. }
     )
 }
 
@@ -288,7 +361,7 @@ pub enum NodeKind {
         content: Box<TextContent>,
     },
     Adjustment {
-        adjustment: serde_json::Value,
+        adjustment: Effect,
     },
     Unsupported {
         raw: serde_json::Value,
@@ -471,7 +544,7 @@ pub struct PropPatch {
     pub mask_enabled: Option<bool>,
     pub mask_linked: Option<bool>,
     pub mask_transform: Option<Affine2>,
-    pub effects: Option<Vec<serde_json::Value>>,
+    pub effects: Option<Vec<Effect>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TileChange {
@@ -511,7 +584,7 @@ pub enum Op {
     },
     SetAdjustment {
         id: NodeId,
-        adjustment: serde_json::Value,
+        adjustment: Effect,
     },
     SetTiles {
         layer: NodeId,
@@ -1788,7 +1861,7 @@ mod tests {
 
     #[test]
     fn effect_rejects_unknown_fields() {
-        let err = validate_effect(&serde_json::json!({"type":"invert","extra":1}))
+        let err = serde_json::from_value::<Effect>(serde_json::json!({"type":"invert","extra":1}))
             .unwrap_err()
             .to_string();
         assert!(err.contains("extra"), "{err}");

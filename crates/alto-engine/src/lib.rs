@@ -190,7 +190,7 @@ impl Engine {
         ) -> Result<usize, DocError> {
             let node = doc.node(id)?;
             let index = nodes.len();
-            let transform = node.props.transform.0.map(|value| value as f32);
+            let transform = node.props.transform.0;
             let blend = render_blend(node.props.blend);
             nodes.push(RNode {
                 key: id,

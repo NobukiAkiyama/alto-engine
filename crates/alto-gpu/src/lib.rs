@@ -101,12 +101,18 @@ pub struct RFeatures {
     pub effects: Vec<REffect>,
 }
 
+/// Blend math lives in one shader. Composite and the effect pass both prepend it.
+pub fn shader_with_blend(body: &str) -> String {
+    format!("{}{body}", include_str!("../shaders/blend.wgsl"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RNode {
     pub key: NodeId,
     pub version: u64,
     pub visible: bool,
-    pub transform: [f32; 6],
+    /// Document matrix. The compositor casts to f32 only when it writes a GPU command.
+    pub transform: [f64; 6],
     pub opacity: f32,
     pub blend: RenderBlend,
     pub effects: usize,

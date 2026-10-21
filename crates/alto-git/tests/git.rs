@@ -266,7 +266,7 @@ fn sync_rejects_author_and_branch_injection() {
 }
 
 #[test]
-fn open_keeps_a_document_whose_author_sync_refuses() {
+fn open_keeps_an_angled_author_and_sync_strips_it() {
     let Some(root) = repo("author-open") else {
         return;
     };
@@ -282,10 +282,12 @@ fn open_keeps_a_document_whose_author_sync_refuses() {
         opened
             .commits
             .values()
-            .all(|c| c.author.as_deref() != Some("Alice <a@b.c>"))
+            .any(|c| c.author.as_deref() == Some("Alice <a@b.c>"))
     );
-    let err = alto_git::sync(&folder, None).unwrap_err();
-    assert!(err.contains("author"), "{err}");
+    alto_git::sync(&folder, None).unwrap();
+    let author = git(&root, &["log", "-1", "--format=%an"]);
+    assert!(author.contains("Alice"), "{author}");
+    assert!(!author.contains('<') && !author.contains('>'), "{author}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

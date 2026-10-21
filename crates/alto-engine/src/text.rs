@@ -3,7 +3,9 @@
 use crate::{DocHandle, Engine, EngineError};
 use alto_core::{AssetId, ContentHash, NodeId};
 use alto_doc::{AssetKind, AssetRecord, DocError, Document, NodeKind};
-use alto_text::{FontData, FontInfo, FontSet, Motion, OutlineCache, TextContent, TextLayout};
+use alto_text::{
+    FontData, FontEmbedding, FontInfo, FontSet, Motion, OutlineCache, TextContent, TextLayout,
+};
 use alto_vector::{StyledPath, TextRun};
 use serde::Serialize;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
@@ -81,7 +83,8 @@ fn apply(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
 
 impl Engine {
     /// Parses and stores a font file; the returned record is added to a document with
-    /// a `set_asset` operation. Restricted embedding licences produce warnings.
+    /// a `set_asset` operation. A font whose fsType forbids embedding is refused
+    /// before its bytes enter the package. Preview-and-print licences still warn.
     pub fn import_font(
         &mut self,
         bytes: Vec<u8>,
@@ -89,6 +92,13 @@ impl Engine {
     ) -> Result<ImportedFont, EngineError> {
         let info = alto_text::inspect(&bytes, face_index)
             .map_err(|e| DocError::Invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        if info.embedding == FontEmbedding::Restricted {
+            return Err(DocError::Invalid(format!(
+                "INVALID_ARGUMENT: フォント「{}」はライセンス（OS/2 fsType）で埋め込みが禁止されています",
+                info.family
+            ))
+            .into());
+        }
         let byte_len = bytes.len() as u64;
         let hash = self.put_blob(bytes);
         let warnings = info.warnings();

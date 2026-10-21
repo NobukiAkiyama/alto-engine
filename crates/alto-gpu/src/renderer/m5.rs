@@ -85,7 +85,7 @@ impl Resources {
             pipeline: compute(
                 device,
                 "M5 effects",
-                include_str!("../../shaders/effects.wgsl"),
+                &crate::shader_with_blend(include_str!("../../shaders/effects.wgsl")),
             ),
             resolve: compute(
                 device,
@@ -781,7 +781,7 @@ impl Context<'_> {
                 }
                 continue;
             }
-            let transform = multiply(world, node.transform.map(|v| v as f64));
+            let transform = multiply(world, node.transform);
             if let RContent::Adjustment(effect) = &node.content {
                 let mut stack = vec![effect.clone()];
                 stack.extend(node.features.effects.clone());
@@ -929,7 +929,7 @@ impl Context<'_> {
             return Err("INVALID_ARGUMENT: effect graph too deep".into());
         }
         let node = self.scene.nodes[index].clone();
-        let world = multiply(parent, node.transform.map(|v| v as f64));
+        let world = multiply(parent, node.transform);
         let source = self.stack(
             StackInput::Node {
                 index,

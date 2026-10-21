@@ -389,8 +389,13 @@ impl Engine {
         let current = ContentHash::of(&p.snapshot);
         let mut store = VersionStore::default();
         for (hash, bytes) in &p.commits {
-            let commit = match Commit::parse(bytes) {
-                Ok(c) => c,
+            let commit = match Commit::parse_history(bytes) {
+                Ok((c, warning)) => {
+                    if let Some(w) = warning {
+                        warnings.push(format!("commit {hash}: {w}"));
+                    }
+                    c
+                }
                 Err(e) => {
                     warnings.push(format!("damaged commit {hash}: {e}"));
                     continue;

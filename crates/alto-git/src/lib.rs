@@ -51,8 +51,8 @@ pub struct Opened {
     pub entries: BTreeMap<String, Vec<u8>>,
     pub doc: Document,
     pub commits: BTreeMap<ContentHash, Commit>,
-    /// Commits whose bytes match their name but fail `Commit::parse`.
-    /// Opening still returns the document. `sync` refuses the folder.
+    /// Commits that stayed readable but whose author cannot be copied onto a
+    /// git author line. `sync` keeps the version and strips `<` and `>`.
     pub warnings: Vec<String>,
 }
 impl Opened {
@@ -62,8 +62,11 @@ impl Opened {
         let mut commits = BTreeMap::new();
         let mut warnings = Vec::new();
         for (h, b) in &package.commits {
-            match Commit::parse(b) {
-                Ok(c) => {
+            match Commit::parse_history(b) {
+                Ok((c, warning)) => {
+                    if let Some(w) = warning {
+                        warnings.push(format!("commit {h}: {w}"));
+                    }
                     commits.insert(*h, c);
                 }
                 Err(e) => warnings.push(format!("damaged commit {h}: {e}")),
@@ -361,7 +364,12 @@ pub fn textconv(snapshot: &[u8]) -> Result<String> {
                     *s += &format!("{pad}  | {line}\n");
                 }
             }
-            NodeKind::Adjustment { adjustment } => *s += &format!("{pad}  {adjustment}\n"),
+            NodeKind::Adjustment { adjustment } => {
+                *s += &format!(
+                    "{pad}  {}\n",
+                    serde_json::to_string(adjustment).unwrap_or_else(|_| "adjustment".into())
+                );
+            }
             _ => {}
         }
         if let Some(m) = &p.mask {
@@ -416,7 +424,7 @@ fn reject_damaged_commits(entries: &BTreeMap<String, Vec<u8>>) -> Result<()> {
         if let Some(rest) = name.strip_prefix("commits/")
             && let Some(stem) = rest.strip_suffix(".json")
             && !stem.contains('/')
-            && let Err(e) = Commit::parse(bytes)
+            && let Err(e) = Commit::parse_history(bytes)
         {
             return Err(format!("damaged commit {name}: {e}"));
         }
@@ -424,6 +432,19 @@ fn reject_damaged_commits(entries: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     Ok(())
 }
 
+/// A name that can sit in `author {name} <email>` without becoming another field.
+fn git_person(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .filter(|c| *c != '<' && *c != '>' && !c.is_control())
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        "Alto".into()
+    } else {
+        cleaned
+    }
+}
 fn identity(label: &str, value: &str, email: bool) -> Result<()> {
     if value.is_empty()
         || value
@@ -469,8 +490,8 @@ pub struct SyncReport {
 /// only ever added, so later commits reuse earlier blobs.
 pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
     let p = Opened::from_entries(folder::read(folder_dir).map_err(|e| e.to_string())?)?;
-    // Open skips a commit the engine would also drop. Importing it would
-    // write the author line into fast-import, so sync still refuses.
+    // A commit that does not parse is not imported. Angle brackets in a stored
+    // author are a warning, and the fast-import line uses `git_person`.
     reject_damaged_commits(&p.entries)?;
     let prefix = git(folder_dir, &["rev-parse", "--show-prefix"])?
         .trim()
@@ -581,7 +602,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
             }
         }
         message += &format!("\n\nAlto-Commit: {h}\nAlto-Snapshot: {}\n", c.snapshot);
-        let who = c.author.clone().unwrap_or_else(|| name.clone());
+        let who = git_person(&c.author.clone().unwrap_or_else(|| name.clone()));
         identity("author", &who, false)?;
         let _ = write!(stream, "commit {reference}\nmark :{}\n", n + 1);
         let _ = writeln!(

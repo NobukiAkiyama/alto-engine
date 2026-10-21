@@ -304,11 +304,8 @@ impl Renderer {
             "display pyramid",
             include_str!("../shaders/downsample.wgsl"),
         );
-        let composite = compute(
-            &device,
-            "tile compositor",
-            include_str!("../shaders/composite.wgsl"),
-        );
+        let composite_src = crate::shader_with_blend(include_str!("../shaders/composite.wgsl"));
+        let composite = compute(&device, "tile compositor", &composite_src);
         let brush = compute(
             &device,
             "brush coverage",
@@ -589,7 +586,7 @@ impl Renderer {
             if !n.visible || n.opacity <= 0.0 {
                 return Ok(());
             }
-            let world = multiply(world, n.transform.map(f64::from));
+            let world = multiply(world, n.transform);
             match &n.content {
                 RContent::Group { children, isolated } => {
                     let isolate = *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
@@ -612,8 +609,7 @@ impl Renderer {
                             continue;
                         }
                         if let RContent::Tiles(ts) = &cn.content {
-                            let Some(inv) = inverse(multiply(world, cn.transform.map(f64::from)))
-                            else {
+                            let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                 continue;
                             };
                             let corners = [
@@ -1606,8 +1602,13 @@ mod shader_tests {
                 include_str!("../shaders/effects-resolve.wgsl"),
             ),
         ] {
-            let module = naga::front::wgsl::parse_str(text)
-                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(text)));
+            let owned = if name == "composite" || name == "effects" {
+                crate::shader_with_blend(text)
+            } else {
+                text.to_string()
+            };
+            let module = naga::front::wgsl::parse_str(&owned)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&owned)));
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::all(),

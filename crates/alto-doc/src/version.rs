@@ -66,6 +66,31 @@ impl Commit {
         c.validate()?;
         Ok(c)
     }
+    /// Loads a commit that is already in a package. An author that contains
+    /// `<` or `>` is kept, with a warning: rewriting the file would change its
+    /// hash. New commits still go through [`Self::validate`], and `sync`
+    /// strips those characters before they reach a `fast-import` author line.
+    pub fn parse_history(bytes: &[u8]) -> Result<(Self, Option<String>), String> {
+        let c: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        match c.validate() {
+            Ok(()) => Ok((c, None)),
+            Err(e) => {
+                let angle_only = c.author.as_ref().is_some_and(|author| {
+                    !author.is_empty()
+                        && author.chars().count() <= 256
+                        && author.chars().any(|ch| ch == '<' || ch == '>')
+                        && !author.chars().any(|ch| ch.is_control())
+                });
+                let mut relaxed = c.clone();
+                relaxed.author = None;
+                if angle_only && relaxed.validate().is_ok() {
+                    Ok((c, Some(e)))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 /// Groups the edit log by intent and targets, keeping first-use order: 「ブラシ ×3」.
@@ -1118,5 +1143,10 @@ mod tests {
         assert!(bad.validate().is_err());
         bad.author = Some("A <injected>".into());
         assert!(bad.validate().is_err());
+        let (kept, warning) = Commit::parse_history(&bad.bytes()).unwrap();
+        assert_eq!(kept.author.as_deref(), Some("A <injected>"));
+        assert!(warning.unwrap().contains('<'));
+        bad.author = Some("Mallory\nreset refs/heads/main".into());
+        assert!(Commit::parse_history(&bad.bytes()).is_err());
     }
 }
