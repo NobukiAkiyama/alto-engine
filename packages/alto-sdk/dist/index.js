@@ -582,6 +582,12 @@ export class DocumentHandle {
         status: () => this.view.versions,
         /** Restores a version as one undoable edit; history is kept. */
         restore: (hash) => this.command("restoreVersion", { hash }),
+        /** Drops versions that cannot be reached from the head. Commit and open keep every version. */
+        prune: async () => {
+            const state = await this.engine.request("pruneVersions");
+            this.apply(state);
+            return state.removed ?? 0;
+        },
     };
     /** Saves the folder form. Content-addressed files are written once; manifest.json last. */
     async saveFolder(provider, options = {}) {
@@ -936,6 +942,8 @@ export class AltoEngine extends Events {
             const bytes = await file.arrayBuffer();
             return this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]);
         },
+        /** Abandons an imported font or encoded image that was never added with SetAsset. */
+        releaseImport: (hash) => this.request("releaseImport", { hash }),
         importImage: async (file) => {
             const bitmap = await createImageBitmap(file);
             const c = new OffscreenCanvas(bitmap.width, bitmap.height);

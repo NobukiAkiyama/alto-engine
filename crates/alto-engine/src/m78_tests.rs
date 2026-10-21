@@ -462,7 +462,7 @@ fn trimmed_package_drops_older_commits_without_touching_the_open_history() {
 }
 
 #[test]
-fn unreachable_commit_drops_tiles_that_only_it_referenced() {
+fn divergent_history_survives_commit_and_reopen_until_prune() {
     let mut e = Engine::new();
     let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
     let layer = Node::raster("A");
@@ -480,31 +480,40 @@ fn unreachable_commit_drops_tiles_that_only_it_referenced() {
     )
     .unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 1);
-    let old = {
+    let a = e.commit(d, "A", 1, None, false).unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 2);
+    let only_b = {
         let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
             panic!()
         };
         tiles.tiles[&TileKey { tx: 0, ty: 0 }]
     };
-    let c1 = e.commit(d, "v1", 1, None, false).unwrap();
-    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 2);
-    let c2 = e.commit(d, "v2", 2, None, false).unwrap();
-    assert!(e.versions[&d].retained.contains(&old));
-    assert_eq!(e.log(d).unwrap().len(), 2);
+    let b = e.commit(d, "B", 2, None, false).unwrap();
+    e.restore_version(d, a.hash).unwrap();
     while e.documents.get_mut(&d).unwrap().drop_oldest_undo() {}
-    e.versions
-        .get_mut(&d)
-        .unwrap()
-        .commits
-        .get_mut(&c2.hash)
-        .unwrap()
-        .parents
-        .clear();
-    e.versions.get_mut(&d).unwrap().gc_unreachable();
-    assert!(!e.versions[&d].commits.contains_key(&c1.hash));
-    assert!(!e.versions[&d].retained.contains(&old));
-    e.maintain();
-    assert!(e.tile(&old).is_none());
-    assert_eq!(e.log(d).unwrap().len(), 1);
-    assert_eq!(e.log(d).unwrap()[0].hash, c2.hash);
+    e.versions.get_mut(&d).unwrap().head = Some(a.hash);
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 3);
+    let c = e.commit(d, "C", 3, None, false).unwrap();
+    while e.documents.get_mut(&d).unwrap().drop_oldest_undo() {}
+    assert_eq!(e.versions[&d].commits[&c.hash].parents, vec![a.hash]);
+    assert!(e.versions[&d].commits.contains_key(&b.hash));
+    assert!(e.tile(&only_b).is_some());
+    assert!(e.log(d).unwrap().iter().all(|commit| commit.hash != b.hash));
+    let bytes = e.save_package(d).unwrap();
+    let mut fresh = Engine::new();
+    let (f, warnings) = fresh.open_package(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(fresh.versions[&f].commits.contains_key(&b.hash));
+    assert!(fresh.tile(&only_b).is_some());
+    assert_eq!(fresh.prune_versions(f).unwrap(), 1);
+    assert!(!fresh.versions[&f].commits.contains_key(&b.hash));
+    assert!(fresh.versions[&f].commits.contains_key(&a.hash));
+    assert!(fresh.versions[&f].commits.contains_key(&c.hash));
+    assert!(fresh.tile(&only_b).is_none());
+    let again = fresh.save_package(f).unwrap();
+    let mut reopened = Engine::new();
+    let (g, warnings) = reopened.open_package(&again).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(!reopened.versions[&g].commits.contains_key(&b.hash));
+    assert_eq!(reopened.log(g).unwrap().len(), 2);
 }

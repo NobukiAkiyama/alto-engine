@@ -152,7 +152,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .transact(intent, ops, base_revision)?;
         self.maintain();
-        self.settle_pending();
+        self.unpin_referenced();
         Ok(changes)
     }
     pub fn undo(&mut self, handle: DocHandle) -> Result<Option<ChangeSet>, EngineError> {
@@ -162,7 +162,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .undo()?;
         self.maintain();
-        self.settle_pending();
+        self.unpin_referenced();
         Ok(c)
     }
     pub fn redo(&mut self, handle: DocHandle) -> Result<Option<ChangeSet>, EngineError> {
@@ -172,7 +172,7 @@ impl Engine {
             .ok_or(EngineError::NotFound(handle))?
             .redo()?;
         self.maintain();
-        self.settle_pending();
+        self.unpin_referenced();
         Ok(c)
     }
 
@@ -394,13 +394,43 @@ impl Engine {
         self.blobs.entry(h).or_insert(bytes);
         h
     }
-    /// Stores bytes that an import will reference from a later `SetAsset`.
-    /// `maintain` keeps the blob. A finished transaction drops it unless a
-    /// document, the undo stack, or a version now references it.
+    /// Stores bytes that a later `SetAsset` will reference.
+    /// The pin survives unrelated transactions. It comes off when a document,
+    /// the undo stack, or a version references the hash. `release_import`
+    /// abandons one pin, and closing the last document abandons the rest.
     pub fn put_import_blob(&mut self, bytes: Vec<u8>) -> ContentHash {
         let hash = self.put_blob(bytes);
         self.pending_blobs.insert(hash);
         hash
+    }
+    /// Drops one import pin. The bytes are removed when nothing else references them.
+    pub fn release_import(&mut self, hash: ContentHash) -> bool {
+        if !self.pending_blobs.remove(&hash) {
+            return false;
+        }
+        if !self.rooted_hashes().contains(&hash) {
+            self.blobs.remove(&hash);
+        }
+        true
+    }
+    /// Removes a document and its versions. The last document to close abandons
+    /// import pins that were never referenced.
+    pub fn close_document(&mut self, handle: DocHandle) -> Result<(), EngineError> {
+        if self.documents.remove(&handle).is_none() {
+            return Err(EngineError::NotFound(handle));
+        }
+        self.versions.remove(&handle);
+        if self.documents.is_empty() {
+            let referenced = self.rooted_hashes();
+            let pending = std::mem::take(&mut self.pending_blobs);
+            for hash in pending {
+                if !referenced.contains(&hash) {
+                    self.blobs.remove(&hash);
+                }
+            }
+        }
+        self.maintain();
+        Ok(())
     }
     fn encoded(&self, h: ContentHash) -> Option<Vec<u8>> {
         if let Some(t) = self.tile(&h) {
@@ -622,6 +652,21 @@ impl Engine {
         }
         self.blobs.retain(|hash, _| reachable.contains(hash));
     }
+    fn rooted_hashes(&self) -> std::collections::BTreeSet<ContentHash> {
+        let mut referenced = self.live_hashes();
+        for v in self.versions.values() {
+            referenced.extend(v.retained.iter().copied());
+        }
+        referenced
+    }
+    /// A referenced import no longer needs a pin. Unreferenced pins stay.
+    fn unpin_referenced(&mut self) {
+        if self.pending_blobs.is_empty() {
+            return;
+        }
+        let referenced = self.rooted_hashes();
+        self.pending_blobs.retain(|hash| !referenced.contains(hash));
+    }
     fn live_hashes(&self) -> std::collections::BTreeSet<ContentHash> {
         let mut current = self.imported.clone();
         for editor in self.documents.values() {
@@ -637,21 +682,6 @@ impl Engine {
             }
         }
         current
-    }
-    fn settle_pending(&mut self) {
-        if self.pending_blobs.is_empty() {
-            return;
-        }
-        let mut referenced = self.live_hashes();
-        for v in self.versions.values() {
-            referenced.extend(v.retained.iter().copied());
-        }
-        let pending = std::mem::take(&mut self.pending_blobs);
-        for hash in pending {
-            if !referenced.contains(&hash) {
-                self.blobs.remove(&hash);
-            }
-        }
     }
 }
 #[cfg(test)]
@@ -720,7 +750,7 @@ mod package_tests {
         assert!(e.pending_blobs.is_empty());
     }
     #[test]
-    fn imported_font_is_dropped_when_a_transaction_ends_without_it() {
+    fn imported_font_survives_an_unrelated_transaction_until_set_asset() {
         let mut e = Engine::new();
         let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
         let font = e
@@ -730,8 +760,49 @@ mod package_tests {
             )
             .unwrap();
         let hash = font.record.hash;
+        let id = font.record.id;
         e.maintain();
         assert!(e.blobs.contains_key(&hash));
+        let root = e.document(d).unwrap().root;
+        let revision = e.document(d).unwrap().revision;
+        e.transact(
+            d,
+            "other",
+            vec![Op::InsertNode {
+                node: Node::raster("x"),
+                parent: root,
+                index: 0,
+            }],
+            revision,
+        )
+        .unwrap();
+        assert!(e.blobs.contains_key(&hash));
+        assert!(e.pending_blobs.contains(&hash));
+        let revision = e.document(d).unwrap().revision;
+        e.transact(
+            d,
+            "font",
+            vec![Op::SetAsset {
+                id,
+                record: Some(font.record),
+            }],
+            revision,
+        )
+        .unwrap();
+        assert!(e.blobs.contains_key(&hash));
+        assert!(!e.pending_blobs.contains(&hash));
+    }
+    #[test]
+    fn release_import_and_the_last_close_abandon_an_unreferenced_font() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let font = e
+            .import_font(
+                include_bytes!("../../../tests/fonts/AltoTestLatin.ttf").to_vec(),
+                0,
+            )
+            .unwrap();
+        let hash = font.record.hash;
         let root = e.document(d).unwrap().root;
         e.transact(
             d,
@@ -744,7 +815,28 @@ mod package_tests {
             0,
         )
         .unwrap();
+        assert!(e.release_import(hash));
         assert!(!e.blobs.contains_key(&hash));
+        let err = e
+            .transact(
+                d,
+                "late",
+                vec![Op::SetAsset {
+                    id: font.record.id,
+                    record: Some(font.record),
+                }],
+                e.document(d).unwrap().revision,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("content tile not found"), "{err}");
+        let again = e
+            .import_font(
+                include_bytes!("../../../tests/fonts/AltoTestLatin.ttf").to_vec(),
+                0,
+            )
+            .unwrap();
+        e.close_document(d).unwrap();
+        assert!(!e.blobs.contains_key(&again.record.hash));
         assert!(e.pending_blobs.is_empty());
     }
     #[test]
@@ -757,6 +849,19 @@ mod package_tests {
             e.blobs.get(&hash).map(Vec::as_slice),
             Some(b"encoded-image".as_slice())
         );
+        let root = e.document(d).unwrap().root;
+        e.transact(
+            d,
+            "other",
+            vec![Op::InsertNode {
+                node: Node::raster("x"),
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(e.pending_blobs.contains(&hash));
         let id = alto_core::AssetId::new();
         e.transact(
             d,
@@ -773,7 +878,7 @@ mod package_tests {
                     dims: Some((8, 8)),
                 }),
             }],
-            0,
+            e.document(d).unwrap().revision,
         )
         .unwrap();
         assert!(e.blobs.contains_key(&hash));

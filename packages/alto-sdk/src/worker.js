@@ -194,6 +194,15 @@ async function execute(m) {
     }
     case "importFont":
       return JSON.parse(runtime.importFont(new Uint8Array(m.bytes), m.faceIndex));
+    case "releaseImport":
+      return runtime.releaseImport(m.hash);
+    case "pruneVersions": {
+      const state = JSON.parse(runtime.pruneVersions());
+      postMessage({ t: "patch", value: state });
+      await flushJournal();
+      await checkpoint();
+      return state;
+    }
     case "textInfo":
       return JSON.parse(runtime.textInfo(m.node));
     case "textHitTest":

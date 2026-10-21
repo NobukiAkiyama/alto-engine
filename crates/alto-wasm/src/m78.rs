@@ -148,6 +148,21 @@ impl Runtime {
         let names = self.engine.diff_names(self.doc, a, b).map_err(error)?;
         serde_json::to_string(&json!({"items":items,"names":names})).map_err(error)
     }
+    #[wasm_bindgen(js_name=pruneVersions)]
+    pub fn prune_versions(&mut self) -> Result<String, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("CONFLICT: finish active tool first"));
+        }
+        let removed = self.engine.prune_versions(self.doc).map_err(error)?;
+        let mut value: serde_json::Value = serde_json::from_str(&self.view()?).map_err(error)?;
+        value["removed"] = json!(removed);
+        serde_json::to_string(&value).map_err(error)
+    }
+    #[wasm_bindgen(js_name=releaseImport)]
+    pub fn release_import(&mut self, hash: &str) -> Result<bool, JsValue> {
+        let hash = hash.parse().map_err(|_| error("INVALID_ARGUMENT: hash"))?;
+        Ok(self.engine.release_import(hash))
+    }
     #[wasm_bindgen(js_name=restoreVersion)]
     pub fn restore_version(&mut self, hash: &str) -> Result<String, JsValue> {
         if self.sampler.is_some() {

@@ -518,6 +518,8 @@ export declare class DocumentHandle {
         status: () => VersionStatus;
         /** Restores a version as one undoable edit; history is kept. */
         restore: (hash: string) => Promise<void>;
+        /** Drops versions that cannot be reached from the head. Commit and open keep every version. */
+        prune: () => Promise<number>;
     };
     /** Saves the folder form. Content-addressed files are written once; manifest.json last. */
     saveFolder(provider: ObjectStorageProvider, options?: {
@@ -608,6 +610,8 @@ export declare class AltoEngine extends Events {
         importFont: (file: Blob, options?: {
             faceIndex?: number;
         }) => Promise<FontAsset>;
+        /** Abandons an imported font or encoded image that was never added with SetAsset. */
+        releaseImport: (hash: string) => Promise<boolean>;
         importImage: (file: Blob) => Promise<AssetRef>;
     };
     readonly viewport: {

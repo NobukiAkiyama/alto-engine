@@ -81,8 +81,7 @@ impl VersionStore {
 
     /// Drops commits that cannot be reached from the head, then rebuilds the
     /// retained object set from the snapshots those commits still point at.
-    /// A linear history does not shrink. Commits left behind by a rewritten
-    /// parent link do.
+    /// Only `Engine::prune_versions` calls this. Commit and open keep every version.
     pub(crate) fn gc_unreachable(&mut self) {
         let mut keep = BTreeSet::new();
         let mut stack: Vec<ContentHash> = self.head.into_iter().collect();
@@ -177,7 +176,6 @@ impl Engine {
         let store = self.versions.entry(h).or_default();
         store.insert(hash, commit, bytes, snapshot)?;
         store.head = Some(hash);
-        store.gc_unreachable();
         if let Some(editor) = self.documents.get_mut(&h) {
             editor.take_intent_log();
         }
@@ -304,6 +302,20 @@ impl Engine {
             changes,
             pending_intents: self.documents.get(&h).map_or(0, |e| e.intent_log().len()),
         })
+    }
+
+    /// Drops versions that cannot be reached from the head, then drops objects
+    /// only those versions referenced. Commit and open do not call this.
+    pub fn prune_versions(&mut self, h: DocHandle) -> Result<usize, EngineError> {
+        self.document(h)?;
+        let Some(store) = self.versions.get_mut(&h) else {
+            return Ok(0);
+        };
+        let before = store.commits.len();
+        store.gc_unreachable();
+        let removed = before - store.commits.len();
+        self.maintain();
+        Ok(removed)
     }
 
     /// Restores a version as one undoable transaction. History is not rewritten.
@@ -444,7 +456,6 @@ impl Engine {
             }
         }
         store.head = p.head.filter(|h| store.commits.contains_key(h));
-        store.gc_unreachable();
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
                 warnings.push(format!("missing object {hash} in version history"));
