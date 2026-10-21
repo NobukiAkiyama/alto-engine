@@ -1,0 +1,9 @@
+[package]
+name = "alto-raster"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+alto-core = { path = "../alto-core" }
+serde = { version = "1", features = ["derive"] }
+lz4_flex = "0.13"

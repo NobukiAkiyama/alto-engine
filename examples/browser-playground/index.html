@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="ja">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Alto Engine Playground</title
+  ><style>
+    :root {
+      color-scheme: dark;
+      font:
+        14px system-ui,
+        sans-serif;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: #11151c;
+      color: #e9edf6;
+    }
+    button,
+    input,
+    select {
+      font: inherit;
+      color: inherit;
+      background: #252e3e;
+      border: 1px solid #42516b;
+      border-radius: 6px;
+      padding: 7px;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:hover {
+      background: #354762;
+    }
+    button:disabled {
+      opacity: 0.4;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 12px 16px;
+      border-bottom: 1px solid #364158;
+    }
+    h1 {
+      font-size: 18px;
+      margin: 0 12px 0 0;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 270px;
+      height: calc(100vh - 110px);
+    }
+    #stage {
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+    aside {
+      padding: 12px;
+      overflow: auto;
+      border-left: 1px solid #364158;
+    }
+    label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      margin: 10px 0;
+    }
+    input[type="number"] {
+      width: 85px;
+    }
+    input[type="range"] {
+      width: 130px;
+    }
+    .tools {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .layer {
+      display: flex;
+      gap: 7px;
+      width: 100%;
+      text-align: left;
+      margin: 5px 0;
+    }
+    .layer.active {
+      outline: 2px solid #81b3ff;
+    }
+    .layer span {
+      flex: 1;
+    }
+    .meta {
+      color: #9cacc6;
+      font-size: 12px;
+    }
+    #recovery {
+      padding: 12px;
+      background: #57471a;
+    }
+    #status {
+      padding: 7px 16px;
+      color: #9fc4ff;
+      min-height: 32px;
+    }
+    #test-results {
+      white-space: pre-wrap;
+      font: 12px ui-monospace;
+      max-height: 45vh;
+      overflow: auto;
+    }
+    #error {
+      color: #ff9b9b;
+    }
+    details {
+      margin-top: 20px;
+    }
+    summary {
+      cursor: pointer;
+    }
+    @media (max-width: 700px) {
+      main {
+        grid-template-columns: minmax(0, 1fr) 205px;
+      }
+      aside {
+        padding: 8px;
+      }
+      header {
+        padding: 8px;
+      }
+      label {
+        flex-wrap: wrap;
+      }
+      input[type="range"] {
+        width: 110px;
+      }
+    }
+
+    body {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    main {
+      height: auto;
+      flex: 1;
+      min-height: 0;
+      grid-template-columns: minmax(0, 1fr) 310px;
+    }
+    #selection-tools {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 8px 16px;
+      border-bottom: 1px solid #364158;
+      font-size: 12px;
+    }
+    #selection-tools label {
+      margin: 0;
+    }
+    #selection-tools select {
+      max-width: 110px;
+    }
+    #selection-tools input {
+      width: 56px;
+    }
+    #selection-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    #selection-overlay path {
+      fill: none;
+      vector-effect: non-scaling-stroke;
+      stroke-width: 1.5;
+    }
+    #outline-black {
+      stroke: #101010;
+    }
+    #outline-white,
+    #selection-preview {
+      stroke: white;
+      stroke-dasharray: 5 5;
+      animation: march 1s linear infinite;
+    }
+    @keyframes march {
+      to {
+        stroke-dashoffset: -10;
+      }
+    }
+    #layers {
+      max-height: 165px;
+      overflow: auto;
+    }
+    fieldset {
+      border: 1px solid #42516b;
+      border-radius: 8px;
+      margin: 14px 0;
+      padding: 10px;
+    }
+    legend {
+      color: #b7d3ff;
+    }
+    fieldset .tools button {
+      font-size: 12px;
+    }
+    .effect-row {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      margin: 6px 0;
+    }
+    .effect-row span {
+      flex: 1;
+      font-size: 12px;
+    }
+    .effect-row button {
+      padding: 4px;
+    }
+    button.active-tool {
+      outline: 2px solid #81b3ff;
+    }
+    .mask-active {
+      color: #ffdb8e;
+    }
+  #text-panel .path-data-label,#version-panel .path-data-label{display:block;} #text-content,#commit-message{margin-top:6px;width:100%;box-sizing:border-box;color:inherit;background:#202735;border:1px solid #485064;border-radius:5px;font:14px/1.6 system-ui,sans-serif;resize:vertical;}
+    #text-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:hidden;}#text-overlay .text-selection{fill:#4d8dff;fill-opacity:.32;stroke:#9cc1ff;stroke-width:1;}#text-overlay .text-caret{stroke:#ffcc63;stroke-width:2;}#text-overlay .text-frame{fill:none;stroke:#81b3ff;stroke-dasharray:4 3;stroke-width:1;}
+    #text-input{position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;}
+    .version-list{list-style:none;margin:6px 0;padding:0;max-height:260px;overflow:auto;}.version-list li{border:1px solid #364158;border-radius:6px;padding:6px;margin:4px 0;}.version-list li.active{outline:2px solid #81b3ff;}.version-list .meta{display:block;}
+    .diff-list{list-style:none;margin:6px 0;padding:0;font-size:12px;}.diff-list li{padding:3px 0;border-bottom:1px solid #2a3346;}
+  #vector-panel .path-data-label{display:block;} #vector-data {margin-top:6px;width:100%;box-sizing:border-box;color:inherit;background:#202735;border:1px solid #485064;border-radius:5px;font:12px/1.5 monospace;resize:vertical;}input[type="color"]{height:32px;width:64px;padding:3px;flex:none;} #vector-handles{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:hidden;}#vector-handles circle{pointer-events:auto;cursor:move;touch-action:none;stroke:#111827;stroke-width:1.5;} .vector-anchor{fill:#fff;} .vector-control{fill:#ffcc63;} .vector-control-line{stroke:#ffcc63;stroke-width:1;fill:none;pointer-events:none;}
+</style>
+  <header>
+    <h1>Alto Engine</h1>
+    <button id="new">新規</button><button id="import">画像を追加</button
+    ><button id="open">開く</button><button id="save">保存 .alto</button
+    ><button id="save-folder">フォルダに保存</button><button id="open-folder">フォルダを開く</button
+    ><button id="undo">元に戻す</button><button id="redo">やり直す</button
+    ><button id="fit">全体表示</button><span id="dirty" class="meta"></span>
+  </header>
+  <nav id="selection-tools" aria-label="選択範囲">
+    <strong>選択範囲</strong
+    ><button data-selection="rectangle">長方形選択</button
+    ><button data-selection="ellipse">楕円選択</button
+    ><button data-selection="lasso">投げ縄選択</button>
+    <label
+      >操作<select id="selection-mode">
+        <option value="replace">置き換え</option>
+        <option value="add">追加</option>
+        <option value="subtract">削除</option>
+        <option value="intersect">共通部分</option>
+      </select></label
+    >
+    <label
+      >ぼかし幅<input
+        id="selection-feather"
+        type="number"
+        min="0"
+        max="64"
+        value="0"
+    /></label>
+    <button id="select-all">全選択</button
+    ><button id="select-clear">選択解除</button
+    ><button id="select-invert">選択反転</button
+    ><span id="selection-state" class="meta">選択なし</span
+    ><button data-panel="mask-panel">マスク・クリップ設定</button
+    ><button data-panel="effects-panel">ぼかし・効果設定</button
+    ><button data-panel="adjustment-panel">色調整設定</button><button data-panel="vector-panel">ベクター設定</button><button data-panel="text-panel">テキスト設定</button><button data-panel="version-panel">版管理</button>
+  </nav>
+  <div id="recovery" hidden>
+    未保存の編集を復旧できます。<button id="restore">編集を復旧</button
+    ><button id="discard">新しく始める</button>
+  </div>
+  <div id="status">エンジン起動中…</div>
+  <main>
+    <div id="stage">
+      <canvas id="canvas"></canvas
+      ><svg id="selection-overlay" aria-hidden="true">
+        <g id="selection-transform">
+          <path id="outline-black" />
+          <path id="outline-white" />
+          <path id="selection-preview" />
+        </g>
+      </svg><svg id="vector-handles" aria-label="パスの編集点"></svg><svg id="text-overlay" aria-hidden="true"></svg><textarea id="text-input" aria-label="テキスト入力" autocomplete="off" spellcheck="false"></textarea>
+    </div>
+    <aside>
+      <div class="tools">
+        <button data-tool="brush">ブラシ</button
+        ><button data-tool="eraser">消しゴム</button
+        ><button data-tool="pan">移動</button><button data-tool="text">テキスト</button>
+      </div>
+      <label>色<input type="color" id="color" value="#5a85ff" /></label
+      ><label
+        >サイズ<input
+          type="range"
+          id="size"
+          min="1"
+          max="200"
+          value="24"
+        /><span id="size-label">24</span></label
+      ><label
+        >硬さ<input
+          type="range"
+          id="hardness"
+          min="0"
+          max="0.999"
+          step=".01"
+          value=".8" /></label
+      ><label
+        >フロー<input
+          type="range"
+          id="flow"
+          min=".05"
+          max="1"
+          step=".05"
+          value="1" /></label
+      ><label
+        >ビュー回転<input type="number" id="view-rotation" value="0" step="15"
+      /></label>
+      <div class="tools">
+        <button id="add-layer">＋レイヤー</button
+        ><button id="add-group">＋グループ</button>
+      </div>
+      <div id="layers"></div>
+      <label>表示倍率 %<input type="number" id="view-zoom" min=".5" max="3200" value="100" step="25"/></label>
+      <label>名前<input id="name" size="12" /></label
+      ><label
+        >不透明度<input
+          type="range"
+          id="opacity"
+          min="0"
+          max="1"
+          step=".01"
+          value="1" /></label
+      ><label
+        >合成<select id="blend">
+          <option value="normal">Normal</option>
+          <option value="multiply">Multiply</option>
+          <option value="screen">Screen</option>
+        </select></label
+      ><label>表示<input type="checkbox" id="visible" checked /></label
+      ><label>ロック<input type="checkbox" id="locked" /></label
+      ><label>X<input type="number" id="x" value="0" /></label
+      ><label>Y<input type="number" id="y" value="0" /></label
+      ><label>倍率<input type="number" id="scale" value="1" step=".1" /></label
+      ><label
+        >回転 °<input type="number" id="rotation" value="0" step="5"
+      /></label>
+      <div class="tools">
+        <button id="move-up">上へ</button><button id="move-down">下へ</button
+        ><button id="delete">削除</button>
+      </div>
+      <fieldset id="vector-panel">
+        <legend>ベクターパス</legend>
+        <div class="tools"><button id="vector-rectangle">長方形を追加</button><button id="vector-ellipse">楕円を追加</button><button id="vector-curve">曲線を追加</button></div>
+        <label>パス<select id="vector-path-index"></select></label>
+        <label class="path-data-label">SVGパスデータ<textarea id="vector-data" rows="4" spellcheck="false">M 90 300 C 150 20 390 20 450 300 Q 260 420 90 300 Z</textarea></label>
+        <label>塗り<input type="checkbox" id="vector-fill-on" checked/><input type="color" id="vector-fill" value="#8c85ff" /></label>
+        <label>線<input type="checkbox" id="vector-stroke-on" checked/><input type="color" id="vector-stroke" value="#e4fbff" /></label>
+        <label>線幅<input type="number" id="vector-width" value="6" min="0" max="4096" step="1"/></label>
+        <label>線端<select id="vector-cap"><option value="butt">Butt</option><option value="round" selected>Round</option><option value="square">Square</option></select></label>
+        <label>結合<select id="vector-join"><option value="miter">Miter</option><option value="round" selected>Round</option><option value="bevel">Bevel</option></select></label>
+        <label>パスの不透明度<input type="number" id="vector-alpha" value="1" min="0" max="1" step=".1"/></label>
+        <label>塗り規則<select id="vector-rule"><option value="non_zero">Non-zero</option><option value="even_odd">Even-odd</option></select></label>
+        <div class="tools"><button id="vector-add">新規ベクター</button><button id="vector-update">パスを更新</button><button id="vector-add-path">パスを追加</button><button id="vector-remove-path">パスを削除</button></div>
+        <button id="vector-edit">パスの点を編集</button>
+        <p class="meta">塗り・線を編集後「パスを更新」で反映します。点の編集では端点と制御点をドラッグできます。</p>
+        <label>ベクターマスクのぼかし<input type="number" id="vector-mask-feather" min="0" max="64" value="0"/></label>
+        <div class="tools"><button id="vector-mask-load">マスクのパスを読み込む</button><button id="vector-mask-set">パスをマスクに設定</button><button id="vector-mask-remove">ベクターマスクを外す</button></div>
+        <label>ベクターマスクを有効<input type="checkbox" id="vector-mask-enabled"/></label>
+        <div class="tools"><button id="clip-path-load">クリップのパスを読み込む</button><button id="clip-path-set">クリッピングパスを設定</button><button id="clip-path-remove">クリッピングパスを外す</button></div>
+        <label>クリッピングパスを有効<input type="checkbox" id="clip-path-enabled"/></label>
+        <p class="meta">入力したパスを選択レイヤーの座標で適用します。マスクとクリッピングパスは重ねて使えます。</p>
+      </fieldset>
+      <fieldset id="text-panel">
+        <legend>テキスト・縦組み</legend>
+        <div class="tools"><button id="font-load">フォントを読み込む</button><button id="font-demo">テスト用フォント</button></div>
+        <label>フォント<select id="text-font"></select></label>
+        <p class="meta" id="font-state">フォントが未登録です。文字は仮の枠で表示されます。</p>
+        <label class="path-data-label">本文<textarea id="text-content" rows="4">吾輩は猫である。名前はまだ無い。
+令和8年10月19日、第12回「縦組み」の確認。Alto Engine</textarea></label>
+        <label>組み方向<select id="text-writing"><option value="vertical_rl">縦組み</option><option value="horizontal_tb">横組み</option></select></label>
+        <label>サイズ<input type="number" id="text-size" value="40" min="1" max="4096" /></label>
+        <label>行送り（倍）<input type="number" id="text-line-height" value="1.6" min="0.5" max="10" step="0.1" /></label>
+        <label>字送り追加 em<input type="number" id="text-spacing" value="0" min="-0.5" max="10" step="0.05" /></label>
+        <label>色<input type="color" id="text-color" value="#f2f4f8" /></label>
+        <label>揃え<select id="text-align"><option value="start">先頭</option><option value="center">中央</option><option value="end">末尾</option><option value="justify">均等</option></select></label>
+        <label>枠<select id="text-frame"><option value="area">エリア（折り返し）</option><option value="point">ポイント</option></select></label>
+        <label>枠の幅<input type="number" id="text-width" value="520" min="1" /></label>
+        <label>枠の高さ<input type="number" id="text-height" value="600" min="1" /></label>
+        <label>自動縦中横（桁）<input type="number" id="text-tcy" value="2" min="0" max="4" /></label>
+        <label>OpenType機能<input id="text-features" placeholder="palt, liga=0" size="12" /></label>
+        <div class="tools"><button id="text-add">テキストを追加</button><button id="text-update">テキストを更新</button></div>
+        <p class="meta" id="text-selection-state">「テキスト」ツールでドラッグすると文字を選択できます。選択中は入力・削除・矢印キーで編集します。</p>
+        <div class="tools"><button id="text-style-selection">選択部分に色・サイズ・機能を適用</button><button id="text-tcy-selection">選択部分を縦中横</button></div>
+      </fieldset>
+      <fieldset id="version-panel">
+        <legend>版管理</legend>
+        <p class="meta" id="version-state">コミットはまだありません</p>
+        <label class="path-data-label">メッセージ<textarea id="commit-message" rows="2" placeholder="例：線画を追加"></textarea></label>
+        <div class="tools"><button id="version-commit">コミット</button><button id="version-working">作業中の変更</button></div>
+        <ul id="version-list" class="version-list"></ul>
+        <div class="tools"><button id="version-diff">選択した版と比較</button><button id="version-restore">この版に戻す</button></div>
+        <ul id="version-diff-list" class="diff-list"></ul>
+        <p class="meta">コミットは文書とともに .alto / フォルダへ保存されます。フォルダ形式は git で管理でき、<code>alto-git sync</code> がAltoのコミットをgitコミットへ写します。</p>
+      </fieldset>
+      <fieldset id="mask-panel">
+        <legend>マスクとクリッピング</legend>
+        <label
+          >下のレイヤーにクリップ<input type="checkbox" id="clip-to-below"
+        /></label>
+        <div class="tools">
+          <button id="mask-selection">選択をマスク化</button
+          ><button id="mask-white">白マスクを追加</button
+          ><button id="mask-remove">マスクを外す</button>
+        </div>
+        <label
+          >マスクを有効にする<input
+            type="checkbox"
+            id="mask-enabled"
+            checked /></label
+        ><label
+          >レイヤーと連動<input type="checkbox" id="mask-linked" checked
+        /></label>
+        <label class="mask-active"
+          >マスクを編集<input type="checkbox" id="mask-edit" /></label
+        ><label
+          >塗る色<select id="mask-paint">
+            <option value="black">黒・隠す</option>
+            <option value="white">白・表示</option>
+          </select></label
+        >
+      </fieldset>
+      <fieldset id="effects-panel">
+        <legend>非破壊エフェクト</legend>
+        <div id="effect-list"></div>
+        <label
+          >ぼかし半径・文書px<input
+            type="number"
+            id="blur-radius"
+            min="0"
+            max="64"
+            step="1"
+            value="12" /></label
+        ><button id="add-blur">ぼかしを追加</button>
+        <p class="meta">
+          選択があると、その部分だけに適用します。元画像は変わりません。
+        </p>
+      </fieldset>
+      <fieldset id="adjustment-panel">
+        <legend>色調整レイヤー</legend>
+        <label
+          >明るさ<input
+            type="number"
+            id="adjust-brightness"
+            min="-1"
+            max="1"
+            step=".05"
+            value="0" /></label
+        ><label
+          >コントラスト<input
+            type="number"
+            id="adjust-contrast"
+            min="0"
+            max="4"
+            step=".1"
+            value="1" /></label
+        ><label
+          >彩度<input
+            type="number"
+            id="adjust-saturation"
+            min="0"
+            max="4"
+            step=".1"
+            value="1"
+        /></label>
+        <div class="tools">
+          <button id="add-adjustment">色調整を追加</button
+          ><button id="update-adjustment">選択中の調整を更新</button>
+        </div>
+      </fieldset>
+      <details open>
+        <summary>検証と計測</summary>
+        <button id="test">機能を自動検証</button
+        ><button id="benchmark">B1〜B7を計測</button
+        ><button id="gpu-loss">GPU復旧を検証</button
+        ><button id="report">結果を保存 JSON</button>
+        <button id="test-m5">M5を自動検証</button
+        ><button id="sample-m5">M5サンプルを開く</button>
+        <button id="test-m6">M6を自動検証</button><button id="sample-m6">M6サンプルを開く</button>
+        <button id="test-m7">M7を自動検証</button><button id="test-m8">M8を自動検証</button><button id="sample-m78">M7/M8サンプルを開く</button>
+        <pre id="test-results"></pre>
+      </details>
+      <p id="error"></p>
+    </aside>
+  </main>
+  <input
+    type="file"
+    id="image-file"
+    accept="image/png,image/jpeg"
+    hidden
+  /><input type="file" id="alto-file" accept=".alto,application/zip" hidden /><input type="file" id="font-file" accept=".otf,.ttf,.ttc,font/otf,font/ttf,font/collection" hidden />
+  <script type="module" src="./main.js"></script>
+</html>

@@ -1,0 +1,33 @@
+[package]
+name = "alto-wasm"
+version = "0.0.1"
+edition = "2024"
+description = "Alto Engine M0 WebGPU worker spike"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+alto-vector = { path = "../alto-vector" }
+alto-core = { path = "../alto-core" }
+alto-doc = { path = "../alto-doc" }
+alto-engine = { path = "../alto-engine" }
+alto-raster = { path = "../alto-raster" }
+alto-gpu = { path = "../alto-gpu" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["OffscreenCanvas", "console", "Performance", "WorkerGlobalScope"] }
+js-sys = "0.3"
+futures-channel = "0.3"
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu"] }
+
+[features]
+vello-probe = ["dep:vello"]
+
+[dependencies.vello]
+version = "=0.11.0"
+default-features = false
+features = ["wgpu"]
+optional = true

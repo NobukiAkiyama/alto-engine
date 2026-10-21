@@ -1,0 +1,19 @@
+[package]
+name = "alto-git"
+version = "0.4.0"
+edition = "2024"
+description = "Git Adapter for Alto folder packages: mirrors Alto commits into git and prints layer-level diffs"
+
+[[bin]]
+name = "alto-git"
+path = "src/main.rs"
+
+[dependencies]
+alto-core = { path = "../alto-core" }
+alto-doc = { path = "../alto-doc" }
+alto-store = { path = "../alto-store" }
+serde_json = "1"
+
+[dev-dependencies]
+alto-engine = { path = "../alto-engine" }
+alto-raster = { path = "../alto-raster" }

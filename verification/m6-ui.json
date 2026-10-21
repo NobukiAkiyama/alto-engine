@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-18T13:31:59.795Z",
+  "browser": "Codex in-app Chromium 155",
+  "sample": "sample-m6.alto",
+  "checks": {
+    "before": "M100,410 C170,80 370,70 480,350 C610,660 750,430 860,120 L920,620 L60,620 Z",
+    "after": "M100,410 C225.7331940090561,122.15952629745732 370,70 480,350 C610,660 750,430 860,120 L920,620 L60,620 Z",
+    "dragChanged": true,
+    "undo": "M100,410 C170,80 370,70 480,350 C610,660 750,430 860,120 L920,620 L60,620 Z",
+    "undoRestored": true,
+    "lineWidthAfter": "10",
+    "lineWidthUndo": "6",
+    "lineWidthRestored": true
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "alto-gpu"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+alto-vector = { path = "../alto-vector" }
+alto-core = { path = "../alto-core" }
+alto-raster = { path = "../alto-raster" }
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu", "std"] }
+bytemuck = { version = "1", features = ["derive"] }
+futures-channel = "0.3"
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }

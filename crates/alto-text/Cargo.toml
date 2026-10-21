@@ -1,0 +1,15 @@
+[package]
+name = "alto-text"
+version = "0.4.0"
+edition = "2024"
+
+[dependencies]
+alto-core = { path = "../alto-core" }
+alto-vector = { path = "../alto-vector" }
+rustybuzz = "0.20.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1"

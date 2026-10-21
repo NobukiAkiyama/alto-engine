@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-18T13:30:05.311Z",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "crossOriginIsolated": false,
+  "viewport": {
+    "width": 1093,
+    "height": 827,
+    "dpr": 2
+  },
+  "results": [
+    {
+      "id": "B1 GPU-complete frame p95 ms",
+      "value": 3.9000000059604645,
+      "target": 16.7,
+      "pass": true
+    },
+    {
+      "id": "B2 zoom ms",
+      "value": 69.7999999821186,
+      "target": 250,
+      "pass": true
+    },
+    {
+      "id": "B3 continuous input-to-present GPU-complete p95 ms",
+      "value": 7.300000011920929,
+      "target": "2 frames (~33.4 ms)",
+      "pass": true
+    },
+    {
+      "id": "B4 full-canvas Undo ms",
+      "value": 11.099999994039536,
+      "target": 50,
+      "pass": true
+    },
+    {
+      "id": "B5 save/open ms",
+      "value": {
+        "save": 274.5,
+        "open": 933.9000000059605
+      },
+      "target": "3000 / 2000",
+      "pass": true
+    },
+    {
+      "id": "B6 sampled peak memory MiB",
+      "value": {
+        "gpu": 483.75,
+        "wasm": 240.5
+      },
+      "target": "512 / 1024",
+      "pass": true
+    },
+    {
+      "id": "B7 cached Worker restart + first draw ms",
+      "value": 1116.5,
+      "target": 1500,
+      "pass": true
+    }
+  ]
+}

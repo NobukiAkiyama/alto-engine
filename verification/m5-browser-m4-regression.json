@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-18T12:41:29.331Z",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "crossOriginIsolated": false,
+  "viewport": {
+    "width": 1093,
+    "height": 827,
+    "dpr": 2
+  },
+  "results": [
+    {
+      "name": "empty scene GPU validation / Normal / Multiply / Screen / opacity / visibility",
+      "pass": true,
+      "ms": 68.90000000596046
+    },
+    {
+      "name": "non-destructive transform / reorder / group isolation",
+      "pass": true,
+      "ms": 13.5
+    },
+    {
+      "name": "GPU brush / pressure / tile boundary / exact Undo-Redo / eraser",
+      "pass": true,
+      "ms": 38
+    },
+    {
+      "name": ".alto ZIP save/open preserves pixels and snapshot hash",
+      "pass": true,
+      "ms": 6.5
+    },
+    {
+      "name": "atomic save survives write failure and writer Worker termination",
+      "pass": true,
+      "ms": 10.400000005960464
+    },
+    {
+      "name": "invalid transaction leaves mirror and history unchanged",
+      "pass": true,
+      "ms": 0.29999998211860657
+    },
+    {
+      "name": "device loss rebuilds GPU from CPU content",
+      "pass": true,
+      "ms": 30.30000001192093
+    },
+    {
+      "name": "Worker restart replays flushed OPFS journal",
+      "pass": true,
+      "ms": 56.599999994039536
+    },
+    {
+      "name": "truncated journal tail is excluded during recovery",
+      "pass": true,
+      "ms": 42.29999998211861
+    },
+    {
+      "name": "PNG/JPEG decoding to raster layers",
+      "pass": true,
+      "ms": 20.700000017881393
+    },
+    {
+      "name": "second engine cannot overwrite the active recovery journal",
+      "pass": true,
+      "ms": 0.19999998807907104
+    }
+  ]
+}

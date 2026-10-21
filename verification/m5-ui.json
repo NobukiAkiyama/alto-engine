@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-18",
+  "browser": "Codex in-app Chromium 155",
+  "sample": "sample-m5.alto",
+  "checks": [
+    {
+      "name": "Rectangle selection via canvas drag",
+      "pass": true,
+      "observation": "Selection state active, SVG path populated, document dirty."
+    },
+    {
+      "name": "Existing blur radius edited via numeric control",
+      "pass": true,
+      "before": 12,
+      "after": 19
+    },
+    {
+      "name": "Blur radius Undo",
+      "pass": true,
+      "restored": 12
+    },
+    {
+      "name": "Reload M5 sample",
+      "pass": true,
+      "observation": "Saved state; Undo and Redo disabled."
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-18T13:28:23.974Z",
+  "milestone": "M5",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "crossOriginIsolated": false,
+  "viewport": {
+    "width": 1093,
+    "height": 827,
+    "dpr": 2
+  },
+  "results": [
+    {
+      "name": "R8 selection combinations / feather / ellipse / lasso / Undo",
+      "pass": true,
+      "ms": 72.10000002384186
+    },
+    {
+      "name": "document-space selection restricts GPU brush on a transformed layer",
+      "pass": true,
+      "ms": 25.69999998807907
+    },
+    {
+      "name": "layer mask / enable / linked transform / GPU mask brush preview / exact Undo",
+      "pass": true,
+      "ms": 50.400000005960464
+    },
+    {
+      "name": "clipping chain preserves the base alpha including translucent bases",
+      "pass": true,
+      "ms": 46.900000005960464
+    },
+    {
+      "name": "Gaussian blur matches CPU reference across both tile seams and preserves source",
+      "pass": true,
+      "ms": 60.599999994039536
+    },
+    {
+      "name": "effect captures selection and group blur receives a halo",
+      "pass": true,
+      "ms": 27.19999998807907
+    },
+    {
+      "name": "adjustment only affects lower siblings in its group and supports a mask",
+      "pass": true,
+      "ms": 63.900000005960464
+    },
+    {
+      "name": "M5 objects survive ZIP, GPU loss, journal recovery and invalid edits remain atomic",
+      "pass": true,
+      "ms": 86.5
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+{
+  "date": "2026-10-19T03:12:29.999Z",
+  "milestone": "M8",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.42304.0 Chrome/152.0.7977.149 Safari/537.36",
+  "crossOriginIsolated": false,
+  "viewport": {
+    "width": 511,
+    "height": 662,
+    "dpr": 2
+  },
+  "results": [
+    {
+      "name": "commit / intent summary / log / status / empty commit refused",
+      "pass": true,
+      "ms": 139.1
+    },
+    {
+      "name": "semantic diff reads layer by layer (pixels, props, moves, text, assets)",
+      "pass": true,
+      "ms": 19
+    },
+    {
+      "name": "restore an earlier version as one undoable edit",
+      "pass": true,
+      "ms": 40.9
+    },
+    {
+      "name": ".alto keeps history; old versions restore after reopening",
+      "pass": true,
+      "ms": 41.8
+    },
+    {
+      "name": "folder form in OPFS: incremental save, manifest last, reopen, conflict detection",
+      "pass": true,
+      "ms": 119.2
+    },
+    {
+      "name": "commits survive a Worker crash (checkpoint) and journal recovery",
+      "pass": true,
+      "ms": 100.4
+    }
+  ],
+  "metrics": {
+    "diff": {
+      "v1v2": [
+        {
+          "fields": [
+            "opacity"
+          ],
+          "id": "01a15225-7769-7a5b-b557-976b25015bb3",
+          "name": "背景",
+          "type": "props_changed"
+        },
+        {
+          "bounds": {
+            "x0": 0,
+            "x1": 512,
+            "y0": 0,
+            "y1": 512
+          },
+          "document_bounds": {
+            "x0": 0,
+            "x1": 512,
+            "y0": 0,
+            "y1": 512
+          },
+          "id": "01a15225-7769-708a-8baa-ce57e60266ff",
+          "name": "線画",
+          "target": "content",
+          "tiles": 4,
+          "type": "pixels_changed"
+        }
+      ],
+      "working": [
+        {
+          "id": "01a15225-77f0-7a33-93cf-64180f583739",
+          "kind": "group",
+          "name": "人物",
+          "parent": "01a15225-7763-7419-aa52-e3dee4acbb4b",
+          "type": "added"
+        },
+        {
+          "from": [
+            "01a15225-7763-7419-aa52-e3dee4acbb4b",
+            1
+          ],
+          "id": "01a15225-7769-708a-8baa-ce57e60266ff",
+          "name": "線画",
+          "to": [
+            "01a15225-77f0-7a33-93cf-64180f583739",
+            0
+          ],
+          "type": "moved"
+        }
+      ]
+    },
+    "zipBytes": 19143,
+    "folder": {
+      "first": {
+        "written": 9,
+        "skipped": 0
+      },
+      "second": {
+        "written": 2,
+        "skipped": 9
+      },
+      "files": 11
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-21",
+  "version": "0.4.0",
+  "milestone": "M7/M8",
+  "protocolVersion": 4,
+  "wasmBytes": 4162722,
+  "gzipBytes": 1047959,
+  "wasmSha256": "51e7fdee1480eedc1699ac8f525442131f22c470f178a3fb826e7d50e21f8832",
+  "comparisonWasm": {
+    "bytes": 4223713,
+    "gzipBytes": 984224,
+    "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
+  },
+  "nativeTests": 68,
+  "targets": [
+    "Headless Chrome 155.0.8059.84"
+  ],
+  "browserFunctionalTests": 11,
+  "browserM7Tests": 9,
+  "browserM8Tests": 6,
+  "browserM6RegressionTests": 10,
+  "browserM5RegressionTests": 8,
+  "browserM4RegressionTests": 11,
+  "browserBenchmarks": 7,
+  "comparisonWasmNote": "comparisonWasm is the M6 vello comparison build and was not rebuilt on 2026-10-21",
+  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4."
+}

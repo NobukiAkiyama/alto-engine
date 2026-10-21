@@ -1,0 +1,120 @@
+# alto-git: sample-m78.alto をフォルダ形式へ展開し、git へ写した記録
+# git version 2.54.0 (Apple Git-157), 2026-10-19 02:50 JST
+
+$ git init -q -b main
+[exit 0]
+
+$ <repo>/target/release/alto-git export <repo>/verification/sample-m78.alto art.altoproj
+12 ファイルを書き込み、0 ファイルは既存のため省略しました
+[exit 0]
+
+$ <repo>/target/release/alto-git install .
+diff.alto.textconv を登録しました
+[exit 0]
+
+$ <repo>/target/release/alto-git sync art.altoproj
+main に 3 件のコミットを作成しました
+  311c2b8656  紙とフォントを用意
+  75e02e8494  本文と見出しを組む
+  29b21519c2  縦中横の注記を追加
+[exit 0]
+
+$ <repo>/target/release/alto-git sync art.altoproj
+main は最新です
+[exit 0]
+
+$ git log --format=%h %ad %an%n%B --date=iso-local
+b05f098 2026-10-19 00:20:00 +0900 Alto
+縦中横の注記を追加
+
+- 注記と紙の色（注記、紙）
+
+~ 属性    紙: opacity
++ 追加    [text] 注記（ルート内）
+
+Alto-Commit: 29b21519c2f848a8d3cf56a9c2e55e004791593b68e4893dabd482d0958a6a5e
+Alto-Snapshot: bf5459549312ac6e0ac684633114581d00a35c687617ba1a38c75c80e443a234
+
+7ec9740 2026-10-19 00:10:00 +0900 Alto
+本文と見出しを組む
+
+- テキスト追加（本文（縦組み）、見出し（横組み））
+
++ 追加    [text] 本文（縦組み）（ルート内）
++ 追加    [text] 見出し（横組み）（ルート内）
+
+Alto-Commit: 75e02e84943dfbe17db84c4c702ef2331df0c28ac2332282b371f5b3a8e33a7c
+Alto-Snapshot: 1f12937c8f1e7d71fc4951659d28dfba16422bf22ad96e2b1b9920d03ae3cd6b
+
+be99bdc 2026-10-19 00:00:00 +0900 Alto
+紙とフォントを用意
+
+- フォントと紙（紙）
+
++ 追加    [raster] 紙（ルート内）
+~ アセット font 追加 1db19276
+~ アセット font 追加 1ec877e5
+
+Alto-Commit: 311c2b8656e987ff47282425f458a9030169979e801775ca5cfd3361b912d061
+Alto-Snapshot: af064594be5b44e3356c4b06ac0c1a0219291c4af0a710b266c11c869b5af3bf
+
+[exit 0]
+
+$ git status --short
+[exit 0]
+
+$ <repo>/target/release/alto-git log art.altoproj
+commit 29b21519c2  縦中横の注記を追加
+作成者 Alto
+  - 注記と紙の色（注記、紙）
+    ~ 属性    紙: opacity
+    + 追加    [text] 注記（ルート内）
+
+commit 75e02e8494  本文と見出しを組む
+作成者 Alto
+  - テキスト追加（本文（縦組み）、見出し（横組み））
+    + 追加    [text] 本文（縦組み）（ルート内）
+    + 追加    [text] 見出し（横組み）（ルート内）
+
+commit 311c2b8656  紙とフォントを用意
+作成者 Alto
+  - フォントと紙（紙）
+    + 追加    [raster] 紙（ルート内）
+    ~ アセット font 追加 1db19276
+    ~ アセット font 追加 1ec877e5
+
+[exit 0]
+
+$ <repo>/target/release/alto-git diff HEAD~2:art.altoproj HEAD:art.altoproj
+~ 属性    紙: opacity
++ 追加    [text] 本文（縦組み）（ルート内）
++ 追加    [text] 見出し（横組み）（ルート内）
++ 追加    [text] 注記（ルート内）
+[exit 0]
+
+$ git diff HEAD~1 HEAD -- art.altoproj/document.json
+diff --git a/art.altoproj/document.json b/art.altoproj/document.json
+index ce461db..525c2fd 100644
+--- a/art.altoproj/document.json
++++ b/art.altoproj/document.json
+@@ -1,6 +1,6 @@
+ 文書 1200×800 Srgb U8
+ [group] Root  id=8610b878 visible=true opacity=1 blend=Normal transform=[1 0 0 1 0 0]
+-  [raster] 紙  id=43a57ef1 visible=true opacity=1 blend=Normal transform=[1 0 0 1 0 0]
++  [raster] 紙  id=43a57ef1 visible=true opacity=0.92 blend=Normal transform=[1 0 0 1 0 0]
+     tile 0,0 f2a3078394
+     tile 0,1 f2a3078394
+     tile 0,2 f2a3078394
+@@ -29,3 +29,7 @@   [text] 本文（縦組み）  id=fa18ad7c visible=true opacity=1 blend=Normal
+   [text] 見出し（横組み）  id=92fa153e visible=true opacity=1 blend=Normal transform=[1 0 0 1 60 60]
+     HorizontalTb size=40 fonts=2
+     | 縦組みと横組み — Alto Engine M7
++  [text] 注記  id=63fe4df5 visible=true opacity=1 blend=Normal transform=[1 0 0 1 360 160]
++    VerticalRl size=30 fonts=2
++    | 記録2026年
++    | 約物「、。」
+[exit 0]
+
+$ git fsck --strict --no-progress
+[exit 0]
+
