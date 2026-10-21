@@ -441,17 +441,18 @@ export async function runTests(engine, benchmark, log) {
 async function benches(engine, log, results) {
   let doc = await engine.createDocument({ width: 3840, height: 2160 });
   const layers = [];
-  log("Preparing 4K × 20 distinct raster layers…");
+  log("Preparing 4K × 20 translucent raster layers…");
   for (let i = 0; i < 20; i++) {
     const c = new OffscreenCanvas(3840, 2160),
       ctx = c.getContext("2d");
-    ctx.fillStyle = `rgb(${40 + i * 7},${70 + i * 4},${110 + i * 3})`;
+    ctx.fillStyle = `rgba(${40 + i * 7},${70 + i * 4},${110 + i * 3},.5)`;
     ctx.fillRect(0, 0, 3840, 2160);
     for (let y = 0; y < 2160; y += 256)
       for (let x = 0; x < 3840; x += 256) {
         ctx.fillStyle = `rgba(${((x / 256) * 17 + i * 11) % 255},${((y / 256) * 29 + i * 7) % 255},180,.45)`;
         ctx.fillRect(x + 7, y + 7, 220, 220);
       }
+    assert(ctx.getImageData(0, 0, 1, 1).data[3] < 255, "benchmark layer became opaque");
     const a = await engine.assets.importImage(await c.convertToBlob());
     await doc.transact("benchmark image", (tx) =>
       layers.push(tx.addRasterFromAsset(a, { name: "Layer " + i })),
