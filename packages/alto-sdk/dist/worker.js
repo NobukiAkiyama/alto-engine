@@ -90,7 +90,15 @@ async function execute(m) {
       return state;
     }
     case "transact": {
-      const s = JSON.parse(runtime.transact(JSON.stringify(m)));
+      const s = JSON.parse(
+        runtime.transact(
+          JSON.stringify({
+            intent: m.intent,
+            ops: m.ops,
+            baseRevision: m.baseRevision,
+          }),
+        ),
+      );
       postMessage({ t: "patch", value: s });
       await flushJournal();
       return s;

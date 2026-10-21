@@ -78,6 +78,33 @@ impl VersionStore {
         self.commit_bytes.insert(hash, bytes);
         Ok(())
     }
+
+    /// Drops commits that cannot be reached from the head, then rebuilds the
+    /// retained object set from the snapshots those commits still point at.
+    /// A linear history does not shrink. Commits left behind by a rewritten
+    /// parent link do.
+    pub(crate) fn gc_unreachable(&mut self) {
+        let mut keep = BTreeSet::new();
+        let mut stack: Vec<ContentHash> = self.head.into_iter().collect();
+        while let Some(hash) = stack.pop() {
+            if !keep.insert(hash) {
+                continue;
+            }
+            if let Some(commit) = self.commits.get(&hash) {
+                stack.extend(commit.parents.iter().copied());
+            }
+        }
+        self.commits.retain(|hash, _| keep.contains(hash));
+        self.commit_bytes.retain(|hash, _| keep.contains(hash));
+        let snapshots: BTreeSet<_> = self.commits.values().map(|c| c.snapshot).collect();
+        self.snapshots.retain(|hash, _| snapshots.contains(hash));
+        self.retained.clear();
+        for bytes in self.snapshots.values() {
+            if let Ok(doc) = Document::from_snapshot_bytes(bytes) {
+                self.retained.extend(doc_hashes(&doc));
+            }
+        }
+    }
 }
 
 fn kept_commits(store: &VersionStore, ancestors: u32) -> BTreeSet<ContentHash> {
@@ -150,6 +177,7 @@ impl Engine {
         let store = self.versions.entry(h).or_default();
         store.insert(hash, commit, bytes, snapshot)?;
         store.head = Some(hash);
+        store.gc_unreachable();
         if let Some(editor) = self.documents.get_mut(&h) {
             editor.take_intent_log();
         }
@@ -416,6 +444,7 @@ impl Engine {
             }
         }
         store.head = p.head.filter(|h| store.commits.contains_key(h));
+        store.gc_unreachable();
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
                 warnings.push(format!("missing object {hash} in version history"));

@@ -925,7 +925,7 @@ impl Context<'_> {
         parent: [f64; 6],
         depth: usize,
     ) -> Result<Target> {
-        if depth > 128 {
+        if depth > alto_core::MAX_TREE_DEPTH as usize {
             return Err("INVALID_ARGUMENT: effect graph too deep".into());
         }
         let node = self.scene.nodes[index].clone();

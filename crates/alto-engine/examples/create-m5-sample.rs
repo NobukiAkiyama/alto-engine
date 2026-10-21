@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     group.props.effects = vec![Effect::GaussianBlur {
         radius: 12.0,
         selection: None,
+        extra: Default::default(),
     }];
     let group_id = group.id;
     let mut stripes = Node::raster("クリップしたストライプ");
@@ -121,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             contrast: 1.12,
             saturation: 1.35,
             selection: None,
+            extra: Default::default(),
         },
     };
     adjustment.props.mask = engine.document(h)?.selection.clone();

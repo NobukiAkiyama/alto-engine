@@ -1,6 +1,6 @@
 //! Canvas geometry, fills, and 1:1 reads. New hashes are stored before the transaction.
 use super::*;
-use alto_core::{Affine2, NodeId, PixelFormat, TileKey};
+use alto_core::{Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, TileKey};
 use alto_doc::{Document, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_raster::{TileData, TileMap};
 use alto_text::TextFrame;
@@ -41,7 +41,7 @@ fn chain(doc: &Document, id: NodeId, include_self: bool) -> Result<(i32, i32), E
     } else {
         doc.node(id)?.parent
     };
-    for _ in 0..128 {
+    for _ in 0..MAX_TREE_DEPTH {
         let Some(id) = next else {
             return Ok((x, y));
         };
@@ -51,7 +51,7 @@ fn chain(doc: &Document, id: NodeId, include_self: bool) -> Result<(i32, i32), E
         y += dy;
         next = node.parent;
     }
-    Err(bad("Group nesting exceeds 128"))
+    Err(bad(&format!("Group nesting exceeds {MAX_TREE_DEPTH}")))
 }
 
 fn plain(node: &Node) -> Result<(), EngineError> {
@@ -1403,6 +1403,7 @@ mod tests {
                             out_black: 0.0,
                             out_white: 1.0,
                             selection: None,
+                            extra: Default::default(),
                         }]),
                         ..PropPatch::default()
                     },

@@ -460,3 +460,51 @@ fn trimmed_package_drops_older_commits_without_touching_the_open_history() {
     assert_eq!(log[0].hash, c3.hash);
     assert!(fresh.restore_version(f, c1.hash).is_err());
 }
+
+#[test]
+fn unreachable_commit_drops_tiles_that_only_it_referenced() {
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+    let layer = Node::raster("A");
+    let id = layer.id;
+    let root = e.document(d).unwrap().root;
+    e.transact(
+        d,
+        "add",
+        vec![Op::InsertNode {
+            node: layer,
+            parent: root,
+            index: 0,
+        }],
+        0,
+    )
+    .unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 1);
+    let old = {
+        let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+            panic!()
+        };
+        tiles.tiles[&TileKey { tx: 0, ty: 0 }]
+    };
+    let c1 = e.commit(d, "v1", 1, None, false).unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 2);
+    let c2 = e.commit(d, "v2", 2, None, false).unwrap();
+    assert!(e.versions[&d].retained.contains(&old));
+    assert_eq!(e.log(d).unwrap().len(), 2);
+    while e.documents.get_mut(&d).unwrap().drop_oldest_undo() {}
+    e.versions
+        .get_mut(&d)
+        .unwrap()
+        .commits
+        .get_mut(&c2.hash)
+        .unwrap()
+        .parents
+        .clear();
+    e.versions.get_mut(&d).unwrap().gc_unreachable();
+    assert!(!e.versions[&d].commits.contains_key(&c1.hash));
+    assert!(!e.versions[&d].retained.contains(&old));
+    e.maintain();
+    assert!(e.tile(&old).is_none());
+    assert_eq!(e.log(d).unwrap().len(), 1);
+    assert_eq!(e.log(d).unwrap()[0].hash, c2.hash);
+}

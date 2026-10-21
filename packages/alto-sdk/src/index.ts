@@ -540,7 +540,18 @@ class DocumentView extends Events {
   dirty = false;
   warnings: string[] = [];
   apply(state: any) {
-    this.mirror = state.document;
+    if (state.patch) {
+      this.mirror.revision = state.revision;
+      if (Object.prototype.hasOwnProperty.call(state, "meta")) this.mirror.meta = state.meta;
+      if (Object.prototype.hasOwnProperty.call(state, "selection"))
+        this.mirror.selection = state.selection;
+      if (Object.prototype.hasOwnProperty.call(state, "assets"))
+        (this.mirror as any).assets = state.assets;
+      for (const id of state.removed ?? []) delete this.mirror.nodes[id];
+      Object.assign(this.mirror.nodes, state.nodes ?? {});
+    } else {
+      this.mirror = state.document;
+    }
     this.history = state.history;
     this.snapshotHash = state.snapshotHash;
     this.stateHash = state.stateHash;
@@ -664,7 +675,7 @@ export class ToolSession {
     try {
       const state = await this.doc.engine.request("endBrush");
       this.doc.apply(state);
-      return state.document.revision;
+      return state.document?.revision ?? state.revision;
     } finally {
       this.doc.activeTool = null;
     }

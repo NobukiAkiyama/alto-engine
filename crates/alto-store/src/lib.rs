@@ -177,6 +177,28 @@ pub fn write_entries(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
         .map_err(|e| StoreError::Io(e.to_string()))?
         .into_inner())
 }
+/// Uncompressed package cap. A declared size above this is refused before the
+/// bytes are buffered, and a reader that keeps going is stopped at the same cap.
+pub const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn read_limited(reader: &mut impl Read, budget: u64) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        if data.len() as u64 + n as u64 > budget {
+            return Err(StoreError::Corrupt("package exceeds 512 MiB".into()));
+        }
+        data.extend_from_slice(&buf[..n]);
+    }
+    Ok(data)
+}
+
 pub fn read_entries(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut archive =
         ZipArchive::new(Cursor::new(bytes)).map_err(|e| StoreError::Corrupt(e.to_string()))?;
@@ -189,23 +211,16 @@ pub fn read_entries(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut f = archive
             .by_index(i)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        let budget = 2_147_483_648u64.saturating_sub(total);
+        let budget = MAX_PACKAGE_BYTES.saturating_sub(total);
         if f.size() > budget {
-            return Err(StoreError::Corrupt("package exceeds 2 GiB".into()));
+            return Err(StoreError::Corrupt("package exceeds 512 MiB".into()));
         }
         let name = f.name().to_string();
         if name.contains("..") || name.starts_with('/') || entries.contains_key(&name) {
             return Err(StoreError::Corrupt("invalid or duplicate path".into()));
         }
-        // `size()` is the header. A lying small size must not decompress without a cap.
-        let mut data = Vec::new();
-        (&mut f)
-            .take(budget + 1)
-            .read_to_end(&mut data)
-            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        if data.len() as u64 > budget {
-            return Err(StoreError::Corrupt("package exceeds 2 GiB".into()));
-        }
+        // `size()` is the header. A lying small size must not fill the cap.
+        let data = read_limited(&mut f, budget)?;
         total += data.len() as u64;
         entries.insert(name, data);
     }
@@ -554,5 +569,11 @@ mod tests {
         let p = decode_package(&write_entries(&e).unwrap()).unwrap();
         assert_eq!(p.snapshot, snapshot);
         assert_eq!(p.warnings.len(), 2);
+    }
+    #[test]
+    fn read_limited_stops_before_buffering_the_cap() {
+        let mut reader = std::io::repeat(1u8).take(10_000);
+        let err = read_limited(&mut reader, 100).unwrap_err();
+        assert!(err.to_string().contains("512 MiB"), "{err}");
     }
 }

@@ -108,6 +108,12 @@ impl Runtime {
         self.view()
     }
     pub fn view(&self) -> Result<String, JsValue> {
+        let mut value = self.envelope()?;
+        let doc = self.engine.document(self.doc).map_err(error)?;
+        value["document"] = serde_json::to_value(doc).map_err(error)?;
+        serde_json::to_string(&value).map_err(error)
+    }
+    fn envelope(&self) -> Result<serde_json::Value, JsValue> {
         let doc = self.engine.document(self.doc).map_err(error)?;
         let (undo, redo) = self.engine.history_state(self.doc).map_err(error)?;
         let hash = ContentHash::of(&self.engine.snapshot(self.doc).map_err(error)?);
@@ -115,14 +121,52 @@ impl Runtime {
         warnings.extend(self.engine.font_warnings(self.doc).map_err(error)?);
         let versions = self.engine.version_status(self.doc).map_err(error)?;
         let state = self.state_hash()?;
-        serde_json::to_string(&json!({"document":doc,"history":{"undo":undo,"redo":redo},"snapshotHash":hash,"stateHash":state,"dirty":state!=self.saved,"warnings":warnings,"versions":versions})).map_err(error)
+        Ok(json!({
+            "history": {"undo": undo, "redo": redo},
+            "snapshotHash": hash,
+            "stateHash": state,
+            "dirty": state != self.saved,
+            "warnings": warnings,
+            "versions": versions,
+            "revision": doc.revision,
+        }))
+    }
+    /// Hot-path reply: changed nodes, removals, and document-level fields.
+    /// Open, create, save, and mark-saved still use the full `view`.
+    fn patch_view(&self, changes: &alto_doc::ChangeSet) -> Result<String, JsValue> {
+        let doc = self.engine.document(self.doc).map_err(error)?;
+        let mut nodes = serde_json::Map::new();
+        let mut removed = Vec::new();
+        for id in &changes.nodes {
+            match doc.nodes.get(id) {
+                Some(node) => {
+                    nodes.insert(id.0.to_string(), serde_json::to_value(node).map_err(error)?);
+                }
+                None => removed.push(id.0.to_string()),
+            }
+        }
+        let mut value = self.envelope()?;
+        value["patch"] = json!(true);
+        value["nodes"] = serde_json::Value::Object(nodes);
+        value["removed"] = json!(removed);
+        if changes.meta_changed {
+            value["meta"] = serde_json::to_value(&doc.meta).map_err(error)?;
+        }
+        if changes.selection_changed {
+            value["selection"] = serde_json::to_value(&doc.selection).map_err(error)?;
+        }
+        if changes.assets_changed {
+            value["assets"] = serde_json::to_value(&doc.assets).map_err(error)?;
+        }
+        serde_json::to_string(&value).map_err(error)
     }
     pub fn transact(&mut self, request: &str) -> Result<String, JsValue> {
         if self.sampler.is_some() {
             return Err(error("CONFLICT: finish active tool first"));
         }
         let r: Request = serde_json::from_str(request).map_err(error)?;
-        self.engine
+        let edited = self
+            .engine
             .transact(self.doc, &r.intent, r.ops.clone(), r.base_revision)
             .map_err(error)?;
         self.journal.push(
@@ -131,33 +175,43 @@ impl Runtime {
                 .map_err(error)?,
         );
         self.refresh()?;
-        self.view()
+        self.patch_view(&edited)
     }
     pub fn undo(&mut self) -> Result<String, JsValue> {
         if self.sampler.is_some() {
             return Err(error("CONFLICT: finish active tool first"));
         }
         let ops = self.engine.undo_operations(self.doc).map_err(error)?;
-        if !ops.is_empty() {
-            self.engine.undo(self.doc).map_err(error)?;
-            self.journal
-                .push(self.engine.journal_record("Undo", &ops).map_err(error)?);
-            self.refresh()?;
+        if ops.is_empty() {
+            return self.view();
         }
-        self.view()
+        let edited = self
+            .engine
+            .undo(self.doc)
+            .map_err(error)?
+            .unwrap_or_default();
+        self.journal
+            .push(self.engine.journal_record("Undo", &ops).map_err(error)?);
+        self.refresh()?;
+        self.patch_view(&edited)
     }
     pub fn redo(&mut self) -> Result<String, JsValue> {
         if self.sampler.is_some() {
             return Err(error("CONFLICT: finish active tool first"));
         }
         let ops = self.engine.redo_operations(self.doc).map_err(error)?;
-        if !ops.is_empty() {
-            self.engine.redo(self.doc).map_err(error)?;
-            self.journal
-                .push(self.engine.journal_record("Redo", &ops).map_err(error)?);
-            self.refresh()?;
+        if ops.is_empty() {
+            return self.view();
         }
-        self.view()
+        let edited = self
+            .engine
+            .redo(self.doc)
+            .map_err(error)?
+            .unwrap_or_default();
+        self.journal
+            .push(self.engine.journal_record("Redo", &ops).map_err(error)?);
+        self.refresh()?;
+        self.patch_view(&edited)
     }
     pub fn resize(&mut self, w: u32, h: u32) {
         self.canvas.set_width(w.max(1));
@@ -329,7 +383,7 @@ impl Runtime {
         }
         self.sampler = None;
         self.layer = None;
-        if !changes.is_empty() {
+        let edited = if !changes.is_empty() {
             let ops = if self.mask {
                 let mut mask = self
                     .engine
@@ -356,7 +410,8 @@ impl Runtime {
                 vec![Op::SetTiles { layer, changes }]
             };
             let rev = self.engine.document(self.doc).map_err(error)?.revision;
-            self.engine
+            let edited = self
+                .engine
                 .transact(self.doc, "Brush stroke", ops.clone(), rev)
                 .map_err(error)?;
             self.journal.push(
@@ -364,9 +419,12 @@ impl Runtime {
                     .journal_record("Brush stroke", &ops)
                     .map_err(error)?,
             );
-        }
+            edited
+        } else {
+            alto_doc::ChangeSet::default()
+        };
         self.refresh()?;
-        self.view()
+        self.patch_view(&edited)
     }
     #[wasm_bindgen(js_name=cancelBrush)]
     pub fn cancel_brush(&mut self) {
@@ -636,13 +694,14 @@ impl Runtime {
     }
     fn command(&mut self, intent: &str, ops: Vec<Op>) -> Result<String, JsValue> {
         let revision = self.engine.document(self.doc).map_err(error)?.revision;
-        self.engine
+        let edited = self
+            .engine
             .transact(self.doc, intent, ops.clone(), revision)
             .map_err(error)?;
         self.journal
             .push(self.engine.journal_record(intent, &ops).map_err(error)?);
         self.refresh()?;
-        self.view()
+        self.patch_view(&edited)
     }
     fn refresh(&mut self) -> Result<(), JsValue> {
         self.scene = self.engine.render_scene(self.doc).map_err(error)?;

@@ -729,6 +729,7 @@ mod tests {
                 vec![alto_doc::Effect::GaussianBlur {
                     radius: 12.0,
                     selection: None,
+                    extra: Default::default(),
                 }],
                 true,
             )
@@ -804,6 +805,7 @@ mod tests {
                     effects: Some(vec![alto_doc::Effect::GaussianBlur {
                         radius: -1.0,
                         selection: None,
+                        extra: Default::default(),
                     }]),
                     ..Default::default()
                 },

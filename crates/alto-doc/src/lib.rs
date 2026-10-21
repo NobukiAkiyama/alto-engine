@@ -1,6 +1,6 @@
 use alto_core::{
-    Affine2, AssetId, BitDepth, ColorSpace, ContentHash, MAX_ISOLATED_GROUPS, NodeId, PixelFormat,
-    Rect, TILE, TileKey,
+    Affine2, AssetId, BitDepth, ColorSpace, ContentHash, MAX_ISOLATED_GROUPS, MAX_TREE_DEPTH,
+    NodeId, PixelFormat, Rect, TILE, TileKey,
 };
 use alto_raster::TileMap;
 use alto_text::TextContent;
@@ -155,15 +155,6 @@ pub fn validate_mask(map: &TileMap) -> Result<(), DocError> {
     }
     Ok(())
 }
-fn blur_radius() -> f64 {
-    8.0
-}
-fn zero_f64() -> f64 {
-    0.0
-}
-fn one_f64() -> f64 {
-    1.0
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -182,63 +173,222 @@ pub struct CurvePoint {
 }
 
 /// A layer or adjustment effect. The JSON shape is the document format:
-/// `{"type":"gaussian_blur","radius":12}`. Unknown types do not parse. Extra
-/// fields are ignored so a document that opened on the untyped format still
-/// opens; they are not written back.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// `{"type":"gaussian_blur","radius":12}`. Unknown types do not parse. Fields
+/// this version does not know are kept and written back, so a document that
+/// opened before effects were typed still round-trips.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     GaussianBlur {
-        #[serde(default = "blur_radius")]
         radius: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     ColorAdjust {
-        #[serde(default = "zero_f64")]
         brightness: f64,
-        #[serde(default = "one_f64")]
         contrast: f64,
-        #[serde(default = "one_f64")]
         saturation: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     Levels {
-        #[serde(default = "zero_f64")]
         in_black: f64,
-        #[serde(default = "one_f64")]
         in_white: f64,
-        #[serde(default = "one_f64")]
         gamma: f64,
-        #[serde(default = "zero_f64")]
         out_black: f64,
-        #[serde(default = "one_f64")]
         out_white: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     HueSaturation {
-        #[serde(default = "zero_f64")]
         hue: f64,
-        #[serde(default = "one_f64")]
         saturation: f64,
-        #[serde(default = "zero_f64")]
         lightness: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     Invert {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     Curves {
-        #[serde(default)]
         channel: CurveChannel,
         points: Vec<CurvePoint>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
+}
+
+fn effect_f64(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    default: f64,
+) -> Result<f64, String> {
+    let Some(value) = obj.remove(key) else {
+        return Ok(default);
+    };
+    value
+        .as_f64()
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| format!("Invalid {key}"))
+}
+fn effect_selection(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<TileMap>, String> {
+    match obj.remove("selection") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value).map_err(|e| e.to_string()),
+    }
+}
+fn effect_from_map(mut obj: serde_json::Map<String, serde_json::Value>) -> Result<Effect, String> {
+    let type_name = obj
+        .remove("type")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "effect type required".to_string())?;
+    match type_name.as_str() {
+        "gaussian_blur" => Ok(Effect::GaussianBlur {
+            radius: effect_f64(&mut obj, "radius", 8.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "color_adjust" => Ok(Effect::ColorAdjust {
+            brightness: effect_f64(&mut obj, "brightness", 0.0)?,
+            contrast: effect_f64(&mut obj, "contrast", 1.0)?,
+            saturation: effect_f64(&mut obj, "saturation", 1.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "levels" => Ok(Effect::Levels {
+            in_black: effect_f64(&mut obj, "in_black", 0.0)?,
+            in_white: effect_f64(&mut obj, "in_white", 1.0)?,
+            gamma: effect_f64(&mut obj, "gamma", 1.0)?,
+            out_black: effect_f64(&mut obj, "out_black", 0.0)?,
+            out_white: effect_f64(&mut obj, "out_white", 1.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "hue_saturation" => Ok(Effect::HueSaturation {
+            hue: effect_f64(&mut obj, "hue", 0.0)?,
+            saturation: effect_f64(&mut obj, "saturation", 1.0)?,
+            lightness: effect_f64(&mut obj, "lightness", 0.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "invert" => Ok(Effect::Invert {
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "curves" => {
+            let channel = match obj.remove("channel") {
+                None => CurveChannel::Master,
+                Some(value) => serde_json::from_value(value).map_err(|e| e.to_string())?,
+            };
+            let points = serde_json::from_value(
+                obj.remove("points")
+                    .ok_or_else(|| "Curve points required".to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(Effect::Curves {
+                channel,
+                points,
+                selection: effect_selection(&mut obj)?,
+                extra: obj,
+            })
+        }
+        _ => Err(format!("unknown effect type {type_name}")),
+    }
+}
+impl Serialize for Effect {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serde_json::Map::new();
+        let (type_name, selection, extra) = match self {
+            Self::GaussianBlur {
+                radius,
+                selection,
+                extra,
+            } => {
+                map.insert("radius".into(), serde_json::json!(radius));
+                ("gaussian_blur", selection, extra)
+            }
+            Self::ColorAdjust {
+                brightness,
+                contrast,
+                saturation,
+                selection,
+                extra,
+            } => {
+                map.insert("brightness".into(), serde_json::json!(brightness));
+                map.insert("contrast".into(), serde_json::json!(contrast));
+                map.insert("saturation".into(), serde_json::json!(saturation));
+                ("color_adjust", selection, extra)
+            }
+            Self::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+                selection,
+                extra,
+            } => {
+                map.insert("in_black".into(), serde_json::json!(in_black));
+                map.insert("in_white".into(), serde_json::json!(in_white));
+                map.insert("gamma".into(), serde_json::json!(gamma));
+                map.insert("out_black".into(), serde_json::json!(out_black));
+                map.insert("out_white".into(), serde_json::json!(out_white));
+                ("levels", selection, extra)
+            }
+            Self::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+                selection,
+                extra,
+            } => {
+                map.insert("hue".into(), serde_json::json!(hue));
+                map.insert("saturation".into(), serde_json::json!(saturation));
+                map.insert("lightness".into(), serde_json::json!(lightness));
+                ("hue_saturation", selection, extra)
+            }
+            Self::Invert { selection, extra } => ("invert", selection, extra),
+            Self::Curves {
+                channel,
+                points,
+                selection,
+                extra,
+            } => {
+                map.insert(
+                    "channel".into(),
+                    serde_json::to_value(channel).map_err(serde::ser::Error::custom)?,
+                );
+                map.insert(
+                    "points".into(),
+                    serde_json::to_value(points).map_err(serde::ser::Error::custom)?,
+                );
+                ("curves", selection, extra)
+            }
+        };
+        map.insert("type".into(), serde_json::Value::String(type_name.into()));
+        if let Some(selection) = selection {
+            map.insert(
+                "selection".into(),
+                serde_json::to_value(selection).map_err(serde::ser::Error::custom)?,
+            );
+        }
+        for (key, value) in extra {
+            map.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        serde_json::Value::Object(map).serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for Effect {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = match value {
+            serde_json::Value::Object(map) => map,
+            _ => return Err(serde::de::Error::custom("effect must be an object")),
+        };
+        effect_from_map(obj).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Effect {
@@ -248,7 +398,7 @@ impl Effect {
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
-            | Self::Invert { selection }
+            | Self::Invert { selection, .. }
             | Self::Curves { selection, .. } => selection.as_ref(),
         }
     }
@@ -258,7 +408,7 @@ impl Effect {
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
-            | Self::Invert { selection }
+            | Self::Invert { selection, .. }
             | Self::Curves { selection, .. } => selection,
         }
     }
@@ -647,6 +797,10 @@ pub struct ChangeSet {
     pub structure_changed: bool,
     pub dirty: Vec<(NodeId, Rect)>,
     pub tiles: Vec<(NodeId, TileKey)>,
+    /// Document-level fields that are not nodes. A patch can send these alone.
+    pub selection_changed: bool,
+    pub assets_changed: bool,
+    pub meta_changed: bool,
 }
 impl ChangeSet {
     fn merge(&mut self, other: Self) {
@@ -654,6 +808,9 @@ impl ChangeSet {
         self.structure_changed |= other.structure_changed;
         self.dirty.extend(other.dirty);
         self.tiles.extend(other.tiles);
+        self.selection_changed |= other.selection_changed;
+        self.assets_changed |= other.assets_changed;
+        self.meta_changed |= other.meta_changed;
     }
 }
 
@@ -726,8 +883,10 @@ impl Document {
         let mut hops = 0;
         while let Some(current) = cursor {
             hops += 1;
-            if hops > 128 {
-                return Err(DocError::Invalid("Group nesting exceeds 128".into()));
+            if hops > MAX_TREE_DEPTH {
+                return Err(DocError::Invalid(format!(
+                    "Group nesting exceeds {MAX_TREE_DEPTH}"
+                )));
             }
             let node = self.node(current)?;
             if node.props.locked {
@@ -739,8 +898,10 @@ impl Document {
     }
     fn descendant_locked(&self, id: NodeId) -> Result<bool, DocError> {
         fn walk(doc: &Document, id: NodeId, hops: u32) -> Result<bool, DocError> {
-            if hops > 128 {
-                return Err(DocError::Invalid("Group nesting exceeds 128".into()));
+            if hops > MAX_TREE_DEPTH {
+                return Err(DocError::Invalid(format!(
+                    "Group nesting exceeds {MAX_TREE_DEPTH}"
+                )));
             }
             let Some(children) = doc.node(id)?.children().map(|c| c.to_vec()) else {
                 return Ok(false);
@@ -1149,6 +1310,7 @@ impl Document {
                 if let Some(m) = &selection {
                     validate_mask(m)?;
                 }
+                change.selection_changed = true;
                 Op::SetSelection {
                     selection: std::mem::replace(&mut self.selection, selection),
                 }
@@ -1161,10 +1323,12 @@ impl Document {
                     Some(record) => self.assets.insert(id, record),
                     None => self.assets.remove(&id),
                 };
+                change.assets_changed = true;
                 Op::SetAsset { id, record: old }
             }
             Op::SetMeta { meta } => {
                 meta.validate()?;
+                change.meta_changed = true;
                 Op::SetMeta {
                     meta: std::mem::replace(&mut self.meta, meta),
                 }
@@ -1273,8 +1437,10 @@ impl Document {
             stack: u32,
             drawn: bool,
         ) -> Result<(), DocError> {
-            if depth > 128 {
-                return Err(DocError::Invalid("Group nesting exceeds 128".into()));
+            if depth > MAX_TREE_DEPTH as usize {
+                return Err(DocError::Invalid(format!(
+                    "Group nesting exceeds {MAX_TREE_DEPTH}"
+                )));
             }
             if !visited.insert(id) {
                 return Err(DocError::Invalid("Cycle or duplicate child".into()));
@@ -2139,7 +2305,8 @@ mod tests {
             serde_json::from_str::<Effect>(r#"{"type":"gaussian_blur"}"#).unwrap(),
             Effect::GaussianBlur {
                 radius: 8.0,
-                selection: None
+                selection: None,
+                extra: Default::default(),
             }
         );
         assert_eq!(
@@ -2151,6 +2318,7 @@ mod tests {
                 channel: CurveChannel::Master,
                 points: vec![CurvePoint { x: 0.0, y: 0.0 }, CurvePoint { x: 1.0, y: 1.0 }],
                 selection: None,
+                extra: Default::default(),
             }
         );
         assert!(serde_json::from_str::<Effect>(r#"{"type":"not_an_effect"}"#).is_err());
@@ -2161,6 +2329,7 @@ mod tests {
         layer.props.effects = vec![Effect::GaussianBlur {
             radius: 12.0,
             selection: None,
+            extra: Default::default(),
         }];
         editor
             .transact(
@@ -2184,13 +2353,24 @@ mod tests {
             .values()
             .find(|node| node.name == "Old")
             .unwrap();
+        let Effect::GaussianBlur {
+            radius,
+            selection,
+            extra,
+        } = &opened_layer.props.effects[0]
+        else {
+            panic!("gaussian blur");
+        };
+        assert_eq!(*radius, 12.0);
+        assert!(selection.is_none());
         assert_eq!(
-            opened_layer.props.effects,
-            vec![Effect::GaussianBlur {
-                radius: 12.0,
-                selection: None
-            }]
+            extra.get("vendor").and_then(|v| v.as_str()),
+            Some("alto-0.3")
         );
+        let written = serde_json::to_value(&opened_layer.props.effects[0]).unwrap();
+        assert_eq!(written["vendor"], "alto-0.3");
+        assert_eq!(written["radius"], 12.0);
+        assert_eq!(written["type"], "gaussian_blur");
     }
 
     proptest! {
