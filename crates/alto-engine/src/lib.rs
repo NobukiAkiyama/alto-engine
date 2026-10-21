@@ -588,6 +588,7 @@ impl Engine {
                 for n in editor.doc.nodes.values() {
                     node_hashes(n, &mut current);
                 }
+                current.extend(editor.doc.assets.values().map(|a| a.hash));
                 if history.difference(&current).count() <= 2048 || !editor.drop_oldest_undo() {
                     break;
                 }
@@ -601,6 +602,7 @@ impl Engine {
             if let Some(t) = &editor.doc.selection {
                 current.extend(t.tiles.values().copied());
             }
+            current.extend(editor.doc.assets.values().map(|a| a.hash));
             for op in editor.retained_ops() {
                 op_hashes(&op, &mut current);
             }
@@ -614,6 +616,7 @@ impl Engine {
         } else {
             self.tiles.retain(&reachable);
         }
+        self.blobs.retain(|hash, _| reachable.contains(hash));
     }
 }
 #[cfg(test)]
@@ -621,6 +624,40 @@ mod package_tests {
     use super::*;
     use alto_core::{PixelFormat, TileKey};
     use alto_doc::{Node, TileChange};
+    #[test]
+    fn unreferenced_blobs_are_dropped_and_live_assets_stay() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let orphan = ContentHash::of(b"orphan");
+        e.blobs.insert(orphan, b"orphan".to_vec());
+        let hash = ContentHash::of(b"font-bytes");
+        e.blobs.insert(hash, b"font-bytes".to_vec());
+        let id = alto_core::AssetId::new();
+        let record = alto_doc::AssetRecord {
+            id,
+            hash,
+            kind: alto_doc::AssetKind::EncodedImage {
+                mime: "image/png".into(),
+            },
+            byte_len: 10,
+            dims: None,
+        };
+        e.transact(
+            d,
+            "asset",
+            vec![Op::SetAsset {
+                id,
+                record: Some(record),
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(!e.blobs.contains_key(&orphan));
+        assert_eq!(
+            e.blobs.get(&hash).map(Vec::as_slice),
+            Some(b"font-bytes".as_slice())
+        );
+    }
     #[test]
     fn fresh_engine_package_and_journal_restore_exactly() {
         let mut e = Engine::new();

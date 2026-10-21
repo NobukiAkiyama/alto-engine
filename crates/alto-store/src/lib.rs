@@ -56,17 +56,23 @@ pub fn commit_path(h: &ContentHash) -> String {
 pub fn is_immutable(path: &str) -> bool {
     path.starts_with("objects/") || path.starts_with("snapshots/") || path.starts_with("commits/")
 }
-/// Native folder saves only. wasm32 has no `folder` module, so this must not be compiled there.
+/// True when `data` is the bytes named by a content-addressed path.
+/// The object shard has to be the first two hex digits of that hash.
+/// Native only: wasm32 does not save folders or run `git fast-import`.
 #[cfg(not(target_arch = "wasm32"))]
-fn addressed(name: &str, data: &[u8]) -> bool {
+pub fn bytes_match_name(name: &str, data: &[u8]) -> bool {
     if let Some(rest) = name.strip_prefix("objects/") {
-        let Some(hash) = rest
-            .split('/')
-            .nth(1)
-            .and_then(|s| s.parse::<ContentHash>().ok())
-        else {
+        let mut parts = rest.split('/');
+        let (Some(shard), Some(hash), None) = (
+            parts.next(),
+            parts.next().and_then(|s| s.parse::<ContentHash>().ok()),
+            parts.next(),
+        ) else {
             return false;
         };
+        if shard != &hash.hex()[..2] {
+            return false;
+        }
         return decode_object(data)
             .map(|(tag, pixels)| object_hash(tag, &pixels) == hash)
             .unwrap_or(false);
@@ -362,14 +368,16 @@ pub mod folder {
             }
             let path = dir.join(name);
             if is_immutable(name) {
-                if !addressed(name, data) {
+                if !bytes_match_name(name, data) {
                     return Err(StoreError::Corrupt(format!(
                         "content does not match {name}"
                     )));
                 }
                 if path.exists() {
                     let existing = std::fs::read(&path).map_err(io)?;
-                    if addressed(name, &existing) {
+                    // Same bytes already matched the name. A different encoding is
+                    // kept only when it still hashes to that name.
+                    if existing == *data || bytes_match_name(name, &existing) {
                         report.skipped += 1;
                         continue;
                     }
@@ -502,6 +510,18 @@ mod tests {
         assert!(folder::write(&elsewhere, &forged, None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+    #[test]
+    fn object_name_requires_the_shard_prefix() {
+        let pixels = vec![7; 262144];
+        let h = object_hash(4, &pixels);
+        let data = encode_object(4, &pixels);
+        assert!(bytes_match_name(&object_path(&h), &data));
+        assert!(!bytes_match_name(&format!("objects/zz/{h}"), &data));
+        assert!(!bytes_match_name(
+            &format!("objects/{}/{h}/extra", &h.hex()[..2]),
+            &data
+        ));
     }
     #[test]
     fn stored_zip_and_object_hash_roundtrip() {

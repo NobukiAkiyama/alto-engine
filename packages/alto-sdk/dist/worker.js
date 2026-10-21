@@ -48,7 +48,9 @@ function structured(error) {
       "CORRUPT_DATA",
       "STORAGE",
       "INTERNAL",
-    ].find((c) => message.includes(c)) ||
+    ].find(
+      (c) => message === c || message.startsWith(`${c}:`) || message.startsWith(`${c} `),
+    ) ||
     (/unreachable|borrow|RuntimeError/.test(message)
       ? "INTERNAL"
       : "INVALID_ARGUMENT");

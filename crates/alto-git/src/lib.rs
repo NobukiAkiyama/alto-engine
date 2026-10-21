@@ -51,21 +51,30 @@ pub struct Opened {
     pub entries: BTreeMap<String, Vec<u8>>,
     pub doc: Document,
     pub commits: BTreeMap<ContentHash, Commit>,
+    /// Commits whose bytes match their name but fail `Commit::parse`.
+    /// Opening still returns the document. `sync` refuses the folder.
+    pub warnings: Vec<String>,
 }
 impl Opened {
     pub fn from_entries(entries: BTreeMap<String, Vec<u8>>) -> Result<Self> {
         let package = alto_store::decode_entries(entries.clone()).map_err(|e| e.to_string())?;
         let doc = Document::from_snapshot_bytes(&package.snapshot).map_err(|e| e.to_string())?;
         let mut commits = BTreeMap::new();
+        let mut warnings = Vec::new();
         for (h, b) in &package.commits {
-            let c = Commit::parse(b).map_err(|e| format!("commit {h}: {e}"))?;
-            commits.insert(*h, c);
+            match Commit::parse(b) {
+                Ok(c) => {
+                    commits.insert(*h, c);
+                }
+                Err(e) => warnings.push(format!("damaged commit {h}: {e}")),
+            }
         }
         Ok(Self {
             package,
             entries,
             doc,
             commits,
+            warnings,
         })
     }
     /// Opens a `.alto` file, a folder package, or `<git-rev>:<folder>` inside a repository.
@@ -396,9 +405,21 @@ fn referenced(snapshot: &[u8], available: &BTreeSet<String>) -> BTreeSet<String>
         .collect()
 }
 
-fn one_line(label: &str, value: &str) -> Result<()> {
-    if value.chars().any(|c| c.is_control()) {
-        return Err(format!("{label} must be a single line"));
+fn path_token(label: &str, value: &str) -> Result<()> {
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("{label} must not contain whitespace"));
+    }
+    Ok(())
+}
+fn reject_damaged_commits(entries: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for (name, bytes) in entries {
+        if let Some(rest) = name.strip_prefix("commits/")
+            && let Some(stem) = rest.strip_suffix(".json")
+            && !stem.contains('/')
+            && let Err(e) = Commit::parse(bytes)
+        {
+            return Err(format!("damaged commit {name}: {e}"));
+        }
     }
     Ok(())
 }
@@ -448,6 +469,9 @@ pub struct SyncReport {
 /// only ever added, so later commits reuse earlier blobs.
 pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
     let p = Opened::from_entries(folder::read(folder_dir).map_err(|e| e.to_string())?)?;
+    // Open skips a commit the engine would also drop. Importing it would
+    // write the author line into fast-import, so sync still refuses.
+    reject_damaged_commits(&p.entries)?;
     let prefix = git(folder_dir, &["rev-parse", "--show-prefix"])?
         .trim()
         .to_string();
@@ -497,7 +521,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         .filter(|k| k.starts_with("objects/"))
         .cloned()
         .collect();
-    one_line("path", &prefix)?;
+    path_token("path", &prefix)?;
     let name = git(&root, &["config", "user.name"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "Alto".into());
@@ -613,7 +637,10 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
             if alto_store::is_immutable(&path) && present.contains(&path) {
                 continue;
             }
-            one_line("path", &path)?;
+            path_token("path", &path)?;
+            if alto_store::is_immutable(&path) && !alto_store::bytes_match_name(&path, &data) {
+                return Err(format!("content does not match {path}"));
+            }
             file(&mut stream, &path, &data);
             present.insert(path);
         }

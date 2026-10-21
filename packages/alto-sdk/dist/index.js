@@ -740,8 +740,9 @@ export class AltoEngine extends Events {
         }
     }
     async acquireLease() {
-        if (!navigator.locks)
-            return;
+        if (!navigator.locks) {
+            throw new AltoError("CONFLICT", "このブラウザは Web Locks が無く、同じ文書を別タブと同時に開けません");
+        }
         let release;
         const hold = new Promise((resolve) => {
             release = resolve;

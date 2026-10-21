@@ -1,5 +1,6 @@
 use alto_core::{
-    Affine2, AssetId, BitDepth, ColorSpace, ContentHash, NodeId, PixelFormat, Rect, TILE, TileKey,
+    Affine2, AssetId, BitDepth, ColorSpace, ContentHash, MAX_ISOLATED_GROUPS, NodeId, PixelFormat,
+    Rect, TILE, TileKey,
 };
 use alto_raster::TileMap;
 use alto_text::TextContent;
@@ -36,6 +37,11 @@ impl DocumentMeta {
         }
         if self.format_version != 1 && self.format_version != 2 {
             return Err(DocError::Invalid("Unsupported document format".into()));
+        }
+        if self.color != ColorSpace::Srgb || self.depth != BitDepth::U8 {
+            return Err(DocError::Invalid(
+                "Only sRGB 8-bit documents are supported".into(),
+            ));
         }
         Ok(())
     }
@@ -150,6 +156,30 @@ pub fn validate_mask(map: &TileMap) -> Result<(), DocError> {
     Ok(())
 }
 pub fn validate_effect(value: &serde_json::Value) -> Result<(), DocError> {
+    let Some(obj) = value.as_object() else {
+        return Err(DocError::Invalid("Unknown effect type".into()));
+    };
+    let kind = obj.get("type").and_then(|v| v.as_str());
+    let allowed: &[&str] = match kind {
+        Some("gaussian_blur") => &["type", "radius", "selection"],
+        Some("color_adjust") => &["type", "brightness", "contrast", "saturation", "selection"],
+        Some("levels") => &[
+            "type",
+            "in_black",
+            "in_white",
+            "gamma",
+            "out_black",
+            "out_white",
+            "selection",
+        ],
+        Some("hue_saturation") => &["type", "hue", "saturation", "lightness", "selection"],
+        Some("invert") => &["type", "selection"],
+        Some("curves") => &["type", "channel", "points", "selection"],
+        _ => return Err(DocError::Invalid("Unknown effect type".into())),
+    };
+    if let Some(key) = obj.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(DocError::Invalid(format!("Unknown effect field {key}")));
+    }
     let finite = |key: &str, default: f64, min: f64, max: f64| {
         let n = value
             .get(key)
@@ -825,42 +855,55 @@ impl Document {
                 } else {
                     patch.mask_transform
                 };
-                let node = self.node_mut(id)?;
-                let mut old = PropPatch::default();
-                if let Some(name) = patch.name {
-                    old.name = Some(std::mem::replace(&mut node.name, name));
-                }
-                if let Some(v) = patch.visible {
-                    old.visible = Some(std::mem::replace(&mut node.props.visible, v));
-                }
-                if let Some(v) = patch.locked {
-                    old.locked = Some(std::mem::replace(&mut node.props.locked, v));
-                }
-                if let Some(v) = patch.opacity {
-                    old.opacity = Some(std::mem::replace(&mut node.props.opacity, v));
-                }
-                if let Some(v) = patch.blend {
-                    old.blend = Some(std::mem::replace(&mut node.props.blend, v));
-                }
-                if let Some(v) = patch.transform {
-                    old.transform = Some(std::mem::replace(&mut node.props.transform, v));
-                }
-                if let Some(v) = patch.clip_to_below {
-                    old.clip_to_below = Some(std::mem::replace(&mut node.props.clip_to_below, v));
-                }
-                if let Some(v) = patch.mask_enabled {
-                    old.mask_enabled = Some(std::mem::replace(&mut node.props.mask_enabled, v));
-                }
-                if let Some(v) = mask_transform {
-                    old.mask_transform = Some(std::mem::replace(&mut node.props.mask_transform, v));
-                }
-                if let Some(v) = patch.mask_linked {
-                    old.mask_linked = Some(std::mem::replace(&mut node.props.mask_linked, v));
-                }
-                if let Some(v) = patch.effects {
-                    old.effects = Some(std::mem::replace(&mut node.props.effects, v));
-                }
-                node.props.validate()?;
+                let saved = self.node(id)?.clone();
+                let validated = (|| -> Result<PropPatch, DocError> {
+                    let node = self.node_mut(id)?;
+                    let mut old = PropPatch::default();
+                    if let Some(name) = patch.name {
+                        old.name = Some(std::mem::replace(&mut node.name, name));
+                    }
+                    if let Some(v) = patch.visible {
+                        old.visible = Some(std::mem::replace(&mut node.props.visible, v));
+                    }
+                    if let Some(v) = patch.locked {
+                        old.locked = Some(std::mem::replace(&mut node.props.locked, v));
+                    }
+                    if let Some(v) = patch.opacity {
+                        old.opacity = Some(std::mem::replace(&mut node.props.opacity, v));
+                    }
+                    if let Some(v) = patch.blend {
+                        old.blend = Some(std::mem::replace(&mut node.props.blend, v));
+                    }
+                    if let Some(v) = patch.transform {
+                        old.transform = Some(std::mem::replace(&mut node.props.transform, v));
+                    }
+                    if let Some(v) = patch.clip_to_below {
+                        old.clip_to_below =
+                            Some(std::mem::replace(&mut node.props.clip_to_below, v));
+                    }
+                    if let Some(v) = patch.mask_enabled {
+                        old.mask_enabled = Some(std::mem::replace(&mut node.props.mask_enabled, v));
+                    }
+                    if let Some(v) = mask_transform {
+                        old.mask_transform =
+                            Some(std::mem::replace(&mut node.props.mask_transform, v));
+                    }
+                    if let Some(v) = patch.mask_linked {
+                        old.mask_linked = Some(std::mem::replace(&mut node.props.mask_linked, v));
+                    }
+                    if let Some(v) = patch.effects {
+                        old.effects = Some(std::mem::replace(&mut node.props.effects, v));
+                    }
+                    node.props.validate()?;
+                    Ok(old)
+                })();
+                let old = match validated {
+                    Ok(old) => old,
+                    Err(e) => {
+                        self.nodes.insert(id, saved);
+                        return Err(e);
+                    }
+                };
                 change.nodes.insert(id);
                 Op::SetProps { id, patch: old }
             }
@@ -1115,6 +1158,8 @@ impl Document {
             id: NodeId,
             visited: &mut BTreeSet<NodeId>,
             depth: usize,
+            stack: u32,
+            drawn: bool,
         ) -> Result<(), DocError> {
             if depth > 128 {
                 return Err(DocError::Invalid("Group nesting exceeds 128".into()));
@@ -1124,6 +1169,22 @@ impl Document {
             }
             let node = doc.node(id)?;
             node.props.validate()?;
+            let drawn = drawn && node.props.visible && node.props.opacity > 0.0;
+            let isolate = drawn
+                && match &node.kind {
+                    NodeKind::Group { isolation, .. } => {
+                        *isolation == Isolation::Isolated
+                            || node.props.opacity < 1.0
+                            || node.props.blend != BlendMode::Normal
+                    }
+                    _ => false,
+                };
+            if isolate && stack >= MAX_ISOLATED_GROUPS {
+                return Err(DocError::Invalid(format!(
+                    "Group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                )));
+            }
+            let stack = stack + u32::from(isolate);
             if let NodeKind::Vector { paths } = &node.kind {
                 validate_paths(paths).map_err(|e| DocError::Invalid(e.to_string()))?;
             }
@@ -1151,12 +1212,12 @@ impl Document {
                     if doc.node(*child)?.parent != Some(id) {
                         return Err(DocError::Invalid("Parent link mismatch".into()));
                     }
-                    visit(doc, *child, visited, depth + 1)?;
+                    visit(doc, *child, visited, depth + 1, stack, drawn)?;
                 }
             }
             Ok(())
         }
-        visit(self, self.root, &mut visited, 0)?;
+        visit(self, self.root, &mut visited, 0, 0, true)?;
         if visited.len() != self.nodes.len() {
             return Err(DocError::Invalid("Unreachable node".into()));
         }
@@ -1248,6 +1309,40 @@ impl Editor {
             targets,
         });
     }
+    /// Applies `ops` to the live document. A failed op or a failed graph check
+    /// rolls the completed ops back, so the caller does not keep a second copy
+    /// of the document just to discard a rejected edit.
+    fn replay(&mut self, ops: Vec<Op>) -> Result<(Vec<AppliedOp>, ChangeSet), DocError> {
+        let revision = self.doc.revision;
+        let mut applied = Vec::with_capacity(ops.len());
+        let mut changes = ChangeSet::default();
+        for op in ops {
+            match self.doc.apply(op.clone()) {
+                Ok((inverse, change)) => {
+                    applied.push(AppliedOp { op, inverse });
+                    changes.merge(change);
+                }
+                Err(e) => {
+                    self.revert(&applied);
+                    self.doc.revision = revision;
+                    return Err(e);
+                }
+            }
+        }
+        if let Err(e) = self.doc.validate_graph() {
+            self.revert(&applied);
+            self.doc.revision = revision;
+            return Err(e);
+        }
+        Ok((applied, changes))
+    }
+    fn revert(&mut self, applied: &[AppliedOp]) {
+        for item in applied.iter().rev() {
+            self.doc
+                .apply(item.inverse.clone())
+                .expect("inverse of an applied edit");
+        }
+    }
     pub fn transact(
         &mut self,
         intent: impl Into<String>,
@@ -1263,17 +1358,8 @@ impl Editor {
         if ops.is_empty() {
             return Ok(ChangeSet::default());
         }
-        let mut next = self.doc.clone();
-        let mut applied = Vec::new();
-        let mut changes = ChangeSet::default();
-        for op in ops {
-            let (inverse, change) = next.apply(op.clone())?;
-            applied.push(AppliedOp { op, inverse });
-            changes.merge(change);
-        }
-        next.validate_graph()?;
-        next.revision += 1;
-        self.doc = next;
+        let (applied, changes) = self.replay(ops)?;
+        self.doc.revision += 1;
         self.seq += 1;
         let tx = Transaction {
             intent: intent.into(),
@@ -1293,15 +1379,14 @@ impl Editor {
         let Some(tx) = self.undo.last().cloned() else {
             return Ok(None);
         };
-        let mut next = self.doc.clone();
-        let mut changes = ChangeSet::default();
-        for item in tx.ops.iter().rev() {
-            let (_, change) = next.apply(item.inverse.clone())?;
-            changes.merge(change);
-        }
-        next.validate_graph()?;
-        next.revision += 1;
-        self.doc = next;
+        let inverses = tx
+            .ops
+            .iter()
+            .rev()
+            .map(|item| item.inverse.clone())
+            .collect();
+        let (_, changes) = self.replay(inverses)?;
+        self.doc.revision += 1;
         self.undo.pop();
         if self.log.last().is_some_and(|e| e.seq == tx.seq) {
             self.log.pop();
@@ -1315,15 +1400,9 @@ impl Editor {
         let Some(tx) = self.redo.last().cloned() else {
             return Ok(None);
         };
-        let mut next = self.doc.clone();
-        let mut changes = ChangeSet::default();
-        for item in &tx.ops {
-            let (_, change) = next.apply(item.op.clone())?;
-            changes.merge(change);
-        }
-        next.validate_graph()?;
-        next.revision += 1;
-        self.doc = next;
+        let ops = tx.ops.iter().map(|item| item.op.clone()).collect();
+        let (_, changes) = self.replay(ops)?;
+        self.doc.revision += 1;
         self.redo.pop();
         self.log_tx(&tx, "");
         self.undo.push(tx);
@@ -1620,6 +1699,99 @@ mod tests {
                 rev,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn isolated_groups_stop_at_the_compositor_limit() {
+        let mut editor = editor();
+        let mut parent = editor.doc.root;
+        let mut ops = vec![];
+        for i in 0..MAX_ISOLATED_GROUPS {
+            let mut node = Node::group(format!("g{i}"));
+            node.props.opacity = 0.5;
+            let id = node.id;
+            ops.push(Op::InsertNode {
+                node,
+                parent,
+                index: 0,
+            });
+            parent = id;
+        }
+        editor.transact("stack", ops, 0).unwrap();
+        let mut extra = Node::group("one more");
+        extra.props.opacity = 0.5;
+        let err = editor
+            .transact(
+                "too deep",
+                vec![Op::InsertNode {
+                    node: extra,
+                    parent,
+                    index: 0,
+                }],
+                editor.doc.revision,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("31"), "{err}");
+        assert_eq!(editor.doc.nodes.len(), MAX_ISOLATED_GROUPS as usize + 1);
+    }
+
+    #[test]
+    fn a_hidden_stack_can_exceed_the_compositor_until_it_is_shown() {
+        let mut editor = editor();
+        let mut parent = editor.doc.root;
+        let mut ops = vec![];
+        let mut top = None;
+        for i in 0..40 {
+            let mut node = Node::group(format!("h{i}"));
+            node.props.opacity = 0.5;
+            if i == 0 {
+                node.props.visible = false;
+                top = Some(node.id);
+            }
+            let id = node.id;
+            ops.push(Op::InsertNode {
+                node,
+                parent,
+                index: 0,
+            });
+            parent = id;
+        }
+        editor.transact("hidden", ops, 0).unwrap();
+        let err = editor
+            .transact(
+                "show",
+                vec![Op::SetProps {
+                    id: top.unwrap(),
+                    patch: PropPatch {
+                        visible: Some(true),
+                        ..Default::default()
+                    },
+                }],
+                editor.doc.revision,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("31"), "{err}");
+        assert!(!editor.doc.node(top.unwrap()).unwrap().props.visible);
+    }
+
+    #[test]
+    fn meta_rejects_unimplemented_color_and_depth() {
+        let mut meta = DocumentMeta::srgb_u8(8, 8);
+        meta.color = ColorSpace::DisplayP3;
+        assert!(Document::new(meta).is_err());
+        let mut meta = DocumentMeta::srgb_u8(8, 8);
+        meta.depth = BitDepth::F16;
+        assert!(Document::new(meta).is_err());
+    }
+
+    #[test]
+    fn effect_rejects_unknown_fields() {
+        let err = validate_effect(&serde_json::json!({"type":"invert","extra":1}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extra"), "{err}");
     }
 
     proptest! {

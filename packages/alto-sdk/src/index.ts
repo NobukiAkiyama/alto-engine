@@ -1,5 +1,22 @@
 export type NodeId = string;
-export type BlendMode = "normal" | "multiply" | "screen";
+export type BlendMode =
+  | "normal"
+  | "multiply"
+  | "screen"
+  | "overlay"
+  | "darken"
+  | "lighten"
+  | "color_dodge"
+  | "color_burn"
+  | "hard_light"
+  | "soft_light"
+  | "difference"
+  | "exclusion"
+  | "hue"
+  | "saturation"
+  | "color"
+  | "luminosity"
+  | "add";
 export type Color = [number,number,number,number];
 export type PathCommand = {op:'move'|'line';x:number;y:number} | {op:'quad';cx:number;cy:number;x:number;y:number} | {op:'cubic';c1x:number;c1y:number;c2x:number;c2y:number;x:number;y:number} | {op:'close'};
 export interface PathData {commands:PathCommand[]}
@@ -914,7 +931,12 @@ export class AltoEngine extends Events {
     }
   }
   private async acquireLease() {
-    if (!navigator.locks) return;
+    if (!navigator.locks) {
+      throw new AltoError(
+        "CONFLICT",
+        "このブラウザは Web Locks が無く、同じ文書を別タブと同時に開けません",
+      );
+    }
     let release!: () => void;
     const hold = new Promise<void>((resolve) => {
       release = resolve;

@@ -1,6 +1,6 @@
 //! Worker and native renderer. The document remains CPU-owned; all textures are caches.
 use crate::{RContent, RenderBlend, RenderScene};
-use alto_core::{ContentHash, NodeId, Rect, TILE, TileKey};
+use alto_core::{ContentHash, MAX_ISOLATED_GROUPS, NodeId, Rect, TILE, TileKey};
 use alto_raster::{Dab, TileData, TileStore};
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -594,8 +594,10 @@ impl Renderer {
                 RContent::Group { children, isolated } => {
                     let isolate = *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
                     if isolate {
-                        if depth >= 31 {
-                            return Err("INVALID_ARGUMENT: group nesting exceeds 31".into());
+                        if depth >= MAX_ISOLATED_GROUPS {
+                            return Err(format!(
+                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            ));
                         }
                         commands.push(Command {
                             inv0: [0.0; 4],

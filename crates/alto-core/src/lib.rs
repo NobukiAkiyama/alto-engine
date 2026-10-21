@@ -2,6 +2,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, str::FromStr};
 
 pub const TILE: u32 = 256;
+/// Isolated groups the compositor can have open at once. The composite shader
+/// keeps 32 slots and rejects another push once this many isolates are already open.
+pub const MAX_ISOLATED_GROUPS: u32 = 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]

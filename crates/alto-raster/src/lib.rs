@@ -82,6 +82,8 @@ struct StoredTile {
 }
 struct CpuCache {
     tiles: HashMap<ContentHash, (Arc<TileData>, u64)>,
+    /// Clock -> hash, so eviction does not scan the whole map.
+    order: BTreeMap<u64, ContentHash>,
     bytes: usize,
     clock: u64,
 }
@@ -101,6 +103,7 @@ impl Default for MemoryTileStore {
             fault: RefCell::new(None),
             cache: RefCell::new(CpuCache {
                 tiles: HashMap::new(),
+                order: BTreeMap::new(),
                 bytes: 0,
                 clock: 0,
             }),
@@ -114,6 +117,7 @@ impl MemoryTileStore {
         self.cold.borrow_mut().retain(|h, _| keep.contains(h));
         let c = self.cache.get_mut();
         c.tiles.retain(|h, _| keep.contains(h));
+        c.order.retain(|_, h| keep.contains(h));
         c.bytes = c.tiles.values().map(|(d, _)| d.pixels.len()).sum();
     }
     /// Moves tiles outside `resident` into cold storage when they are still reachable.
@@ -154,6 +158,7 @@ impl MemoryTileStore {
             .retain(|h, _| reachable.contains(h) && !resident.contains(h));
         let c = self.cache.get_mut();
         c.tiles.retain(|h, _| resident.contains(h));
+        c.order.retain(|_, h| resident.contains(h));
         c.bytes = c.tiles.values().map(|(d, _)| d.pixels.len()).sum();
     }
     pub fn reachable(&self, hash: &ContentHash) -> bool {
@@ -214,15 +219,13 @@ impl MemoryTileStore {
         if !c.tiles.contains_key(&h) {
             c.bytes += data.pixels.len();
             c.tiles.insert(h, (data, clock));
+            c.order.insert(clock, h);
         }
         while c.bytes > self.budget && c.tiles.len() > 1 {
-            let old = *c
-                .tiles
-                .iter()
-                .filter(|(key, _)| **key != h)
-                .min_by_key(|(_, (_, t))| *t)
-                .map(|(key, _)| key)
-                .unwrap_or(&h);
+            let Some((&tick, &old)) = c.order.iter().find(|(_, key)| **key != h) else {
+                break;
+            };
+            c.order.remove(&tick);
             if let Some((d, _)) = c.tiles.remove(&old) {
                 c.bytes -= d.pixels.len();
             } else {
@@ -248,9 +251,15 @@ impl TileStore for MemoryTileStore {
             let mut c = self.cache.borrow_mut();
             c.clock += 1;
             let clock = c.clock;
-            if let Some((data, used)) = c.tiles.get_mut(h) {
+            let hit = c.tiles.get_mut(h).map(|(data, used)| {
+                let old = *used;
                 *used = clock;
-                return Some(data.clone());
+                (data.clone(), old)
+            });
+            if let Some((data, old)) = hit {
+                c.order.remove(&old);
+                c.order.insert(clock, *h);
+                return Some(data);
             }
         }
         if let Some(stored) = self.tiles.get(h) {

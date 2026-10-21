@@ -264,3 +264,77 @@ fn sync_rejects_author_and_branch_injection() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn open_keeps_a_document_whose_author_sync_refuses() {
+    let Some(root) = repo("author-open") else {
+        return;
+    };
+    let folder = one_commit(&root);
+    poison_author(&folder, "Alice <a@b.c>");
+    let opened = alto_git::Opened::open(folder.to_str().unwrap()).unwrap();
+    assert!(
+        opened.warnings.iter().any(|w| w.contains("author")),
+        "{:?}",
+        opened.warnings
+    );
+    assert!(
+        opened
+            .commits
+            .values()
+            .all(|c| c.author.as_deref() != Some("Alice <a@b.c>"))
+    );
+    let err = alto_git::sync(&folder, None).unwrap_err();
+    assert!(err.contains("author"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn sync_rejects_a_spaced_path_and_a_mismatched_object() {
+    let Some(root) = repo("path-object") else {
+        return;
+    };
+    let spaced = root.join("my art.altoproj");
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+    let layer = Node::raster("Ink");
+    let id = layer.id;
+    let parent = e.document(d).unwrap().root;
+    e.transact(
+        d,
+        "layer",
+        vec![Op::InsertNode {
+            node: layer,
+            parent,
+            index: 0,
+        }],
+        0,
+    )
+    .unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 9);
+    e.commit(d, "開始", 1_760_000_000_000, Some("mimi".into()), false)
+        .unwrap();
+    save(&e, d, &spaced);
+    let err = alto_git::sync(&spaced, None).unwrap_err();
+    assert!(err.contains("path"), "{err}");
+
+    let folder = root.join("art.altoproj");
+    save(&e, d, &folder);
+    let mut flipped = false;
+    for entry in std::fs::read_dir(folder.join("objects")).unwrap().flatten() {
+        if entry.path().is_dir() {
+            for file in std::fs::read_dir(entry.path()).unwrap().flatten() {
+                let mut bytes = std::fs::read(file.path()).unwrap();
+                if let Some(b) = bytes.last_mut() {
+                    *b ^= 0xff;
+                }
+                std::fs::write(file.path(), bytes).unwrap();
+                flipped = true;
+            }
+        }
+    }
+    assert!(flipped);
+    let err = alto_git::sync(&folder, None).unwrap_err();
+    assert!(err.contains("content does not match"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}

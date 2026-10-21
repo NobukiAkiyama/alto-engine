@@ -1,5 +1,5 @@
 export type NodeId = string;
-export type BlendMode = "normal" | "multiply" | "screen";
+export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color_dodge" | "color_burn" | "hard_light" | "soft_light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity" | "add";
 export type Color = [number, number, number, number];
 export type PathCommand = {
     op: 'move' | 'line';

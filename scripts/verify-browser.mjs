@@ -1,9 +1,26 @@
 // Drives the Playground's existing suites against the WASM just built into the tree.
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { platform } from "node:os";
 
-const chrome =
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+function chromeBin() {
+  if (process.env.CHROME) return process.env.CHROME;
+  const candidates =
+    platform() === "darwin"
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : platform() === "win32"
+        ? ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"]
+        : [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+          ];
+  return candidates.find((path) => existsSync(path)) || candidates[0];
+}
+
+const chrome = chromeBin();
 const port = 9333;
 const profile = "/tmp/alto-verify-chrome";
 const pageUrl = "http://127.0.0.1:8765/examples/browser-playground/";
@@ -15,7 +32,7 @@ const proc = spawn(
     `--user-data-dir=${profile}`,
     "--headless=new",
     "--enable-unsafe-webgpu",
-    "--use-angle=metal",
+    ...(platform() === "darwin" ? ["--use-angle=metal"] : []),
     "--no-first-run",
     "--disable-gpu-sandbox",
     "--window-size=1280,800",
