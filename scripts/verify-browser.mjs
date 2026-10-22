@@ -11,6 +11,18 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
+const benchmarkOnly = process.argv.includes("--benchmark-only");
+const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
+const browserWidth = Number(process.env.ALTO_BROWSER_WIDTH || 0);
+const browserHeight = Number(process.env.ALTO_BROWSER_HEIGHT || 0);
+const benchmarkView = process.env.ALTO_BROWSER_VIEW_MODE || "physical";
+if (benchmarkOnly && functionalOnly) throw Error("Choose --benchmark-only or --functional");
+if (benchmarkView !== "physical" && benchmarkView !== "css")
+  throw Error("ALTO_BROWSER_VIEW_MODE must be physical or css");
+if (browserDpr && (!Number.isFinite(browserDpr) || browserDpr < 0.5 || browserDpr > 3))
+  throw Error("ALTO_BROWSER_DPR must be between 0.5 and 3");
+if ((browserWidth && !browserHeight) || (!browserWidth && browserHeight))
+  throw Error("Set both ALTO_BROWSER_WIDTH and ALTO_BROWSER_HEIGHT");
 const reportDir = process.env.ALTO_BROWSER_REPORT_DIR || "verification";
 const externalReports = !!process.env.ALTO_BROWSER_REPORT_DIR;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -124,7 +136,10 @@ try {
   await mkdir(reportDir, { recursive: true });
   server = await startServer();
   const address = server.address();
-  const pageUrl = `http://127.0.0.1:${address.port}/examples/browser-playground/`;
+  const query = new URLSearchParams();
+  if (benchmarkView === "css") query.set("benchmarkView", "css");
+  if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
+  const pageUrl = `http://127.0.0.1:${address.port}/examples/browser-playground/${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
   let stderr = "";
@@ -155,6 +170,14 @@ try {
   };
   await send("Page.enable");
   await send("Runtime.enable");
+  if (browserDpr || browserWidth) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: browserWidth || 1280,
+      height: browserHeight || 800,
+      deviceScaleFactor: browserDpr || 1,
+      mobile: false,
+    });
+  }
   const navigation = await send("Page.navigate", { url: pageUrl });
   if (navigation.result?.errorText) throw Error(navigation.result.errorText);
   let ready = false;
@@ -181,6 +204,7 @@ try {
 
   for (const [name, body] of suites) {
     if (functionalOnly && name === "benchmark") continue;
+    if (benchmarkOnly && name !== "benchmark") continue;
     console.log("RUN", name);
     await evaluate("document.querySelector('#test-results').dataset.report = ''");
     let suiteError = null;

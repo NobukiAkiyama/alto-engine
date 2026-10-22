@@ -251,6 +251,8 @@ await doc.save(); // ブラウザの保存先選択またはダウンロード
 
 Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。`doc.view.node(id)` は凍結した読み取り専用の値です。独自保存先は `ArchiveStorageProvider` の `readArchive` / `writeArchive` を実装できます。型定義は `packages/alto-sdk/dist/index.d.ts` を参照してください。`unstable` APIは検証用です。
 
+`viewport.zoom` は物理ピクセル/文書ピクセルです。画面上の倍率を指定する場合は `engine.viewport.setCssZoom(1)`、読み取る場合は `engine.viewport.getCssZoom()` を使います。実効DPRは `engine.effectiveDpr`（最大2）で確認できます。Workerが停止した場合、`engine.lifecycleState` と `engine.engineFailure` を確認し、`engine.retryWorker()` で確定済みの作業記録から復旧できます。`recovering` 中は編集を停止し、`recovered` の通知後に `engine.document` を取得し直してください。保存障害は従来どおり別の `storageFailure` で通知されます。
+
 ## M5 SDK例
 
 ```ts
@@ -282,6 +284,8 @@ sh scripts/check.sh
 ```
 
 `ALTO_TARGET_DIR=/任意のビルド先 sh scripts/build.sh` でRustの成果物を外に置けます。ブラウザ検証は画面から実行でき、`ALTO_BROWSER_REPORT_DIR=/任意の出力先 node scripts/verify-browser.mjs --functional` でChrome・ローカルサーバーの起動からM4〜M8の機能検証まで自動実行できます。`--functional` を外すとB1〜B7の性能測定も実行します。CIは機能検証を必須とし、性能測定はハードウェア依存のため別に扱います。ネイティブRustテストだけではWebGPU・OPFSの実動作を検証できません。
+
+DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2` を指定し、`ALTO_BROWSER_VIEW_MODE=css` で同じ文書範囲を描画します。例: `ALTO_BROWSER_DPR=2 ALTO_BROWSER_WIDTH=1093 ALTO_BROWSER_HEIGHT=827 ALTO_BROWSER_VIEW_MODE=css ALTO_BROWSER_PROFILE=1 ALTO_BROWSER_REPORT_DIR=/tmp/alto-dpr2 node scripts/verify-browser.mjs --benchmark-only`。従来の同じ物理ズームでの比較には `ALTO_BROWSER_VIEW_MODE=physical` を使います。結果JSONにはキャンバスのCSS/物理寸法とB2時点の可視文書範囲を記録します。
 
 ## 現在の範囲
 

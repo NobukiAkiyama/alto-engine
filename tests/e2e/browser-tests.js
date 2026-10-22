@@ -319,6 +319,55 @@ export async function runTests(engine, benchmark, log) {
         "journal recovery pixels mismatch",
       );
     });
+    await test("simultaneous Worker restart requests share one recovery", async () => {
+      const hash = doc.view.snapshotHash;
+      let replacements = 0;
+      let nested;
+      const off = engine.on("canvasReplaced", () => { replacements++; });
+      const offRecovering = engine.on("recovering", () => { nested = engine.unstable.crash(); });
+      try {
+        const first = engine.unstable.crash();
+        const second = engine.unstable.crash();
+        assert(first === second, "restart requests did not share a promise");
+        assert(first === nested, "reentrant restart did not share a promise");
+        await first;
+      } finally { off(); offRecovering(); }
+      doc = engine.document;
+      assert(replacements === 1, "Worker canvas was replaced more than once");
+      assert(doc.view.snapshotHash === hash, "concurrent restart changed the document");
+    });
+    await test("uncloneable request does not leave a pending reply", async () => {
+      const before = engine.unstable.pendingRequests();
+      let rejected = false;
+      try { await engine.request("view", { invalid: () => true }); }
+      catch { rejected = true; }
+      assert(rejected, "uncloneable request was accepted");
+      assert(engine.unstable.pendingRequests() === before, "failed postMessage leaked a pending reply");
+      await engine.request("view");
+    });
+    await test("missing Worker script stops once and retries without corrupting the journal", async () => {
+      const hash = doc.view.snapshotHash;
+      engine.unstable.setWorkerURL("/missing-alto-engine-worker.js");
+      let code = null;
+      try { await engine.unstable.crash(); }
+      catch (error) { code = error.code; }
+      finally { engine.unstable.setWorkerURL(undefined); }
+      assert(code === "WORKER_UNAVAILABLE", "missing script was not classified: " + code);
+      assert(engine.lifecycleState === "failed" && engine.engineFailure, "Worker failure did not stop the engine");
+      assert(!engine.storageFailure, "Worker failure was mislabeled as saved-data corruption");
+      assert(engine.document === null, "stale document remained active");
+      assert(!document.querySelector("#engine-failure").hidden, "retry control was not shown");
+      let blocked = false;
+      try { await engine.request("save"); }
+      catch (error) { blocked = error.code === "WORKER_UNAVAILABLE"; }
+      assert(blocked, "editing request continued after Worker failure");
+      await event(engine, "recovered", () => document.querySelector("#retry-worker").click());
+      doc = engine.document;
+      assert(engine.lifecycleState === "running" && !engine.engineFailure, "retry did not restore the engine");
+      assert(doc?.view.snapshotHash === hash, "retry opened the wrong document");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "retry changed saved pixels");
+      assert(document.querySelector("#engine-failure").hidden, "failure controls remained open");
+    });
     await test("truncated journal tail is excluded during recovery", async () => {
       const hash = doc.view.snapshotHash;
       await engine.unstable.corruptJournalTail();
@@ -477,6 +526,7 @@ export async function runTests(engine, benchmark, log) {
     log("FAIL " + e);
     throw e;
   } finally {
+    const canvas = engine.canvas.getBoundingClientRect();
     document.querySelector("#test-results").dataset.report = JSON.stringify({
       date: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -485,6 +535,9 @@ export async function runTests(engine, benchmark, log) {
         width: innerWidth,
         height: innerHeight,
         dpr: devicePixelRatio,
+        canvasCss: [canvas.width, canvas.height],
+        canvasPixels: [engine.canvas.width, engine.canvas.height],
+        benchmarkView: new URLSearchParams(location.search).get("benchmarkView") || "physical",
       },
       results,
     });
@@ -492,6 +545,8 @@ export async function runTests(engine, benchmark, log) {
 }
 async function benches(engine, log, results) {
   const profiling = new URLSearchParams(location.search).has("profile");
+  const sameView = new URLSearchParams(location.search).get("benchmarkView") === "css";
+  const zoomScale = sameView ? engine.effectiveDpr : 1;
   if (profiling) await engine.request("setProfiling", { enabled: true });
   let doc = await engine.createDocument({ width: 3840, height: 2160 });
   const layers = [];
@@ -513,7 +568,7 @@ async function benches(engine, log, results) {
     );
     if (i % 5 === 4) log("Prepared " + (i + 1) + " layers");
   }
-  engine.viewport.set({ center: [1920, 1080], zoom: 1, rotation: 0 });
+  engine.viewport.set({ center: [1920, 1080], zoom: zoomScale, rotation: 0 });
   let frame = await settled(engine);
   const record = (id, value, target, pass) => {
     results.push({ id, value, target, pass });
@@ -541,12 +596,22 @@ async function benches(engine, log, results) {
     frames[Math.floor(frames.length * 0.95)] <= 16.7,
   );
   let start = performance.now();
-  engine.viewport.set({ center: [1920, 1080], zoom: 0.5 });
+  engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale });
   frame = await settled(engine);
   const zoom = performance.now() - start;
   if (profiling) log("B2 profile: " + JSON.stringify(frame.profile));
   record("B2 zoom ms", zoom, 250, zoom <= 250);
-  engine.viewport.set({ zoom: 1 });
+  if (profiling) results.at(-1).profile = frame.profile;
+  const canvasCss = engine.canvas.getBoundingClientRect();
+  results.at(-1).canvasCss = [canvasCss.width, canvasCss.height];
+  results.at(-1).canvasPixels = [engine.canvas.width, engine.canvas.height];
+  results.at(-1).physicalZoom = engine.viewport.zoom;
+  results.at(-1).cssZoom = engine.viewport.getCssZoom();
+  results.at(-1).visibleDocument = {
+    width: engine.canvas.width / engine.viewport.zoom,
+    height: engine.canvas.height / engine.viewport.zoom,
+  };
+  engine.viewport.set({ zoom: zoomScale });
   await settled(engine);
   const s = doc.tools.begin("brush", {
     layer: layers.at(-1),
