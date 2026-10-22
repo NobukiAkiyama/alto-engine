@@ -18,7 +18,7 @@ DPR 2の同じ見た目が今回速いのは、物理ズームが1.0で、DPR 1�
 - `viewport.zoom`の既存の物理ピクセル単位を維持し、`getCssZoom()` / `setCssZoom()`と`effectiveDpr`を追加。DPRが変わった際はCSS上の倍率を維持する。Playgroundのfit/パンも同じ係数を使用する。
 - PlaygroundにWorker障害表示と再試行ボタンを追加。再接続後に文書ハンドルを付け直す。404のWorkerを注入して停止・再試行・文書ハッシュと画素の一致を確認した。
 - SwiftShaderのブラウザ機能試験はM4相当20件、M5 8件、M6 10件、M7 9件、M8 6件、計53件が合格。[M4/復旧の生データ](worker-resilience-functional-2026-10-22.json)、[集計](worker-resilience-summary-2026-10-22.json)。二重再起動は1回のCanvas交換と同じPromiseに収束し、送信できないリクエストは保留キューに残らなかった。
-- Rustのworkspaceテスト、fmt、Clippy、配布WASMのバイト一致、SDKビルドを確認した。GitHub Actionsの実行結果はpush後に確認する。
+- Rustのworkspaceテスト、fmt、Clippy、配布WASMのバイト一致、SDKビルドを確認した。[GitHub Actionsの実行39724391776](https://github.com/NobukiAkiyama/alto-engine/actions/runs/39724391776)はコミット`4dae1b5`で成功し、macOS arm64のビルド照合とSwiftShaderのブラウザ機能試験も通過した。
 
 ## 続けて扱う範囲
 
