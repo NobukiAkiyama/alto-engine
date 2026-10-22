@@ -1,12 +1,12 @@
 {
-  "date": "2026-10-22",
+  "date": "2026-10-23",
   "version": "0.4.0",
   "milestone": "M7/M8",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4281045,
-  "gzipBytes": 1088734,
-  "wasmSha256": "9e73147b63eacbc17d5bbcf9ebc81b49a331db2834ca5bd8bacdf5a448376992",
+  "wasmBytes": 4308289,
+  "gzipBytes": 1096033,
+  "wasmSha256": "4ea8ffd898b49f539aa48f88585da94680d86a81e3b91eedd3d61ec22bb85e52",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
@@ -16,7 +16,7 @@
   "targets": [
     "Codex in-app browser on macOS"
   ],
-  "browserFunctionalTests": 17,
+  "browserFunctionalTests": 21,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,

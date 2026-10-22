@@ -33,7 +33,34 @@ let runtime,
   wantTick = false,
   pendingViewport = null,
   pendingResize = null,
-  viewVersion = 0;
+  viewVersion = 0,
+  frameSettled = false,
+  prefetchTimer = null,
+  prefetchDisabled = false,
+  lastMessageAt = performance.now();
+function schedulePrefetch() {
+  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure)
+    return;
+  prefetchTimer = setTimeout(() => {
+    prefetchTimer = null;
+    if (draining || queue.length || wantTick || pendingViewport || pendingResize || !frameSettled)
+      return;
+    try {
+      const didWork = runtime.prefetchStep();
+      // Continuous input gets one low-priority tile after each completed frame.
+      // With no input, continue one tile per task while yielding to messages.
+      if (didWork && performance.now() - lastMessageAt >= 100) schedulePrefetch();
+    } catch (error) {
+      if (String(error).includes("GPU_LOST")) {
+        wantTick = true;
+        void drain();
+      } else {
+        prefetchDisabled = true;
+        postMessage({ t: "diagnostic", value: { message: "prefetch disabled: " + error } });
+      }
+    }
+  }, 0);
+}
 // The journal normally runs in a nested Storage Worker. Some embedded browsers cannot
 // start workers from a worker; then the same journal code runs on this thread.
 const journal = createStorageSession({
@@ -375,6 +402,7 @@ async function execute(m) {
         if (frame.pending) await new Promise((r) => setTimeout(r, 0));
       } while (frame.pending);
       await runtime.gpuIdle();
+      frameSettled = true;
       if (profiles.length) {
         frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
           [key, profiles.reduce((sum, profile) => sum + profile[key], 0)]));
@@ -425,6 +453,7 @@ async function drain() {
         if (runtime)
           try {
             const value = { ...JSON.parse(runtime.tick(8)), viewVersion };
+            frameSettled = value.pending === 0;
             postMessage({ t: "frame", value });
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
@@ -441,10 +470,13 @@ async function drain() {
     }
   } finally {
     draining = false;
+    schedulePrefetch();
   }
 }
 
 self.onmessage = ({ data: m }) => {
+  lastMessageAt = performance.now();
+  frameSettled = false;
   if (m.t === "tick") {
     wantTick = true;
   } else if (m.t === "viewport") {

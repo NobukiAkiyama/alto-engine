@@ -134,6 +134,29 @@ export async function runTests(engine, benchmark, log) {
         "group undo/redo",
       );
     });
+    await test("low-zoom prefetch matches direct composite pixels", async () => {
+      for (const size of [512, 300]) {
+        doc = await engine.createDocument({ width: size, height: size });
+        const red = await image(engine, "rgba(255,0,0,.5)", size, size);
+        const blue = await image(engine, "rgba(0,0,255,.5)", size, size);
+        await doc.transact("two translucent layers", (tx) => {
+          tx.addRasterFromAsset(red);
+          tx.addRasterFromAsset(blue);
+        });
+        const direct = await engine.unstable.readTileLevel(1, 0, 0);
+        await engine.request("validateFrame"); // Clear the direct tile and rebuild the visible level.
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
+        let frame = await settled(engine);
+        for (let i = 0; i < 20 && frame.prefetch.ready < frame.prefetch.candidates; i++) {
+          await delay(10);
+          frame = await settled(engine);
+        }
+        assert(frame.prefetch.candidates === 1 && frame.prefetch.ready === 1,
+          `low-zoom parent was not prepared for ${size}px canvas`);
+        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+          `prefetched parent differs from direct composite for ${size}px canvas`);
+      }
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -584,7 +607,7 @@ async function benches(engine, log, results) {
     engine.viewport.set({
       center: [1920 + Math.sin(i * 0.07) * 100, 1080 + Math.cos(i * 0.07) * 60],
     });
-    await settled(engine);
+    frame = await settled(engine);
     frames.push(performance.now() - start);
     await new Promise(requestAnimationFrame);
   }
@@ -595,6 +618,7 @@ async function benches(engine, log, results) {
     16.7,
     frames[Math.floor(frames.length * 0.95)] <= 16.7,
   );
+  const prefetchBeforeZoom = frame.prefetch;
   let start = performance.now();
   engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale });
   frame = await settled(engine);
@@ -602,6 +626,7 @@ async function benches(engine, log, results) {
   if (profiling) log("B2 profile: " + JSON.stringify(frame.profile));
   record("B2 zoom ms", zoom, 250, zoom <= 250);
   if (profiling) results.at(-1).profile = frame.profile;
+  results.at(-1).prefetchBeforeZoom = prefetchBeforeZoom;
   const canvasCss = engine.canvas.getBoundingClientRect();
   results.at(-1).canvasCss = [canvasCss.width, canvasCss.height];
   results.at(-1).canvasPixels = [engine.canvas.width, engine.canvas.height];

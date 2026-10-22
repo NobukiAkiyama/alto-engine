@@ -1,6 +1,6 @@
 # 高DPI表示とWorker障害復旧の設計
 
-状態: D0の比較条件とR1のWorker状態・再試行を実装。D1のGPUキャッシュ先読みとD2の転送変更は、同じ文書範囲でのDPR 2測定がB2目標を満たしたため保留。**より広い文書範囲を表示するDPR 2・物理倍率0.5の未達については[低倍率合成タイル階層設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)でD1を具体化した（未実装）。**測定と検証の詳細は[追加実装結果](verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)。既存の[縮小表示・復旧高速化設計](PERFORMANCE-RECOVERY-DESIGN.md)と[実装結果](verification/PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を置き換えない。以下の先読み構造と網羅的な障害注入は今後の設計候補であり、実装済みの機能を示すものではない。
+状態: D0の比較条件とR1のWorker状態・再試行を実装。同じ文書範囲でのDPR 2測定がB2目標を満たしたためD2の転送変更は保留した。**より広い文書範囲を表示するDPR 2・物理倍率0.5の未達には、[低倍率合成タイル階層設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)の可視タイル保護と親タイル先読みを実装した。**[先読みの結果](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。分割ジョブと網羅的な障害注入は未実装。以前の[追加実装結果](verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)と[縮小表示・復旧高速化設計](PERFORMANCE-RECOVERY-DESIGN.md)は当時の判断を記録している。以下には当初の設計案も含まれ、実装内容との差は各結果報告で示す。
 
 ## 1. 判断の根拠と未確定な点
 

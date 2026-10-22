@@ -58,7 +58,7 @@ struct BrushUniform {
     origin: [f32; 4],
     info: [u32; 4],
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
     pub center: [f64; 2],
     pub zoom: f64,
@@ -91,6 +91,15 @@ pub struct RenderProfile {
     pub upload_bytes: u64,
     pub pyramid_hits: u32,
 }
+#[derive(Default, Clone, Copy, Debug)]
+pub struct PrefetchStatus {
+    pub candidates: u32,
+    pub ready: u32,
+    pub composed: u32,
+    pub total_ms: f64,
+    pub max_step_ms: f64,
+    pub upload_bytes: u64,
+}
 struct AtlasSlot {
     hash: ContentHash,
     used: u64,
@@ -98,6 +107,7 @@ struct AtlasSlot {
 struct Cached {
     slot: u32,
     used: u64,
+    prefetched: bool,
 }
 pub struct StrokeTile {
     pub output: wgpu::Texture,
@@ -128,8 +138,14 @@ pub struct Renderer {
     atlas_map: HashMap<ContentHash, u32>,
     cache: wgpu::Texture,
     cache_view: wgpu::TextureView,
+    scratch: wgpu::Texture,
     cache_map: BTreeMap<CacheKey, Cached>,
     cache_slots: Vec<Option<CacheKey>>,
+    visible_keys: HashSet<CacheKey>,
+    last_view: Option<Viewport>,
+    last_pending: u32,
+    prefetch_stats: PrefetchStatus,
+    prefetching: bool,
     composite: wgpu::ComputePipeline,
     downsample: wgpu::ComputePipeline,
     present: wgpu::RenderPipeline,
@@ -312,6 +328,22 @@ impl Renderer {
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
         );
+        let scratch = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pyramid input"),
+            size: wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
         let atlas_view = array_view(&atlas);
         let cache_view = array_view(&cache);
         let downsample = compute(
@@ -371,8 +403,14 @@ impl Renderer {
             atlas_map: HashMap::new(),
             cache,
             cache_view,
+            scratch,
             cache_map: BTreeMap::new(),
             cache_slots: vec![None; 256],
+            visible_keys: HashSet::new(),
+            last_view: None,
+            last_pending: 0,
+            prefetch_stats: PrefetchStatus::default(),
+            prefetching: false,
             composite,
             downsample,
             present,
@@ -430,6 +468,12 @@ impl Renderer {
         self.lost.load(Ordering::Relaxed)
     }
     pub fn invalidate(&mut self, bounds: Option<Rect>) {
+        self.last_view = None;
+        self.last_pending = 0;
+        self.visible_keys.clear();
+        if bounds.is_none() {
+            self.prefetch_stats = PrefetchStatus::default();
+        }
         let keys: Vec<_> = self
             .cache_map
             .keys()
@@ -558,6 +602,9 @@ impl Renderer {
             if self.profiling {
                 self.profile.write_ms += (self.profile_now)() - write_start;
                 self.profile.upload_bytes += (256 * 256 * 4) as u64;
+            }
+            if self.prefetching {
+                self.prefetch_stats.upload_bytes += (256 * 256 * 4) as u64;
             }
         }
         if self.profiling {
@@ -795,21 +842,46 @@ impl Renderer {
         )?;
         Ok((commands, entries))
     }
-    fn compose(&mut self, scene: &RenderScene, key: CacheKey, store: &dyn TileStore) -> Result<()> {
+    fn cache_slot(&mut self, key: CacheKey, prefetch: bool) -> Result<Option<usize>> {
         let slot = if let Some(i) = self.cache_slots.iter().position(Option::is_none) {
             i
         } else {
-            let old = *self
+            let Some((&old, _)) = self
                 .cache_map
                 .iter()
-                .min_by_key(|(_, v)| v.used)
-                .ok_or("INTERNAL: cache empty")?
-                .0;
+                .filter(|(cached, _)| {
+                    !self.visible_keys.contains(cached)
+                        && !(prefetch
+                            && key.0 > 0
+                            && cached.0 == key.0 - 1
+                            && cached.1.div_euclid(2) == key.1
+                            && cached.2.div_euclid(2) == key.2)
+                })
+                .min_by_key(|(_, entry)| (!entry.prefetched, entry.used))
+            else {
+                return if prefetch {
+                    Ok(None)
+                } else {
+                    Err("GPU budget: no evictable display tile".into())
+                };
+            };
             let c = self
                 .cache_map
                 .remove(&old)
                 .ok_or("INTERNAL: cache missing")?;
             c.slot as usize
+        };
+        Ok(Some(slot))
+    }
+    fn compose(
+        &mut self,
+        scene: &RenderScene,
+        key: CacheKey,
+        store: &dyn TileStore,
+        prefetch: bool,
+    ) -> Result<bool> {
+        let Some(slot) = self.cache_slot(key, prefetch)? else {
+            return Ok(false);
         };
         if scene.nodes.iter().any(|n| {
             n.features.vector_mask.is_some()
@@ -827,9 +899,10 @@ impl Renderer {
                 Cached {
                     slot: slot as u32,
                     used: self.frame,
+                    prefetched: prefetch,
                 },
             );
-            return Ok(());
+            return Ok(true);
         }
         self.m5 = None;
         self.vector = None;
@@ -843,9 +916,10 @@ impl Renderer {
                 Cached {
                     slot: slot as u32,
                     used: self.frame,
+                    prefetched: prefetch,
                 },
             );
-            return Ok(());
+            return Ok(true);
         }
         let mut encoder = self
             .device
@@ -935,9 +1009,127 @@ impl Renderer {
             Cached {
                 slot: slot as u32,
                 used: self.frame,
+                prefetched: prefetch,
             },
         );
-        Ok(())
+        Ok(true)
+    }
+    fn prefetch_keys(&self, scene: &RenderScene, view: Viewport) -> Vec<CacheKey> {
+        if self.stroke.is_some()
+            || scene.nodes.iter().any(|n| {
+                n.features.vector_mask.is_some()
+                    || n.features.clip_path.is_some()
+                    || matches!(n.content, RContent::Mesh(_) | RContent::Text(_))
+                    || n.features.mask.is_some()
+                    || n.features.clip
+                    || !n.features.effects.is_empty()
+                    || matches!(n.content, RContent::Adjustment(_))
+            })
+        {
+            return Vec::new();
+        }
+        let zoom = view.zoom.max(0.01);
+        let target_zoom = (zoom / 2.0).max(0.01);
+        let current_level = (1.0 / zoom).log2().floor().clamp(0.0, 12.0) as i32;
+        let level = (1.0 / target_zoom).log2().floor().clamp(0.0, 12.0) as i32;
+        if level != current_level + 1 {
+            return Vec::new();
+        }
+        let c = view.rotation.cos();
+        let s = view.rotation.sin();
+        let corners = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]].map(|p| {
+            let x = p[0] * self.config.width as f64 / target_zoom;
+            let y = p[1] * self.config.height as f64 / target_zoom;
+            [
+                view.center[0] + c * x + s * y,
+                view.center[1] - s * x + c * y,
+            ]
+        });
+        let x0 = corners
+            .iter()
+            .map(|p| p[0])
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0);
+        let y0 = corners
+            .iter()
+            .map(|p| p[1])
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0);
+        let x1 = corners
+            .iter()
+            .map(|p| p[0])
+            .fold(f64::NEG_INFINITY, f64::max)
+            .min(scene.canvas.x1 as f64);
+        let y1 = corners
+            .iter()
+            .map(|p| p[1])
+            .fold(f64::NEG_INFINITY, f64::max)
+            .min(scene.canvas.y1 as f64);
+        if x1 <= x0 || y1 <= y0 {
+            return Vec::new();
+        }
+        let span = 256.0 * 2f64.powi(level);
+        let mut keys = Vec::new();
+        for y in (y0 / span).floor() as i32..(y1 / span).ceil() as i32 {
+            for x in (x0 / span).floor() as i32..(x1 / span).ceil() as i32 {
+                keys.push((level, x, y));
+                if keys.len() > self.cache_slots.len() {
+                    return Vec::new();
+                }
+            }
+        }
+        keys.sort_by(|a, b| {
+            let distance = |key: &CacheKey| {
+                let dx = (key.1 as f64 + 0.5) * span - view.center[0];
+                let dy = (key.2 as f64 + 0.5) * span - view.center[1];
+                dx * dx + dy * dy
+            };
+            distance(a).total_cmp(&distance(b)).then_with(|| a.cmp(b))
+        });
+        keys
+    }
+    pub fn prefetch_status(&self, scene: &RenderScene, view: Viewport) -> PrefetchStatus {
+        let keys = self.prefetch_keys(scene, view);
+        PrefetchStatus {
+            candidates: keys.len() as u32,
+            ready: keys
+                .iter()
+                .filter(|key| self.cache_map.contains_key(key))
+                .count() as u32,
+            ..self.prefetch_stats
+        }
+    }
+    /// Compose at most one complete display tile after the visible frame is finished.
+    /// The Worker yields to its message queue between calls.
+    pub fn prefetch_step(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        view: Viewport,
+        now: fn() -> f64,
+    ) -> Result<bool> {
+        if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
+            return Ok(false);
+        }
+        let Some(key) = self
+            .prefetch_keys(scene, view)
+            .into_iter()
+            .find(|key| !self.cache_map.contains_key(key))
+        else {
+            return Ok(false);
+        };
+        self.profile_now = now;
+        self.prefetching = true;
+        let start = now();
+        let result = self.compose(scene, key, store, true);
+        let elapsed = now() - start;
+        self.prefetching = false;
+        if result.as_ref().is_ok_and(|composed| *composed) {
+            self.prefetch_stats.composed += 1;
+            self.prefetch_stats.total_ms += elapsed;
+            self.prefetch_stats.max_step_ms = self.prefetch_stats.max_step_ms.max(elapsed);
+        }
+        result
     }
     pub fn render(
         &mut self,
@@ -1002,6 +1194,13 @@ impl Renderer {
         if required.len() > 256 {
             return Err("GPU budget: viewport needs more than 256 display tiles".into());
         }
+        self.visible_keys = required.iter().copied().collect();
+        for key in &required {
+            if let Some(entry) = self.cache_map.get_mut(key) {
+                entry.used = self.frame;
+                entry.prefetched = false;
+            }
+        }
         let mut composed = 0;
         for key in &required {
             if !self.cache_map.contains_key(key) {
@@ -1009,7 +1208,7 @@ impl Renderer {
                     break;
                 }
                 let compose_start = if self.profiling { now() } else { 0.0 };
-                self.compose(scene, *key, store)?;
+                self.compose(scene, *key, store, false)?;
                 if self.profiling {
                     self.profile.compose_ms += now() - compose_start;
                 }
@@ -1020,6 +1219,8 @@ impl Renderer {
             .iter()
             .filter(|k| !self.cache_map.contains_key(k))
             .count() as u32;
+        self.last_view = Some(view);
+        self.last_pending = pending;
         let mut visible = Vec::new();
         if pending > 0 {
             for (&key, entry) in &self.cache_map {
@@ -1031,7 +1232,6 @@ impl Renderer {
         }
         for key in &required {
             if let Some(entry) = self.cache_map.get_mut(key) {
-                entry.used = self.frame;
                 visible.push((*key, entry.slot));
             }
         }
@@ -1141,6 +1341,7 @@ impl Renderer {
             gpu_bytes: self.vector_bytes()
                 + self.m5.as_ref().map_or(0, |m| m.bytes())
                 + (self.atlas_slots.len() as u64 + 256) * 262144
+                + 1048576 // One reusable 512x512 RGBA downsample scratch texture.
                 + self.stroke.as_ref().map_or(0, |s| {
                     s.tiles
                         .values()
@@ -1220,7 +1421,8 @@ impl Renderer {
         let tile_bytes = 786432 + if selection.is_some() { 262144 } else { 0 };
         let frame = self.m5.as_ref().map_or(0, |m| m.bytes())
             + (stroke.tiles.len() + new_tiles) as u64 * tile_bytes;
-        let fixed = (self.atlas_slots.len() as u64 + 256) * 262144 + self.vector_fixed_bytes();
+        let fixed =
+            (self.atlas_slots.len() as u64 + 256) * 262144 + 1048576 + self.vector_fixed_bytes();
         let Some(allowance) = crate::cache_allowance(self.budget_bytes, frame, fixed) else {
             self.stroke = Some(stroke);
             return Err("INVALID_ARGUMENT: stroke exceeds GPU memory budget".into());
@@ -1496,7 +1698,7 @@ impl Renderer {
         key: CacheKey,
     ) -> Result<Vec<u8>> {
         if !self.cache_map.contains_key(&key) {
-            self.compose(scene, key, store)?;
+            self.compose(scene, key, store, false)?;
         }
         let slot = self.cache_map.get(&key).ok_or("INTERNAL: cache tile")?.slot;
         let b = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1567,21 +1769,25 @@ impl Renderer {
                 children.push((x, y, c.slot));
             }
         }
-        let scratch = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pyramid input"),
-            size: wgpu::Extent3d {
-                width: 512,
-                height: 512,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
         let mut e = self.device.create_command_encoder(&Default::default());
+        // WebGPU has no command-encoder clear. An empty pass clears reused texels so a
+        // missing edge child stays transparent. clear_texture aborts on this backend.
+        {
+            let clear = self.scratch.create_view(&Default::default());
+            let _pass = e.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pyramid clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &clear,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
         for (x, y, from) in children {
             e.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -1595,7 +1801,7 @@ impl Renderer {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture: &scratch,
+                    texture: &self.scratch,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
                         x: x as u32 * 256,
@@ -1611,7 +1817,7 @@ impl Renderer {
                 },
             );
         }
-        let input = scratch.create_view(&Default::default());
+        let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
             &self.device,
             "pyramid slot",
