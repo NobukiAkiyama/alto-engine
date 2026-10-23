@@ -4,6 +4,8 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 [実装状況](MILESTONES.md) / [最終検証結果](verification/RESULTS.md) / [M7/M8サンプル文書](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](verification/m8-git-transcript.txt)
 
+[コールド表示と低倍率描画の改善設計](COLD-RENDERING-DESIGN.md)は設計のみで、実装・性能検証はこれからです。
+
 ## まず起動する
 
 ビルド済みWASMとSDKを同梱しています。Python 3があれば、RustやNode.jsを導入せずに試せます。
