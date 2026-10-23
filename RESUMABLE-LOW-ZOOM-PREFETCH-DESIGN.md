@@ -1,6 +1,6 @@
 # 低倍率親タイル先読みを中断可能にする設計
 
-状態: **設計のみ。未実装。** 2026-10-23 の[先読み実装と測定](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を出発点とする。[低倍率表示の全体設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)のP2を、現行コードに適用できるジョブ境界まで具体化する。保存形式、文書内容、公開SDKの描画結果は変更しない。
+状態: **初期実装・Metal 5回測定済み。** [実装結果と残る境界](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。以下は実装時の設計目標であり、未達項目は結果文書に明記した。2026-10-23 の[同期先読み実装と測定](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を出発点とする。[低倍率表示の全体設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)のP2を、現行コードに適用できるジョブ境界まで具体化する。保存形式、文書内容、公開SDKの描画結果は変更しない。
 
 ## 1. 目的と判断材料
 

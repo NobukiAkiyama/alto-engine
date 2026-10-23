@@ -37,19 +37,27 @@ let runtime,
   frameSettled = false,
   prefetchTimer = null,
   prefetchDisabled = false,
+  prefetchSpentMs = 0,
   lastMessageAt = performance.now();
 function schedulePrefetch() {
   if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure)
     return;
+  const quietFor = performance.now() - lastMessageAt;
+  const delay = prefetchSpentMs >= 4 ? Math.max(0, 100 - quietFor) : 0;
   prefetchTimer = setTimeout(() => {
     prefetchTimer = null;
     if (draining || queue.length || wantTick || pendingViewport || pendingResize || !frameSettled)
       return;
+    if (prefetchSpentMs >= 4 && performance.now() - lastMessageAt < 100) {
+      schedulePrefetch();
+      return;
+    }
     try {
-      const didWork = runtime.prefetchStep();
-      // Continuous input gets one low-priority tile after each completed frame.
-      // With no input, continue one tile per task while yielding to messages.
-      if (didWork && performance.now() - lastMessageAt >= 100) schedulePrefetch();
+      const started = performance.now();
+      const status = runtime.prefetchStep();
+      prefetchSpentMs += performance.now() - started;
+      // Each call returns to the event loop so an incoming edit or visible frame wins.
+      if (status === "progress" || status === "ready") schedulePrefetch();
     } catch (error) {
       if (String(error).includes("GPU_LOST")) {
         wantTick = true;
@@ -59,7 +67,7 @@ function schedulePrefetch() {
         postMessage({ t: "diagnostic", value: { message: "prefetch disabled: " + error } });
       }
     }
-  }, 0);
+  }, delay);
 }
 // The journal normally runs in a nested Storage Worker. Some embedded browsers cannot
 // start workers from a worker; then the same journal code runs on this thread.
@@ -403,6 +411,7 @@ async function execute(m) {
       } while (frame.pending);
       await runtime.gpuIdle();
       frameSettled = true;
+      prefetchSpentMs = 0;
       if (profiles.length) {
         frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
           [key, profiles.reduce((sum, profile) => sum + profile[key], 0)]));
@@ -454,6 +463,7 @@ async function drain() {
           try {
             const value = { ...JSON.parse(runtime.tick(8)), viewVersion };
             frameSettled = value.pending === 0;
+            if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
@@ -477,6 +487,10 @@ async function drain() {
 self.onmessage = ({ data: m }) => {
   lastMessageAt = performance.now();
   frameSettled = false;
+  if (prefetchTimer !== null) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = null;
+  }
   if (m.t === "tick") {
     wantTick = true;
   } else if (m.t === "viewport") {

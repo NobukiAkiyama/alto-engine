@@ -99,6 +99,56 @@ pub struct PrefetchStatus {
     pub total_ms: f64,
     pub max_step_ms: f64,
     pub upload_bytes: u64,
+    pub max_plan_ms: f64,
+    pub max_input_ms: f64,
+    pub max_get_ms: f64,
+    pub max_convert_ms: f64,
+    pub max_write_ms: f64,
+    pub max_submit_ms: f64,
+    pub cancelled: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefetchStep {
+    Idle,
+    Progress,
+    Ready,
+    Blocked,
+}
+struct PlannedSource {
+    xy: [i32; 2],
+    hash: ContentHash,
+}
+enum PlanTask {
+    Node {
+        idx: usize,
+        world: [f64; 6],
+        depth: u32,
+    },
+    Close {
+        opacity: f32,
+        blend: RenderBlend,
+    },
+    Tiles {
+        idx: usize,
+        next: usize,
+        end: usize,
+        inv: [f64; 6],
+        min: [f64; 2],
+        max: [f64; 2],
+        start: u32,
+    },
+}
+struct PrefetchJob {
+    key: CacheKey,
+    region: [f64; 4],
+    stack: Vec<PlanTask>,
+    commands: Vec<Command>,
+    sources: Vec<PlannedSource>,
+    unique: Vec<ContentHash>,
+    missing: HashSet<ContentHash>,
+    cursor: usize,
+    planned: bool,
+    retries: u32,
 }
 struct AtlasSlot {
     hash: ContentHash,
@@ -146,6 +196,7 @@ pub struct Renderer {
     last_pending: u32,
     prefetch_stats: PrefetchStatus,
     prefetching: bool,
+    prefetch_job: Option<PrefetchJob>,
     composite: wgpu::ComputePipeline,
     downsample: wgpu::ComputePipeline,
     present: wgpu::RenderPipeline,
@@ -262,6 +313,233 @@ pub fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
         m[0] * p[0] + m[2] * p[1] + m[4],
         m[1] * p[0] + m[3] * p[1] + m[5],
     ]
+}
+impl PrefetchJob {
+    fn new(scene: &RenderScene, key: CacheKey) -> Self {
+        let s = 2f64.powi(key.0);
+        Self {
+            key,
+            region: [
+                (key.1 as f64 * 256.0 * s).max(scene.canvas.x0 as f64),
+                (key.2 as f64 * 256.0 * s).max(scene.canvas.y0 as f64),
+                ((key.1 + 1) as f64 * 256.0 * s).min(scene.canvas.x1 as f64),
+                ((key.2 + 1) as f64 * 256.0 * s).min(scene.canvas.y1 as f64),
+            ],
+            stack: vec![PlanTask::Node {
+                idx: scene.root,
+                world: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                depth: 0,
+            }],
+            commands: Vec::new(),
+            sources: Vec::new(),
+            unique: Vec::new(),
+            missing: HashSet::new(),
+            cursor: 0,
+            planned: false,
+            retries: 0,
+        }
+    }
+    // One scene node or one source tile per call. No store reads or GPU writes occur here.
+    fn plan_one(&mut self, scene: &RenderScene, store: &dyn TileStore) -> Result<()> {
+        let Some(task) = self.stack.pop() else {
+            self.planned = true;
+            let mut seen = HashSet::new();
+            self.unique = self
+                .sources
+                .iter()
+                .filter_map(|s| {
+                    if seen.insert(s.hash) {
+                        Some(s.hash)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return Ok(());
+        };
+        match task {
+            PlanTask::Close { opacity, blend } => self.commands.push(Command {
+                inv0: [0.0; 4],
+                inv1: [0.0, 0.0, opacity, mode(blend)],
+                info: [2, 0, 0, 0],
+            }),
+            PlanTask::Node { idx, world, depth } => {
+                let n = scene.nodes.get(idx).ok_or("INTERNAL: scene node")?;
+                if !n.visible || n.opacity <= 0.0 {
+                    return Ok(());
+                }
+                let world = multiply(world, n.transform);
+                match &n.content {
+                    RContent::Group { children, isolated } => {
+                        let isolate =
+                            *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
+                        if isolate && depth >= MAX_ISOLATED_GROUPS {
+                            return Err(format!(
+                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            ));
+                        }
+                        if isolate {
+                            self.commands.push(Command {
+                                inv0: [0.0; 4],
+                                inv1: [0.0; 4],
+                                info: [1, 0, 0, 0],
+                            });
+                            self.stack.push(PlanTask::Close {
+                                opacity: n.opacity,
+                                blend: n.blend,
+                            });
+                        }
+                        let mut start = 0;
+                        for (i, &child) in children.iter().enumerate().rev() {
+                            let cn = &scene.nodes[child];
+                            if !cn.visible || cn.opacity != 1.0 || cn.blend != RenderBlend::Normal {
+                                continue;
+                            }
+                            if let RContent::Tiles(ts) = &cn.content {
+                                let Some(inv) = inverse(multiply(world, cn.transform)) else {
+                                    continue;
+                                };
+                                let corners = [
+                                    [self.region[0], self.region[1]],
+                                    [self.region[2], self.region[1]],
+                                    [self.region[0], self.region[3]],
+                                    [self.region[2], self.region[3]],
+                                ]
+                                .map(|p| point(inv, p));
+                                let x0 =
+                                    (corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min)
+                                        / 256.0)
+                                        .floor() as i32;
+                                let y0 =
+                                    (corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)
+                                        / 256.0)
+                                        .floor() as i32;
+                                let x1 = (corners
+                                    .iter()
+                                    .map(|p| p[0])
+                                    .fold(f64::NEG_INFINITY, f64::max)
+                                    / 256.0)
+                                    .ceil() as i32;
+                                let y1 = (corners
+                                    .iter()
+                                    .map(|p| p[1])
+                                    .fold(f64::NEG_INFINITY, f64::max)
+                                    / 256.0)
+                                    .ceil() as i32;
+                                let mut opaque = x1 > x0
+                                    && y1 > y0
+                                    && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
+                                for x in x0..x1 {
+                                    for y in y0..y1 {
+                                        let k = TileKey { tx: x, ty: y };
+                                        opaque &= ts
+                                            .binary_search_by_key(&k, |t| t.key)
+                                            .ok()
+                                            .is_some_and(|j| store.is_opaque(&ts[j].hash));
+                                    }
+                                }
+                                if opaque {
+                                    start = i;
+                                    break;
+                                }
+                            }
+                        }
+                        for &child in children[start..].iter().rev() {
+                            self.stack.push(PlanTask::Node {
+                                idx: child,
+                                world,
+                                depth: depth + u32::from(isolate),
+                            });
+                        }
+                    }
+                    RContent::Tiles(tiles) => {
+                        let Some(inv) = inverse(world) else {
+                            return Ok(());
+                        };
+                        let corners = [
+                            [self.region[0], self.region[1]],
+                            [self.region[2], self.region[1]],
+                            [self.region[0], self.region[3]],
+                            [self.region[2], self.region[3]],
+                        ]
+                        .map(|p| point(inv, p));
+                        let min = [
+                            corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+                            corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
+                        ];
+                        let max = [
+                            corners
+                                .iter()
+                                .map(|p| p[0])
+                                .fold(f64::NEG_INFINITY, f64::max),
+                            corners
+                                .iter()
+                                .map(|p| p[1])
+                                .fold(f64::NEG_INFINITY, f64::max),
+                        ];
+                        let x0 = (min[0] / 256.0).floor() as i32;
+                        let x1 = (max[0] / 256.0).ceil() as i32;
+                        let next = tiles.partition_point(|t| t.key.tx < x0);
+                        let end = tiles.partition_point(|t| t.key.tx < x1);
+                        self.stack.push(PlanTask::Tiles {
+                            idx,
+                            next,
+                            end,
+                            inv,
+                            min,
+                            max,
+                            start: self.sources.len() as u32,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            PlanTask::Tiles {
+                idx,
+                next,
+                end,
+                inv,
+                min,
+                max,
+                start,
+            } => {
+                let n = &scene.nodes[idx];
+                let RContent::Tiles(tiles) = &n.content else {
+                    return Err("INTERNAL: tile plan changed".into());
+                };
+                if next == end {
+                    self.commands.push(Command {
+                        inv0: [inv[0] as f32, inv[1] as f32, inv[2] as f32, inv[3] as f32],
+                        inv1: [inv[4] as f32, inv[5] as f32, n.opacity, mode(n.blend)],
+                        info: [0, start, self.sources.len() as u32 - start, 0],
+                    });
+                } else {
+                    let t = &tiles[next];
+                    let k = t.key;
+                    if (k.tx as f64 * 256.0) < max[0]
+                        && ((k.tx + 1) as f64 * 256.0) > min[0]
+                        && (k.ty as f64 * 256.0) < max[1]
+                        && ((k.ty + 1) as f64 * 256.0) > min[1]
+                    {
+                        self.sources.push(PlannedSource {
+                            xy: [k.tx, k.ty],
+                            hash: t.hash,
+                        });
+                    }
+                    self.stack.push(PlanTask::Tiles {
+                        idx,
+                        next: next + 1,
+                        end,
+                        inv,
+                        min,
+                        max,
+                        start,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 impl Renderer {
     pub async fn new(
@@ -411,6 +689,7 @@ impl Renderer {
             last_pending: 0,
             prefetch_stats: PrefetchStatus::default(),
             prefetching: false,
+            prefetch_job: None,
             composite,
             downsample,
             present,
@@ -431,6 +710,7 @@ impl Renderer {
     }
     pub fn resize(&mut self, w: u32, h: u32) {
         if self.config.width != w.max(1) || self.config.height != h.max(1) {
+            self.cancel_prefetch();
             self.config.width = w.max(1);
             self.config.height = h.max(1);
             self.surface.configure(&self.device, &self.config);
@@ -468,6 +748,7 @@ impl Renderer {
         self.lost.load(Ordering::Relaxed)
     }
     pub fn invalidate(&mut self, bounds: Option<Rect>) {
+        self.cancel_prefetch();
         self.last_view = None;
         self.last_pending = 0;
         self.visible_keys.clear();
@@ -495,6 +776,11 @@ impl Renderer {
             }
         }
     }
+    fn cancel_prefetch(&mut self) {
+        if self.prefetch_job.take().is_some() {
+            self.prefetch_stats.cancelled += 1;
+        }
+    }
     fn upload(
         &mut self,
         hash: ContentHash,
@@ -514,7 +800,7 @@ impl Renderer {
             pinned.insert(slot);
             return Ok(slot);
         }
-        let get_start = if self.profiling {
+        let get_start = if self.profiling || self.prefetching {
             (self.profile_now)()
         } else {
             0.0
@@ -524,8 +810,14 @@ impl Renderer {
         } else {
             store.get_checked(&hash)?
         };
-        if self.profiling {
-            self.profile.get_ms += (self.profile_now)() - get_start;
+        if self.profiling || self.prefetching {
+            let elapsed = (self.profile_now)() - get_start;
+            if self.profiling {
+                self.profile.get_ms += elapsed;
+            }
+            if self.prefetching {
+                self.prefetch_stats.max_get_ms = self.prefetch_stats.max_get_ms.max(elapsed);
+            }
         }
         if pixels.is_none() && !previews.contains_key(&hash) {
             return Ok(u32::MAX);
@@ -571,7 +863,19 @@ impl Renderer {
                 },
             );
         } else if let Some(tile) = pixels {
-            let write_start = if self.profiling {
+            let convert_start = if self.prefetching {
+                (self.profile_now)()
+            } else {
+                0.0
+            };
+            let rgba = rgba_pixels(&tile);
+            if self.prefetching {
+                self.prefetch_stats.max_convert_ms = self
+                    .prefetch_stats
+                    .max_convert_ms
+                    .max((self.profile_now)() - convert_start);
+            }
+            let write_start = if self.profiling || self.prefetching {
                 (self.profile_now)()
             } else {
                 0.0
@@ -587,7 +891,7 @@ impl Renderer {
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &rgba_pixels(&tile),
+                &rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(1024),
@@ -599,8 +903,17 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
+            if self.profiling || self.prefetching {
+                let elapsed = (self.profile_now)() - write_start;
+                if self.profiling {
+                    self.profile.write_ms += elapsed;
+                }
+                if self.prefetching {
+                    self.prefetch_stats.max_write_ms =
+                        self.prefetch_stats.max_write_ms.max(elapsed);
+                }
+            }
             if self.profiling {
-                self.profile.write_ms += (self.profile_now)() - write_start;
                 self.profile.upload_bytes += (256 * 256 * 4) as u64;
             }
             if self.prefetching {
@@ -935,6 +1248,19 @@ impl Renderer {
         if self.profiling {
             self.profile.commands_ms += (self.profile_now)() - commands_start;
         }
+        self.submit_composite(scene, key, slot, commands, entries, encoder, prefetch)
+    }
+    #[allow(clippy::too_many_arguments)] // Submission shares the visible and prefetch paths without copying GPU setup.
+    fn submit_composite(
+        &mut self,
+        scene: &RenderScene,
+        key: CacheKey,
+        slot: usize,
+        commands: Vec<Command>,
+        entries: Vec<Entry>,
+        mut encoder: wgpu::CommandEncoder,
+        prefetch: bool,
+    ) -> Result<bool> {
         let cb = buffer(
             &self.device,
             "scene commands",
@@ -1099,37 +1425,156 @@ impl Renderer {
             ..self.prefetch_stats
         }
     }
-    /// Compose at most one complete display tile after the visible frame is finished.
-    /// The Worker yields to its message queue between calls.
+    /// Advances one parent job for a bounded CPU slice. The Worker yields between calls.
     pub fn prefetch_step(
         &mut self,
         scene: &RenderScene,
         store: &dyn TileStore,
         view: Viewport,
         now: fn() -> f64,
-    ) -> Result<bool> {
+    ) -> Result<PrefetchStep> {
         if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
-            return Ok(false);
+            return Ok(PrefetchStep::Idle);
         }
-        let Some(key) = self
-            .prefetch_keys(scene, view)
-            .into_iter()
-            .find(|key| !self.cache_map.contains_key(key))
-        else {
-            return Ok(false);
-        };
+        let keys = self.prefetch_keys(scene, view);
+        if self
+            .prefetch_job
+            .as_ref()
+            .is_some_and(|j| !keys.contains(&j.key) || self.cache_map.contains_key(&j.key))
+        {
+            self.cancel_prefetch();
+        }
+        if self.prefetch_job.is_none() {
+            let Some(key) = keys
+                .into_iter()
+                .find(|key| !self.cache_map.contains_key(key))
+            else {
+                return Ok(PrefetchStep::Idle);
+            };
+            self.prefetch_job = Some(PrefetchJob::new(scene, key));
+        }
+        let mut job = self.prefetch_job.take().ok_or("INTERNAL: prefetch job")?;
         self.profile_now = now;
         self.prefetching = true;
         let start = now();
-        let result = self.compose(scene, key, store, true);
+        let result = self.advance_prefetch(&mut job, scene, store, now);
         let elapsed = now() - start;
         self.prefetching = false;
-        if result.as_ref().is_ok_and(|composed| *composed) {
-            self.prefetch_stats.composed += 1;
+        if result.is_ok() {
+            if result.as_ref().is_ok_and(|s| *s == PrefetchStep::Ready) {
+                self.prefetch_stats.composed += 1;
+            } else {
+                self.prefetch_job = Some(job);
+            }
             self.prefetch_stats.total_ms += elapsed;
             self.prefetch_stats.max_step_ms = self.prefetch_stats.max_step_ms.max(elapsed);
         }
         result
+    }
+    fn advance_prefetch(
+        &mut self,
+        job: &mut PrefetchJob,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        now: fn() -> f64,
+    ) -> Result<PrefetchStep> {
+        if !job.planned {
+            let start = now();
+            loop {
+                job.plan_one(scene, store)?;
+                if job.planned || now() - start >= 1.8 {
+                    break;
+                }
+            }
+            self.prefetch_stats.max_plan_ms = self.prefetch_stats.max_plan_ms.max(now() - start);
+            if job.unique.len() > self.atlas_slots.len() {
+                return Ok(PrefetchStep::Blocked);
+            }
+            return Ok(PrefetchStep::Progress);
+        }
+        if job.unique.len() > self.atlas_slots.len() {
+            return Ok(PrefetchStep::Blocked);
+        }
+        if job.cursor < job.unique.len() {
+            let start = now();
+            let mut uploaded = false;
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("prefetch upload"),
+                });
+            while job.cursor < job.unique.len() {
+                let hash = job.unique[job.cursor];
+                if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
+                    let pinned: HashSet<u32> = job.unique[..job.cursor]
+                        .iter()
+                        .filter_map(|h| self.atlas_map.get(h).copied())
+                        .collect();
+                    let mut pinned = pinned;
+                    let input_start = now();
+                    let slot =
+                        self.upload(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
+                    self.prefetch_stats.max_input_ms =
+                        self.prefetch_stats.max_input_ms.max(now() - input_start);
+                    if slot == u32::MAX {
+                        job.missing.insert(hash);
+                    } else {
+                        uploaded = true;
+                    }
+                }
+                job.cursor += 1;
+                if now() - start >= 1.8 {
+                    break;
+                }
+            }
+            if uploaded {
+                self.queue.submit(Some(encoder.finish()));
+            }
+            return Ok(PrefetchStep::Progress);
+        }
+        if let Some(i) = job
+            .unique
+            .iter()
+            .position(|h| !job.missing.contains(h) && !self.atlas_map.contains_key(h))
+        {
+            job.cursor = i;
+            job.retries += 1;
+            return Ok(if job.retries > 8 {
+                PrefetchStep::Blocked
+            } else {
+                PrefetchStep::Progress
+            });
+        }
+        let Some(slot) = self.cache_slot(job.key, true)? else {
+            return Ok(PrefetchStep::Blocked);
+        };
+        let entries = job
+            .sources
+            .iter()
+            .map(|s| Entry {
+                xy: s.xy,
+                slot: self.atlas_map.get(&s.hash).copied().unwrap_or(u32::MAX),
+                pad: 0,
+            })
+            .collect();
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("prefetch compose"),
+            });
+        let submit_start = now();
+        self.submit_composite(
+            scene,
+            job.key,
+            slot,
+            std::mem::take(&mut job.commands),
+            entries,
+            encoder,
+            true,
+        )?;
+        self.prefetch_stats.max_submit_ms =
+            self.prefetch_stats.max_submit_ms.max(now() - submit_start);
+        Ok(PrefetchStep::Ready)
     }
     pub fn render(
         &mut self,

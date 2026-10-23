@@ -244,13 +244,21 @@ impl Runtime {
             })
         });
         let prefetch = self.renderer.prefetch_status(&self.scene, self.viewport);
-        Ok(json!({"composed":r.composed,"pending":r.pending,"gpuBytes":r.gpu_bytes,"cpuMs":clock()-start,"wasmBytes":wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),"adapter":self.renderer.adapter_name,"profile":profile,"prefetch":{"candidates":prefetch.candidates,"ready":prefetch.ready,"composed":prefetch.composed,"totalMs":prefetch.total_ms,"maxStepMs":prefetch.max_step_ms,"uploadBytes":prefetch.upload_bytes}}).to_string())
+        Ok(json!({"composed":r.composed,"pending":r.pending,"gpuBytes":r.gpu_bytes,"cpuMs":clock()-start,"wasmBytes":wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),"adapter":self.renderer.adapter_name,"profile":profile,"prefetch":{"candidates":prefetch.candidates,"ready":prefetch.ready,"composed":prefetch.composed,"totalMs":prefetch.total_ms,"maxStepMs":prefetch.max_step_ms,"maxPlanMs":prefetch.max_plan_ms,"maxInputMs":prefetch.max_input_ms,"maxGetMs":prefetch.max_get_ms,"maxConvertMs":prefetch.max_convert_ms,"maxWriteMs":prefetch.max_write_ms,"maxSubmitMs":prefetch.max_submit_ms,"cancelled":prefetch.cancelled,"uploadBytes":prefetch.upload_bytes}}).to_string())
     }
     #[wasm_bindgen(js_name=prefetchStep)]
-    pub fn prefetch_step(&mut self) -> Result<bool, JsValue> {
-        self.renderer
+    pub fn prefetch_step(&mut self) -> Result<String, JsValue> {
+        let result = self
+            .renderer
             .prefetch_step(&self.scene, &self.engine, self.viewport, clock)
-            .map_err(error)
+            .map_err(error)?;
+        Ok(match result {
+            alto_gpu::renderer::PrefetchStep::Idle => "idle",
+            alto_gpu::renderer::PrefetchStep::Progress => "progress",
+            alto_gpu::renderer::PrefetchStep::Ready => "ready",
+            alto_gpu::renderer::PrefetchStep::Blocked => "blocked",
+        }
+        .into())
     }
     #[wasm_bindgen(js_name=setProfiling)]
     pub fn set_profiling(&mut self, enabled: bool) {

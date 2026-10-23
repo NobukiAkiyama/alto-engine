@@ -1,5 +1,9 @@
 # M7・M8 検証結果
 
+## 2026-10-23：現在の配布版
+
+中断可能な低倍率親タイル先読みを実装した配布WASMは **4,328,183 bytes**、gzip **1,101,543 bytes**、SHA-256 `65d988114c677d07806a7251c315ee33653c4ad7e8d12b3b9adcc8e07e37ea6c`。PlaygroundとSDKの配布バイト列は一致する。Rust94件、SwiftShader機能54件が成功した。Metalの半透明20層・DPR 2負荷テストは5回ともB1/B2/B3/B7を満たし、ズーム前の親タイルは35/35枚だった。最大同期ステップは2.1–2.3 msで、目標2.0 msは厳密には未達。詳細と生データは[中断可能な先読みの検証](RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。
+
 ## 2026-10-22：縮小表示・復旧高速化後の配布版
 
 WASMは4,281,045 bytes、gzip 1,088,734 bytes、SHA-256 `9e73147b63eacbc17d5bbcf9ebc81b49a331db2834ca5bd8bacdf5a448376992`。PlaygroundとSDKの配布WASMは一致する。Rust94件、SwiftShaderのブラウザ機能17件とM5/M6/M7/M8の33件、MetalのB1–B7を新規Chromeプロファイル3回で確認した。B2は206.1–207.7 ms、B7は1257.9–1282.5 msで各目標内。破損した復旧記録の前世代への復帰、両世代破損時の停止と外部ファイルからの再開を含む。[実装と生データ](PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。

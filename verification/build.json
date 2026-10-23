@@ -1,12 +1,12 @@
 {
   "date": "2026-10-23",
   "version": "0.4.0",
-  "milestone": "M7/M8",
+  "milestone": "M8 + resumable low-zoom prefetch",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4308289,
-  "gzipBytes": 1096033,
-  "wasmSha256": "4ea8ffd898b49f539aa48f88585da94680d86a81e3b91eedd3d61ec22bb85e52",
+  "wasmBytes": 4328183,
+  "gzipBytes": 1101543,
+  "wasmSha256": "65d988114c677d07806a7251c315ee33653c4ad7e8d12b3b9adcc8e07e37ea6c",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
@@ -14,7 +14,8 @@
   },
   "nativeTests": 94,
   "targets": [
-    "Codex in-app browser on macOS"
+    "Chrome 155 / Apple Metal on macOS",
+    "Chrome 155 / SwiftShader"
   ],
   "browserFunctionalTests": 21,
   "browserM7Tests": 9,

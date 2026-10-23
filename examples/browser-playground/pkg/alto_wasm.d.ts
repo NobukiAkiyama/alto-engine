@@ -31,7 +31,7 @@ export class Runtime {
      */
     openRecoveryPackage(bytes: Uint8Array, opaque: string): string;
     parseVectorPath(svg: string): string;
-    prefetchStep(): boolean;
+    prefetchStep(): string;
     protocolVersion(): number;
     pruneVersions(): string;
     readTileLevel(level: number, tx: number, ty: number): Promise<Uint8Array>;
@@ -115,7 +115,7 @@ export interface InitOutput {
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly runtime_prefetchStep: (a: number) => [number, number, number];
+    readonly runtime_prefetchStep: (a: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
     readonly runtime_readTile: (a: number, b: number, c: number) => any;
