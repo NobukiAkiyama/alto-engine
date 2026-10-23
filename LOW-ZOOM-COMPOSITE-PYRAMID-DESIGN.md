@@ -1,6 +1,6 @@
 # 低倍率表示の合成タイル階層と先読み設計
 
-状態: **可視タイル保護と親タイル先読みを実装し、標準B2で検証済み。分割ジョブとコールド表示対策は未実装。** 実装と測定値は[結果報告](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。2026-10-22 の[DPR別実測](verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)で残った「DPR 2、物理倍率0.5」のB2を対象にする。既存の[DPR・Worker設計](DPR-WORKER-RESILIENCE-DESIGN.md)のD1を、この広い可視範囲の条件に対して具体化する。Worker復旧のR1、文書形式、保存契約は変更しない。
+状態: **可視タイル保護と親タイル先読みを実装し、標準B2で検証済み。分割ジョブとコールド表示対策は未実装。** 実装と測定値は[結果報告](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)、次段階のジョブ境界は[中断可能な先読み設計](RESUMABLE-LOW-ZOOM-PREFETCH-DESIGN.md)を参照。2026-10-22 の[DPR別実測](verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)で残った「DPR 2、物理倍率0.5」のB2を対象にする。既存の[DPR・Worker設計](DPR-WORKER-RESILIENCE-DESIGN.md)のD1を、この広い可視範囲の条件に対して具体化する。Worker復旧のR1、文書形式、保存契約は変更しない。
 
 ## 1. 解く問題と測定上の境界
 
