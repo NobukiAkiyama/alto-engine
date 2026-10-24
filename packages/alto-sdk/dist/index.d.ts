@@ -244,13 +244,17 @@ export interface NodeView {
     kind: {
         kind: string;
         children?: NodeId[];
-        tiles?: {
-            format: string;
-            tiles: Record<string, string>;
-        };
+        /** Raster layers: size only. The map itself comes from `DocumentHandle.nodeTiles`. */
+        tiles?: RasterTilesSummary;
         [key: string]: unknown;
     };
     children: NodeView[];
+}
+export interface RasterTilesSummary {
+    format: string;
+    count: number;
+    /** Union of tile rectangles in layer pixels, `[x0, y0, x1, y1]`; null when empty. */
+    bounds: [number, number, number, number] | null;
 }
 export interface Mirror {
     meta: {
@@ -439,7 +443,8 @@ declare class DocumentView extends Events {
         undo: number;
         redo: number;
     };
-    snapshotHash: string;
+    /** Set by full views (open, save). Null after an edit: use `DocumentHandle.snapshotHash()`. */
+    snapshotHash: string | null;
     stateHash: string;
     versions: VersionStatus;
     dirty: boolean;
@@ -538,6 +543,13 @@ export declare class DocumentHandle {
         begin: (tool: "brush" | "eraser", options: BrushOptions) => ToolSession;
     };
     transact<T>(intent: string, callback: (tx: TransactionBuilder) => T): Promise<T>;
+    /** The hash of the snapshot a save would write. Computed on request, not per edit. */
+    snapshotHash(): Promise<string>;
+    /** A raster layer's full tile map (key `tx,ty` to content hash). */
+    nodeTiles(id: NodeId): Promise<{
+        format: string;
+        tiles: Record<string, string>;
+    }>;
     undo(): Promise<void>;
     redo(): Promise<void>;
     command(type: string, payload: any): Promise<void>;

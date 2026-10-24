@@ -10,6 +10,70 @@ use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
+const FRAME_FIELDS: [&str; 31] = [
+    "composed",
+    "pending",
+    "gpuBytes",
+    "cpuMs",
+    "wasmBytes",
+    "prefetch.candidates",
+    "prefetch.ready",
+    "prefetch.composed",
+    "prefetch.totalMs",
+    "prefetch.maxStepMs",
+    "prefetch.maxPlanMs",
+    "prefetch.maxInputMs",
+    "prefetch.maxGetMs",
+    "prefetch.maxConvertMs",
+    "prefetch.maxWriteMs",
+    "prefetch.maxSubmitMs",
+    "prefetch.cancelled",
+    "prefetch.uploadBytes",
+    "hasProfile",
+    "profile.composeMs",
+    "profile.commandsMs",
+    "profile.getMs",
+    "profile.writeMs",
+    "profile.uploads",
+    "profile.atlasHits",
+    "profile.uploadBytes",
+    "profile.pyramidHits",
+    "profile.maxStepMs",
+    "profile.steps",
+    "profile.uniqueInputs",
+    "profile.atlasEvictions",
+];
+fn state_hash(digest: ContentHash, head: Option<ContentHash>) -> ContentHash {
+    let mut b = digest.0.to_vec();
+    if let Some(h) = head {
+        b.extend(h.0);
+    }
+    ContentHash::of(&b)
+}
+/// A node as views send it. Raster layers carry their tile count and bounds; the
+/// map itself comes from `nodeTiles`, since a 4K layer's map is ~13 KB of JSON.
+fn node_view(node: &alto_doc::Node) -> Result<serde_json::Value, JsValue> {
+    let mut value = serde_json::to_value(node).map_err(error)?;
+    if let NodeKind::Raster { tiles } = &node.kind {
+        let bounds = tiles.tiles.keys().fold(None, |b: Option<[i32; 4]>, k| {
+            let r = [k.tx * 256, k.ty * 256, (k.tx + 1) * 256, (k.ty + 1) * 256];
+            Some(b.map_or(r, |b| {
+                [
+                    b[0].min(r[0]),
+                    b[1].min(r[1]),
+                    b[2].max(r[2]),
+                    b[3].max(r[3]),
+                ]
+            }))
+        });
+        value["kind"]["tiles"] = json!({
+            "format": tiles.format,
+            "count": tiles.tiles.len(),
+            "bounds": bounds,
+        });
+    }
+    Ok(value)
+}
 fn error(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
@@ -110,20 +174,49 @@ impl Runtime {
     pub fn view(&self) -> Result<String, JsValue> {
         let mut value = self.envelope()?;
         let doc = self.engine.document(self.doc).map_err(error)?;
-        value["document"] = serde_json::to_value(doc).map_err(error)?;
+        value["snapshotHash"] = json!(ContentHash::of(
+            &self.engine.snapshot(self.doc).map_err(error)?
+        ));
+        let mut document = serde_json::to_value(doc).map_err(error)?;
+        if let Some(nodes) = document["nodes"].as_object_mut() {
+            for (id, node) in nodes.iter_mut() {
+                let id: NodeId = serde_json::from_value(json!(id)).map_err(error)?;
+                *node = node_view(doc.node(id).map_err(error)?)?;
+            }
+        }
+        value["document"] = document;
         serde_json::to_string(&value).map_err(error)
     }
+    /// The hash of the snapshot bytes a save would write. Edits do not compute it.
+    #[wasm_bindgen(js_name=snapshotHash)]
+    pub fn snapshot_hash(&self) -> Result<String, JsValue> {
+        Ok(ContentHash::of(&self.engine.snapshot(self.doc).map_err(error)?).to_string())
+    }
+    /// A raster layer's full tile map; views carry only its size and bounds.
+    #[wasm_bindgen(js_name=nodeTiles)]
+    pub fn node_tiles(&self, id: &str) -> Result<String, JsValue> {
+        let id: NodeId = serde_json::from_value(json!(id)).map_err(error)?;
+        let doc = self.engine.document(self.doc).map_err(error)?;
+        let NodeKind::Raster { tiles } = &doc.node(id).map_err(error)?.kind else {
+            return Err(error("INVALID_ARGUMENT: raster layer required"));
+        };
+        serde_json::to_string(tiles).map_err(error)
+    }
+    /// Fields every reply carries. Each is maintained incrementally or is O(1), so an
+    /// edit's reply does not serialize the document.
     fn envelope(&self) -> Result<serde_json::Value, JsValue> {
         let doc = self.engine.document(self.doc).map_err(error)?;
         let (undo, redo) = self.engine.history_state(self.doc).map_err(error)?;
-        let hash = ContentHash::of(&self.engine.snapshot(self.doc).map_err(error)?);
         let mut warnings = self.warnings.clone();
         warnings.extend(self.engine.font_warnings(self.doc).map_err(error)?);
         let versions = self.engine.version_status(self.doc).map_err(error)?;
-        let state = self.state_hash()?;
+        let state = state_hash(
+            self.engine.state_digest(self.doc).map_err(error)?,
+            versions.head,
+        );
         Ok(json!({
             "history": {"undo": undo, "redo": redo},
-            "snapshotHash": hash,
+            "snapshotHash": null,
             "stateHash": state,
             "dirty": state != self.saved,
             "warnings": warnings,
@@ -140,7 +233,7 @@ impl Runtime {
         for id in &changes.nodes {
             match doc.nodes.get(id) {
                 Some(node) => {
-                    nodes.insert(id.0.to_string(), serde_json::to_value(node).map_err(error)?);
+                    nodes.insert(id.0.to_string(), node_view(node)?);
                 }
                 None => removed.push(id.0.to_string()),
             }
@@ -240,24 +333,68 @@ impl Runtime {
             self.engine.clear_decoded_tile_cache();
         }
     }
-    pub fn tick(&mut self, budget_ms: f64) -> Result<String, JsValue> {
+    /// One frame's report as numbers in `FRAME_FIELDS` order. A frame is reported
+    /// every few milliseconds; building and parsing JSON for it was pure overhead.
+    pub fn tick(&mut self, budget_ms: f64) -> Result<Vec<f64>, JsValue> {
         let start = clock();
         let r = self
             .renderer
             .render(&self.scene, &self.engine, self.viewport, budget_ms)
             .map_err(error)?;
-        let profile = r.profile.map(|p| {
-            json!({
-                "composeMs": p.compose_ms, "commandsMs": p.commands_ms,
-                "getMs": p.get_ms, "writeMs": p.write_ms,
-                "uploads": p.uploads, "atlasHits": p.atlas_hits,
-                "uploadBytes": p.upload_bytes, "pyramidHits": p.pyramid_hits,
-                "maxStepMs": p.max_step_ms, "steps": p.steps,
-                "uniqueInputs": p.unique_inputs, "atlasEvictions": p.atlas_evictions,
-            })
-        });
-        let prefetch = self.renderer.prefetch_status(&self.scene, self.viewport);
-        Ok(json!({"composed":r.composed,"pending":r.pending,"gpuBytes":r.gpu_bytes,"cpuMs":clock()-start,"wasmBytes":wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),"adapter":self.renderer.adapter_name,"profile":profile,"prefetch":{"candidates":prefetch.candidates,"ready":prefetch.ready,"composed":prefetch.composed,"totalMs":prefetch.total_ms,"maxStepMs":prefetch.max_step_ms,"maxPlanMs":prefetch.max_plan_ms,"maxInputMs":prefetch.max_input_ms,"maxGetMs":prefetch.max_get_ms,"maxConvertMs":prefetch.max_convert_ms,"maxWriteMs":prefetch.max_write_ms,"maxSubmitMs":prefetch.max_submit_ms,"cancelled":prefetch.cancelled,"uploadBytes":prefetch.upload_bytes}}).to_string())
+        let wasm_bytes = wasm_bindgen::memory()
+            .unchecked_into::<js_sys::WebAssembly::Memory>()
+            .buffer()
+            .unchecked_into::<js_sys::ArrayBuffer>()
+            .byte_length();
+        let p = self.renderer.prefetch_status(&self.scene, self.viewport);
+        let mut out = vec![
+            r.composed as f64,
+            r.pending as f64,
+            r.gpu_bytes as f64,
+            clock() - start,
+            wasm_bytes as f64,
+            p.candidates as f64,
+            p.ready as f64,
+            p.composed as f64,
+            p.total_ms,
+            p.max_step_ms,
+            p.max_plan_ms,
+            p.max_input_ms,
+            p.max_get_ms,
+            p.max_convert_ms,
+            p.max_write_ms,
+            p.max_submit_ms,
+            p.cancelled as f64,
+            p.upload_bytes as f64,
+            f64::from(u8::from(r.profile.is_some())),
+        ];
+        let q = r.profile.unwrap_or_default();
+        out.extend([
+            q.compose_ms,
+            q.commands_ms,
+            q.get_ms,
+            q.write_ms,
+            q.uploads as f64,
+            q.atlas_hits as f64,
+            q.upload_bytes as f64,
+            q.pyramid_hits as f64,
+            q.max_step_ms,
+            q.steps as f64,
+            q.unique_inputs as f64,
+            q.atlas_evictions as f64,
+        ]);
+        debug_assert_eq!(out.len(), FRAME_FIELDS.len());
+        Ok(out)
+    }
+    /// Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+    /// nests the field; `profile.*` is present only when `hasProfile` is 1.
+    #[wasm_bindgen(js_name=frameFields)]
+    pub fn frame_fields(&self) -> Vec<String> {
+        FRAME_FIELDS.iter().map(|f| f.to_string()).collect()
+    }
+    #[wasm_bindgen(js_name=adapterName)]
+    pub fn adapter_name(&self) -> String {
+        self.renderer.adapter_name.clone()
     }
     #[wasm_bindgen(js_name=prefetchStep)]
     pub fn prefetch_step(&mut self) -> Result<String, JsValue> {
@@ -753,15 +890,13 @@ impl Runtime {
         self.reload()?;
         self.view()
     }
-    /// Identity of what a save writes: the snapshot and the version head.
+    /// Identity of what a save writes: the document content and the version head.
     pub(crate) fn state_hash(&self) -> Result<ContentHash, JsValue> {
-        let mut b = ContentHash::of(&self.engine.snapshot(self.doc).map_err(error)?)
-            .0
-            .to_vec();
-        if let Some(h) = self.engine.version_status(self.doc).map_err(error)?.head {
-            b.extend(h.0);
-        }
-        Ok(ContentHash::of(&b))
+        let head = self.engine.version_status(self.doc).map_err(error)?.head;
+        Ok(state_hash(
+            self.engine.state_digest(self.doc).map_err(error)?,
+            head,
+        ))
     }
     fn command(&mut self, intent: &str, ops: Vec<Op>) -> Result<String, JsValue> {
         let revision = self.engine.document(self.doc).map_err(error)?.revision;

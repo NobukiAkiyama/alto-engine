@@ -16,6 +16,19 @@ pub struct VersionStore {
     pub(crate) head: Option<ContentHash>,
     /// Tiles and blobs referenced by committed snapshots (GC roots).
     pub(crate) retained: BTreeSet<ContentHash>,
+    /// The head commit's document, parsed once. Version status diffs against it
+    /// after every edit; parsing the snapshot each time cost ten times the diff.
+    head_doc: Option<(ContentHash, std::sync::Arc<Document>)>,
+}
+impl VersionStore {
+    fn set_head(&mut self, head: Option<ContentHash>) {
+        self.head = head;
+        self.head_doc = head.and_then(|c| {
+            let commit = self.commits.get(&c)?;
+            let doc = Document::from_snapshot_bytes(self.snapshots.get(&commit.snapshot)?).ok()?;
+            Some((c, std::sync::Arc::new(doc)))
+        });
+    }
 }
 
 /// Which side of a diff: a commit or the working document.
@@ -174,7 +187,7 @@ impl Engine {
         let hash = ContentHash::of(&bytes);
         let store = self.versions.entry(h).or_default();
         store.insert(hash, commit, bytes, snapshot)?;
-        store.head = Some(hash);
+        store.set_head(Some(hash));
         if let Some(editor) = self.documents.get_mut(&h) {
             editor.take_intent_log();
         }
@@ -288,11 +301,14 @@ impl Engine {
 
     pub fn version_status(&self, h: DocHandle) -> Result<VersionStatus, EngineError> {
         let store = self.versions(h)?;
-        let changes = match store.head {
-            Some(c) => self
+        let changes = match (store.head, &store.head_doc) {
+            (Some(c), Some((cached, doc))) if *cached == c => {
+                alto_doc::diff(doc, self.document(h)?).len()
+            }
+            (Some(c), _) => self
                 .diff_versions(h, VersionRef::Commit(c), VersionRef::Working)?
                 .len(),
-            None => usize::from(self.document(h)?.nodes.len() > 1),
+            (None, _) => usize::from(self.document(h)?.nodes.len() > 1),
         };
         Ok(VersionStatus {
             head: store.head,
@@ -490,7 +506,8 @@ impl Engine {
                 None => warnings.push(format!("snapshot missing for commit {hash}")),
             }
         }
-        store.head = p.head.filter(|h| store.commits.contains_key(h));
+        let head = p.head.filter(|h| store.commits.contains_key(h));
+        store.set_head(head);
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
                 warnings.push(format!("missing object {hash} in version history"));

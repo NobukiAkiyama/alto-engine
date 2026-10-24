@@ -5,6 +5,7 @@ export class Runtime {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    adapterName(): string;
     beginBrush(layer: string, config: string, color: Float32Array, erase: boolean, mask: boolean): void;
     brushInput(samples: Float32Array): void;
     cancelBrush(): void;
@@ -20,10 +21,19 @@ export class Runtime {
     endBrush(): Promise<string>;
     folderEntries(): Uint8Array;
     folderPlan(framed: Uint8Array): string;
+    /**
+     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+     * nests the field; `profile.*` is present only when `hasProfile` is 1.
+     */
+    frameFields(): string[];
     gpuIdle(): Promise<void>;
     importFont(bytes: Uint8Array, face_index: number): string;
     importRgba(w: number, h: number, pixels: Uint8Array, encoded: Uint8Array, mime: string): string;
     markSaved(hash: string): string;
+    /**
+     * A raster layer's full tile map; views carry only its size and bounds.
+     */
+    nodeTiles(id: string): string;
     openFolder(framed: Uint8Array): string;
     openPackage(bytes: Uint8Array): string;
     /**
@@ -55,13 +65,21 @@ export class Runtime {
     setMask(layer: string, source: string): string;
     setProfiling(enabled: boolean): void;
     setVisibleTileJobs(enabled: boolean): void;
+    /**
+     * The hash of the snapshot bytes a save would write. Edits do not compute it.
+     */
+    snapshotHash(): string;
     takeJournal(): Uint8Array;
     textCaret(id: string, offset: number): string;
     textHitTest(id: string, x: number, y: number): number;
     textInfo(id: string): string;
     textNavigate(id: string, offset: number, motion: string): number;
     textSelection(id: string, start: number, end: number): string;
-    tick(budget_ms: number): string;
+    /**
+     * One frame's report as numbers in `FRAME_FIELDS` order. A frame is reported
+     * every few milliseconds; building and parsing JSON for it was pure overhead.
+     */
+    tick(budget_ms: number): Float64Array;
     transact(request: string): string;
     undo(): string;
     /**
@@ -97,6 +115,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_runtime_free: (a: number, b: number) => void;
     readonly __wbg_spike_free: (a: number, b: number) => void;
+    readonly runtime_adapterName: (a: number) => [number, number];
     readonly runtime_beginBrush: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly runtime_brushInput: (a: number, b: number, c: number) => [number, number];
     readonly runtime_cancelBrush: (a: number) => void;
@@ -109,10 +128,12 @@ export interface InitOutput {
     readonly runtime_endBrush: (a: number) => any;
     readonly runtime_folderEntries: (a: number) => [number, number, number, number];
     readonly runtime_folderPlan: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_frameFields: (a: number) => [number, number];
     readonly runtime_gpuIdle: (a: number) => any;
     readonly runtime_importFont: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_importRgba: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_nodeTiles: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openFolder: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -138,6 +159,7 @@ export interface InitOutput {
     readonly runtime_setMask: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_setProfiling: (a: number, b: number) => void;
     readonly runtime_setVisibleTileJobs: (a: number, b: number) => void;
+    readonly runtime_snapshotHash: (a: number) => [number, number, number, number];
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_textHitTest: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -166,8 +188,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__70: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__71: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__74: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__75: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
@@ -177,6 +199,7 @@ export interface InitOutput {
     readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

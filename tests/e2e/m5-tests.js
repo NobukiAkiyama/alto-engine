@@ -159,7 +159,7 @@ export async function runM5Tests(engine, log) {
       await doc.selection.clear();
       await paint(doc, layer, 400, 128, { size: 64 });
       await paint(doc, layer, 400, 128, { size: 48, tool: "eraser" });
-      const canonical = JSON.stringify(doc.view.node(layer).kind.tiles);
+      const canonical = JSON.stringify(await doc.nodeTiles(layer));
       await doc.selection.apply({
         kind: "rectangle",
         x: 0,
@@ -170,7 +170,7 @@ export async function runM5Tests(engine, log) {
       const selectedHistory = doc.view.history.undo;
       await paint(doc, layer, 400, 128, { size: 64, color: [1, 0, 0, 1] });
       assert(
-        JSON.stringify(doc.view.node(layer).kind.tiles) === canonical &&
+        JSON.stringify(await doc.nodeTiles(layer)) === canonical &&
           doc.view.history.undo === selectedHistory,
         "unselected hidden RGB bytes changed",
       );
@@ -239,7 +239,7 @@ export async function runM5Tests(engine, log) {
       await doc.undo();
       await doc.undo();
       const before = await engine.unstable.readTile(0, 0),
-        source = JSON.stringify(doc.view.node(layer).kind.tiles);
+        source = JSON.stringify(await doc.nodeTiles(layer));
       const session = doc.tools.begin("brush", {
         layer,
         target: "mask",
@@ -253,7 +253,7 @@ export async function runM5Tests(engine, log) {
       const masked = await engine.unstable.readTile(0, 0);
       assert(doc.view.node(layer).props.mask.format === "r8", "mask not R8");
       assert(
-        JSON.stringify(doc.view.node(layer).kind.tiles) === source,
+        JSON.stringify(await doc.nodeTiles(layer)) === source,
         "mask painted source pixels",
       );
       await doc.undo();
@@ -299,7 +299,7 @@ export async function runM5Tests(engine, log) {
         "seam image",
         (tx) => (layer = tx.addRasterFromAsset(a)),
       );
-      const original = JSON.stringify(doc.view.node(layer).kind.tiles);
+      const original = JSON.stringify(await doc.nodeTiles(layer));
       await doc.effects.set(layer, [{ type: "gaussian_blur", radius: 12 }]);
       await engine.request("validateFrame");
       const tiles = new Map();
@@ -324,7 +324,7 @@ export async function runM5Tests(engine, log) {
           );
         }
       assert(
-        JSON.stringify(doc.view.node(layer).kind.tiles) === original,
+        JSON.stringify(await doc.nodeTiles(layer)) === original,
         "blur changed canonical pixels",
       );
       const blurred = await engine.unstable.readTile(0, 0);
@@ -457,11 +457,11 @@ export async function runM5Tests(engine, log) {
         feather: 8,
       });
       await doc.effects.set(layer, [{ type: "gaussian_blur", radius: 8 }]);
-      const hash = doc.view.snapshotHash,
+      const hash = (await doc.snapshotHash()),
         reference = await engine.unstable.readTile(0, 0),
         bytes = await engine.unstable.saveBytes();
       doc = await engine.openDocument(new Blob([bytes]));
-      assert(doc.view.snapshotHash === hash, "M5 snapshot changed on open");
+      assert((await doc.snapshotHash()) === hash, "M5 snapshot changed on open");
       assert(
         same(reference, await engine.unstable.readTile(0, 0)),
         "M5 ZIP pixels",
@@ -481,15 +481,15 @@ export async function runM5Tests(engine, log) {
       await doc.transact("journal mask state", (tx) =>
         tx.setProps(layer, { mask_enabled: false }),
       );
-      const recoveryHash = doc.view.snapshotHash;
+      const recoveryHash = (await doc.snapshotHash());
       await engine.unstable.crash();
       doc = engine.document;
-      assert(doc.view.snapshotHash === recoveryHash, "M5 journal hash");
+      assert((await doc.snapshotHash()) === recoveryHash, "M5 journal hash");
       assert(
         same(reference, await engine.unstable.readTile(0, 0)),
         "M5 recovery pixels",
       );
-      const before = doc.view.snapshotHash,
+      const before = (await doc.snapshotHash()),
         undo = doc.view.history.undo;
       let rejected = false;
       try {
@@ -499,7 +499,7 @@ export async function runM5Tests(engine, log) {
       }
       assert(
         rejected &&
-          doc.view.snapshotHash === before &&
+          (await doc.snapshotHash()) === before &&
           doc.view.history.undo === undo,
         "invalid effect was not atomic",
       );
@@ -510,7 +510,7 @@ export async function runM5Tests(engine, log) {
         rejected = true;
       }
       assert(
-        rejected && engine.document === doc && doc.view.snapshotHash === before,
+        rejected && engine.document === doc && (await doc.snapshotHash()) === before,
         "invalid effect crashed or changed document",
       );
     });

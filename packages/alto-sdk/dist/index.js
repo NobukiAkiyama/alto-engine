@@ -241,7 +241,7 @@ const readableAfterStorageFailure = new Set([
     "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
     "selectionOutline", "textInfo", "textHitTest", "textCaret",
     "textSelection", "textNavigate", "versionLog", "versionDiff",
-    "vectorStats", "vectorPathSvg", "releaseSave",
+    "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
 ]);
 function nodeId() {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -397,7 +397,8 @@ export class TransactionBuilder {
 class DocumentView extends Events {
     mirror;
     history = { undo: 0, redo: 0 };
-    snapshotHash = "";
+    /** Set by full views (open, save). Null after an edit: use `DocumentHandle.snapshotHash()`. */
+    snapshotHash = null;
     stateHash = "";
     versions = { head: null, commits: 0, changed: false, changes: 0, pending_intents: 0 };
     dirty = false;
@@ -668,6 +669,14 @@ export class DocumentHandle {
             this.apply(state);
             return value;
         });
+    }
+    /** The hash of the snapshot a save would write. Computed on request, not per edit. */
+    snapshotHash() {
+        return this.engine.request("snapshotHash");
+    }
+    /** A raster layer's full tile map (key `tx,ty` to content hash). */
+    nodeTiles(id) {
+        return this.engine.request("nodeTiles", { node: id });
     }
     async undo() {
         if (this.activeTool)

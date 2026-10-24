@@ -6,6 +6,7 @@ use alto_raster::TileMap;
 use alto_text::TextContent;
 use alto_vector::{ClipPath, StyledPath, VectorMask, validate_paths};
 
+pub mod digest;
 pub mod version;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1555,10 +1556,12 @@ pub struct Editor {
     max_undo: usize,
     seq: u64,
     log: Vec<IntentLogEntry>,
+    digest: digest::StateDigest,
 }
 impl Editor {
     pub fn new(doc: Document) -> Self {
         Self {
+            digest: digest::StateDigest::of(&doc),
             doc,
             undo: vec![],
             redo: vec![],
@@ -1566,6 +1569,10 @@ impl Editor {
             seq: 0,
             log: vec![],
         }
+    }
+    /// Identifies the document's content; kept current by every edit, undo and redo.
+    pub fn state_digest(&self) -> ContentHash {
+        self.digest.value()
     }
     /// Edits recorded since the last call (the last commit).
     pub fn take_intent_log(&mut self) -> Vec<IntentLogEntry> {
@@ -1663,6 +1670,7 @@ impl Editor {
             self.undo.remove(0);
         }
         self.redo.clear();
+        self.digest.update(&self.doc, &changes);
         Ok(changes)
     }
     pub fn undo(&mut self) -> Result<Option<ChangeSet>, DocError> {
@@ -1684,6 +1692,7 @@ impl Editor {
             self.log_tx(&tx, "取り消し: ");
         }
         self.redo.push(tx);
+        self.digest.update(&self.doc, &changes);
         Ok(Some(changes))
     }
     pub fn redo(&mut self) -> Result<Option<ChangeSet>, DocError> {
@@ -1696,6 +1705,7 @@ impl Editor {
         self.redo.pop();
         self.log_tx(&tx, "");
         self.undo.push(tx);
+        self.digest.update(&self.doc, &changes);
         Ok(Some(changes))
     }
     pub fn drop_oldest_undo(&mut self) -> bool {
@@ -1748,6 +1758,110 @@ mod tests {
     fn content(mut doc: Document) -> Document {
         doc.revision = 0;
         doc
+    }
+
+    #[test]
+    fn incremental_state_digest_matches_a_full_recompute_after_every_edit() {
+        let mut e = editor();
+        let root = e.doc.root;
+        let check = |e: &Editor, step: &str| {
+            assert_eq!(
+                e.state_digest(),
+                digest::StateDigest::of(&e.doc).value(),
+                "{step}"
+            );
+        };
+        let initial = e.state_digest();
+        let (a, b, g) = (Node::raster("A"), Node::raster("B"), Node::group("G"));
+        let (a, b, g) = {
+            let ids = (a.id, b.id, g.id);
+            let rev = e.doc.revision;
+            e.transact(
+                "add",
+                vec![
+                    Op::InsertNode {
+                        node: a,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: b,
+                        parent: root,
+                        index: 1,
+                    },
+                    Op::InsertNode {
+                        node: g,
+                        parent: root,
+                        index: 2,
+                    },
+                ],
+                rev,
+            )
+            .unwrap();
+            ids
+        };
+        check(&e, "insert");
+        let tile = |seed: &[u8]| TileChange {
+            key: TileKey { tx: 0, ty: 0 },
+            before: None,
+            after: Some(ContentHash::of(seed)),
+        };
+        let edits: Vec<(&str, Vec<Op>)> = vec![
+            (
+                "tiles",
+                vec![Op::SetTiles {
+                    layer: a,
+                    changes: vec![tile(b"t")],
+                }],
+            ),
+            (
+                "move into group",
+                vec![Op::MoveNode {
+                    id: b,
+                    parent: g,
+                    index: 0,
+                }],
+            ),
+            (
+                "reorder",
+                vec![Op::MoveNode {
+                    id: g,
+                    parent: root,
+                    index: 0,
+                }],
+            ),
+            (
+                "props",
+                vec![Op::SetProps {
+                    id: a,
+                    patch: PropPatch {
+                        opacity: Some(0.5),
+                        name: Some("A2".into()),
+                        ..Default::default()
+                    },
+                }],
+            ),
+            ("remove group", vec![Op::RemoveNode { id: g }]),
+            ("selection", vec![Op::SetSelection { selection: None }]),
+            (
+                "meta",
+                vec![Op::SetMeta {
+                    meta: DocumentMeta::srgb_u8(800, 600),
+                }],
+            ),
+        ];
+        for (step, ops) in edits {
+            let rev = e.doc.revision;
+            e.transact(step, ops, rev).unwrap();
+            check(&e, step);
+        }
+        while e.undo().unwrap().is_some() {
+            check(&e, "undo");
+        }
+        assert_eq!(e.state_digest(), initial, "undo back to the start");
+        while e.redo().unwrap().is_some() {
+            check(&e, "redo");
+        }
     }
 
     #[test]

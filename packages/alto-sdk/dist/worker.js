@@ -26,7 +26,7 @@ const readableAfterFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
 ]);
 let storageFailure = null;
 function freezeStorage(error) {
@@ -151,6 +151,21 @@ async function persistCheckpoint(bytes) {
   const opaque = JSON.parse(runtime.recoveryOpaque());
   await io("checkpoint", { bytes: bytes.buffer, opaque }, [bytes.buffer]);
 }
+// tick() returns numbers in the order frameFields() names them, fixed for the build.
+let frameFields = [];
+let adapterName = "";
+function decodeFrame(numbers) {
+  const out = { adapter: adapterName, prefetch: {}, profile: null };
+  const profile = {};
+  frameFields.forEach((name, i) => {
+    const [group, key] = name.split(".");
+    if (key === undefined) out[group] = numbers[i];
+    else (group === "profile" ? profile : out.prefetch)[key] = numbers[i];
+  });
+  if (out.hasProfile) out.profile = profile;
+  delete out.hasProfile;
+  return out;
+}
 let savedToken = 0;
 // Each entry holds a whole package until the page confirms or releases it.
 const saves = new Map();
@@ -174,6 +189,8 @@ async function execute(m) {
       budget = m.budget;
       await init();
       runtime = await Runtime.create(canvas, budget);
+      frameFields = runtime.frameFields();
+      adapterName = runtime.adapterName();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
       return { protocol: 4, recovery: await io("inspect") };
@@ -296,6 +313,10 @@ async function execute(m) {
       postMessage({ t: "patch", value: state });
       return state;
     }
+    case "snapshotHash":
+      return runtime.snapshotHash();
+    case "nodeTiles":
+      return JSON.parse(runtime.nodeTiles(m.node));
     case "textInfo":
       return JSON.parse(runtime.textInfo(m.node));
     case "textHitTest":
@@ -433,7 +454,7 @@ async function execute(m) {
       let frame;
       const profiles = diagnosticProfiles || [];
       do {
-        frame = JSON.parse(runtime.tick(8));
+        frame = decodeFrame(runtime.tick(8));
         if (frame.profile) profiles.push(frame.profile);
         if (frame.pending) await yieldTask();
       } while (frame.pending);
@@ -490,7 +511,7 @@ async function drain() {
         wantTick = false;
         if (runtime)
           try {
-            const value = { ...JSON.parse(runtime.tick(8)), viewVersion };
+            const value = { ...decodeFrame(runtime.tick(8)), viewVersion };
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0;
             if (value.pending) wantTick = true;
@@ -502,6 +523,7 @@ async function drain() {
               postMessage({ t: "gpuLost" });
               try {
                 await runtime.recoverGpu();
+                adapterName = runtime.adapterName();
                 postMessage({ t: "gpuRestored" });
               } catch (e) {
                 postMessage({ t: "error", value: structured(e) });

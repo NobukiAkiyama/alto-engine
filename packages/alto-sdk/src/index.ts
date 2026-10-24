@@ -110,10 +110,17 @@ export interface NodeView {
   kind: {
     kind: string;
     children?: NodeId[];
-    tiles?: { format: string; tiles: Record<string, string> };
+    /** Raster layers: size only. The map itself comes from `DocumentHandle.nodeTiles`. */
+    tiles?: RasterTilesSummary;
     [key: string]: unknown;
   };
   children: NodeView[];
+}
+export interface RasterTilesSummary {
+  format: string;
+  count: number;
+  /** Union of tile rectangles in layer pixels, `[x0, y0, x1, y1]`; null when empty. */
+  bounds: [number, number, number, number] | null;
 }
 export interface Mirror {
   meta: {
@@ -354,7 +361,7 @@ const readableAfterStorageFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
 ]);
 function nodeId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -541,7 +548,8 @@ export class TransactionBuilder {
 class DocumentView extends Events {
   private mirror!: Mirror;
   history = { undo: 0, redo: 0 };
-  snapshotHash = "";
+  /** Set by full views (open, save). Null after an edit: use `DocumentHandle.snapshotHash()`. */
+  snapshotHash: string | null = null;
   stateHash = "";
   versions: VersionStatus = { head: null, commits: 0, changed: false, changes: 0, pending_intents: 0 };
   dirty = false;
@@ -834,6 +842,14 @@ export class DocumentHandle {
       this.apply(state);
       return value;
     });
+  }
+  /** The hash of the snapshot a save would write. Computed on request, not per edit. */
+  snapshotHash(): Promise<string> {
+    return this.engine.request("snapshotHash");
+  }
+  /** A raster layer's full tile map (key `tx,ty` to content hash). */
+  nodeTiles(id: NodeId): Promise<{ format: string; tiles: Record<string, string> }> {
+    return this.engine.request("nodeTiles", { node: id });
   }
   async undo() {
     if (this.activeTool) await this.activeTool.end();

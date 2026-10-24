@@ -390,6 +390,13 @@ impl TileStore for Engine {
     }
 }
 impl Engine {
+    pub fn state_digest(&self, h: DocHandle) -> Result<ContentHash, EngineError> {
+        Ok(self
+            .documents
+            .get(&h)
+            .ok_or(EngineError::NotFound(h))?
+            .state_digest())
+    }
     pub fn history_state(&self, h: DocHandle) -> Result<(usize, usize), EngineError> {
         let e = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
         Ok((e.undo_len(), e.redo_len()))
