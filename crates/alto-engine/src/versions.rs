@@ -363,7 +363,9 @@ impl Engine {
 
     /// Package contents including every committed snapshot and its objects.
     pub fn package_parts(&self, h: DocHandle) -> Result<PackageParts, EngineError> {
-        Ok(self.package_parts_except(h, &BTreeSet::new())?.0)
+        Ok(self
+            .package_parts_except(h, &BTreeSet::new(), BTreeSet::new())?
+            .0)
     }
 
     /// Package parts without the bytes of objects in `stored`, plus every object the
@@ -372,10 +374,12 @@ impl Engine {
         &self,
         h: DocHandle,
         stored: &BTreeSet<ContentHash>,
+        extra: BTreeSet<ContentHash>,
     ) -> Result<(PackageParts, BTreeSet<ContentHash>), EngineError> {
         let doc = self.document(h)?;
         let store = self.versions(h)?;
-        let mut hashes = doc_hashes(doc);
+        let mut hashes = extra;
+        hashes.extend(doc_hashes(doc));
         hashes.extend(store.retained.iter().copied());
         let mut objects = BTreeMap::new();
         for &hash in hashes.difference(stored) {
@@ -400,8 +404,20 @@ impl Engine {
         h: DocHandle,
         stored: &BTreeSet<ContentHash>,
     ) -> Result<RecoveryCheckpoint, EngineError> {
-        let (parts, refs) = self.package_parts_except(h, stored)?;
+        // The undo history travels with a recovery checkpoint, and so do the objects
+        // only it references. A saved .alto file has neither.
+        let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
+        let history = editor.history();
+        let mut history_objects = BTreeSet::new();
+        for tx in history.undo.iter().chain(&history.redo) {
+            crate::tx_hashes(tx, &mut history_objects);
+        }
+        let (parts, refs) = self.package_parts_except(h, stored, history_objects)?;
         let mut entries = alto_store::package_entries(&parts)?;
+        entries.insert(
+            "history.json".into(),
+            serde_json::to_vec(&history).map_err(|e| DocError::Serialization(e.to_string()))?,
+        );
         let meta = serde_json::json!({
             "objects": refs.iter().map(alto_store::object_path).collect::<Vec<_>>(),
             "opaque": self.recovery_opaque_hashes(h)?,
@@ -491,7 +507,7 @@ impl Engine {
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false)
+        self.open_decoded_package(p, false, None)
     }
 
     /// Journal-only fast path. The caller must verify the entire checkpoint's
@@ -508,17 +524,25 @@ impl Engine {
     /// Objects are named by their hash and checked against it on first use.
     pub fn open_recovery_entries(
         &mut self,
-        entries: BTreeMap<String, Vec<u8>>,
+        mut entries: BTreeMap<String, Vec<u8>>,
         opaque: &std::collections::BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
+        let history = match entries.remove("history.json") {
+            Some(bytes) => Some(
+                serde_json::from_slice::<alto_doc::History>(&bytes)
+                    .map_err(|e| alto_store::StoreError::Corrupt(format!("history: {e}")))?,
+            ),
+            None => None,
+        };
         let p = alto_store::decode_recovery_entries(entries, opaque)?;
-        self.open_decoded_package(p, true)
+        self.open_decoded_package(p, true, history)
     }
 
     fn open_decoded_package(
         &mut self,
         p: alto_store::Package,
         deferred_verify: bool,
+        history: Option<alto_doc::History>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let (handle, mut warnings) = self.install_package(
             p.objects,
@@ -565,6 +589,12 @@ impl Engine {
         }
         warnings.dedup();
         self.versions.insert(handle, store);
+        // Before maintain(): the objects only the history references are kept for it.
+        if let Some(history) = history
+            && let Some(editor) = self.documents.get_mut(&handle)
+        {
+            editor.restore_history(history);
+        }
         self.backed = true;
         self.maintain();
         Ok((handle, warnings))

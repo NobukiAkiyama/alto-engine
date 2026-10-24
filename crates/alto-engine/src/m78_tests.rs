@@ -115,7 +115,9 @@ fn text_layers_render_select_save_and_recover() {
     }];
     e.transact(d, "テキスト編集", ops.clone(), rev).unwrap();
     assert_eq!(e.text_info(d, id).unwrap().fonts_used, vec![jp, latin]);
-    let record = e.journal_record("テキスト編集", &ops).unwrap();
+    let record = e
+        .journal_record(d, JournalKind::Transact, "テキスト編集", &ops)
+        .unwrap();
     e.undo(d).unwrap();
     assert_eq!(e.text_info(d, id).unwrap().lines.len(), 2);
     e.redo(d).unwrap();

@@ -60,7 +60,9 @@ fn vector_paths_masks_clips_are_reversible_serializable_and_journaled() {
     ];
     e.transact(h, "edit", ops.clone(), 1).unwrap();
     let after = e.snapshot(h).unwrap();
-    let record = e.journal_record("edit", &ops).unwrap();
+    let record = e
+        .journal_record(h, JournalKind::Transact, "edit", &ops)
+        .unwrap();
     e.undo(h).unwrap();
     assert_eq!(before, e.snapshot(h).unwrap());
     e.redo(h).unwrap();

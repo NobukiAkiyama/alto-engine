@@ -559,12 +559,23 @@ impl Engine {
         }
         Ok((handle, warnings))
     }
-    pub fn journal_record(&self, intent: &str, ops: &[Op]) -> Result<Vec<u8>, EngineError> {
+    /// A journal record for the step just applied to `h`. `ops` are what the step
+    /// applied, so a checkpoint without undo history can still replay it forward.
+    pub fn journal_record(
+        &self,
+        h: DocHandle,
+        kind: JournalKind,
+        intent: &str,
+        ops: &[Op],
+    ) -> Result<Vec<u8>, EngineError> {
         let mut entries = BTreeMap::new();
+        let after = self.state_digest(h)?;
         entries.insert(
             "transaction.json".into(),
-            serde_json::to_vec(&serde_json::json!({"intent":intent,"ops":ops}))
-                .map_err(|e| DocError::Serialization(e.to_string()))?,
+            serde_json::to_vec(&serde_json::json!({
+                "kind": kind.name(), "intent": intent, "ops": ops, "after": after,
+            }))
+            .map_err(|e| DocError::Serialization(e.to_string()))?,
         );
         let mut hashes = std::collections::BTreeSet::new();
         for op in ops {
@@ -577,7 +588,10 @@ impl Engine {
         }
         Ok(alto_store::write_entries(&entries)?)
     }
-    pub fn replay_record(&mut self, h: DocHandle, bytes: &[u8]) -> Result<(), EngineError> {
+    /// Replays one journal record. Undo and redo use the restored history when there
+    /// is one; older checkpoints have none, and their steps replay as forward edits.
+    /// A step that does not reach the recorded state is reverted and reported.
+    pub fn replay_record(&mut self, h: DocHandle, bytes: &[u8]) -> Result<Replayed, EngineError> {
         let mut entries = alto_store::read_entries(bytes)?;
         let tx = entries
             .remove("transaction.json")
@@ -594,15 +608,70 @@ impl Engine {
                 self.install_object(hash, &data)?;
             }
         }
-        let revision = self.document(h)?.revision;
-        self.transact(
-            h,
-            v["intent"].as_str().unwrap_or("Recovered edit"),
-            ops,
-            revision,
-        )?;
-        Ok(())
+        let (undo, redo) = self.history_state(h)?;
+        let applied = match v["kind"].as_str() {
+            Some("undo") if undo > 0 => {
+                self.undo(h)?;
+                JournalKind::Undo
+            }
+            Some("redo") if redo > 0 => {
+                self.redo(h)?;
+                JournalKind::Redo
+            }
+            _ => {
+                let revision = self.document(h)?.revision;
+                let intent = v["intent"].as_str().unwrap_or("Recovered edit");
+                self.transact(h, intent, ops, revision)?;
+                JournalKind::Transact
+            }
+        };
+        let Some(after) = v["after"].as_str() else {
+            return Ok(Replayed::Applied);
+        };
+        if after == self.state_digest(h)?.to_string() {
+            return Ok(Replayed::Applied);
+        }
+        match applied {
+            JournalKind::Undo => {
+                self.redo(h)?;
+            }
+            // Undoing the replayed redo puts the step back on the redo stack.
+            JournalKind::Redo => {
+                self.undo(h)?;
+            }
+            // A transaction cleared the redo stack; undoing it leaves only the
+            // diverged step there, which is not offered for redo.
+            JournalKind::Transact => {
+                self.undo(h)?;
+                self.documents
+                    .get_mut(&h)
+                    .ok_or(EngineError::NotFound(h))?
+                    .drop_newest_redo();
+            }
+        }
+        Ok(Replayed::Diverged)
     }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalKind {
+    Transact,
+    Undo,
+    Redo,
+}
+impl JournalKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Transact => "transact",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replayed {
+    Applied,
+    /// The step did not reproduce the recorded state; it was reverted.
+    Diverged,
 }
 pub(crate) fn node_hashes(n: &alto_doc::Node, h: &mut std::collections::BTreeSet<ContentHash>) {
     if let NodeKind::Raster { tiles } = &n.kind {
@@ -648,7 +717,10 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
     }
 }
 
-fn tx_hashes(tx: &alto_doc::Transaction, h: &mut std::collections::BTreeSet<ContentHash>) {
+pub(crate) fn tx_hashes(
+    tx: &alto_doc::Transaction,
+    h: &mut std::collections::BTreeSet<ContentHash>,
+) {
     for applied in &tx.ops {
         op_hashes(&applied.op, h);
         op_hashes(&applied.inverse, h);
@@ -981,7 +1053,9 @@ mod package_tests {
             }],
         }];
         e.transact(d, "paint", ops.clone(), 1).unwrap();
-        let record = e.journal_record("paint", &ops).unwrap();
+        let record = e
+            .journal_record(d, JournalKind::Transact, "paint", &ops)
+            .unwrap();
         let mut recovered = Engine::new();
         let (r, warning) = recovered.open_package(&base).unwrap();
         assert!(warning.is_empty());
@@ -1146,9 +1220,129 @@ mod package_tests {
         assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
     }
 
+    /// Builds the same recovery the Worker does: checkpoint entries plus stored objects.
+    fn recover(
+        checkpoint: RecoveryCheckpoint,
+        records: &[Vec<u8>],
+    ) -> (Engine, DocHandle, Vec<Replayed>) {
+        let mut entries = checkpoint.entries;
+        let meta: serde_json::Value =
+            serde_json::from_slice(&entries.remove("checkpoint.json").unwrap()).unwrap();
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_value(meta["opaque"].clone()).unwrap();
+        let mut fresh = Engine::new();
+        let (r, warnings) = fresh.open_recovery_entries(entries, &opaque).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let replayed = records
+            .iter()
+            .map(|b| fresh.replay_record(r, b).unwrap())
+            .collect();
+        (fresh, r, replayed)
+    }
+    fn history_walk(e: &mut Engine, d: DocHandle) -> Vec<Vec<u8>> {
+        let mut out = vec![e.snapshot(d).unwrap()];
+        while e.undo(d).unwrap().is_some() {
+            out.push(e.snapshot(d).unwrap());
+        }
+        while e.redo(d).unwrap().is_some() {
+            out.push(e.snapshot(d).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn recovery_keeps_undo_history_across_the_checkpoint() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+        let layer = Node::raster("A");
+        let id = layer.id;
+        let root = e.document(d).unwrap().root;
+        e.transact(
+            d,
+            "add",
+            vec![Op::InsertNode {
+                node: layer,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        let mut tiles = vec![];
+        let mut paint = |e: &mut Engine, v: u8| -> Vec<Op> {
+            let mut px = vec![v; 262144];
+            px[3] = 255;
+            let after = e.put_tile(TileData::new(PixelFormat::Rgba8, px).unwrap());
+            let before = tiles.last().copied().flatten();
+            tiles.push(after);
+            let key = TileKey { tx: 0, ty: 0 };
+            let ops = vec![Op::SetTiles {
+                layer: id,
+                changes: vec![TileChange { key, before, after }],
+            }];
+            let rev = e.document(d).unwrap().revision;
+            e.transact(d, "paint", ops.clone(), rev).unwrap();
+            ops
+        };
+        paint(&mut e, 10);
+        paint(&mut e, 20);
+        // The first tile is only in the undo history now.
+        let checkpoint = e.recovery_checkpoint(d, &Default::default()).unwrap();
+        let mut records = vec![];
+        let ops = paint(&mut e, 30);
+        records.push(
+            e.journal_record(d, JournalKind::Transact, "paint", &ops)
+                .unwrap(),
+        );
+        let ops = e.undo_operations(d).unwrap();
+        e.undo(d).unwrap();
+        records.push(
+            e.journal_record(d, JournalKind::Undo, "Undo", &ops)
+                .unwrap(),
+        );
+        let (mut fresh, r, replayed) = recover(checkpoint, &records);
+        assert!(replayed.iter().all(|x| *x == Replayed::Applied));
+        assert_eq!(fresh.history_state(r).unwrap(), e.history_state(d).unwrap());
+        assert_eq!(history_walk(&mut fresh, r), history_walk(&mut e, d));
+    }
+
+    #[test]
+    fn a_replayed_step_that_misses_its_recorded_state_is_reverted() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let root = e.document(d).unwrap().root;
+        let checkpoint = e.recovery_checkpoint(d, &Default::default()).unwrap();
+        let layer = Node::raster("A");
+        let ops = vec![Op::InsertNode {
+            node: layer,
+            parent: root,
+            index: 0,
+        }];
+        e.transact(d, "add", ops.clone(), 0).unwrap();
+        let good = e
+            .journal_record(d, JournalKind::Transact, "add", &ops)
+            .unwrap();
+        // Same step, but a recorded state it cannot reach.
+        let mut entries = alto_store::read_entries(&good).unwrap();
+        let mut tx: serde_json::Value =
+            serde_json::from_slice(&entries["transaction.json"]).unwrap();
+        tx["after"] = serde_json::json!(ContentHash::of(b"elsewhere"));
+        entries.insert("transaction.json".into(), serde_json::to_vec(&tx).unwrap());
+        let bad = alto_store::write_entries(&entries).unwrap();
+        let (fresh, r, replayed) = recover(checkpoint, &[bad]);
+        assert_eq!(replayed, vec![Replayed::Diverged]);
+        assert_eq!(
+            fresh.document(r).unwrap().nodes.len(),
+            1,
+            "the step was not reverted"
+        );
+        assert_eq!(fresh.history_state(r).unwrap(), (0, 0));
+    }
+
     #[test]
     fn journal_record_refuses_an_operation_whose_tile_is_missing() {
-        let e = Engine::new();
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
         let absent = ContentHash::of(b"never stored");
         let ops = vec![Op::SetTiles {
             layer: alto_core::NodeId::new(),
@@ -1159,7 +1353,7 @@ mod package_tests {
             }],
         }];
         assert!(matches!(
-            e.journal_record("paint", &ops),
+            e.journal_record(d, JournalKind::Transact, "paint", &ops),
             Err(EngineError::MissingTile(h)) if h == absent
         ));
     }

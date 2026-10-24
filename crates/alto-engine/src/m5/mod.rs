@@ -865,7 +865,10 @@ mod tests {
         let mut records = vec![];
         let mut apply = |e: &mut Engine, ops: Vec<Op>| {
             commit(e, h, ops.clone());
-            records.push(e.journal_record("M5", &ops).unwrap());
+            records.push(
+                e.journal_record(h, JournalKind::Transact, "M5", &ops)
+                    .unwrap(),
+            );
         };
         let ops = e
             .selection_ops(

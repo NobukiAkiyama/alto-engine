@@ -1,7 +1,7 @@
 //! M7 text / fonts and M8 versions / folder packages at the WASM boundary.
 use crate::{Runtime, error};
 use alto_core::{ContentHash, NodeId};
-use alto_engine::{Engine, VersionRef};
+use alto_engine::{Engine, JournalKind, VersionRef};
 use serde_json::json;
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
@@ -173,8 +173,11 @@ impl Runtime {
             .map_err(|_| error("INVALID_ARGUMENT: commit hash"))?;
         let ops = self.engine.restore_version(self.doc, hash).map_err(error)?;
         let label = format!("版を復元: {}", &hash.hex()[..10]);
-        self.journal
-            .push(self.engine.journal_record(&label, &ops).map_err(error)?);
+        self.journal.push(
+            self.engine
+                .journal_record(self.doc, JournalKind::Transact, &label, &ops)
+                .map_err(error)?,
+        );
         self.refresh()?;
         self.view()
     }

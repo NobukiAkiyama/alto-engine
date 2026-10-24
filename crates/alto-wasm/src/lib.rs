@@ -2,7 +2,7 @@
 mod spike;
 use alto_core::{Affine2, AssetId, ContentHash, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
-use alto_engine::{DocHandle, Engine};
+use alto_engine::{DocHandle, Engine, JournalKind};
 use alto_gpu::renderer::{Renderer, Viewport};
 use alto_raster::{BrushConfig, StrokeSample, StrokeSampler, TileData, TileMap};
 use alto_scene::RenderScene;
@@ -268,7 +268,7 @@ impl Runtime {
             .map_err(error)?;
         self.journal.push(
             self.engine
-                .journal_record(&r.intent, &r.ops)
+                .journal_record(self.doc, JournalKind::Transact, &r.intent, &r.ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -287,8 +287,11 @@ impl Runtime {
             .undo(self.doc)
             .map_err(error)?
             .unwrap_or_default();
-        self.journal
-            .push(self.engine.journal_record("Undo", &ops).map_err(error)?);
+        self.journal.push(
+            self.engine
+                .journal_record(self.doc, JournalKind::Undo, "Undo", &ops)
+                .map_err(error)?,
+        );
         self.refresh()?;
         self.patch_view(&edited)
     }
@@ -305,8 +308,11 @@ impl Runtime {
             .redo(self.doc)
             .map_err(error)?
             .unwrap_or_default();
-        self.journal
-            .push(self.engine.journal_record("Redo", &ops).map_err(error)?);
+        self.journal.push(
+            self.engine
+                .journal_record(self.doc, JournalKind::Redo, "Redo", &ops)
+                .map_err(error)?,
+        );
         self.refresh()?;
         self.patch_view(&edited)
     }
@@ -606,7 +612,7 @@ impl Runtime {
             };
             self.journal.push(
                 self.engine
-                    .journal_record("Brush stroke", &ops)
+                    .journal_record(self.doc, JournalKind::Transact, "Brush stroke", &ops)
                     .map_err(error)?,
             );
             edited
@@ -798,15 +804,18 @@ impl Runtime {
                 return Err(error("CORRUPT_DATA: journal record frame"));
             }
             let (record, next) = tail.split_at(len);
-            self.engine.replay_record(self.doc, record).map_err(error)?;
+            if self.engine.replay_record(self.doc, record).map_err(error)?
+                == alto_engine::Replayed::Diverged
+            {
+                // Later records build on a state this replay did not reach.
+                self.warnings.push(
+                    "復旧記録の再生が記録時の状態と一致しなかったため、その手前までを復旧しました"
+                        .into(),
+                );
+                break;
+            }
             rest = next;
         }
-        self.refresh()?;
-        self.view()
-    }
-    #[wasm_bindgen(js_name=replayRecord)]
-    pub fn replay_record(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
-        self.engine.replay_record(self.doc, bytes).map_err(error)?;
         self.refresh()?;
         self.view()
     }
@@ -927,8 +936,11 @@ impl Runtime {
             .engine
             .transact(self.doc, intent, ops.clone(), revision)
             .map_err(error)?;
-        self.journal
-            .push(self.engine.journal_record(intent, &ops).map_err(error)?);
+        self.journal.push(
+            self.engine
+                .journal_record(self.doc, JournalKind::Transact, intent, &ops)
+                .map_err(error)?,
+        );
         self.refresh()?;
         self.patch_view(&edited)
     }

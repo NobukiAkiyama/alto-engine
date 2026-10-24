@@ -511,6 +511,44 @@ export async function runTests(engine, benchmark, log) {
       assert((await doc.snapshotHash()) === hash, "recovered document differs");
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
+    await test("recovery keeps undo history from before the checkpoint", async () => {
+      const name = doc.view.node(brushLayer).name;
+      for (const label of ["H1", "H2"])
+        await doc.transact(label, (tx) => tx.setProps(brushLayer, { name: label }));
+      await doc.versions.commit("history checkpoint");
+      for (const label of ["H3", "H4"])
+        await doc.transact(label, (tx) => tx.setProps(brushLayer, { name: label }));
+      await doc.undo();
+      const walk = async () => {
+        const out = [];
+        const redo = doc.view.history.redo;
+        while (doc.view.history.undo) {
+          await doc.undo();
+          out.push(await doc.snapshotHash());
+        }
+        while (doc.view.history.redo) {
+          await doc.redo();
+          out.push(await doc.snapshotHash());
+        }
+        // Back to where the walk started, with the same stacks.
+        for (let i = 0; i < redo; i++) await doc.undo();
+        return out;
+      };
+      const history = { ...doc.view.history };
+      const expected = await walk();
+      // The walk's own undos and redos are edits too and change the intent log.
+      const pending = doc.view.versions.pending_intents;
+      await doc.durable();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.history.undo === history.undo && doc.view.history.redo === history.redo,
+        `history ${JSON.stringify(doc.view.history)} after recovery, ${JSON.stringify(history)} before`);
+      assert(doc.view.versions.pending_intents === pending, "commit intents were lost");
+      const actual = await walk();
+      assert(actual.length === expected.length && actual.every((h, i) => h === expected[i]),
+        "undo/redo after recovery reached different states");
+      await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
+    });
     await test("simultaneous Worker restart requests share one recovery", async () => {
       const hash = (await doc.snapshotHash());
       let replacements = 0;

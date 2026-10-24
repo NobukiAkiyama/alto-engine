@@ -1519,6 +1519,15 @@ pub struct Transaction {
     pub seq: u64,
 }
 
+/// Undo and redo stacks and the commit intent log, as a recovery checkpoint keeps them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct History {
+    pub undo: Vec<Transaction>,
+    pub redo: Vec<Transaction>,
+    pub seq: u64,
+    pub log: Vec<IntentLogEntry>,
+}
+
 /// Edits since the last version commit, summarised into the commit's intents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IntentLogEntry {
@@ -1741,6 +1750,30 @@ impl Editor {
     }
     pub fn drop_oldest_undos(&mut self, count: usize) {
         self.undo.drain(..count.min(self.undo.len()));
+    }
+    pub fn history(&self) -> History {
+        History {
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+            seq: self.seq,
+            log: self.log.clone(),
+        }
+    }
+    /// Reinstates stacks saved with this document's content. The caller guarantees
+    /// they were taken from the same document state.
+    pub fn restore_history(&mut self, history: History) {
+        self.undo = history.undo;
+        self.redo = history.redo;
+        self.seq = history.seq;
+        self.log = history.log;
+        if self.undo.len() > self.max_undo {
+            let excess = self.undo.len() - self.max_undo;
+            self.undo.drain(..excess);
+        }
+    }
+    /// Forgets the most recent redo entry, for an undo that reverted a replayed edit.
+    pub fn drop_newest_redo(&mut self) {
+        self.redo.pop();
     }
     pub fn redo_len(&self) -> usize {
         self.redo.len()
