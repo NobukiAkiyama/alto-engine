@@ -815,7 +815,7 @@ impl Renderer {
         let pixels = if previews.contains_key(&hash) {
             None
         } else {
-            store.get(&hash)?
+            alto_raster::load(store, &hash)?
         };
         cost.get_ms = now() - t;
         if pixels.is_none() && !previews.contains_key(&hash) {
@@ -1933,7 +1933,7 @@ impl Renderer {
         let mut selection_tiles = HashMap::new();
         if let Some((m, _, _)) = selection {
             for (key, hash) in &m.tiles {
-                if let Some(tile) = store.get(hash)? {
+                if let Some(tile) = alto_raster::load(store, hash)? {
                     selection_tiles.insert(*key, tile);
                 }
             }
@@ -1959,7 +1959,10 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
                 let before = tiles.get(&key).copied();
-                let previous = before.map(|h| store.get(&h)).transpose()?.flatten();
+                let previous = before
+                    .map(|h| alto_raster::load(store, &h))
+                    .transpose()?
+                    .flatten();
                 let data = previous.unwrap_or_else(|| {
                     Arc::new(TileData {
                         format: if stroke.mask {

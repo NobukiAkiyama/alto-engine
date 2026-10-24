@@ -474,12 +474,15 @@ async function execute(m) {
       let lastError;
       for (const candidate of candidates) {
         try {
-          if (candidate.metadata?.format === 3)
-            runtime.openRecoveryEntries(candidate.base, JSON.stringify(candidate.metadata.opaque));
-          else if (candidate.metadata)
-            runtime.openRecoveryPackage(candidate.base, JSON.stringify(candidate.metadata.opaque));
-          else runtime.openPackage(candidate.base);
-          runtime.replayRecords(frameRecords(candidate.records));
+          // A candidate that cannot be read (a missing object) is skipped like one that
+          // cannot be opened; it does not stop storage.
+          const full = await journal.request("loadCandidate", { generation: candidate.generation });
+          if (full.metadata?.format === 3)
+            runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
+          else if (full.metadata)
+            runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
+          else runtime.openPackage(full.base);
+          runtime.replayRecords(frameRecords(full.records));
           recovery = candidate;
           break;
         } catch (error) {

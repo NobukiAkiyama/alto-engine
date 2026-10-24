@@ -15,7 +15,9 @@ let directory,
   // a checkpoint skips objects listed here, so one must never vanish mid-session.
   stored = new Set(),
   // Parsed checkpoints and records stay in memory only until recovery is decided.
-  released = false;
+  released = false,
+  // Unreferenced objects are deleted once per session, before its first write.
+  collected = false;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 async function sha256(bytes) {
@@ -141,7 +143,7 @@ function parse(bytes) {
     : null;
 }
 const isHash = (hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
-async function validMetadata(candidate, present) {
+async function validMetadata(candidate) {
   const meta = candidate.metadata;
   if (!meta) return true;
   if (!Array.isArray(meta.opaque) || meta.opaque.some((hash) => !isHash(hash))) return false;
@@ -151,7 +153,7 @@ async function validMetadata(candidate, present) {
   return (
     isHash(meta.entriesSha256) &&
     Array.isArray(meta.objects) &&
-    meta.objects.every((path) => typeof path === "string" && OBJECT_PATH.test(path) && present.has(path)) &&
+    meta.objects.every((path) => typeof path === "string" && OBJECT_PATH.test(path)) &&
     (await sha256(candidate.base)) === meta.entriesSha256
   );
 }
@@ -174,9 +176,12 @@ async function init() {
   objectsDirectory = await directory.getDirectoryHandle("objects", { create: true });
   await scan();
 }
-/** Reads both journals, keeps the valid checkpoints, and deletes unreferenced objects. */
+/**
+ * Reads both journals and keeps the valid checkpoints. Objects are not listed here:
+ * that is slow with thousands of them, and startup waits for this. A missing object
+ * fails its checkpoint when recovery reads it.
+ */
 async function scan() {
-  const present = await listObjects();
   const found = [];
   const seenGenerations = [];
   for (const name of ["journal-a.bin", "journal-b.bin"])
@@ -191,21 +196,29 @@ async function scan() {
   generation = Math.max(0, ...seenGenerations);
   candidates = [];
   for (const candidate of found)
-    if (await validMetadata(candidate, present)) {
+    if (await validMetadata(candidate)) {
       candidate.recordCount = candidate.records.length;
       candidates.push(candidate);
     }
   candidates.sort((a, b) => b.generation - a.generation);
-  // An object no valid checkpoint names was written for a checkpoint that never
-  // completed, or by a generation since replaced. It may be partial; it is not kept.
   stored = new Set(candidates.flatMap((c) => (c.metadata?.format === 3 ? c.metadata.objects : [])));
-  for (const [path, dir] of present)
-    if (!stored.has(path)) await dir.removeEntry(path.split("/")[2]).catch(() => {});
   released = false;
   if (candidates.length) {
     active = candidates[0];
     offset = active.validLength;
   }
+}
+/**
+ * Deletes objects no valid checkpoint named at startup: written for a checkpoint that
+ * never completed (possibly partial), or only by a generation since replaced. Runs
+ * before the session's first write, while `stored` is still exactly the startup set
+ * the engine was told about.
+ */
+async function collectGarbage() {
+  if (collected) return;
+  collected = true;
+  for (const [path, dir] of await listObjects())
+    if (!stored.has(path)) await dir.removeEntry(path.split("/")[2]).catch(() => {});
 }
 /** After recovery is decided, the parsed packages and records are not needed in memory. */
 function release() {
@@ -238,7 +251,18 @@ async function writeObject(path, bytes) {
 async function packageOf(candidate) {
   if (candidate.metadata?.format !== 3) return candidate.base;
   const entries = unframe(candidate.base);
-  for (const path of candidate.metadata.objects) entries.set(path, await readObject(path));
+  // One OPFS read per object; overlapping them hides most of the per-file latency.
+  const paths = candidate.metadata.objects;
+  const objects = new Array(paths.length);
+  let next = 0;
+  const reader = async () => {
+    while (next < paths.length) {
+      const i = next++;
+      objects[i] = await readObject(paths[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(32, paths.length) }, reader));
+  paths.forEach((path, i) => entries.set(path, objects[i]));
   return frame(entries);
 }
 async function writeGeneration(tag, payload, metadata) {
@@ -288,6 +312,7 @@ function withMetadata(metadata, bytes) {
  */
 async function checkpoint(framed) {
   await init();
+  await collectGarbage();
   const entries = unframe(framed);
   const meta = JSON.parse(decoder.decode(entries.get("checkpoint.json")));
   entries.delete("checkpoint.json");
@@ -350,17 +375,22 @@ export async function handle(data) {
       objects: [...stored],
     };
   else if (data.t === "loadCandidates") {
+    // Newest first, without their contents: recovery usually needs only the first.
     if (released) await scan();
-    value = [];
-    for (const candidate of candidates)
-      value.push({
-        generation: candidate.generation,
-        latestGeneration: generation,
-        base: await packageOf(candidate),
-        metadata: candidate.metadata && { format: candidate.metadata.format, opaque: candidate.metadata.opaque },
-        records: candidate.records,
-        truncated: candidate.truncated,
-      });
+    value = candidates.map((candidate) => ({
+      generation: candidate.generation,
+      latestGeneration: generation,
+      truncated: candidate.truncated,
+    }));
+  } else if (data.t === "loadCandidate") {
+    if (released) await scan();
+    const candidate = candidates.find((c) => c.generation === data.generation);
+    if (!candidate) throw Error("Journal generation unavailable");
+    value = {
+      base: await packageOf(candidate),
+      metadata: candidate.metadata && { format: candidate.metadata.format, opaque: candidate.metadata.opaque },
+      records: candidate.records,
+    };
   } else if (data.t === "activate") {
     const selected = candidates.find((candidate) => candidate.generation === data.generation);
     if (!selected) throw Error("Journal generation unavailable");
@@ -386,6 +416,7 @@ export async function handle(data) {
     value = true;
   } else if (data.t === "append") {
     if (!active) throw Error("Journal has no checkpoint");
+    await collectGarbage();
     const bytes = new Uint8Array(data.bytes);
     const r = record(1, bytes);
     const h = await active.file.createSyncAccessHandle();

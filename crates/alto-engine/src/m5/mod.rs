@@ -92,7 +92,7 @@ type Decoded = BTreeMap<TileKey, Arc<TileData>>;
 pub fn decode(map: &TileMap, store: &dyn TileStore) -> Result<Decoded, EngineError> {
     let mut decoded = Decoded::new();
     for (key, hash) in &map.tiles {
-        if let Some(tile) = store.get(hash)? {
+        if let Some(tile) = alto_raster::load(store, hash)? {
             decoded.insert(*key, tile);
         }
     }

@@ -4,7 +4,7 @@ pub mod text;
 pub mod versions;
 use alto_core::ContentHash;
 use alto_doc::{BlendMode, ChangeSet, DocError, Document, DocumentMeta, Editor, NodeKind, Op};
-use alto_raster::{MemoryTileStore, TileData, TileStore};
+use alto_raster::{DecodeCache, ObjectStore, TileData, TileStore};
 use alto_scene::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
 use std::collections::BTreeMap;
 pub use text::{CaretInfo, ImportedFont, TextInfo};
@@ -55,7 +55,10 @@ pub enum EngineError {
 pub struct Engine {
     documents: BTreeMap<DocHandle, Editor>,
     next_handle: u64,
-    tiles: MemoryTileStore,
+    tiles: ObjectStore,
+    /// Decoded tiles for CPU edits, which read pixel by pixel. The renderer keeps
+    /// none: its GPU atlas is its cache.
+    decoded: std::cell::RefCell<DecodeCache>,
     blobs: BTreeMap<ContentHash, Vec<u8>>,
     imported: std::collections::BTreeSet<ContentHash>,
     /// Blobs stored by import and not yet referenced by a committed transaction.
@@ -75,13 +78,14 @@ impl Default for Engine {
 
 impl Engine {
     pub fn clear_decoded_tile_cache(&mut self) {
-        self.tiles.clear_decoded_cache();
+        self.decoded.get_mut().clear();
     }
     pub fn new() -> Self {
         Self {
             documents: BTreeMap::new(),
             next_handle: 1,
-            tiles: MemoryTileStore::default(),
+            tiles: ObjectStore::default(),
+            decoded: std::cell::RefCell::new(DecodeCache::new(128 * 1024 * 1024)),
             blobs: BTreeMap::new(),
             imported: std::collections::BTreeSet::new(),
             pending_blobs: std::collections::BTreeSet::new(),
@@ -117,7 +121,12 @@ impl Engine {
         if tile.is_empty() {
             None
         } else {
-            Some(self.tiles.put(tile))
+            let hash = self.tiles.insert_tile(&tile);
+            // New tiles are usually read again at once (fills, journal records).
+            self.decoded
+                .get_mut()
+                .insert(hash, std::sync::Arc::new(tile));
+            Some(hash)
         }
     }
 
@@ -125,14 +134,14 @@ impl Engine {
         &self,
         hash: &ContentHash,
     ) -> Result<Option<std::sync::Arc<TileData>>, EngineError> {
-        Ok(self.tiles.get(hash)?)
+        Ok(self.decoded.borrow_mut().get(&self.tiles, hash)?)
     }
     /// For tiles the document references: absence is an error, not transparency.
     pub fn require_tile(
         &self,
         hash: &ContentHash,
     ) -> Result<std::sync::Arc<TileData>, EngineError> {
-        self.tiles.get(hash)?.ok_or(EngineError::MissingTile(*hash))
+        self.tile(hash)?.ok_or(EngineError::MissingTile(*hash))
     }
 
     pub fn transact(
@@ -379,14 +388,8 @@ impl TileStore for Engine {
     fn is_opaque(&self, h: &ContentHash) -> bool {
         self.tiles.is_opaque(h)
     }
-    fn get(
-        &self,
-        h: &ContentHash,
-    ) -> Result<Option<std::sync::Arc<TileData>>, alto_raster::TileError> {
-        self.tiles.get(h)
-    }
-    fn put(&mut self, d: TileData) -> ContentHash {
-        self.tiles.put(d)
+    fn object(&self, h: &ContentHash) -> Option<std::sync::Arc<alto_raster::StoredTile>> {
+        self.tiles.object(h)
     }
 }
 impl Engine {
@@ -459,14 +462,8 @@ impl Engine {
         Ok(())
     }
     fn encoded(&self, h: ContentHash) -> Result<Option<Vec<u8>>, EngineError> {
-        if let Some(t) = self.tile(&h)? {
-            Ok(Some(alto_store::encode_object(
-                match t.format {
-                    alto_core::PixelFormat::Rgba8 => 4,
-                    alto_core::PixelFormat::R8 => 1,
-                },
-                &t.pixels,
-            )))
+        if let Some(object) = self.tiles.object(&h) {
+            Ok(Some(object.encoded(&h)?))
         } else {
             Ok(self.blobs.get(&h).map(|b| alto_store::encode_object(0, b)))
         }
@@ -481,7 +478,7 @@ impl Engine {
         self.tiles.contains(hash)
     }
     pub fn resident_bytes(&self) -> usize {
-        self.tiles.allocated_bytes()
+        self.tiles.allocated_bytes() + self.decoded.borrow().bytes()
     }
     #[cfg(test)]
     pub fn tamper_parked_tile(&mut self, hash: &ContentHash) -> bool {
@@ -504,7 +501,7 @@ impl Engine {
                 };
                 let tile = TileData::new(format, data)
                     .map_err(|_| alto_store::StoreError::Corrupt("tile length".into()))?;
-                self.tiles.put(tile);
+                self.tiles.insert_tile(&tile);
             }
             _ => return Err(alto_store::StoreError::Corrupt("pixel format".into()).into()),
         }
@@ -524,9 +521,9 @@ impl Engine {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
                 let insert = if deferred_verify {
-                    MemoryTileStore::insert_deferred
+                    ObjectStore::insert_deferred
                 } else {
-                    MemoryTileStore::insert_verified
+                    ObjectStore::insert_verified
                 };
                 insert(
                     &mut self.tiles,
@@ -783,8 +780,10 @@ impl Engine {
         reachable.extend(self.pending_blobs.iter().copied());
         if self.backed {
             self.tiles.separate(&current, &reachable);
+            self.decoded.get_mut().retain(|h| current.contains(h));
         } else {
             self.tiles.retain(&reachable);
+            self.decoded.get_mut().retain(|h| reachable.contains(h));
         }
         self.blobs.retain(|hash, _| reachable.contains(hash));
     }

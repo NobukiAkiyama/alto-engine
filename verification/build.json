@@ -1,18 +1,18 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + undo history survives recovery",
+  "milestone": "M8 + shareable tile store",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4468333,
-  "gzipBytes": 1131279,
-  "wasmSha256": "1bf24abbdf70347783f88dfe52f49af320ac87dfe90829c534ee77d1a8e71b5f",
+  "wasmBytes": 4478703,
+  "gzipBytes": 1132032,
+  "wasmSha256": "db788094e698cfd1b5d374ff9fe37e59c28f06c36597003d090baf88aab9b972",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 112,
+  "nativeTests": 115,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
