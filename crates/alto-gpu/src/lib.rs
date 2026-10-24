@@ -1,5 +1,7 @@
 pub use alto_scene::*;
+pub use error::RenderError;
 
+mod error;
 pub mod glyph_atlas;
 pub mod renderer;
 

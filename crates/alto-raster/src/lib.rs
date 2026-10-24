@@ -42,12 +42,6 @@ impl std::fmt::Display for TileError {
     }
 }
 impl std::error::Error for TileError {}
-/// The renderer still reports errors as coded strings.
-impl From<TileError> for String {
-    fn from(error: TileError) -> Self {
-        error.to_string()
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TileData {

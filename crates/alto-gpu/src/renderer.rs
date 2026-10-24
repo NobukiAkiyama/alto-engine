@@ -14,7 +14,8 @@ use std::{
 mod m5;
 pub mod vector;
 
-type Result<T> = std::result::Result<T, String>;
+pub use crate::RenderError;
+type Result<T> = std::result::Result<T, RenderError>;
 type CacheKey = (i32, i32, i32);
 /// CPU time one resumable job slice may use before yielding to the Worker.
 const JOB_SLICE_MS: f64 = 1.8;
@@ -461,7 +462,10 @@ impl TileJob {
                 info: [2, 0, 0, 0],
             }),
             PlanTask::Node { idx, world, depth } => {
-                let n = scene.nodes.get(idx).ok_or("INTERNAL: scene node")?;
+                let n = scene
+                    .nodes
+                    .get(idx)
+                    .ok_or(RenderError::Internal("scene node".into()))?;
                 if !n.visible || n.opacity <= 0.0 {
                     return Ok(());
                 }
@@ -471,9 +475,9 @@ impl TileJob {
                         let isolate =
                             *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
                         if isolate && depth >= MAX_ISOLATED_GROUPS {
-                            return Err(format!(
-                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
-                            ));
+                            return Err(RenderError::InvalidArgument(format!(
+                                "group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            )));
                         }
                         if isolate {
                             self.commands.push(Command {
@@ -560,7 +564,7 @@ impl TileJob {
             } => {
                 let n = &scene.nodes[idx];
                 let RContent::Tiles(tiles) = &n.content else {
-                    return Err("INTERNAL: tile plan changed".into());
+                    return Err(RenderError::Internal("tile plan changed".into()));
                 };
                 if next == end {
                     self.commands.push(Command {
@@ -611,7 +615,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| format!("GPU_UNSUPPORTED: {e}"))?;
+            .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
         let slots = adapter
             .limits()
             .max_texture_array_layers
@@ -627,10 +631,10 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| RenderError::Internal(e.to_string()))?;
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or("GPU_UNSUPPORTED: no surface format")?;
+            .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
         if let Some(f) = surface
             .get_capabilities(&adapter)
             .formats
@@ -1001,7 +1005,9 @@ impl Renderer {
                     .min_by_key(|(_, s)| s.as_ref().map_or(0, |s| s.used))
                     .map(|(i, _)| i)
             })
-            .ok_or("GPU budget too small for one display tile")?;
+            .ok_or(RenderError::Budget(
+                "GPU budget too small for one display tile".into(),
+            ))?;
         if let Some(old) = self.atlas_slots[slot].take() {
             if self.profiling {
                 self.profile.atlas_evictions += 1;
@@ -1026,7 +1032,7 @@ impl Renderer {
             }
             self.atlas_slots[slot as usize]
                 .as_mut()
-                .ok_or("INTERNAL: atlas slot")?
+                .ok_or(RenderError::Internal("atlas slot".into()))?
                 .used = self.frame;
             pinned.insert(slot);
             return Ok((slot, cost));
@@ -1161,7 +1167,11 @@ impl Renderer {
             pinned: &mut HashSet<u32>,
             previews: &HashMap<ContentHash, wgpu::Texture>,
         ) -> Result<()> {
-            let n = b.scene.nodes.get(idx).ok_or("INTERNAL: scene node")?;
+            let n = b
+                .scene
+                .nodes
+                .get(idx)
+                .ok_or(RenderError::Internal("scene node".into()))?;
             if !n.visible || n.opacity <= 0.0 {
                 return Ok(());
             }
@@ -1171,9 +1181,9 @@ impl Renderer {
                     let isolate = *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
                     if isolate {
                         if depth >= MAX_ISOLATED_GROUPS {
-                            return Err(format!(
-                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
-                            ));
+                            return Err(RenderError::InvalidArgument(format!(
+                                "group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            )));
                         }
                         commands.push(Command {
                             inv0: [0.0; 4],
@@ -1350,13 +1360,15 @@ impl Renderer {
                 return if prefetch {
                     Ok(None)
                 } else {
-                    Err("GPU budget: no evictable display tile".into())
+                    Err(RenderError::Budget(
+                        "GPU budget: no evictable display tile".into(),
+                    ))
                 };
             };
             let c = self
                 .cache_map
                 .remove(&old)
-                .ok_or("INTERNAL: cache missing")?;
+                .ok_or(RenderError::Internal("cache missing".into()))?;
             // A resumable caller may defer submission or cancel. Keep the
             // reverse map consistent even before a replacement is published.
             self.cache_slots[c.slot as usize] = None;
@@ -1625,7 +1637,10 @@ impl Renderer {
             };
             self.prefetch_job = Some(TileJob::new(scene, key));
         }
-        let mut job = self.prefetch_job.take().ok_or("INTERNAL: prefetch job")?;
+        let mut job = self
+            .prefetch_job
+            .take()
+            .ok_or(RenderError::Internal("prefetch job".into()))?;
         let start = now();
         let result = self.advance_tile_job(&mut job, scene, store, true);
         let elapsed = now() - start;
@@ -1649,7 +1664,7 @@ impl Renderer {
     ) -> Result<JobStep> {
         let now = self.clock;
         if let Some(hash) = self.decoder.as_mut().and_then(|d| d.failed.take()) {
-            return Err(format!("CORRUPT_DATA: corrupt object {hash}"));
+            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
         }
         if !job.planned {
             let start = now();
@@ -1812,7 +1827,7 @@ impl Renderer {
         budget_ms: f64,
     ) -> Result<FrameReport> {
         if self.is_lost() {
-            return Err("GPU_LOST".into());
+            return Err(RenderError::GpuLost("device lost".into()));
         }
         let now = self.clock;
         self.frame += 1;
@@ -1864,7 +1879,9 @@ impl Renderer {
             }
         }
         if required.len() > 256 {
-            return Err("GPU budget: viewport needs more than 256 display tiles".into());
+            return Err(RenderError::Budget(
+                "GPU budget: viewport needs more than 256 display tiles".into(),
+            ));
         }
         self.visible_keys = required.iter().copied().collect();
         for key in &required {
@@ -1902,7 +1919,7 @@ impl Renderer {
                 if self.visible_job.is_none() {
                     let slot = self
                         .cache_slot(*key, false)?
-                        .ok_or("GPU budget: visible tile")?;
+                        .ok_or(RenderError::Budget("GPU budget: visible tile".into()))?;
                     if self.downsample_cached(scene, *key, slot as u32)? {
                         self.cache_slots[slot] = Some(*key);
                         self.cache_map.insert(
@@ -1921,13 +1938,18 @@ impl Renderer {
                     }
                     self.visible_job = Some(TileJob::new(scene, *key));
                 }
-                let mut job = self.visible_job.take().ok_or("INTERNAL: visible job")?;
+                let mut job = self
+                    .visible_job
+                    .take()
+                    .ok_or(RenderError::Internal("visible job".into()))?;
                 match self.advance_tile_job(&mut job, scene, store, false)? {
                     JobStep::Ready => {
                         composed += 1;
                     }
                     JobStep::Blocked => {
-                        return Err("GPU budget too small for one display tile".into());
+                        return Err(RenderError::Budget(
+                            "GPU budget too small for one display tile".into(),
+                        ));
                     }
                     _ => {
                         self.visible_job = Some(job);
@@ -2048,7 +2070,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(FrameReport::default());
             }
-            _ => return Err("GPU_LOST: surface".into()),
+            _ => return Err(RenderError::GpuLost("surface".into())),
         };
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -2109,7 +2131,7 @@ impl Renderer {
         world: [f64; 6],
     ) -> Result<()> {
         if self.stroke.is_some() {
-            return Err("CONFLICT: stroke already active".into());
+            return Err(RenderError::Conflict("stroke already active".into()));
         }
         self.stroke = Some(GpuStroke {
             layer,
@@ -2135,7 +2157,10 @@ impl Renderer {
         if dabs.is_empty() {
             return Ok(None);
         }
-        let mut stroke = self.stroke.take().ok_or("CONFLICT: no stroke")?;
+        let mut stroke = self
+            .stroke
+            .take()
+            .ok_or(RenderError::Conflict("no stroke".into()))?;
         let mut affected: BTreeMap<TileKey, Vec<GpuDab>> = BTreeMap::new();
         let mut bounds = Rect {
             x0: f64::INFINITY,
@@ -2177,7 +2202,9 @@ impl Renderer {
             + self.vector_fixed_bytes();
         let Some(allowance) = crate::cache_allowance(self.budget_bytes, frame, fixed) else {
             self.stroke = Some(stroke);
-            return Err("INVALID_ARGUMENT: stroke exceeds GPU memory budget".into());
+            return Err(RenderError::InvalidArgument(
+                "stroke exceeds GPU memory budget".into(),
+            ));
         };
         if self.vector_mesh_bytes() > allowance
             && let Some(vector) = self.vector.as_mut()
@@ -2308,7 +2335,10 @@ impl Renderer {
                     selection: selected,
                 });
             }
-            let tile = stroke.tiles.get(&key).ok_or("INTERNAL: stroke tile")?;
+            let tile = stroke
+                .tiles
+                .get(&key)
+                .ok_or(RenderError::Internal("stroke tile".into()))?;
             let db = buffer(
                 &self.device,
                 &self.queue,
@@ -2391,7 +2421,10 @@ impl Renderer {
         Ok(Some(damage))
     }
     pub async fn finish_stroke(&mut self) -> Result<Vec<(TileKey, Option<ContentHash>, TileData)>> {
-        let stroke = self.stroke.take().ok_or("CONFLICT: no stroke")?;
+        let stroke = self
+            .stroke
+            .take()
+            .ok_or(RenderError::Conflict("no stroke".into()))?;
         let mut buffers = Vec::new();
         let mut finished = Vec::new();
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -2433,7 +2466,7 @@ impl Renderer {
         }
         let mut failed = None;
         for w in waits {
-            if let Err(e) = w.await.map_err(|e| e.to_string())? {
+            if let Err(e) = w.await.map_err(|e| RenderError::Internal(e.to_string()))? {
                 failed.get_or_insert(e);
             }
         }
@@ -2446,17 +2479,20 @@ impl Renderer {
             }
             // As in read_tile: say whether the device was lost while the maps waited.
             return Err(if self.is_lost() {
-                format!("GPU_LOST: device lost while reading back a stroke: {e}")
+                RenderError::GpuLost(format!("device lost while reading back a stroke: {e}"))
             } else {
-                format!(
-                    "INTERNAL: reading back a stroke ({} tiles): {e}",
+                RenderError::Internal(format!(
+                    "reading back a stroke ({} tiles): {e}",
                     buffers.len()
-                )
+                ))
             });
         }
         let mut out = Vec::new();
         for (k, before, b) in buffers {
-            let mapped = b.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+            let mapped = b
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| RenderError::Internal(e.to_string()))?;
             let data = TileData::new(
                 if stroke.mask {
                     alto_core::PixelFormat::R8
@@ -2469,7 +2505,7 @@ impl Renderer {
                     mapped.to_vec()
                 },
             )
-            .map_err(|_| "CORRUPT_DATA: readback")?;
+            .map_err(|_| RenderError::CorruptData("readback".into()))?;
             drop(mapped);
             b.unmap();
             b.destroy();
@@ -2521,7 +2557,11 @@ impl Renderer {
         if !self.cache_map.contains_key(&key) {
             self.compose(scene, key, store, false)?;
         }
-        let slot = self.cache_map.get(&key).ok_or("INTERNAL: cache tile")?.slot;
+        let slot = self
+            .cache_map
+            .get(&key)
+            .ok_or(RenderError::Internal("cache tile".into()))?
+            .slot;
         let b = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe"),
             size: 262144,
@@ -2560,18 +2600,23 @@ impl Renderer {
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let mapped = rx.await.map_err(|e| e.to_string())?;
+        let mapped = rx.await.map_err(|e| RenderError::Internal(e.to_string()))?;
         // A map fails when the device is lost while it waits; say so, so the caller
         // can tell device loss from a renderer bug.
         if let Err(e) = mapped {
             b.destroy();
             return Err(if self.is_lost() {
-                format!("GPU_LOST: device lost while reading display tile {key:?}: {e}")
+                RenderError::GpuLost(format!(
+                    "device lost while reading display tile {key:?}: {e}"
+                ))
             } else {
-                format!("INTERNAL: reading display tile {key:?}: {e}")
+                RenderError::Internal(format!("reading display tile {key:?}: {e}"))
             });
         }
-        let view = b.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+        let view = b
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| RenderError::Internal(e.to_string()))?;
         let data = view.to_vec();
         drop(view);
         b.unmap();

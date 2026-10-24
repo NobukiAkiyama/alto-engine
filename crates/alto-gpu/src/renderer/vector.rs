@@ -430,7 +430,7 @@ impl VectorResources {
             (world[0] * world[0] + world[1] * world[1] + world[2] * world[2] + world[3] * world[3])
                 .sqrt();
         if !transform_scale.is_finite() || scale <= 0.0 {
-            return Err("INVALID_ARGUMENT: vector transform".into());
+            return Err(RenderError::InvalidArgument("vector transform".into()));
         }
         let band = (scale / transform_scale.max(1e-12))
             .log2()
@@ -468,10 +468,12 @@ impl VectorResources {
             let meshes = self
                 .tessellator
                 .prepare(std::slice::from_ref(*p), tolerance)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| RenderError::Internal(e.to_string()))?;
             let bytes = meshes.iter().map(|m| m.bytes() as u64).sum::<u64>();
             if bytes > mesh_limit || bytes + coverage_bytes > budget {
-                return Err("INVALID_ARGUMENT: vector mesh exceeds GPU budget".into());
+                return Err(RenderError::InvalidArgument(
+                    "vector mesh exceeds GPU budget".into(),
+                ));
             }
             while self.meshes.values().map(|m| m.bytes).sum::<u64>() + bytes
                 > mesh_limit.min(budget - coverage_bytes)
@@ -482,7 +484,9 @@ impl VectorResources {
                     .filter(|(_, m)| m.used != frame)
                     .min_by_key(|(_, m)| m.used)
                     .map(|(k, _)| *k)
-                    .ok_or("INVALID_ARGUMENT: visible vector meshes exceed GPU budget")?;
+                    .ok_or(RenderError::InvalidArgument(
+                        "visible vector meshes exceed GPU budget".into(),
+                    ))?;
                 if let Some(mesh) = self.meshes.remove(&old) {
                     mesh.retire(&mut self.retired);
                 }
@@ -544,7 +548,9 @@ impl VectorResources {
                 .filter(|(_, m)| m.used != frame)
                 .min_by_key(|(_, m)| m.used)
                 .map(|(k, _)| *k)
-                .ok_or("INVALID_ARGUMENT: vector coverage exceeds GPU budget")?;
+                .ok_or(RenderError::InvalidArgument(
+                    "vector coverage exceeds GPU budget".into(),
+                ))?;
             if let Some(mesh) = self.meshes.remove(&old) {
                 mesh.retire(&mut self.retired);
             }
@@ -580,7 +586,10 @@ impl VectorResources {
                 h,
             });
         }
-        let coverage = self.coverage.as_ref().ok_or("INTERNAL: vector coverage")?;
+        let coverage = self
+            .coverage
+            .as_ref()
+            .ok_or(RenderError::Internal("vector coverage".into()))?;
         let multi = coverage.multi.create_view(&Default::default());
         let resolved = coverage.resolved.create_view(&Default::default());
         let target = target.create_view(&Default::default());

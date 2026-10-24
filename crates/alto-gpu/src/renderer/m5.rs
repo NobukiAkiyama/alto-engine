@@ -200,7 +200,9 @@ impl Context<'_> {
             || roi.w > self.r.device.limits().max_texture_dimension_2d
             || roi.h > self.r.device.limits().max_texture_dimension_2d
         {
-            return Err("INVALID_ARGUMENT: effect ROI exceeds texture limits".into());
+            return Err(RenderError::InvalidArgument(
+                "effect ROI exceeds texture limits".into(),
+            ));
         }
         let index = self.next;
         self.next += 1;
@@ -235,7 +237,9 @@ impl Context<'_> {
             let fixed =
                 (self.r.atlas_slots.len() as u64 + 256) * 262144 + self.r.vector_fixed_bytes();
             if crate::cache_allowance(self.r.budget_bytes, frame, fixed).is_none() {
-                return Err("INVALID_ARGUMENT: effects exceed GPU memory budget".into());
+                return Err(RenderError::InvalidArgument(
+                    "effects exceed GPU memory budget".into(),
+                ));
             }
         }
         if self
@@ -871,9 +875,11 @@ impl Context<'_> {
                     self.dispatch(out, input, mixed, input, Self::params(10, transform), &[]);
                     base = Some(out);
                     accum = self.blend(
-                        base_background.ok_or("INTERNAL: clipping backdrop")?,
+                        base_background.ok_or(RenderError::Internal("clipping backdrop".into()))?,
                         out,
-                        base_node.as_ref().ok_or("INTERNAL: clipping base")?,
+                        base_node
+                            .as_ref()
+                            .ok_or(RenderError::Internal("clipping base".into()))?,
                         None,
                     )?;
                 } else {
@@ -916,9 +922,11 @@ impl Context<'_> {
                     let clipped = self.clip_blend(current, src, &node)?;
                     base = Some(clipped);
                     accum = self.blend(
-                        base_background.ok_or("INTERNAL: clipping backdrop")?,
+                        base_background.ok_or(RenderError::Internal("clipping backdrop".into()))?,
                         clipped,
-                        base_node.as_ref().ok_or("INTERNAL: clipping base")?,
+                        base_node
+                            .as_ref()
+                            .ok_or(RenderError::Internal("clipping base".into()))?,
                         None,
                     )?;
                 }
@@ -940,7 +948,7 @@ impl Context<'_> {
         depth: usize,
     ) -> Result<Target> {
         if depth > alto_core::MAX_TREE_DEPTH as usize {
-            return Err("INVALID_ARGUMENT: effect graph too deep".into());
+            return Err(RenderError::InvalidArgument("effect graph too deep".into()));
         }
         let node = self.scene.nodes[index].clone();
         let world = multiply(parent, node.transform);
