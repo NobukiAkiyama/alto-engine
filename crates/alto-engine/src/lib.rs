@@ -30,7 +30,7 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
         BlendMode::Add => RenderBlend::Add,
     }
 }
-pub use versions::{CommitView, VersionRef, VersionStatus};
+pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocHandle(pub u64);
@@ -1065,6 +1065,85 @@ mod package_tests {
             fast.drop_oldest_undos(undos_over_budget(&editor, &current, limit));
             assert_eq!(fast.undo_len(), slow.undo_len(), "limit {limit}");
         }
+    }
+
+    #[test]
+    fn incremental_recovery_checkpoint_writes_each_object_once_and_reopens() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(512, 256)).unwrap();
+        let layer = Node::raster("A");
+        let id = layer.id;
+        let root = e.document(d).unwrap().root;
+        e.transact(
+            d,
+            "add",
+            vec![Op::InsertNode {
+                node: layer,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        let paint = |e: &mut Engine, tx: i32, v: u8| {
+            let mut px = vec![v; 262144];
+            px[3] = 255;
+            let after = e.put_tile(TileData::new(PixelFormat::Rgba8, px).unwrap());
+            let rev = e.document(d).unwrap().revision;
+            let key = TileKey { tx, ty: 0 };
+            let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+                panic!()
+            };
+            let before = tiles.tiles.get(&key).copied();
+            e.transact(
+                d,
+                "paint",
+                vec![Op::SetTiles {
+                    layer: id,
+                    changes: vec![TileChange { key, before, after }],
+                }],
+                rev,
+            )
+            .unwrap();
+        };
+        paint(&mut e, 0, 10);
+        let mut disk = BTreeMap::new();
+        let mut stored = std::collections::BTreeSet::new();
+        let mut checkpoint = |e: &Engine, disk: &mut BTreeMap<String, Vec<u8>>| {
+            let c = e.recovery_checkpoint(d, &stored).unwrap();
+            stored.extend(c.written.iter().copied());
+            let mut rest = BTreeMap::new();
+            for (name, bytes) in c.entries {
+                if name.starts_with("objects/") {
+                    assert!(
+                        disk.insert(name, bytes).is_none(),
+                        "an object was written twice"
+                    );
+                } else {
+                    rest.insert(name, bytes);
+                }
+            }
+            (c.written.len(), rest)
+        };
+        let (first, _) = checkpoint(&e, &mut disk);
+        assert_eq!(first, 1);
+        paint(&mut e, 1, 20);
+        let (second, rest) = checkpoint(&e, &mut disk);
+        assert_eq!(second, 1, "only the new tile");
+        // Recovery reads the referenced objects from the store.
+        let meta: serde_json::Value = serde_json::from_slice(&rest["checkpoint.json"]).unwrap();
+        let mut entries = rest.clone();
+        entries.remove("checkpoint.json");
+        for p in meta["objects"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            entries.insert(p.into(), disk[p].clone());
+        }
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_value(meta["opaque"].clone()).unwrap();
+        let mut fresh = Engine::new();
+        let (r, warnings) = fresh.open_recovery_entries(entries, &opaque).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
     }
 
     #[test]

@@ -31,6 +31,12 @@ impl VersionStore {
     }
 }
 
+pub struct RecoveryCheckpoint {
+    pub entries: BTreeMap<String, Vec<u8>>,
+    /// Objects whose bytes `entries` carries.
+    pub written: Vec<ContentHash>,
+}
+
 /// Which side of a diff: a commit or the working document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VersionRef {
@@ -357,21 +363,56 @@ impl Engine {
 
     /// Package contents including every committed snapshot and its objects.
     pub fn package_parts(&self, h: DocHandle) -> Result<PackageParts, EngineError> {
+        Ok(self.package_parts_except(h, &BTreeSet::new())?.0)
+    }
+
+    /// Package parts without the bytes of objects in `stored`, plus every object the
+    /// package references. A recovery checkpoint writes only the objects it lacks.
+    pub fn package_parts_except(
+        &self,
+        h: DocHandle,
+        stored: &BTreeSet<ContentHash>,
+    ) -> Result<(PackageParts, BTreeSet<ContentHash>), EngineError> {
         let doc = self.document(h)?;
         let store = self.versions(h)?;
         let mut hashes = doc_hashes(doc);
         hashes.extend(store.retained.iter().copied());
         let mut objects = BTreeMap::new();
-        for hash in hashes {
+        for &hash in hashes.difference(stored) {
             let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
             objects.insert(hash, bytes);
         }
-        Ok(PackageParts {
+        let parts = PackageParts {
             snapshot: doc.snapshot_bytes()?,
             objects,
             snapshots: store.snapshots.clone(),
             commits: store.commit_bytes.clone(),
             head: store.head,
+        };
+        Ok((parts, hashes))
+    }
+
+    /// A recovery checkpoint as package entries without the objects in `stored`,
+    /// plus `checkpoint.json` naming every object path it references and the
+    /// opaque objects.
+    pub fn recovery_checkpoint(
+        &self,
+        h: DocHandle,
+        stored: &BTreeSet<ContentHash>,
+    ) -> Result<RecoveryCheckpoint, EngineError> {
+        let (parts, refs) = self.package_parts_except(h, stored)?;
+        let mut entries = alto_store::package_entries(&parts)?;
+        let meta = serde_json::json!({
+            "objects": refs.iter().map(alto_store::object_path).collect::<Vec<_>>(),
+            "opaque": self.recovery_opaque_hashes(h)?,
+        });
+        entries.insert(
+            "checkpoint.json".into(),
+            serde_json::to_vec(&meta).map_err(|e| DocError::Serialization(e.to_string()))?,
+        );
+        Ok(RecoveryCheckpoint {
+            entries,
+            written: parts.objects.into_keys().collect(),
         })
     }
 
@@ -460,7 +501,16 @@ impl Engine {
         bytes: &[u8],
         opaque: &std::collections::BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
-        let entries = alto_store::read_entries(bytes)?;
+        self.open_recovery_entries(alto_store::read_entries(bytes)?, opaque)
+    }
+
+    /// Journal-only: entries of a checkpoint whose metadata digest the caller verified.
+    /// Objects are named by their hash and checked against it on first use.
+    pub fn open_recovery_entries(
+        &mut self,
+        entries: BTreeMap<String, Vec<u8>>,
+        opaque: &std::collections::BTreeSet<ContentHash>,
+    ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let p = alto_store::decode_recovery_entries(entries, opaque)?;
         self.open_decoded_package(p, true)
     }

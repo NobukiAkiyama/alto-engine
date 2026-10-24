@@ -1408,6 +1408,9 @@ export class AltoEngine extends Events {
     /** Temporarily changes the module URL for Worker load-failure tests. */
     setWorkerURL: (url: URL | string | undefined) => { this.options.workerURL = url; },
     pendingRequests: () => this.pending.size,
+    /** Generation, record count and object count of the OPFS recovery store. */
+    recoveryStore: (): Promise<{ latestGeneration: number; records: number; objects: number }> =>
+      this.request("recoveryStore"),
     corruptJournalTail: () => this.request("corruptJournalTail"),
     corruptCheckpoint: () => this.request("corruptCheckpoint"),
     corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),

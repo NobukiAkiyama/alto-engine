@@ -696,6 +696,12 @@ export declare class AltoEngine extends Events {
         /** Temporarily changes the module URL for Worker load-failure tests. */
         setWorkerURL: (url: URL | string | undefined) => void;
         pendingRequests: () => number;
+        /** Generation, record count and object count of the OPFS recovery store. */
+        recoveryStore: () => Promise<{
+            latestGeneration: number;
+            records: number;
+            objects: number;
+        }>;
         corruptJournalTail: () => Promise<any>;
         corruptCheckpoint: () => Promise<any>;
         corruptCheckpointCrc: () => Promise<any>;

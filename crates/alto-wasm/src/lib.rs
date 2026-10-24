@@ -106,6 +106,9 @@ pub struct Runtime {
     saved: ContentHash,
     budget: u32,
     warnings: Vec<String>,
+    /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
+    /// The store deletes objects only at startup, so this set only grows.
+    stored_objects: std::collections::BTreeSet<ContentHash>,
 }
 #[wasm_bindgen]
 impl Runtime {
@@ -145,6 +148,7 @@ impl Runtime {
             saved,
             budget,
             warnings: vec![],
+            stored_objects: Default::default(),
         })
     }
     #[wasm_bindgen(js_name=createDocument)]

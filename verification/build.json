@@ -1,23 +1,23 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + journal writes off the edit path",
+  "milestone": "M8 + incremental recovery checkpoints",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4395455,
-  "gzipBytes": 1114656,
-  "wasmSha256": "5b588ed3ff38c6b748a2873dc39e0ec30d57dd6c66dc46d043660dabb07cbacb",
+  "wasmBytes": 4416199,
+  "gzipBytes": 1119365,
+  "wasmSha256": "e3adc7ad2e0a1238cb485e447b9d798eef3188b763d02b6824e8d4e9b1a0bf7e",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 109,
+  "nativeTests": 110,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
   ],
-  "browserFunctionalTests": 25,
+  "browserFunctionalTests": 27,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,

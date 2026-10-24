@@ -462,6 +462,38 @@ export async function runTests(engine, benchmark, log) {
         "journal recovery pixels mismatch",
       );
     });
+    await test("a checkpoint writes only the objects the recovery store lacks", async () => {
+      await doc.durable();
+      const start = await engine.unstable.recoveryStore();
+      // Tile (1,0): later tests compare tile (0,0) with the pixels painted earlier.
+      await stroke(doc, brushLayer, "brush", [{ x: 400, y: 40, pressure: 1 }]);
+      await doc.versions.commit("one more tile");
+      await doc.durable();
+      const after = await engine.unstable.recoveryStore();
+      assert(after.latestGeneration === start.latestGeneration + 1, "the commit did not checkpoint");
+      assert(after.records === 0, "the checkpoint kept journal records");
+      const added = after.objects - start.objects;
+      // The stroke touches one tile; the earlier tile stays as history and is already stored.
+      assert(added === 1, `the checkpoint wrote ${added} objects`);
+      await doc.undo();
+    });
+    await test("a long journal is checkpointed once editing pauses", async () => {
+      const name = doc.view.node(brushLayer).name;
+      const start = await engine.unstable.recoveryStore();
+      // 500 journal records start an automatic checkpoint after 2 s without messages.
+      for (let i = 0; i < 520; i++)
+        await doc.transact("rename " + i, (tx) => tx.setProps(brushLayer, { name: "Long " + i }));
+      await doc.durable();
+      let store = await engine.unstable.recoveryStore();
+      assert(store.latestGeneration === start.latestGeneration, "checkpointed while editing");
+      assert(store.records >= 500, `only ${store.records} records were journaled`);
+      // A request counts as activity, so wait without polling.
+      await delay(3000);
+      store = await engine.unstable.recoveryStore();
+      assert(store.latestGeneration === start.latestGeneration + 1, "no automatic checkpoint");
+      assert(store.records === 0, "records remained after the checkpoint");
+      await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
+    });
     await test("rapid edits keep journal order and survive a crash", async () => {
       const before = doc.view.revision;
       const name = doc.view.node(brushLayer).name;

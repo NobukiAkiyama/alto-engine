@@ -135,6 +135,28 @@ let durableSeq = 0;
 let pumping = null;
 let durableWaiters = [];
 let roomWaiters = [];
+// A long session without saves or commits would grow the journal without bound and
+// make recovery replay all of it. Past these, checkpoint once the user pauses.
+const AUTO_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+const AUTO_CHECKPOINT_RECORDS = 500;
+const AUTO_CHECKPOINT_IDLE_MS = 2000;
+let lastCommandAt = 0;
+let journaledBytes = 0;
+let journaledRecords = 0;
+let autoCheckpointTimer = null;
+function scheduleAutoCheckpoint() {
+  if (autoCheckpointTimer !== null) return;
+  // Fire when the pause would be long enough, not a fixed interval after the last check.
+  const wait = Math.max(0, lastCommandAt + AUTO_CHECKPOINT_IDLE_MS - performance.now()) + 10;
+  autoCheckpointTimer = setTimeout(() => {
+    autoCheckpointTimer = null;
+    if (storageFailure || !runtime) return;
+    // The page sends a tick every animation frame, so only commands count as activity.
+    const busy = draining || queue.length || performance.now() - lastCommandAt < AUTO_CHECKPOINT_IDLE_MS;
+    if (busy) scheduleAutoCheckpoint();
+    else queueCheckpoint();
+  }, wait);
+}
 function enqueue(entry) {
   entry.seq = ++queuedSeq;
   writes.push(entry);
@@ -145,19 +167,22 @@ function queueJournal() {
   let bytes;
   while ((bytes = runtime.takeJournal()).length) enqueue({ kind: "append", bytes });
 }
-/** The package already holds every edit queued so far; their appends are dropped. */
-function queueCheckpoint(bytes, opaque = JSON.parse(runtime.recoveryOpaque())) {
+/**
+ * Checkpoints the current document: its package without the objects the store already
+ * holds. It contains every edit queued so far, so their appends are dropped.
+ */
+function queueCheckpoint() {
+  journaledBytes = 0;
+  journaledRecords = 0;
+  const bytes = runtime.checkpointParts();
   for (const w of writes) pendingBytes -= w.bytes.length;
   writes = writes.filter((w) => w.kind !== "append");
   for (const w of writes) pendingBytes += w.bytes.length;
-  enqueue({ kind: "checkpoint", bytes, opaque });
-}
-function queuePackageCheckpoint() {
-  queueCheckpoint(runtime.savePackage());
+  enqueue({ kind: "checkpoint", bytes });
 }
 async function write(w) {
   if (w.kind === "checkpoint") {
-    await io("checkpoint", { bytes: w.bytes.buffer, opaque: w.opaque }, [w.bytes.buffer]);
+    await io("checkpoint", { entries: w.bytes.buffer }, [w.bytes.buffer]);
     return;
   }
   if (injectedStorageFault === "beforeAppend") {
@@ -173,7 +198,9 @@ async function write(w) {
 async function pump() {
   while (writes.length && !storageFailure) {
     const w = writes.shift();
-    pendingBytes -= w.bytes.length;
+    // Writing transfers the buffer; read its size first.
+    const size = w.bytes.length;
+    pendingBytes -= size;
     try {
       await write(w);
     } catch (error) {
@@ -181,6 +208,12 @@ async function pump() {
       return;
     }
     durableSeq = w.seq;
+    if (w.kind === "append") {
+      journaledBytes += size;
+      journaledRecords++;
+      if (journaledBytes >= AUTO_CHECKPOINT_BYTES || journaledRecords >= AUTO_CHECKPOINT_RECORDS)
+        scheduleAutoCheckpoint();
+    }
     durableWaiters = durableWaiters.filter((d) => (d.seq <= durableSeq ? (d.resolve(), false) : true));
     if (hasRoom()) for (const wake of roomWaiters.splice(0)) wake();
   }
@@ -229,7 +262,7 @@ function decodeFrame(numbers) {
   return out;
 }
 let savedToken = 0;
-// Each entry holds a whole package until the page confirms or releases it.
+// The state each save wrote, until the page confirms or releases it.
 const saves = new Map();
 const MAX_PENDING_SAVES = 4;
 function rememberSave(entry) {
@@ -256,10 +289,14 @@ async function execute(m) {
       adapterName = runtime.adapterName();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
-      return { protocol: 4, recovery: await io("inspect") };
+      const recovery = await io("inspect");
+      // Later checkpoints skip the objects the store already holds.
+      runtime.noteStoredObjects(JSON.stringify(recovery.objects));
+      delete recovery.objects;
+      return { protocol: 4, recovery };
     case "createDocument": {
       const state = JSON.parse(runtime.createDocument(m.width, m.height));
-      queuePackageCheckpoint();
+      queueCheckpoint();
       return state;
     }
     case "transact": {
@@ -342,7 +379,6 @@ async function execute(m) {
       const token = rememberSave({
         hash: state.stateHash,
         revision: state.document.revision,
-        bytes: bytes.slice(),
       });
       return { bytes, token };
     }
@@ -352,7 +388,6 @@ async function execute(m) {
       const token = rememberSave({
         hash: state.stateHash,
         revision: state.document.revision,
-        bytes: runtime.checkpointBytes(),
       });
       return { bytes, token };
     }
@@ -360,7 +395,7 @@ async function execute(m) {
       return JSON.parse(runtime.folderPlan(new Uint8Array(m.bytes)));
     case "openFolder": {
       const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
-      queueCheckpoint(runtime.checkpointBytes());
+      queueCheckpoint();
       return s;
     }
     case "importFont":
@@ -370,7 +405,7 @@ async function execute(m) {
     case "pruneVersions": {
       const state = JSON.parse(runtime.pruneVersions());
       queueJournal();
-      queuePackageCheckpoint();
+      queueCheckpoint();
       postMessage({ t: "patch", value: state });
       return state;
     }
@@ -395,7 +430,7 @@ async function execute(m) {
       const state = JSON.parse(runtime.view());
       // Commits are not journaled operations: checkpoint so a crash keeps them.
       queueJournal();
-      queuePackageCheckpoint();
+      queueCheckpoint();
       postMessage({ t: "patch", value: state });
       return { commit, state };
     }
@@ -414,7 +449,7 @@ async function execute(m) {
       if (!saved) throw Error("INVALID_ARGUMENT: save token expired");
       const state = JSON.parse(runtime.markSaved(saved.hash));
       if (state.document.revision === saved.revision) {
-        queueCheckpoint(saved.bytes);
+        queueCheckpoint();
       }
       saves.delete(m.token);
       return state;
@@ -423,7 +458,7 @@ async function execute(m) {
       return saves.delete(m.token);
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
-      queueCheckpoint(new Uint8Array(m.bytes));
+      queueCheckpoint();
       return s;
     }
     case "recover": {
@@ -439,7 +474,9 @@ async function execute(m) {
       let lastError;
       for (const candidate of candidates) {
         try {
-          if (candidate.metadata)
+          if (candidate.metadata?.format === 3)
+            runtime.openRecoveryEntries(candidate.base, JSON.stringify(candidate.metadata.opaque));
+          else if (candidate.metadata)
             runtime.openRecoveryPackage(candidate.base, JSON.stringify(candidate.metadata.opaque));
           else runtime.openPackage(candidate.base);
           runtime.replayRecords(frameRecords(candidate.records));
@@ -467,6 +504,11 @@ async function execute(m) {
         new Float32Array(m.color),
         new Float32Array(m.samples),
       );
+    case "recoveryStore": {
+      await writesIdle();
+      const store = await io("inspect");
+      return { latestGeneration: store.latestGeneration, records: store.records, objects: store.objects.length };
+    }
     case "corruptJournalTail":
       await writesIdle();
       return io("corruptTail");
@@ -625,6 +667,9 @@ self.onmessage = ({ data: m }) => {
   } else if (m.t === "resize") {
     pendingResize = m;
     wantTick = true;
-  } else queue.push(m);
+  } else {
+    lastCommandAt = performance.now();
+    queue.push(m);
+  }
   void drain();
 };

@@ -13,6 +13,13 @@ export class Runtime {
      * The canonical .alto bytes for a folder, used as the recovery checkpoint.
      */
     checkpointBytes(): Uint8Array;
+    /**
+     * A recovery checkpoint as framed entries: the package without the objects
+     * already stored, plus `checkpoint.json` naming every object it references and
+     * the opaque ones. The returned objects are counted as stored from now on: if
+     * writing them fails, storage stops accepting writes altogether.
+     */
+    checkpointParts(): Uint8Array;
     commit(message: string, created_at: number, author: string, allow_empty: boolean): string;
     cpuBrushReference(config: string, color: Float32Array, samples: Float32Array): Uint8Array;
     createDocument(w: number, h: number): string;
@@ -34,8 +41,16 @@ export class Runtime {
      * A raster layer's full tile map; views carry only its size and bounds.
      */
     nodeTiles(id: string): string;
+    /**
+     * Object paths (`objects/ab/<hash>`) the recovery store already holds.
+     */
+    noteStoredObjects(paths: string): void;
     openFolder(framed: Uint8Array): string;
     openPackage(bytes: Uint8Array): string;
+    /**
+     * Only called by the journal worker after verifying the checkpoint digest.
+     */
+    openRecoveryEntries(framed: Uint8Array, opaque: string): string;
     /**
      * Only called by the journal worker after verifying the checkpoint digest.
      */
@@ -124,6 +139,7 @@ export interface InitOutput {
     readonly runtime_brushInput: (a: number, b: number, c: number) => [number, number];
     readonly runtime_cancelBrush: (a: number) => void;
     readonly runtime_checkpointBytes: (a: number) => [number, number, number, number];
+    readonly runtime_checkpointParts: (a: number) => [number, number, number, number];
     readonly runtime_commit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_cpuBrushReference: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_create: (a: any, b: number) => any;
@@ -138,8 +154,10 @@ export interface InitOutput {
     readonly runtime_importRgba: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_nodeTiles: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_noteStoredObjects: (a: number, b: number, c: number) => [number, number];
     readonly runtime_openFolder: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_openRecoveryEntries: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_prefetchStep: (a: number) => [number, number, number, number];
@@ -193,8 +211,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__75: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__76: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__78: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__79: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
