@@ -263,6 +263,45 @@ export async function runTests(engine, benchmark, log) {
       }
       await engine.request("enablePrefetch");
     });
+    await test("cold frames decode inputs in the decode workers and match inline decoding", async () => {
+      // Six layers at zoom 0.5: each display tile needs up to 24 source tiles, more
+      // than a job decodes inline.
+      doc = await engine.createDocument({ width: 1024, height: 512 });
+      // Each 256 px tile differs, so content addressing cannot merge them.
+      const assets = [];
+      for (let i = 0; i < 6; i++) {
+        const c = new OffscreenCanvas(1024, 512), ctx = c.getContext("2d");
+        ctx.fillStyle = `rgba(${40 * i},${200 - 30 * i},120,.4)`;
+        ctx.fillRect(0, 0, 1024, 512);
+        for (let y = 0; y < 512; y += 256)
+          for (let x = 0; x < 1024; x += 256) {
+            ctx.fillStyle = `rgba(${(x / 4 + i * 30) % 255},${(y / 2 + i * 50) % 255},60,.5)`;
+            ctx.fillRect(x + 16, y + 16, 200, 200);
+          }
+        assets.push(await engine.assets.importImage(await c.convertToBlob()));
+      }
+      await doc.transact("layers", (tx) => assets.forEach((a) => tx.addRasterFromAsset(a)));
+      const view = { center: [512, 256], zoom: 0.5, rotation: 0 };
+      const readAll = async () => [await engine.unstable.readTileLevel(1, 0, 0), await engine.unstable.readTileLevel(1, 1, 0)];
+      const cold = async (workers) => {
+        if (!(await engine.request("setDecodeWorkers", { enabled: workers })) && workers)
+          return null;
+        // Set the level before clearing, so no tick composes level 0 first.
+        engine.viewport.set(view);
+        await engine.request("resetRenderCache", { cpu: true });
+        engine.viewport.set(view);
+        const frame = await settled(engine);
+        return { frame, tiles: await readAll() };
+      };
+      const inline = await cold(false);
+      const pooled = await cold(true);
+      // A browser without nested Workers decodes inline; nothing more to compare.
+      if (pooled) {
+        assert(pooled.frame.workerDecodes > 0, "no input was decoded in a decode worker");
+        pooled.tiles.forEach((t, i) => assert(same(t, inline.tiles[i]), `tile ${i} differs from inline decoding`));
+      }
+      await engine.request("enablePrefetch");
+    });
     await test("full display cache can yield and replace tiles without orphaning slots", async () => {
       doc = await engine.createDocument({ width: 300, height: 300 });
       const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);

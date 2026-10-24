@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-const FRAME_FIELDS: [&str; 31] = [
+const FRAME_FIELDS: [&str; 32] = [
     "composed",
     "pending",
     "gpuBytes",
@@ -29,6 +29,7 @@ const FRAME_FIELDS: [&str; 31] = [
     "prefetch.maxSubmitMs",
     "prefetch.cancelled",
     "prefetch.uploadBytes",
+    "workerDecodes",
     "hasProfile",
     "profile.composeMs",
     "profile.commandsMs",
@@ -109,6 +110,8 @@ pub struct Runtime {
     /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
     /// The store deletes objects only at startup, so this set only grows.
     stored_objects: std::collections::BTreeSet<ContentHash>,
+    /// The Worker decodes job inputs in its decode pool. Kept across GPU recovery.
+    decode_workers: bool,
 }
 #[wasm_bindgen]
 impl Runtime {
@@ -149,6 +152,7 @@ impl Runtime {
             budget,
             warnings: vec![],
             stored_objects: Default::default(),
+            decode_workers: false,
         })
     }
     #[wasm_bindgen(js_name=createDocument)]
@@ -376,6 +380,7 @@ impl Runtime {
             p.max_submit_ms,
             p.cancelled as f64,
             p.upload_bytes as f64,
+            self.renderer.decoded_elsewhere() as f64,
             f64::from(u8::from(r.profile.is_some())),
         ];
         let q = r.profile.unwrap_or_default();
@@ -398,6 +403,81 @@ impl Runtime {
     }
     /// Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
     /// nests the field; `profile.*` is present only when `hasProfile` is 1.
+    /// Whether resumable jobs leave input decoding to the Worker's decode pool.
+    #[wasm_bindgen(js_name=setDecodeWorkers)]
+    pub fn set_decode_workers(&mut self, enabled: bool) {
+        self.decode_workers = enabled;
+        self.renderer.set_parallel_decode(enabled);
+    }
+    /// Up to `max` decode requests: u32 count, then per tile a 32-byte hash, pixel
+    /// format tag (1 R8, 4 RGBA8), check flag, u32 length and the LZ4 bytes.
+    #[wasm_bindgen(js_name=takeDecodeRequests)]
+    pub fn take_decode_requests(&mut self, max: u32) -> Vec<u8> {
+        let requests = self.renderer.take_decode_requests(max as usize);
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        let mut out = (requests.len() as u32).to_le_bytes().to_vec();
+        let mut count = 0u32;
+        for (hash, object) in requests {
+            let Ok((compressed, check)) = object.for_decoder(&hash) else {
+                self.renderer.decode_failed(hash);
+                continue;
+            };
+            out.extend(hash.0);
+            out.push(match object.format {
+                alto_core::PixelFormat::R8 => 1,
+                alto_core::PixelFormat::Rgba8 => 4,
+            });
+            out.push(u8::from(check));
+            out.extend((compressed.len() as u32).to_le_bytes());
+            out.extend(compressed);
+            count += 1;
+        }
+        out[..4].copy_from_slice(&count.to_le_bytes());
+        out
+    }
+    /// Decode results: u32 count, then per tile a 32-byte hash, status (0 ok,
+    /// 1 ok and content checked, 2 damaged), u32 length and the pixels.
+    #[wasm_bindgen(js_name=provideDecoded)]
+    pub fn provide_decoded(&mut self, framed: &[u8]) -> Result<(), JsValue> {
+        let bad = || error("INTERNAL: decode result frame");
+        let count = u32::from_le_bytes(
+            framed
+                .get(..4)
+                .ok_or_else(bad)?
+                .try_into()
+                .map_err(|_| bad())?,
+        );
+        let mut p = 4usize;
+        for _ in 0..count {
+            let hash = ContentHash(
+                framed
+                    .get(p..p + 32)
+                    .ok_or_else(bad)?
+                    .try_into()
+                    .map_err(|_| bad())?,
+            );
+            let status = *framed.get(p + 32).ok_or_else(bad)?;
+            let len = u32::from_le_bytes(
+                framed
+                    .get(p + 33..p + 37)
+                    .ok_or_else(bad)?
+                    .try_into()
+                    .map_err(|_| bad())?,
+            ) as usize;
+            let pixels = framed.get(p + 37..p + 37 + len).ok_or_else(bad)?;
+            p += 37 + len;
+            if status == 2 {
+                self.renderer.decode_failed(hash);
+            } else {
+                self.renderer
+                    .provide_decoded(hash, pixels, status == 1)
+                    .map_err(error)?;
+            }
+        }
+        Ok(())
+    }
     #[wasm_bindgen(js_name=frameFields)]
     pub fn frame_fields(&self) -> Vec<String> {
         FRAME_FIELDS.iter().map(|f| f.to_string()).collect()
@@ -846,6 +926,7 @@ impl Runtime {
         .await
         .map_err(error)?;
         self.renderer.set_clock(clock);
+        self.renderer.set_parallel_decode(self.decode_workers);
         // The new device starts with an empty glyph atlas; entries are rasterized
         // again from the scene's outlines on the next frame.
         self.renderer.set_glyph_atlas(glyph_atlas);
@@ -969,15 +1050,21 @@ impl Runtime {
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
         self.renderer.invalidate(None);
-        loop {
-            let frame = self
+        // This loop never returns to the Worker, so inputs cannot arrive from the
+        // decode pool while it runs: decode them inline.
+        self.renderer.set_parallel_decode(false);
+        let rendered = loop {
+            match self
                 .renderer
                 .render(&self.scene, &self.engine, self.viewport, 1000.0)
-                .map_err(error)?;
-            if frame.pending == 0 {
-                break;
+            {
+                Ok(frame) if frame.pending == 0 => break Ok(()),
+                Ok(_) => {}
+                Err(e) => break Err(error(e)),
             }
-        }
+        };
+        self.renderer.set_parallel_decode(self.decode_workers);
+        rendered?;
         self.gpu_idle().await?;
         if let Some(validation) = scope.pop().await {
             return Err(error(format!("INTERNAL: GPU validation: {validation}")));

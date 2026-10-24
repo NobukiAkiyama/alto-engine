@@ -1,23 +1,23 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + shareable tile store",
+  "milestone": "M8 + parallel tile decoding",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4478703,
-  "gzipBytes": 1132032,
-  "wasmSha256": "db788094e698cfd1b5d374ff9fe37e59c28f06c36597003d090baf88aab9b972",
+  "wasmBytes": 4503180,
+  "gzipBytes": 1137764,
+  "wasmSha256": "46ba2e7f056b242e1404a1998dbc9f11ded8a555c74ef4a0fea234cebe6ff109",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 115,
+  "nativeTests": 116,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
   ],
-  "browserFunctionalTests": 28,
+  "browserFunctionalTests": 29,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,

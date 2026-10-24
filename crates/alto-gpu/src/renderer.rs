@@ -24,6 +24,8 @@ const MAX_JOB_RETRIES: u32 = 8;
 /// One reusable 512x512 RGBA texture for pyramid downsampling.
 const SCRATCH_BYTES: u64 = 512 * 512 * 4;
 const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
+/// Jobs that need at most this many inputs decode them inline even with a pool.
+const INLINE_DECODE_MAX: usize = 8;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Command {
@@ -162,6 +164,23 @@ struct TileJob {
     planned: bool,
     retries: u32,
 }
+/// Inputs decoded on other threads. The renderer asks; the host decodes them and
+/// hands the pixels back, and they go straight into the atlas.
+#[derive(Default)]
+struct Decoder {
+    queued: std::collections::VecDeque<ContentHash>,
+    in_flight: HashMap<ContentHash, Arc<alto_raster::StoredTile>>,
+    failed: Option<ContentHash>,
+    decoded: u64,
+}
+impl Decoder {
+    fn request(&mut self, hash: ContentHash, object: Arc<alto_raster::StoredTile>) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.in_flight.entry(hash) {
+            e.insert(object);
+            self.queued.push_back(hash);
+        }
+    }
+}
 #[derive(Default, Clone, Copy)]
 struct UploadCost {
     get_ms: f64,
@@ -236,6 +255,8 @@ pub struct Renderer {
     /// Small text through the glyph atlas (true) or always through the vector path.
     glyph_atlas: bool,
     profiling: bool,
+    /// Some while the host decodes job inputs on other threads.
+    decoder: Option<Decoder>,
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
@@ -681,6 +702,7 @@ impl Renderer {
             vector: None,
             glyph_atlas: true,
             profiling: false,
+            decoder: None,
             clock: || 0.0,
             profile: RenderProfile::default(),
         })
@@ -709,6 +731,116 @@ impl Renderer {
     }
     pub fn set_profiling(&mut self, enabled: bool) {
         self.profiling = enabled;
+    }
+    /// Resumable jobs ask the host to decode their inputs instead of decoding inline.
+    /// Turning it off forgets outstanding requests; inline decoding takes them over.
+    pub fn set_parallel_decode(&mut self, enabled: bool) {
+        if enabled != self.decoder.is_some() {
+            self.decoder = enabled.then(Decoder::default);
+        }
+    }
+    /// Up to `max` inputs to decode, with their compressed bytes and whether the
+    /// content address must be checked. A damaged object fails its job.
+    pub fn take_decode_requests(
+        &mut self,
+        max: usize,
+    ) -> Vec<(ContentHash, Arc<alto_raster::StoredTile>)> {
+        let Some(d) = self.decoder.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while out.len() < max
+            && let Some(hash) = d.queued.pop_front()
+        {
+            if let Some(object) = d.in_flight.get(&hash) {
+                out.push((hash, object.clone()));
+            }
+        }
+        out
+    }
+    /// Pixels the host decoded for a request. `checked`: it verified the content
+    /// address. Answers to requests no job is waiting for any more are dropped.
+    pub fn provide_decoded(
+        &mut self,
+        hash: ContentHash,
+        pixels: &[u8],
+        checked: bool,
+    ) -> Result<()> {
+        let Some(d) = self.decoder.as_mut() else {
+            return Ok(());
+        };
+        let Some(object) = d.in_flight.remove(&hash) else {
+            return Ok(());
+        };
+        if checked {
+            object.mark_verified();
+        }
+        d.decoded += 1;
+        if self.atlas_map.contains_key(&hash) {
+            return Ok(());
+        }
+        let expected = 256 * 256 * object.format.bytes_per_pixel();
+        if pixels.len() != expected {
+            d.failed = Some(hash);
+            return Ok(());
+        }
+        // Inputs the waiting jobs already have must stay until those jobs compose.
+        let pinned: HashSet<u32> = [&self.visible_job, &self.prefetch_job]
+            .into_iter()
+            .flatten()
+            .flat_map(|j| j.unique.iter())
+            .filter_map(|h| self.atlas_map.get(h).copied())
+            .collect();
+        let slot = self.free_atlas_slot(&pinned)?;
+        let rgba: std::borrow::Cow<'_, [u8]> = if object.format == alto_core::PixelFormat::R8 {
+            std::borrow::Cow::Owned(pixels.iter().flat_map(|v| [*v, *v, *v, 255]).collect())
+        } else {
+            std::borrow::Cow::Borrowed(pixels)
+        };
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(256),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        if self.profiling {
+            self.profile.uploads += 1;
+            self.profile.upload_bytes += TILE_RGBA_BYTES;
+        }
+        self.atlas_slots[slot] = Some(AtlasSlot {
+            hash,
+            used: self.frame,
+        });
+        self.atlas_map.insert(hash, slot as u32);
+        Ok(())
+    }
+    /// The host could not decode a request, or the result failed its check.
+    pub fn decode_failed(&mut self, hash: ContentHash) {
+        if let Some(d) = self.decoder.as_mut() {
+            d.in_flight.remove(&hash);
+            d.failed = Some(hash);
+        }
+    }
+    /// Inputs decoded on other threads so far.
+    pub fn decoded_elsewhere(&self) -> u64 {
+        self.decoder.as_ref().map_or(0, |d| d.decoded)
     }
     /// The time source for frame budgets and profiles. Set once after construction.
     pub fn set_clock(&mut self, clock: fn() -> f64) {
@@ -742,6 +874,13 @@ impl Renderer {
         self.atlas_slots.iter_mut().for_each(|slot| *slot = None);
     }
     fn reset_jobs(&mut self) {
+        // Requests not yet handed out belong to the jobs being dropped. Those in
+        // flight are kept: their pixels are still worth placing when they arrive.
+        if let Some(d) = self.decoder.as_mut() {
+            for hash in d.queued.drain(..) {
+                d.in_flight.remove(&hash);
+            }
+        }
         self.cancel_prefetch();
         self.visible_job = None;
         self.last_view = None;
@@ -789,6 +928,29 @@ impl Renderer {
     ) -> Result<u32> {
         Ok(self.upload_timed(hash, store, pinned, encoder, previews)?.0)
     }
+    /// The empty or least recently used atlas slot outside `pinned`, emptied.
+    fn free_atlas_slot(&mut self, pinned: &HashSet<u32>) -> Result<usize> {
+        let slot = self
+            .atlas_slots
+            .iter()
+            .position(Option::is_none)
+            .or_else(|| {
+                self.atlas_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !pinned.contains(&(*i as u32)))
+                    .min_by_key(|(_, s)| s.as_ref().map_or(0, |s| s.used))
+                    .map(|(i, _)| i)
+            })
+            .ok_or("GPU budget too small for one display tile")?;
+        if let Some(old) = self.atlas_slots[slot].take() {
+            if self.profiling {
+                self.profile.atlas_evictions += 1;
+            }
+            self.atlas_map.remove(&old.hash);
+        }
+        Ok(slot)
+    }
     /// Places one source tile in the atlas. `u32::MAX` means the store has no such tile.
     fn upload_timed(
         &mut self,
@@ -821,25 +983,7 @@ impl Renderer {
         if pixels.is_none() && !previews.contains_key(&hash) {
             return Ok((u32::MAX, cost));
         }
-        let slot = self
-            .atlas_slots
-            .iter()
-            .position(Option::is_none)
-            .or_else(|| {
-                self.atlas_slots
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !pinned.contains(&(*i as u32)))
-                    .min_by_key(|(_, s)| s.as_ref().map_or(0, |s| s.used))
-                    .map(|(i, _)| i)
-            })
-            .ok_or("GPU budget too small for one display tile")?;
-        if let Some(old) = self.atlas_slots[slot].take() {
-            if self.profiling {
-                self.profile.atlas_evictions += 1;
-            }
-            self.atlas_map.remove(&old.hash);
-        }
+        let slot = self.free_atlas_slot(pinned)?;
         let origin = wgpu::Origin3d {
             x: 0,
             y: 0,
@@ -1432,6 +1576,9 @@ impl Renderer {
         prefetch: bool,
     ) -> Result<JobStep> {
         let now = self.clock;
+        if let Some(hash) = self.decoder.as_mut().and_then(|d| d.failed.take()) {
+            return Err(format!("CORRUPT_DATA: corrupt object {hash}"));
+        }
         if !job.planned {
             let start = now();
             loop {
@@ -1457,6 +1604,31 @@ impl Renderer {
         }
         if job.unique.len() > self.atlas_slots.len() {
             return Ok(JobStep::Blocked);
+        }
+        // A few inputs decode faster here than a round trip to the pool takes;
+        // that is the common case after a small edit.
+        let to_decode = job.unique[job.cursor.min(job.unique.len())..]
+            .iter()
+            .filter(|h| !job.missing.contains(h) && !self.atlas_map.contains_key(h))
+            .count();
+        if to_decode > INLINE_DECODE_MAX
+            && let Some(decoder) = self.decoder.as_mut()
+            && job.cursor < job.unique.len()
+        {
+            // Ask for every input the atlas lacks; they arrive between slices.
+            while job.cursor < job.unique.len() {
+                let hash = job.unique[job.cursor];
+                if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
+                    match store.object(&hash) {
+                        Some(object) => decoder.request(hash, object),
+                        None => {
+                            job.missing.insert(hash);
+                        }
+                    }
+                }
+                job.cursor += 1;
+            }
+            return Ok(JobStep::Progress);
         }
         if job.cursor < job.unique.len() {
             let start = now();
@@ -1509,6 +1681,15 @@ impl Renderer {
             .iter()
             .position(|h| !job.missing.contains(h) && !self.atlas_map.contains_key(h))
         {
+            let waiting = self.decoder.as_ref().is_some_and(|d| {
+                job.unique[i..]
+                    .iter()
+                    .any(|h| !self.atlas_map.contains_key(h) && d.in_flight.contains_key(h))
+            });
+            if waiting {
+                return Ok(JobStep::Progress);
+            }
+            // Evicted after it arrived, or never requested: go round again.
             job.cursor = i;
             job.retries += 1;
             return Ok(if job.retries > MAX_JOB_RETRIES {

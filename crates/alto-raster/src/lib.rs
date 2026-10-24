@@ -133,6 +133,18 @@ impl StoredTile {
             opaque,
         }
     }
+    /// The compressed bytes for a decoder elsewhere, after checking their digest, and
+    /// whether that decoder must also check the content address (first use).
+    pub fn for_decoder(&self, hash: &ContentHash) -> Result<(&[u8], bool), TileError> {
+        if ContentHash::of(&self.compressed) != self.compressed_hash {
+            return Err(TileError::Corrupt(*hash));
+        }
+        Ok((&self.compressed, !self.verified.load(Ordering::Relaxed)))
+    }
+    /// A decoder elsewhere checked the content address.
+    pub fn mark_verified(&self) {
+        self.verified.store(true, Ordering::Relaxed);
+    }
     /// The package object bytes (`ALTOOBJ1`, tag, LZ4 size-prepended pixels) without
     /// decoding: the stored compression is that format. A tile never checked against
     /// its content address is checked once first, so damage is not copied onward.

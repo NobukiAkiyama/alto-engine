@@ -1,5 +1,5 @@
 #!/bin/sh
-# Release-build alto-wasm and run the pinned wasm-bindgen CLI into OUT_DIR.
+# Release-build alto-wasm and alto-decode and run the pinned wasm-bindgen CLI into OUT_DIR.
 # check.sh rebuilds into a temp directory and requires the committed packages to match.
 set -eu
 cd "$(dirname "$0")/.."
@@ -42,6 +42,9 @@ cargo_home=${CARGO_HOME:-$HOME/.cargo}
 mkdir -p "$CARGO_TARGET_DIR"
 target_dir=$(CDPATH= cd "$CARGO_TARGET_DIR" && pwd)
 export RUSTFLAGS="--remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${sysroot}=/sysroot --remap-path-prefix=${root}=/src --remap-path-prefix=${target_dir}=/target"
-cargo build -p alto-wasm --target wasm32-unknown-unknown --release --locked
-wasm-bindgen "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/alto_wasm.wasm" \
-  --out-dir "$out" --target web
+# alto-decode is the decode Workers' module: LZ4 and hashing without the engine.
+cargo build -p alto-wasm -p alto-decode --target wasm32-unknown-unknown --release --locked
+for module in alto_wasm alto_decode; do
+  wasm-bindgen "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/$module.wasm" \
+    --out-dir "$out" --target web
+done

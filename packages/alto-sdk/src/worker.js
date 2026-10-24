@@ -67,6 +67,7 @@ function schedulePrefetch() {
     try {
       const started = performance.now();
       const status = runtime.prefetchStep();
+      pumpDecodes();
       prefetchSpentMs += performance.now() - started;
       // Each call returns to the event loop so an incoming edit or visible frame wins.
       if (status === "progress" || status === "ready") schedulePrefetch();
@@ -80,6 +81,75 @@ function schedulePrefetch() {
       }
     }
   }, delay);
+}
+// Resumable jobs leave input decoding to these Workers, so a cold frame decodes on
+// several threads. Without them (nested Workers unavailable, or one failed) the
+// engine decodes inline as before.
+const DECODE_BATCH = 16;
+const DECODES_IN_FLIGHT_PER_WORKER = 2;
+let decoders = [];
+let decodersOn = false;
+// Results wait here: a decode Worker answers at any time, possibly while an async
+// runtime call (endBrush, readTile) holds the runtime. Only the drain loop and
+// waitFrame apply them, between runtime calls.
+let decodedResults = [];
+let decodersAllowed = true;
+function startDecoders() {
+  const count = Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 2) - 1));
+  for (let i = 0; i < count; i++) {
+    let worker;
+    try {
+      worker = new Worker(new URL("./decode-worker.js", import.meta.url), { type: "module" });
+    } catch {
+      break;
+    }
+    const decoder = { worker, busy: 0, ready: false };
+    worker.onmessage = ({ data }) => {
+      if (data.ready) decoder.ready = true;
+      else {
+        decoder.busy--;
+        decodedResults.push(data.out);
+      }
+      wantTick = true;
+      void drain();
+    };
+    worker.onerror = () => stopDecoders("decode worker failed");
+    decoders.push(decoder);
+  }
+}
+/** Back to inline decoding. The drain loop tells the engine to forget its requests. */
+function stopDecoders(why) {
+  for (const decoder of decoders) decoder.worker.terminate();
+  decoders = [];
+  decodedResults = [];
+  if (why) postMessage({ t: "diagnostic", value: { message: "decode workers stopped: " + why } });
+  wantTick = true;
+  void drain();
+}
+/** Only between runtime calls: applies results, then hands out requests. */
+function pumpDecodes() {
+  if (!runtime) return;
+  const ready = decodersAllowed && decoders.some((d) => d.ready);
+  if (ready !== decodersOn) {
+    decodersOn = ready;
+    runtime.setDecodeWorkers(ready);
+  }
+  for (const out of decodedResults.splice(0)) {
+    try {
+      if (decodersOn) runtime.provideDecoded(new Uint8Array(out));
+    } catch (error) {
+      postMessage({ t: "error", value: structured(error) });
+    }
+  }
+  if (!decodersOn) return;
+  for (const decoder of decoders) {
+    while (decoder.ready && decoder.busy < DECODES_IN_FLIGHT_PER_WORKER) {
+      const batch = runtime.takeDecodeRequests(DECODE_BATCH);
+      if (!batch.length) return;
+      decoder.busy++;
+      decoder.worker.postMessage({ batch: batch.buffer }, [batch.buffer]);
+    }
+  }
 }
 // The journal normally runs in a nested Storage Worker. Some embedded browsers cannot
 // start workers from a worker; then the same journal code runs on this thread.
@@ -287,6 +357,7 @@ async function execute(m) {
       runtime = await Runtime.create(canvas, budget);
       frameFields = runtime.frameFields();
       adapterName = runtime.adapterName();
+      startDecoders();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
       const recovery = await io("inspect");
@@ -545,6 +616,11 @@ async function execute(m) {
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
+    case "setDecodeWorkers":
+      // Diagnostic: compare inline decoding with the pool.
+      decodersAllowed = !!m.enabled;
+      pumpDecodes();
+      return decodersOn;
     case "setVisibleTileJobs":
       runtime.setVisibleTileJobs(!!m.enabled);
       return true;
@@ -563,7 +639,9 @@ async function execute(m) {
       let frame;
       const profiles = diagnosticProfiles || [];
       do {
+        pumpDecodes();
         frame = decodeFrame(runtime.tick(8));
+        pumpDecodes();
         if (frame.profile) profiles.push(frame.profile);
         if (frame.pending) await yieldTask();
       } while (frame.pending);
@@ -588,6 +666,7 @@ async function drain() {
   draining = true;
   try {
     while (queue.length || wantTick || pendingViewport || pendingResize) {
+      pumpDecodes();
       if (runtime && pendingResize) {
         runtime.resize(pendingResize.width, pendingResize.height);
         pendingResize = null;
@@ -621,6 +700,7 @@ async function drain() {
         if (runtime)
           try {
             const value = { ...decodeFrame(runtime.tick(8)), viewVersion };
+            pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0;
             if (value.pending) wantTick = true;

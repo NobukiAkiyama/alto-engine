@@ -28,10 +28,6 @@ export class Runtime {
     endBrush(): Promise<string>;
     folderEntries(): Uint8Array;
     folderPlan(framed: Uint8Array): string;
-    /**
-     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
-     * nests the field; `profile.*` is present only when `hasProfile` is 1.
-     */
     frameFields(): string[];
     gpuIdle(): Promise<void>;
     importFont(bytes: Uint8Array, face_index: number): string;
@@ -58,6 +54,11 @@ export class Runtime {
     parseVectorPath(svg: string): string;
     prefetchStep(): string;
     protocolVersion(): number;
+    /**
+     * Decode results: u32 count, then per tile a 32-byte hash, status (0 ok,
+     * 1 ok and content checked, 2 damaged), u32 length and the pixels.
+     */
+    provideDecoded(framed: Uint8Array): void;
     pruneVersions(): string;
     readTileLevel(level: number, tx: number, ty: number): Promise<Uint8Array>;
     readTile(tx: number, ty: number): Promise<Uint8Array>;
@@ -75,6 +76,12 @@ export class Runtime {
     savePackage(): Uint8Array;
     select(spec: string): string;
     selectionOutline(): string;
+    /**
+     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+     * nests the field; `profile.*` is present only when `hasProfile` is 1.
+     * Whether resumable jobs leave input decoding to the Worker's decode pool.
+     */
+    setDecodeWorkers(enabled: boolean): void;
     setEffects(layer: string, effects: string, use_selection: boolean): string;
     /**
      * Small text through the glyph atlas (default) or always through the vector path.
@@ -87,6 +94,11 @@ export class Runtime {
      * The hash of the snapshot bytes a save would write. Edits do not compute it.
      */
     snapshotHash(): string;
+    /**
+     * Up to `max` decode requests: u32 count, then per tile a 32-byte hash, pixel
+     * format tag (1 R8, 4 RGBA8), check flag, u32 length and the LZ4 bytes.
+     */
+    takeDecodeRequests(max: number): Uint8Array;
     takeJournal(): Uint8Array;
     textCaret(id: string, offset: number): string;
     textHitTest(id: string, x: number, y: number): number;
@@ -161,6 +173,7 @@ export interface InitOutput {
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_prefetchStep: (a: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
+    readonly runtime_provideDecoded: (a: number, b: number, c: number) => [number, number];
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
     readonly runtime_readTile: (a: number, b: number, c: number) => any;
     readonly runtime_readTileLevel: (a: number, b: number, c: number, d: number) => any;
@@ -175,12 +188,14 @@ export interface InitOutput {
     readonly runtime_savePackage: (a: number) => [number, number, number, number];
     readonly runtime_select: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_selectionOutline: (a: number) => [number, number, number, number];
+    readonly runtime_setDecodeWorkers: (a: number, b: number) => void;
     readonly runtime_setEffects: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly runtime_setGlyphAtlas: (a: number, b: number) => void;
     readonly runtime_setMask: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_setProfiling: (a: number, b: number) => void;
     readonly runtime_setVisibleTileJobs: (a: number, b: number) => void;
     readonly runtime_snapshotHash: (a: number) => [number, number, number, number];
+    readonly runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_textHitTest: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -209,8 +224,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__77: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__78: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__80: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__81: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
