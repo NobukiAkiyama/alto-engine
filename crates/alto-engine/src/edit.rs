@@ -5,7 +5,7 @@ use alto_doc::{Document, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_raster::{TileData, TileMap};
 use alto_text::TextFrame;
 use alto_vector::{PathCommand, PathData, StyledPath};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 fn bad(message: &str) -> EngineError {
     DocError::Invalid(message.into()).into()
@@ -82,7 +82,7 @@ fn read_pixel(engine: &Engine, map: &TileMap, x: i32, y: i32) -> Result<[u8; 4],
     let Some(hash) = map.tiles.get(&key) else {
         return Ok([0, 0, 0, 0]);
     };
-    let tile = engine.tile_checked(hash)?;
+    let tile = engine.require_tile(hash)?;
     let bpp = map.format.bytes_per_pixel();
     let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize) * bpp;
     let mut out = [0, 0, 0, 0];
@@ -93,24 +93,41 @@ fn read_pixel(engine: &Engine, map: &TileMap, x: i32, y: i32) -> Result<[u8; 4],
     Ok(out)
 }
 
+/// Destination pixels by document position. Writes walk rows, so consecutive pixels
+/// almost always land in the tile the previous write used.
 struct Scratch {
     bpp: usize,
-    tiles: BTreeMap<TileKey, Vec<u8>>,
+    tiles: Vec<(TileKey, Vec<u8>)>,
+    index: HashMap<TileKey, usize>,
+    last: std::cell::Cell<Option<(TileKey, usize)>>,
 }
 impl Scratch {
     fn new(format: PixelFormat) -> Self {
         Self {
             bpp: format.bytes_per_pixel(),
-            tiles: BTreeMap::new(),
+            tiles: Vec::new(),
+            index: HashMap::new(),
+            last: std::cell::Cell::new(None),
         }
     }
+    fn slot(&self, key: TileKey) -> Option<usize> {
+        if let Some((k, i)) = self.last.get()
+            && k == key
+        {
+            return Some(i);
+        }
+        let i = *self.index.get(&key)?;
+        self.last.set(Some((key, i)));
+        Some(i)
+    }
     fn get(&self, x: i32, y: i32) -> [u8; 4] {
-        let Some(tile) = self.tiles.get(&TileKey {
+        let Some(slot) = self.slot(TileKey {
             tx: x.div_euclid(256),
             ty: y.div_euclid(256),
         }) else {
             return [0, 0, 0, 0];
         };
+        let tile = &self.tiles[slot].1;
         let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize) * self.bpp;
         let mut out = [0, 0, 0, 255];
         out[..self.bpp].copy_from_slice(&tile[i..i + self.bpp]);
@@ -124,12 +141,24 @@ impl Scratch {
             tx: x.div_euclid(256),
             ty: y.div_euclid(256),
         };
-        let tile = self
-            .tiles
-            .entry(key)
-            .or_insert_with(|| vec![0; 256 * 256 * self.bpp]);
+        let slot = match self.slot(key) {
+            Some(slot) => slot,
+            None => self.insert(key, vec![0; 256 * 256 * self.bpp]),
+        };
         let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize) * self.bpp;
-        tile[i..i + self.bpp].copy_from_slice(&pixel[..self.bpp]);
+        self.tiles[slot].1[i..i + self.bpp].copy_from_slice(&pixel[..self.bpp]);
+    }
+    /// A whole tile written at once, replacing any earlier writes to it.
+    fn insert(&mut self, key: TileKey, pixels: Vec<u8>) -> usize {
+        if let Some(&slot) = self.index.get(&key) {
+            self.tiles[slot].1 = pixels;
+            return slot;
+        }
+        self.tiles.push((key, pixels));
+        let slot = self.tiles.len() - 1;
+        self.index.insert(key, slot);
+        self.last.set(Some((key, slot)));
+        slot
     }
     fn finish(self, engine: &mut Engine, format: PixelFormat) -> Result<TileMap, EngineError> {
         let mut map = TileMap::new(format);
@@ -212,7 +241,7 @@ where
     }
     let mut scratch = Scratch::new(map.format);
     for (key, hash) in &map.tiles {
-        let tile = engine.tile_checked(hash)?;
+        let tile = engine.require_tile(hash)?;
         let bpp = map.format.bytes_per_pixel();
         for i in 0..(256 * 256) {
             let pixel = &tile.pixels[i * bpp..(i + 1) * bpp];
@@ -878,40 +907,34 @@ impl Engine {
         intent: &str,
         mut paint: impl FnMut(i32, i32, [u8; 4]) -> Option<[u8; 4]>,
     ) -> Result<(), EngineError> {
-        let doc = self.document(handle)?.clone();
-        let node = doc.node(layer)?;
-        let NodeKind::Raster { tiles } = &node.kind else {
-            return Err(bad("Fill target must be a raster"));
+        let (tiles, offset, revision) = {
+            let doc = self.document(handle)?;
+            let NodeKind::Raster { tiles } = &doc.node(layer)?.kind else {
+                return Err(bad("Fill target must be a raster"));
+            };
+            (tiles.clone(), chain(doc, layer, true)?, doc.revision)
         };
-        let offset = chain(&doc, layer, true)?;
-        let tiles = tiles.clone();
         if tiles.tiles.len() > 4096 {
             return Err(bad("Fill exceeds 4096 tiles"));
         }
+        // Each output tile starts as a copy of its source; only changed pixels are rewritten.
         let mut scratch = Scratch::new(PixelFormat::Rgba8);
         for (key, hash) in &tiles.tiles {
-            let tile = self.tile_checked(hash)?;
-            for i in 0..(256 * 256) {
-                let local_x = key.tx * 256 + (i % 256) as i32;
-                let local_y = key.ty * 256 + (i / 256) as i32;
-                let pixel = [
-                    tile.pixels[i * 4],
-                    tile.pixels[i * 4 + 1],
-                    tile.pixels[i * 4 + 2],
-                    tile.pixels[i * 4 + 3],
-                ];
-                if let Some(next) = paint(local_x + offset.0, local_y + offset.1, pixel) {
-                    scratch.put(local_x, local_y, &next);
-                } else {
-                    scratch.put(local_x, local_y, &pixel);
+            let mut pixels = self.require_tile(hash)?.pixels.to_vec();
+            for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = key.tx * 256 + (i % 256) as i32 + offset.0;
+                let y = key.ty * 256 + (i / 256) as i32 + offset.1;
+                if let Some(next) = paint(x, y, *px) {
+                    *px = next;
                 }
             }
+            scratch.insert(*key, pixels);
         }
         let moved = scratch.finish(self, PixelFormat::Rgba8)?;
         let Some(op) = differ(layer, &tiles, &moved) else {
             return Ok(());
         };
-        self.transact(handle, intent, vec![op], doc.revision)?;
+        self.transact(handle, intent, vec![op], revision)?;
         Ok(())
     }
 
@@ -1079,7 +1102,7 @@ impl Engine {
         };
         let mut bins = [[0u32; 256]; 4];
         for hash in tiles.tiles.values() {
-            let tile = self.tile_checked(hash)?;
+            let tile = self.require_tile(hash)?;
             for pixel in tile.pixels.as_chunks::<4>().0 {
                 for (channel, value) in pixel.iter().enumerate() {
                     bins[channel][*value as usize] += 1;
@@ -1242,7 +1265,7 @@ impl Engine {
         };
         let mut scratch = Scratch::new(PixelFormat::Rgba8);
         for (key, hash) in &lower_tiles.tiles {
-            let tile = self.tile_checked(hash)?;
+            let tile = self.require_tile(hash)?;
             for i in 0..(256 * 256) {
                 scratch.put(
                     key.tx * 256 + (i % 256) as i32,
@@ -1252,7 +1275,7 @@ impl Engine {
             }
         }
         for (key, hash) in &upper.map.tiles {
-            let tile = self.tile_checked(hash)?;
+            let tile = self.require_tile(hash)?;
             for i in 0..(256 * 256) {
                 let local_x = key.tx * 256 + (i % 256) as i32;
                 let local_y = key.ty * 256 + (i / 256) as i32;

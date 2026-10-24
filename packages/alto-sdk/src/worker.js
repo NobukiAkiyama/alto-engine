@@ -26,7 +26,7 @@ const readableAfterFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg",
+  "vectorStats", "vectorPathSvg", "releaseSave",
 ]);
 let storageFailure = null;
 function freezeStorage(error) {
@@ -116,9 +116,8 @@ function structured(error) {
     ].find(
       (c) => message === c || message.startsWith(`${c}:`) || message.startsWith(`${c} `),
     ) ||
-    (/unreachable|borrow|RuntimeError/.test(message)
-      ? "INTERNAL"
-      : "INVALID_ARGUMENT");
+    // serde rejects a malformed request before the engine sees it.
+    (/ at line \d+ column \d+/.test(message) ? "INVALID_ARGUMENT" : "INTERNAL");
   return { code, message };
 }
 async function flushJournal() {
@@ -153,7 +152,16 @@ async function persistCheckpoint(bytes) {
   await io("checkpoint", { bytes: bytes.buffer, opaque }, [bytes.buffer]);
 }
 let savedToken = 0;
+// Each entry holds a whole package until the page confirms or releases it.
 const saves = new Map();
+const MAX_PENDING_SAVES = 4;
+function rememberSave(entry) {
+  const token = ++savedToken;
+  saves.set(token, entry);
+  // A caller that never confirms (or crashed mid-save) must not pin packages forever.
+  while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value);
+  return token;
+}
 async function execute(m) {
   // The in-memory runtime may be ahead of the last confirmed journal write.
   // Keep it available for an emergency export, but accept no more edits.
@@ -251,8 +259,7 @@ async function execute(m) {
     case "save": {
       const state = JSON.parse(runtime.view());
       const bytes = runtime.savePackage();
-      const token = ++savedToken;
-      saves.set(token, {
+      const token = rememberSave({
         hash: state.stateHash,
         revision: state.document.revision,
         bytes: bytes.slice(),
@@ -262,8 +269,7 @@ async function execute(m) {
     case "folderEntries": {
       const state = JSON.parse(runtime.view());
       const bytes = runtime.folderEntries();
-      const token = ++savedToken;
-      saves.set(token, {
+      const token = rememberSave({
         hash: state.stateHash,
         revision: state.document.revision,
         bytes: runtime.checkpointBytes(),
@@ -332,6 +338,8 @@ async function execute(m) {
       saves.delete(m.token);
       return state;
     }
+    case "releaseSave":
+      return saves.delete(m.token);
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
       await persistCheckpoint(new Uint8Array(m.bytes));

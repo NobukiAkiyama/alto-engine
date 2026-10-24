@@ -158,7 +158,7 @@ impl Engine {
                 .and_then(|c| store.commits.get(&c))
                 .is_some_and(|c| c.snapshot == sh)
         {
-            return Err(invalid("INVALID_ARGUMENT: 前の版から変更がありません"));
+            return Err(invalid("前の版から変更がありません"));
         }
         let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
         let commit = Commit {
@@ -169,9 +169,7 @@ impl Engine {
             created_at,
             author,
         };
-        commit
-            .validate()
-            .map_err(|e| invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        commit.validate().map_err(|e| invalid(e.to_string()))?;
         let bytes = commit.bytes();
         let hash = ContentHash::of(&bytes);
         let store = self.versions.entry(h).or_default();
@@ -328,8 +326,7 @@ impl Engine {
         let target = self.resolve(h, VersionRef::Commit(commit))?;
         let message = self.versions(h)?.commits[&commit].message.clone();
         let current = self.document(h)?;
-        let ops = alto_doc::restore_ops(current, &target)
-            .map_err(|e| invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        let ops = alto_doc::restore_ops(current, &target).map_err(|e| invalid(e.to_string()))?;
         let revision = current.revision;
         let label: String = message
             .lines()
@@ -350,20 +347,8 @@ impl Engine {
         hashes.extend(store.retained.iter().copied());
         let mut objects = BTreeMap::new();
         for hash in hashes {
-            match self.encoded(hash) {
-                Some(bytes) => {
-                    objects.insert(hash, bytes);
-                }
-                None => {
-                    if let Some(error) = self.take_fault_error() {
-                        return Err(alto_store::StoreError::Corrupt(error).into());
-                    }
-                    return Err(EngineError::MissingTile(hash));
-                }
-            }
-        }
-        if let Some(error) = self.take_fault_error() {
-            return Err(alto_store::StoreError::Corrupt(error).into());
+            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+            objects.insert(hash, bytes);
         }
         Ok(PackageParts {
             snapshot: doc.snapshot_bytes()?,
@@ -417,10 +402,11 @@ impl Engine {
                 commits.insert(*hash, bytes.clone());
             }
         }
-        let objects = hashes
-            .into_iter()
-            .filter_map(|hash| self.encoded(hash).map(|b| (hash, b)))
-            .collect();
+        let mut objects = BTreeMap::new();
+        for hash in hashes {
+            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+            objects.insert(hash, bytes);
+        }
         Ok(alto_store::encode_parts(&PackageParts {
             snapshot: current,
             objects,

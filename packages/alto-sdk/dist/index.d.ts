@@ -568,6 +568,8 @@ export declare class DocumentHandle {
         }) => Promise<void>;
     };
     save(target?: ArchiveStorageProvider | any): Promise<any>;
+    /** A cancelled or failed save no longer needs the Worker's copy of the package. */
+    private releaseSave;
 }
 export declare class AltoEngine extends Events {
     canvas: HTMLCanvasElement;

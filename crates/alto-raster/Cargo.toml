@@ -7,3 +7,7 @@ edition = "2024"
 alto-core = { path = "../alto-core" }
 serde = { version = "1", features = ["derive"] }
 lz4_flex = "0.13"
+
+[features]
+# Lets dependent crates corrupt stored bytes in their own tests.
+test-hooks = []

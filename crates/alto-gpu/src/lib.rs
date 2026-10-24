@@ -1,6 +1,7 @@
 use alto_core::{AssetId, ContentHash, IRect, NodeId, TileKey};
 use std::collections::HashMap;
 
+pub mod damage;
 pub mod glyph_atlas;
 pub mod renderer;
 

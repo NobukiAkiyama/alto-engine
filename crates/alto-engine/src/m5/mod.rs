@@ -92,15 +92,74 @@ type Decoded = BTreeMap<TileKey, Arc<TileData>>;
 pub fn decode(map: &TileMap, store: &dyn TileStore) -> Result<Decoded, EngineError> {
     let mut decoded = Decoded::new();
     for (key, hash) in &map.tiles {
-        if let Some(tile) = store
-            .get_checked(hash)
-            .map_err(alto_store::StoreError::Corrupt)?
-        {
+        if let Some(tile) = store.get(hash)? {
             decoded.insert(*key, tile);
         }
     }
     Ok(decoded)
 }
+/// One bit per document pixel, stored per tile.
+#[derive(Default)]
+struct Coverage {
+    tiles: BTreeMap<TileKey, Box<[u64; 1024]>>,
+}
+impl Coverage {
+    fn bit(x: i32, y: i32) -> (TileKey, usize) {
+        let key = TileKey {
+            tx: x.div_euclid(256),
+            ty: y.div_euclid(256),
+        };
+        (key, (y.rem_euclid(256) * 256 + x.rem_euclid(256)) as usize)
+    }
+    fn get(&self, x: i32, y: i32) -> bool {
+        let (key, i) = Self::bit(x, y);
+        self.tiles
+            .get(&key)
+            .is_some_and(|bits| bits[i / 64] & (1 << (i % 64)) != 0)
+    }
+    fn set(&mut self, x: i32, y: i32) {
+        let (key, i) = Self::bit(x, y);
+        self.tiles.entry(key).or_insert_with(|| Box::new([0; 1024]))[i / 64] |= 1 << (i % 64);
+    }
+}
+
+/// Layer pixels by layer position. Scans move along rows, so the last tile is kept.
+struct LayerPixels<'a> {
+    map: &'a TileMap,
+    engine: &'a Engine,
+    last: Option<(TileKey, Option<Arc<TileData>>)>,
+}
+impl LayerPixels<'_> {
+    fn read(&mut self, x: i32, y: i32) -> Result<Option<[u8; 4]>, EngineError> {
+        let key = TileKey {
+            tx: x.div_euclid(256),
+            ty: y.div_euclid(256),
+        };
+        if self.last.as_ref().is_none_or(|(k, _)| *k != key) {
+            let tile = match self.map.tiles.get(&key) {
+                Some(hash) => Some(self.engine.require_tile(hash)?),
+                None => None,
+            };
+            self.last = Some((key, tile));
+        }
+        let Some((_, Some(tile))) = &self.last else {
+            return Ok(None);
+        };
+        let i = (y.rem_euclid(256) * 256 + x.rem_euclid(256)) as usize * 4;
+        Ok(Some([
+            tile.pixels[i],
+            tile.pixels[i + 1],
+            tile.pixels[i + 2],
+            tile.pixels[i + 3],
+        ]))
+    }
+}
+
+/// Layers above this size are refused before any pixel is read.
+const MAX_SELECTION_SOURCE_TILES: usize = 1024;
+/// Selections and masks are stored as at most this many R8 tiles.
+const MAX_SELECTION_TILES: usize = 4096;
+
 fn generated_selection(
     engine: &mut Engine,
     handle: DocHandle,
@@ -130,7 +189,7 @@ fn generated_selection(
         let NodeKind::Raster { tiles } = &node.kind else {
             return Err(invalid("Color selection requires a raster layer"));
         };
-        if tiles.tiles.len() > 32 {
+        if tiles.tiles.len() > MAX_SELECTION_SOURCE_TILES {
             return Err(invalid("Color selection exceeds the pixel budget"));
         }
         let linear = node.props.transform.0;
@@ -152,98 +211,82 @@ fn generated_selection(
         .map(|m| decode(m, engine))
         .transpose()?
         .unwrap_or_default();
-    let chosen = {
-        let read = |x: i32, y: i32| -> Result<Option<[u8; 4]>, EngineError> {
-            let key = TileKey {
-                tx: x.div_euclid(256),
-                ty: y.div_euclid(256),
-            };
-            let Some(hash) = map.tiles.get(&key) else {
-                return Ok(None);
-            };
-            let Some(tile) = engine
-                .get_checked(hash)
-                .map_err(alto_store::StoreError::Corrupt)?
-            else {
-                return Ok(None);
-            };
-            let i = (y.rem_euclid(256) * 256 + x.rem_euclid(256)) as usize * 4;
-            Ok(Some(
-                tile.pixels[i..i + 4].try_into().unwrap_or([0, 0, 0, 0]),
-            ))
+    let close = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= tolerance);
+    let mut chosen = Coverage::default();
+    if kind == "contiguous" {
+        let sx = spec["x"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
+        let sy = spec["y"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
+        let mut pixels = LayerPixels {
+            map: &map,
+            engine,
+            last: None,
         };
-        let mut chosen = Vec::new();
-        if kind == "contiguous" {
-            let sx = spec["x"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
-            let sy = spec["y"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
-            let seed = read(sx - offset.0, sy - offset.1)?
-                .ok_or_else(|| invalid("Seed is outside the layer"))?;
-            let mut queue = vec![(sx, sy)];
-            let mut seen = BTreeSet::new();
-            while let Some((x, y)) = queue.pop() {
-                if !seen.insert((x, y)) {
-                    continue;
-                }
-                let Some(color) = read(x - offset.0, y - offset.1)? else {
-                    continue;
-                };
-                if color
-                    .iter()
-                    .zip(seed)
-                    .any(|(a, b)| a.abs_diff(b) > tolerance)
-                {
-                    continue;
-                }
-                if chosen.len() >= 1_048_576 {
-                    return Err(invalid("Contiguous selection exceeds the pixel budget"));
-                }
-                chosen.push((x, y));
-                queue.extend([(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]);
+        let seed = pixels
+            .read(sx - offset.0, sy - offset.1)?
+            .ok_or_else(|| invalid("Seed is outside the layer"))?;
+        // Scanline fill: each stack entry is one pixel; a whole run is claimed per pop.
+        let mut stack = vec![(sx, sy)];
+        while let Some((x, y)) = stack.pop() {
+            let mut fits = |x: i32, y: i32, chosen: &Coverage| -> Result<bool, EngineError> {
+                Ok(!chosen.get(x, y)
+                    && pixels
+                        .read(x - offset.0, y - offset.1)?
+                        .is_some_and(|c| close(c, seed)))
+            };
+            if !fits(x, y, &chosen)? {
+                continue;
             }
-        } else {
-            let target = [
-                spec["r"].as_u64().unwrap_or(0) as u8,
-                spec["g"].as_u64().unwrap_or(0) as u8,
-                spec["b"].as_u64().unwrap_or(0) as u8,
-                spec["a"].as_u64().unwrap_or(255) as u8,
-            ];
-            for (key, hash) in &map.tiles {
-                let tile = engine
-                    .get_checked(hash)
-                    .map_err(alto_store::StoreError::Corrupt)?
-                    .ok_or(EngineError::MissingTile(*hash))?;
-                for i in 0..(256 * 256) {
-                    let px = &tile.pixels[i * 4..i * 4 + 4];
-                    if px
-                        .iter()
-                        .zip(target)
-                        .any(|(a, b)| a.abs_diff(b) > tolerance)
-                    {
-                        continue;
+            let mut left = x;
+            while fits(left - 1, y, &chosen)? {
+                left -= 1;
+            }
+            let mut right = x;
+            while fits(right + 1, y, &chosen)? {
+                right += 1;
+            }
+            for px in left..=right {
+                chosen.set(px, y);
+            }
+            if chosen.tiles.len() > MAX_SELECTION_TILES {
+                return Err(invalid("Selection/mask exceeds 4096 tiles"));
+            }
+            for row in [y - 1, y + 1] {
+                let mut open = false;
+                for px in left..=right {
+                    let ok = fits(px, row, &chosen)?;
+                    if ok && !open {
+                        stack.push((px, row));
                     }
-                    chosen.push((
-                        key.tx * 256 + (i % 256) as i32 + offset.0,
-                        key.ty * 256 + (i / 256) as i32 + offset.1,
-                    ));
+                    open = ok;
                 }
             }
         }
-        chosen
-    };
-    let mut keys = std::collections::BTreeSet::new();
-    for (x, y) in &chosen {
-        keys.insert(TileKey {
-            tx: x.div_euclid(256),
-            ty: y.div_euclid(256),
-        });
+    } else {
+        let target = [
+            spec["r"].as_u64().unwrap_or(0) as u8,
+            spec["g"].as_u64().unwrap_or(0) as u8,
+            spec["b"].as_u64().unwrap_or(0) as u8,
+            spec["a"].as_u64().unwrap_or(255) as u8,
+        ];
+        for (key, hash) in &map.tiles {
+            let tile = engine.require_tile(hash)?;
+            for (i, px) in tile.pixels.as_chunks::<4>().0.iter().enumerate() {
+                if close(*px, target) {
+                    chosen.set(
+                        key.tx * 256 + (i % 256) as i32 + offset.0,
+                        key.ty * 256 + (i / 256) as i32 + offset.1,
+                    );
+                }
+            }
+        }
     }
+    let mut keys: BTreeSet<TileKey> = chosen.tiles.keys().copied().collect();
     if mode != "replace" {
         keys.extend(old.keys().copied());
     }
-    if keys.len() > 4096 {
+    if keys.len() > MAX_SELECTION_TILES {
         return Err(invalid("Selection/mask exceeds 4096 tiles"));
     }
-    let chosen: std::collections::BTreeSet<_> = chosen.into_iter().collect();
     let mut out = empty();
     for key in keys {
         let mut pixels = vec![0u8; 65536];
@@ -251,9 +294,8 @@ fn generated_selection(
             for ix in 0..256 {
                 let x = key.tx * 256 + ix;
                 let y = key.ty * 256 + iy;
-                let hit = chosen.contains(&(x, y));
                 let prior = sample(&old, x, y) as f32 / 255.0;
-                let amount = f32::from(hit);
+                let amount = f32::from(chosen.get(x, y));
                 let coverage = match mode {
                     "add" => prior + amount - prior * amount,
                     "subtract" => prior * (1.0 - amount),
@@ -705,6 +747,103 @@ mod tests {
         let rev = e.document(h).unwrap().revision;
         e.transact(h, "M5", ops, rev).unwrap();
     }
+    /// A document with one raster layer whose tiles come from `tile(key)`.
+    fn layer_doc(
+        w: u32,
+        h: u32,
+        mut tile: impl FnMut(TileKey) -> Option<Vec<u8>>,
+    ) -> (Engine, DocHandle, NodeId) {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
+        let mut n = Node::raster("L");
+        let id = n.id;
+        let NodeKind::Raster { tiles } = &mut n.kind else {
+            panic!()
+        };
+        for ty in 0..h.div_ceil(256) as i32 {
+            for tx in 0..w.div_ceil(256) as i32 {
+                let key = TileKey { tx, ty };
+                if let Some(pixels) = tile(key) {
+                    let data = TileData::new(PixelFormat::Rgba8, pixels).unwrap();
+                    tiles.tiles.insert(key, e.put_tile(data).unwrap());
+                }
+            }
+        }
+        let root = e.document(d).unwrap().root;
+        commit(
+            &mut e,
+            d,
+            vec![Op::InsertNode {
+                node: n,
+                parent: root,
+                index: 0,
+            }],
+        );
+        (e, d, id)
+    }
+    fn selected(e: &Engine, d: DocHandle) -> Decoded {
+        decode(e.document(d).unwrap().selection.as_ref().unwrap(), e).unwrap()
+    }
+
+    #[test]
+    fn contiguous_selection_covers_a_layer_larger_than_the_old_pixel_cap() {
+        // 2048 x 2048 = 4 Mi pixels; the previous implementation stopped at 1 Mi.
+        let (mut e, d, id) = layer_doc(2048, 2048, |_| Some(vec![200; 262144]));
+        let ops = e
+            .selection_ops(
+                d,
+                &json!({"kind":"contiguous","layer":id.0.to_string(),"x":5,"y":5}),
+            )
+            .unwrap();
+        commit(&mut e, d, ops);
+        let sel = selected(&e, d);
+        assert_eq!(sel.len(), 64);
+        for (x, y) in [(0, 0), (2047, 2047), (1024, 77), (300, 2000)] {
+            assert_eq!(sample(&sel, x, y), 255, "({x},{y})");
+        }
+    }
+
+    #[test]
+    fn contiguous_selection_follows_walls_and_stops_at_missing_tiles() {
+        // Tile (0,0): white with a black wall at x = 100 except a gap at y = 200..210,
+        // and a black box around (30..40, 30..40) enclosing a white pocket.
+        // Tile (1,0) is white; tile (0,1) is absent.
+        let mut base = vec![255u8; 262144];
+        let mut paint = |x: usize, y: usize| base[(y * 256 + x) * 4..(y * 256 + x) * 4 + 3].fill(0);
+        for y in 0..256 {
+            if !(200..210).contains(&y) {
+                paint(100, y);
+            }
+        }
+        for i in 30..=40 {
+            paint(i, 30);
+            paint(i, 40);
+            paint(30, i);
+            paint(40, i);
+        }
+        let first = base.clone();
+        let (mut e, d, id) = layer_doc(512, 512, |k| match (k.tx, k.ty) {
+            (0, 0) => Some(first.clone()),
+            (1, 0) => Some(vec![255; 262144]),
+            _ => None,
+        });
+        let ops = e
+            .selection_ops(
+                d,
+                &json!({"kind":"contiguous","layer":id.0.to_string(),"x":5,"y":5}),
+            )
+            .unwrap();
+        commit(&mut e, d, ops);
+        let sel = selected(&e, d);
+        let at = |x, y| sample(&sel, x, y);
+        assert_eq!(at(5, 5), 255);
+        assert_eq!(at(100, 50), 0, "wall");
+        assert_eq!(at(150, 50), 255, "reached through the gap");
+        assert_eq!(at(400, 100), 255, "next tile");
+        assert_eq!(at(35, 35), 0, "enclosed pocket");
+        assert_eq!(at(35, 30), 0, "box edge");
+        assert_eq!(at(50, 300), 0, "absent tile");
+    }
     #[test]
     fn selection_masks_effects_survive_history_gc_package_and_journal() {
         let mut e = Engine::new();
@@ -762,7 +901,7 @@ mod tests {
         e.redo(h).unwrap();
         assert_eq!(snapshot, e.snapshot(h).unwrap());
         for hash in &mask_hashes {
-            assert_eq!(e.tile(hash).unwrap().format, PixelFormat::R8);
+            assert_eq!(e.tile(hash).unwrap().unwrap().format, PixelFormat::R8);
         }
         let package = e.save_package(h).unwrap();
         let mut fresh = Engine::new();
@@ -776,7 +915,7 @@ mod tests {
         }
         assert_eq!(snapshot, recovered.snapshot(r).unwrap());
         for hash in mask_hashes {
-            assert!(recovered.tile(&hash).is_some());
+            assert!(recovered.tile(&hash).unwrap().is_some());
         }
     }
     #[test]

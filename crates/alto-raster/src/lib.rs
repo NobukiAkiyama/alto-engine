@@ -22,7 +22,29 @@ impl TileMap {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TileError {
-    WrongLength { expected: usize, got: usize },
+    WrongLength {
+        expected: usize,
+        got: usize,
+    },
+    /// Stored bytes no longer match their digest or content address.
+    Corrupt(ContentHash),
+}
+impl std::fmt::Display for TileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongLength { expected, got } => {
+                write!(f, "CORRUPT_DATA: tile length {got}, expected {expected}")
+            }
+            Self::Corrupt(hash) => write!(f, "CORRUPT_DATA: corrupt object {hash}"),
+        }
+    }
+}
+impl std::error::Error for TileError {}
+/// The renderer still reports errors as coded strings.
+impl From<TileError> for String {
+    fn from(error: TileError) -> Self {
+        error.to_string()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,10 +90,8 @@ impl TileData {
 }
 
 pub trait TileStore {
-    fn get(&self, hash: &ContentHash) -> Option<Arc<TileData>>;
-    fn get_checked(&self, hash: &ContentHash) -> Result<Option<Arc<TileData>>, String> {
-        Ok(self.get(hash))
-    }
+    /// `Ok(None)` means the store does not hold the tile. Damaged bytes are an error.
+    fn get(&self, hash: &ContentHash) -> Result<Option<Arc<TileData>>, TileError>;
     fn put(&mut self, data: TileData) -> ContentHash;
     fn is_opaque(&self, _: &ContentHash) -> bool {
         false
@@ -101,7 +121,6 @@ pub struct MemoryTileStore {
     tiles: HashMap<ContentHash, StoredTile>,
     /// Reachable tiles parked after a package exists. Not part of the working set.
     cold: RefCell<HashMap<ContentHash, StoredTile>>,
-    fault: RefCell<Option<String>>,
     cache: RefCell<CpuCache>,
     budget: usize,
 }
@@ -110,7 +129,6 @@ impl Default for MemoryTileStore {
         Self {
             tiles: HashMap::new(),
             cold: RefCell::new(HashMap::new()),
-            fault: RefCell::new(None),
             cache: RefCell::new(CpuCache {
                 tiles: HashMap::new(),
                 order: BTreeMap::new(),
@@ -182,9 +200,7 @@ impl MemoryTileStore {
     pub fn reachable(&self, hash: &ContentHash) -> bool {
         self.tiles.contains_key(hash) || self.cold.borrow().contains_key(hash)
     }
-    pub fn take_fault(&self) -> Option<String> {
-        self.fault.borrow_mut().take()
-    }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn tamper_cold(&mut self, hash: &ContentHash) -> bool {
         let mut cold = self.cold.borrow_mut();
         let Some(tile) = cold.get_mut(hash) else {
@@ -289,19 +305,11 @@ fn decode_stored(h: &ContentHash, stored: &StoredTile) -> Option<Arc<TileData>> 
     Some(tile)
 }
 impl TileStore for MemoryTileStore {
-    fn get_checked(&self, h: &ContentHash) -> Result<Option<Arc<TileData>>, String> {
-        let tile = self.get(h);
-        if let Some(error) = self.take_fault() {
-            Err(format!("CORRUPT_DATA: {error}"))
-        } else {
-            Ok(tile)
-        }
-    }
     fn is_opaque(&self, h: &ContentHash) -> bool {
         self.tiles.get(h).is_some_and(|t| t.opaque)
             || self.cold.borrow().get(h).is_some_and(|t| t.opaque)
     }
-    fn get(&self, h: &ContentHash) -> Option<Arc<TileData>> {
+    fn get(&self, h: &ContentHash) -> Result<Option<Arc<TileData>>, TileError> {
         {
             let mut c = self.cache.borrow_mut();
             c.clock += 1;
@@ -314,32 +322,19 @@ impl TileStore for MemoryTileStore {
             if let Some((data, old)) = hit {
                 c.order.remove(&old);
                 c.order.insert(clock, *h);
-                return Some(data);
+                return Ok(Some(data));
             }
         }
-        if let Some(stored) = self.tiles.get(h) {
-            let Some(tile) = decode_stored(h, stored) else {
-                *self.fault.borrow_mut() = Some(format!("corrupt object {h}"));
-                return None;
-            };
-            self.cache(*h, tile.clone());
-            return Some(tile);
-        }
-        let decoded = {
-            let cold = self.cold.borrow();
-            let stored = cold.get(h)?;
-            decode_stored(h, stored)
+        let decoded = match self.tiles.get(h) {
+            Some(stored) => decode_stored(h, stored),
+            None => match self.cold.borrow().get(h) {
+                Some(stored) => decode_stored(h, stored),
+                None => return Ok(None),
+            },
         };
-        match decoded {
-            Some(tile) => {
-                self.cache(*h, tile.clone());
-                Some(tile)
-            }
-            None => {
-                *self.fault.borrow_mut() = Some(format!("corrupt object {h}"));
-                None
-            }
-        }
+        let tile = decoded.ok_or(TileError::Corrupt(*h))?;
+        self.cache(*h, tile.clone());
+        Ok(Some(tile))
     }
     fn put(&mut self, data: TileData) -> ContentHash {
         let h = data.hash();
@@ -374,7 +369,7 @@ mod tests {
         let b = store.put(TileData::new(PixelFormat::Rgba8, pixels).unwrap());
         assert_eq!(a, b);
         assert_eq!(store.len(), 1);
-        assert!(store.get(&a).is_some());
+        assert!(store.get(&a).unwrap().is_some());
     }
     #[test]
     fn deferred_tile_is_verified_before_it_enters_the_cpu_cache() {
@@ -383,12 +378,7 @@ mod tests {
         let wrong = ContentHash::of(b"wrong object name");
         let mut store = MemoryTileStore::default();
         store.insert_deferred(wrong, PixelFormat::Rgba8, compressed, true);
-        assert!(
-            store
-                .get_checked(&wrong)
-                .unwrap_err()
-                .contains("CORRUPT_DATA")
-        );
+        assert_eq!(store.get(&wrong), Err(TileError::Corrupt(wrong)));
         assert!(!store.cache.borrow().tiles.contains_key(&wrong));
     }
     #[test]
@@ -399,12 +389,21 @@ mod tests {
         store.clear_decoded_cache();
         store.separate(&BTreeSet::new(), &BTreeSet::from([hash]));
         assert!(store.tamper_cold(&hash));
-        assert!(
-            store
-                .get_checked(&hash)
-                .unwrap_err()
-                .contains("CORRUPT_DATA")
-        );
+        assert_eq!(store.get(&hash), Err(TileError::Corrupt(hash)));
+    }
+    #[test]
+    fn corruption_is_reported_only_by_the_read_that_found_it() {
+        let mut store = MemoryTileStore::default();
+        let bad = store
+            .put(TileData::new(PixelFormat::Rgba8, vec![7; (TILE * TILE * 4) as usize]).unwrap());
+        let good = store
+            .put(TileData::new(PixelFormat::Rgba8, vec![9; (TILE * TILE * 4) as usize]).unwrap());
+        store.clear_decoded_cache();
+        store.separate(&BTreeSet::from([good]), &BTreeSet::from([bad, good]));
+        assert!(store.tamper_cold(&bad));
+        assert_eq!(store.get(&bad), Err(TileError::Corrupt(bad)));
+        assert!(store.get(&good).unwrap().is_some());
+        assert_eq!(store.get(&ContentHash::of(b"absent")), Ok(None));
     }
 }
 

@@ -201,6 +201,64 @@ export async function runTests(engine, benchmark, log) {
       }
       await engine.request("enablePrefetch");
     });
+    await test("edits discard only damaged display tiles and match a full recomposite", async () => {
+      doc = await engine.createDocument({ width: 768, height: 512 });
+      const a = await image(engine, "rgba(200,40,20,.7)", 768, 512);
+      const b = await image(engine, "rgba(20,60,220,.5)", 600, 400);
+      let bottom, top;
+      await doc.transact("layers", tx => {
+        bottom = tx.addRasterFromAsset(a);
+        top = tx.addRasterFromAsset(b);
+      });
+      const keys = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]];
+      // Level 0 first, so level 1 is always built from the same children.
+      const readAll = async () => {
+        const out = [];
+        for (const [x, y] of keys) out.push(await engine.unstable.readTile(x, y));
+        out.push(await engine.unstable.readTileLevel(1, 0, 0));
+        return out;
+      };
+      // Tiles that survived the edit must equal tiles composed from scratch.
+      const check = async (label) => {
+        const kept = await readAll();
+        await engine.request("resetRenderCache", { cpu: false });
+        const fresh = await readAll();
+        kept.forEach((t, i) => assert(same(t, fresh[i]), `${label}: display tile ${i} is stale`));
+      };
+      await readAll();
+      await stroke(doc, top, "brush", [{ x: 300, y: 100, pressure: 1 }, { x: 340, y: 120, pressure: 1 }]);
+      await check("brush");
+      await doc.transact("move", tx => tx.setTransform(top, { x: 90, y: 40, scaleX: 1, scaleY: 1, rotation: 0 }));
+      await check("move");
+      await doc.transact("rotate", tx => tx.setTransform(top, { x: 90, y: 40, scaleX: 0.8, scaleY: 1.2, rotation: 0.3 }));
+      await check("rotate");
+      // Mid-stroke tiles show the stroke preview; each input must discard what it covers.
+      const live = doc.tools.begin("brush", {
+        layer: top,
+        tip: { size: 48, hardness: 0.8, spacing: 0.1 },
+        color: [0.2, 0.8, 0.3, 1],
+      });
+      live.input({ x: 400, y: 300, pressure: 1 });
+      await live.flush();
+      await readAll();
+      live.input({ x: 520, y: 330, pressure: 1 });
+      live.input({ x: 560, y: 200, pressure: 1 });
+      await live.flush();
+      await check("live stroke on a transformed layer");
+      await live.end();
+      await check("brush on a transformed layer");
+      await doc.transact("opacity", tx => tx.setProps(top, { opacity: 0.4 }));
+      await check("opacity");
+      await doc.transact("hide", tx => tx.setProps(bottom, { visible: false }));
+      await check("hide");
+      await doc.transact("reorder", tx => tx.moveNode(top, doc.view.root.id, 0));
+      await check("reorder");
+      for (let i = 0; i < 7; i++) {
+        await doc.undo();
+        await check("undo " + i);
+      }
+      await engine.request("enablePrefetch");
+    });
     await test("full display cache can yield and replace tiles without orphaning slots", async () => {
       doc = await engine.createDocument({ width: 300, height: 300 });
       const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);

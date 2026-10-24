@@ -90,8 +90,8 @@ impl Engine {
         bytes: Vec<u8>,
         face_index: u32,
     ) -> Result<ImportedFont, EngineError> {
-        let info = alto_text::inspect(&bytes, face_index)
-            .map_err(|e| DocError::Invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        let info =
+            alto_text::inspect(&bytes, face_index).map_err(|e| DocError::Invalid(e.to_string()))?;
         if info.embedding == FontEmbedding::Restricted {
             return Err(DocError::Invalid(format!(
                 "INVALID_ARGUMENT: フォント「{}」はライセンス（OS/2 fsType）で埋め込みが禁止されています",
@@ -182,7 +182,7 @@ impl Engine {
         let doc = self.document(h)?;
         match &doc.node(id)?.kind {
             NodeKind::Text { content } => Ok((doc, content)),
-            _ => Err(DocError::Invalid("INVALID_ARGUMENT: text layer required".into()).into()),
+            _ => Err(DocError::Invalid("text layer required".into()).into()),
         }
     }
 
@@ -216,7 +216,7 @@ impl Engine {
     fn local(&self, doc: &Document, id: NodeId, p: [f64; 2]) -> Result<[f64; 2], EngineError> {
         let inv = alto_core::Affine2(world(doc, id)?)
             .inverse()
-            .ok_or_else(|| DocError::Invalid("INVALID_ARGUMENT: singular text transform".into()))?;
+            .ok_or_else(|| DocError::Invalid("singular text transform".into()))?;
         Ok(apply(&inv.0, p))
     }
 

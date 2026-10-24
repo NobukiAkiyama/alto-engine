@@ -338,7 +338,10 @@ fn committed_tiles_survive_garbage_collection() {
         paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, v);
     }
     assert_eq!(e.history_state(d).unwrap().0, 100);
-    assert!(e.tile(&old).is_some(), "committed tile is a GC root");
+    assert!(
+        e.tile(&old).unwrap().is_some(),
+        "committed tile is a GC root"
+    );
     e.restore_version(d, c.hash).unwrap();
     let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
         panic!()
@@ -380,7 +383,7 @@ fn saved_history_tiles_leave_residency_and_fault_back() {
     e.save_package(d).unwrap();
     assert!(!e.tile_resident(&old));
     assert!(e.resident_bytes() < hot);
-    let restored = e.tile(&old).unwrap();
+    let restored = e.tile(&old).unwrap().unwrap();
     assert_eq!(restored.pixels[0], 250);
     e.restore_version(d, c.hash).unwrap();
     assert!(e.tile_resident(&old));
@@ -421,11 +424,10 @@ fn parked_tile_with_a_bad_hash_is_corrupt() {
     }
     e.save_package(d).unwrap();
     assert!(e.tamper_parked_tile(&old));
+    let err = e.require_tile(&old).unwrap_err().to_string();
     assert!(
-        e.tile_checked(&old)
-            .unwrap_err()
-            .to_string()
-            .contains("CORRUPT_DATA")
+        err.contains("CORRUPT_DATA") && err.contains(&old.to_string()),
+        "{err}"
     );
     assert!(
         e.save_package(d)
@@ -433,9 +435,9 @@ fn parked_tile_with_a_bad_hash_is_corrupt() {
             .to_string()
             .contains("CORRUPT_DATA")
     );
-    assert!(e.tile(&old).is_none());
-    let err = e.take_fault_error().unwrap();
-    assert!(err.contains("corrupt") || err.contains("hash"), "{err}");
+    // The damage stays attached to that object; it is not a pending error for the next read.
+    assert!(e.tile(&ContentHash::of(b"absent")).unwrap().is_none());
+    assert!(e.tile(&old).is_err());
 }
 
 #[test]
@@ -509,19 +511,19 @@ fn divergent_history_survives_commit_and_reopen_until_prune() {
     while e.documents.get_mut(&d).unwrap().drop_oldest_undo() {}
     assert_eq!(e.versions[&d].commits[&c.hash].parents, vec![a.hash]);
     assert!(e.versions[&d].commits.contains_key(&b.hash));
-    assert!(e.tile(&only_b).is_some());
+    assert!(e.tile(&only_b).unwrap().is_some());
     assert!(e.log(d).unwrap().iter().all(|commit| commit.hash != b.hash));
     let bytes = e.save_package(d).unwrap();
     let mut fresh = Engine::new();
     let (f, warnings) = fresh.open_package(&bytes).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(fresh.versions[&f].commits.contains_key(&b.hash));
-    assert!(fresh.tile(&only_b).is_some());
+    assert!(fresh.tile(&only_b).unwrap().is_some());
     assert_eq!(fresh.prune_versions(f).unwrap(), 1);
     assert!(!fresh.versions[&f].commits.contains_key(&b.hash));
     assert!(fresh.versions[&f].commits.contains_key(&a.hash));
     assert!(fresh.versions[&f].commits.contains_key(&c.hash));
-    assert!(fresh.tile(&only_b).is_none());
+    assert!(fresh.tile(&only_b).unwrap().is_none());
     let again = fresh.save_package(f).unwrap();
     let mut reopened = Engine::new();
     let (g, warnings) = reopened.open_package(&again).unwrap();

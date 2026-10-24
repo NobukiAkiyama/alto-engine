@@ -36,17 +36,20 @@ pub use versions::{CommitView, VersionRef, VersionStatus};
 pub struct DocHandle(pub u64);
 
 #[derive(Debug, thiserror::Error)]
+/// Messages start with the code the SDK reports (`CODE: detail`).
 pub enum EngineError {
-    #[error("document not found: {0:?}")]
+    #[error("NOT_FOUND: document not found: {0:?}")]
     NotFound(DocHandle),
-    #[error("content tile not found: {0}")]
+    #[error("NOT_FOUND: content tile not found: {0}")]
     MissingTile(ContentHash),
-    #[error("canvas dimensions exceed renderer coordinate range")]
+    #[error("INVALID_ARGUMENT: canvas dimensions exceed renderer coordinate range")]
     InvalidDimensions,
     #[error(transparent)]
     Document(#[from] DocError),
     #[error(transparent)]
     Storage(#[from] alto_store::StoreError),
+    #[error(transparent)]
+    Tile(#[from] alto_raster::TileError),
 }
 
 pub struct Engine {
@@ -118,17 +121,18 @@ impl Engine {
         }
     }
 
-    pub fn tile(&self, hash: &ContentHash) -> Option<std::sync::Arc<TileData>> {
-        self.tiles.get(hash)
+    pub fn tile(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<std::sync::Arc<TileData>>, EngineError> {
+        Ok(self.tiles.get(hash)?)
     }
-    pub fn tile_checked(
+    /// For tiles the document references: absence is an error, not transparency.
+    pub fn require_tile(
         &self,
         hash: &ContentHash,
     ) -> Result<std::sync::Arc<TileData>, EngineError> {
-        self.tiles
-            .get_checked(hash)
-            .map_err(alto_store::StoreError::Corrupt)?
-            .ok_or(EngineError::MissingTile(*hash))
+        self.tiles.get(hash)?.ok_or(EngineError::MissingTile(*hash))
     }
 
     pub fn transact(
@@ -151,7 +155,7 @@ impl Engine {
             if let Op::SetTiles { changes, .. } = op {
                 for change in changes {
                     if let Some(hash) = change.after
-                        && self.tiles.get(&hash).is_none()
+                        && !self.tiles.contains(&hash)
                     {
                         return Err(EngineError::MissingTile(hash));
                     }
@@ -372,13 +376,13 @@ mod tests {
 }
 
 impl TileStore for Engine {
-    fn get_checked(&self, h: &ContentHash) -> Result<Option<std::sync::Arc<TileData>>, String> {
-        self.tiles.get_checked(h)
-    }
     fn is_opaque(&self, h: &ContentHash) -> bool {
         self.tiles.is_opaque(h)
     }
-    fn get(&self, h: &ContentHash) -> Option<std::sync::Arc<TileData>> {
+    fn get(
+        &self,
+        h: &ContentHash,
+    ) -> Result<Option<std::sync::Arc<TileData>>, alto_raster::TileError> {
         self.tiles.get(h)
     }
     fn put(&mut self, d: TileData) -> ContentHash {
@@ -447,17 +451,17 @@ impl Engine {
         self.maintain();
         Ok(())
     }
-    fn encoded(&self, h: ContentHash) -> Option<Vec<u8>> {
-        if let Some(t) = self.tile(&h) {
-            Some(alto_store::encode_object(
+    fn encoded(&self, h: ContentHash) -> Result<Option<Vec<u8>>, EngineError> {
+        if let Some(t) = self.tile(&h)? {
+            Ok(Some(alto_store::encode_object(
                 match t.format {
                     alto_core::PixelFormat::Rgba8 => 4,
                     alto_core::PixelFormat::R8 => 1,
                 },
                 &t.pixels,
-            ))
+            )))
         } else {
-            self.blobs.get(&h).map(|b| alto_store::encode_object(0, b))
+            Ok(self.blobs.get(&h).map(|b| alto_store::encode_object(0, b)))
         }
     }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
@@ -472,9 +476,7 @@ impl Engine {
     pub fn resident_bytes(&self) -> usize {
         self.tiles.allocated_bytes()
     }
-    pub fn take_fault_error(&self) -> Option<String> {
-        self.tiles.take_fault()
-    }
+    #[cfg(test)]
     pub fn tamper_parked_tile(&mut self, hash: &ContentHash) -> bool {
         self.tiles.tamper_cold(hash)
     }
@@ -561,10 +563,10 @@ impl Engine {
         for op in ops {
             op_hashes(op, &mut hashes);
         }
+        // A record without its objects cannot be replayed after a crash.
         for h in hashes {
-            if let Some(b) = self.encoded(h) {
-                entries.insert(format!("objects/{h}"), b);
-            }
+            let b = self.encoded(h)?.ok_or(EngineError::MissingTile(h))?;
+            entries.insert(format!("objects/{h}"), b);
         }
         Ok(alto_store::write_entries(&entries)?)
     }
@@ -639,26 +641,59 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
     }
 }
 
+fn tx_hashes(tx: &alto_doc::Transaction, h: &mut std::collections::BTreeSet<ContentHash>) {
+    for applied in &tx.ops {
+        op_hashes(&applied.op, h);
+        op_hashes(&applied.inverse, h);
+    }
+}
+
+/// Objects only the undo/redo history keeps alive. Older undos are dropped past this.
+const MAX_HISTORY_ONLY_OBJECTS: usize = 2048;
+
+/// How many of the oldest undo transactions to drop so that the history references at
+/// most `limit` objects the document does not. One pass, newest first: each older
+/// transaction can only add objects.
+fn undos_over_budget(
+    editor: &Editor,
+    current: &std::collections::BTreeSet<ContentHash>,
+    limit: usize,
+) -> usize {
+    let mut extra = std::collections::BTreeSet::new();
+    let collect = |tx: &alto_doc::Transaction, extra: &mut std::collections::BTreeSet<_>| {
+        let mut h = std::collections::BTreeSet::new();
+        tx_hashes(tx, &mut h);
+        extra.extend(h.into_iter().filter(|hash| !current.contains(hash)));
+    };
+    for tx in editor.redo_history() {
+        collect(tx, &mut extra);
+    }
+    let undo = editor.undo_history();
+    if extra.len() > limit {
+        return undo.len();
+    }
+    for (kept, tx) in undo.iter().rev().enumerate() {
+        collect(tx, &mut extra);
+        if extra.len() > limit {
+            return undo.len() - kept;
+        }
+    }
+    0
+}
+
 impl Engine {
     pub fn pin_import(&mut self, h: ContentHash) {
         self.imported.insert(h);
     }
     fn maintain(&mut self) {
         for editor in self.documents.values_mut() {
-            loop {
-                let mut history = std::collections::BTreeSet::new();
-                for op in editor.retained_ops() {
-                    op_hashes(&op, &mut history);
-                }
-                let mut current = std::collections::BTreeSet::new();
-                for n in editor.doc.nodes.values() {
-                    node_hashes(n, &mut current);
-                }
-                current.extend(editor.doc.assets.values().map(|a| a.hash));
-                if history.difference(&current).count() <= 2048 || !editor.drop_oldest_undo() {
-                    break;
-                }
+            let mut current = std::collections::BTreeSet::new();
+            for n in editor.doc.nodes.values() {
+                node_hashes(n, &mut current);
             }
+            current.extend(editor.doc.assets.values().map(|a| a.hash));
+            let drop = undos_over_budget(editor, &current, MAX_HISTORY_ONLY_OBJECTS);
+            editor.drop_oldest_undos(drop);
         }
         let mut current = self.live_hashes();
         let mut reachable = current.clone();
@@ -699,8 +734,8 @@ impl Engine {
                 current.extend(t.tiles.values().copied());
             }
             current.extend(editor.doc.assets.values().map(|a| a.hash));
-            for op in editor.retained_ops() {
-                op_hashes(&op, &mut current);
+            for tx in editor.undo_history().iter().chain(editor.redo_history()) {
+                tx_hashes(tx, &mut current);
             }
         }
         current
@@ -946,15 +981,101 @@ mod package_tests {
         recovered.replay_record(r, &record).unwrap();
         assert_eq!(e.snapshot(d).unwrap(), recovered.snapshot(r).unwrap());
         assert_eq!(
-            e.tile(&hash).unwrap().pixels,
-            recovered.tile(&hash).unwrap().pixels
+            e.tile(&hash).unwrap().unwrap().pixels,
+            recovered.tile(&hash).unwrap().unwrap().pixels
         );
         let full = e.save_package(d).unwrap();
         let mut fresh = Engine::new();
         let (f, warnings) = fresh.open_package(&full).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(fresh.snapshot(f).unwrap(), e.snapshot(d).unwrap());
-        assert_eq!(fresh.tile(&hash).unwrap().hash(), hash);
+        assert_eq!(fresh.tile(&hash).unwrap().unwrap().hash(), hash);
+    }
+
+    #[test]
+    fn undo_budget_matches_dropping_one_transaction_at_a_time() {
+        let mut editor = Editor::new(Document::new(DocumentMeta::srgb_u8(256, 256)).unwrap());
+        let root = editor.doc.root;
+        let layer = Node::raster("A");
+        let id = layer.id;
+        editor
+            .transact(
+                "add",
+                vec![Op::InsertNode {
+                    node: layer,
+                    parent: root,
+                    index: 0,
+                }],
+                0,
+            )
+            .unwrap();
+        // Each paint references a new tile; some reuse an earlier one.
+        let mut placed = BTreeMap::new();
+        for i in 0..40u32 {
+            let seed = if i % 5 == 0 { 0 } else { i };
+            let key = TileKey {
+                tx: (i % 3) as i32,
+                ty: 0,
+            };
+            let after = ContentHash::of(&seed.to_le_bytes());
+            let before = placed.insert(key, after);
+            let rev = editor.doc.revision;
+            editor
+                .transact(
+                    "paint",
+                    vec![Op::SetTiles {
+                        layer: id,
+                        changes: vec![TileChange {
+                            key,
+                            before,
+                            after: Some(after),
+                        }],
+                    }],
+                    rev,
+                )
+                .unwrap();
+        }
+        for _ in 0..4 {
+            editor.undo().unwrap();
+        }
+        assert_eq!((editor.undo_len(), editor.redo_len()), (37, 4));
+        let mut current = std::collections::BTreeSet::new();
+        for n in editor.doc.nodes.values() {
+            node_hashes(n, &mut current);
+        }
+        for limit in [0, 1, 5, 12, 30, 1000] {
+            let mut slow = editor.clone();
+            loop {
+                let mut history = std::collections::BTreeSet::new();
+                for tx in slow.undo_history().iter().chain(slow.redo_history()) {
+                    tx_hashes(tx, &mut history);
+                }
+                if history.difference(&current).count() <= limit || !slow.drop_oldest_undo() {
+                    break;
+                }
+            }
+            let mut fast = editor.clone();
+            fast.drop_oldest_undos(undos_over_budget(&editor, &current, limit));
+            assert_eq!(fast.undo_len(), slow.undo_len(), "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn journal_record_refuses_an_operation_whose_tile_is_missing() {
+        let e = Engine::new();
+        let absent = ContentHash::of(b"never stored");
+        let ops = vec![Op::SetTiles {
+            layer: alto_core::NodeId::new(),
+            changes: vec![TileChange {
+                key: TileKey { tx: 0, ty: 0 },
+                before: None,
+                after: Some(absent),
+            }],
+        }];
+        assert!(matches!(
+            e.journal_record("paint", &ops),
+            Err(EngineError::MissingTile(h)) if h == absent
+        ));
     }
 }
 

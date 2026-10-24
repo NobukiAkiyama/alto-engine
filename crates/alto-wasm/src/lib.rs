@@ -57,9 +57,11 @@ impl Runtime {
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
             .map_err(error)?;
-        let renderer = Renderer::new(&instance, surface, canvas.width(), canvas.height(), budget)
-            .await
-            .map_err(error)?;
+        let mut renderer =
+            Renderer::new(&instance, surface, canvas.width(), canvas.height(), budget)
+                .await
+                .map_err(error)?;
+        renderer.set_clock(clock);
         let mut engine = Engine::new();
         let doc = engine
             .create_document(DocumentMeta::srgb_u8(1024, 768))
@@ -104,7 +106,7 @@ impl Runtime {
             zoom: 1.0,
             rotation: 0.0,
         };
-        self.refresh()?;
+        self.reload()?;
         self.view()
     }
     pub fn view(&self) -> Result<String, JsValue> {
@@ -244,7 +246,7 @@ impl Runtime {
         let start = clock();
         let r = self
             .renderer
-            .render(&self.scene, &self.engine, self.viewport, budget_ms, clock)
+            .render(&self.scene, &self.engine, self.viewport, budget_ms)
             .map_err(error)?;
         let profile = r.profile.map(|p| {
             json!({
@@ -263,13 +265,13 @@ impl Runtime {
     pub fn prefetch_step(&mut self) -> Result<String, JsValue> {
         let result = self
             .renderer
-            .prefetch_step(&self.scene, &self.engine, self.viewport, clock)
+            .prefetch_step(&self.scene, &self.engine, self.viewport)
             .map_err(error)?;
         Ok(match result {
-            alto_gpu::renderer::PrefetchStep::Idle => "idle",
-            alto_gpu::renderer::PrefetchStep::Progress => "progress",
-            alto_gpu::renderer::PrefetchStep::Ready => "ready",
-            alto_gpu::renderer::PrefetchStep::Blocked => "blocked",
+            alto_gpu::renderer::JobStep::Idle => "idle",
+            alto_gpu::renderer::JobStep::Progress => "progress",
+            alto_gpu::renderer::JobStep::Ready => "ready",
+            alto_gpu::renderer::JobStep::Blocked => "blocked",
         }
         .into())
     }
@@ -354,6 +356,7 @@ impl Runtime {
                 cfg.opacity,
                 erase && !mask,
                 mask,
+                world,
             )
             .map_err(error)?;
         self.sampler = Some(StrokeSampler::new(cfg));
@@ -405,9 +408,6 @@ impl Runtime {
                     .map(|s| (s, world, [doc.meta.width, doc.meta.height])),
             )
             .map_err(error)?;
-        if self.input_inverse != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
-            self.renderer.invalidate(None);
-        }
         Ok(())
     }
     #[wasm_bindgen(js_name=endBrush)]
@@ -450,10 +450,17 @@ impl Runtime {
                 vec![Op::SetTiles { layer, changes }]
             };
             let rev = self.engine.document(self.doc).map_err(error)?.revision;
-            let edited = self
+            let edited = match self
                 .engine
                 .transact(self.doc, "Brush stroke", ops.clone(), rev)
-                .map_err(error)?;
+            {
+                Ok(edited) => edited,
+                Err(e) => {
+                    // The display may still show the stroke that was not committed.
+                    self.renderer.invalidate(None);
+                    return Err(error(e));
+                }
+            };
             self.journal.push(
                 self.engine
                     .journal_record("Brush stroke", &ops)
@@ -667,6 +674,7 @@ impl Runtime {
         )
         .await
         .map_err(error)?;
+        self.renderer.set_clock(clock);
         // The new device starts with an empty glyph atlas; entries are rasterized
         // again from the scene's outlines on the next frame.
         self.renderer.set_glyph_atlas(glyph_atlas);
@@ -740,7 +748,7 @@ impl Runtime {
         self.saved = self.state_hash()?;
         let meta = &self.engine.document(doc).map_err(error)?.meta;
         self.viewport.center = [meta.width as f64 / 2.0, meta.height as f64 / 2.0];
-        self.refresh()?;
+        self.reload()?;
         self.view()
     }
     /// Identity of what a save writes: the snapshot and the version head.
@@ -764,7 +772,16 @@ impl Runtime {
         self.refresh()?;
         self.patch_view(&edited)
     }
+    /// After an edit of the same document: discard only the display tiles it can change.
     fn refresh(&mut self) -> Result<(), JsValue> {
+        let scene = self.engine.render_scene(self.doc).map_err(error)?;
+        let damage = alto_gpu::damage::scene_damage(&self.scene, &scene);
+        self.scene = scene;
+        self.renderer.invalidate_damage(&damage);
+        Ok(())
+    }
+    /// After another document replaces the current one.
+    fn reload(&mut self) -> Result<(), JsValue> {
         self.scene = self.engine.render_scene(self.doc).map_err(error)?;
         self.renderer.invalidate(None);
         Ok(())
@@ -783,7 +800,7 @@ impl Runtime {
         loop {
             let frame = self
                 .renderer
-                .render(&self.scene, &self.engine, self.viewport, 1000.0, clock)
+                .render(&self.scene, &self.engine, self.viewport, 1000.0)
                 .map_err(error)?;
             if frame.pending == 0 {
                 break;

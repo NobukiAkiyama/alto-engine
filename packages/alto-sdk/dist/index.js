@@ -241,7 +241,7 @@ const readableAfterStorageFailure = new Set([
     "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
     "selectionOutline", "textInfo", "textHitTest", "textCaret",
     "textSelection", "textNavigate", "versionLog", "versionDiff",
-    "vectorStats", "vectorPathSvg",
+    "vectorStats", "vectorPathSvg", "releaseSave",
 ]);
 function nodeId() {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -602,6 +602,7 @@ export class DocumentHandle {
         if (this.activeTool)
             await this.activeTool.end();
         this.engine.emit("saveState", "saving");
+        let token;
         try {
             const current = await provider.readRef("manifest.json");
             const currentHash = current ? await sha256Hex(current) : "";
@@ -611,6 +612,7 @@ export class DocumentHandle {
             if (base !== undefined && base !== currentHash)
                 throw new AltoError("CONFLICT", "フォルダの manifest.json が他で変更されています");
             const saved = await this.engine.request("folderEntries");
+            token = saved.token;
             const entries = unframeEntries(new Uint8Array(saved.bytes));
             const manifest = entries.get("manifest.json");
             if (!manifest)
@@ -626,10 +628,12 @@ export class DocumentHandle {
                 throw new AltoError("STORAGE", "manifest の検証に失敗しました");
             this.folder = { provider, manifest: await sha256Hex(manifest) };
             this.apply(await this.engine.request("saved", { token: saved.token }));
+            token = undefined;
             this.engine.emit("saveState", "saved");
             return report;
         }
         catch (e) {
+            this.releaseSave(token);
             this.engine.emit("saveState", "error");
             throw e;
         }
@@ -705,8 +709,10 @@ export class DocumentHandle {
         if (this.activeTool)
             await this.activeTool.end();
         this.engine.emit("saveState", "saving");
+        let token;
         try {
             const saved = await this.engine.request("save");
+            token = saved.token;
             const data = new Uint8Array(saved.bytes);
             if (!target)
                 target = await this.engine.storage.pickSaveFile({
@@ -726,13 +732,20 @@ export class DocumentHandle {
                 }
             }
             this.apply(await this.engine.request("saved", { token: saved.token }));
+            token = undefined;
             this.engine.emit("saveState", "saved");
             return target;
         }
         catch (e) {
+            this.releaseSave(token);
             this.engine.emit("saveState", "error");
             throw e;
         }
+    }
+    /** A cancelled or failed save no longer needs the Worker's copy of the package. */
+    releaseSave(token) {
+        if (token !== undefined)
+            this.engine.request("releaseSave", { token }).catch(() => { });
     }
 }
 export class AltoEngine extends Events {

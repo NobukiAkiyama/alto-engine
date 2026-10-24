@@ -815,14 +815,15 @@ impl ChangeSet {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
+/// Messages start with the code the SDK reports (`CODE: detail`).
 pub enum DocError {
-    #[error("invalid operation: {0}")]
+    #[error("INVALID_ARGUMENT: invalid operation: {0}")]
     Invalid(String),
-    #[error("node not found: {0:?}")]
+    #[error("NOT_FOUND: node not found: {0:?}")]
     NotFound(NodeId),
-    #[error("revision conflict: expected {expected}, actual {actual}")]
+    #[error("CONFLICT: revision conflict: expected {expected}, actual {actual}")]
     Conflict { expected: u64, actual: u64 },
-    #[error("serialization error: {0}")]
+    #[error("INVALID_ARGUMENT: serialization error: {0}")]
     Serialization(String),
 }
 
@@ -1546,6 +1547,7 @@ impl Op {
     }
 }
 
+#[derive(Clone)]
 pub struct Editor {
     pub doc: Document,
     undo: Vec<Transaction>,
@@ -1719,12 +1721,16 @@ impl Editor {
             .map(|t| t.ops.iter().map(|o| o.op.clone()).collect())
             .unwrap_or_default()
     }
-    pub fn retained_ops(&self) -> Vec<Op> {
-        self.undo
-            .iter()
-            .chain(&self.redo)
-            .flat_map(|t| t.ops.iter().flat_map(|o| [o.op.clone(), o.inverse.clone()]))
-            .collect()
+    /// Oldest first.
+    pub fn undo_history(&self) -> &[Transaction] {
+        &self.undo
+    }
+    /// The next redo is last.
+    pub fn redo_history(&self) -> &[Transaction] {
+        &self.redo
+    }
+    pub fn drop_oldest_undos(&mut self, count: usize) {
+        self.undo.drain(..count.min(self.undo.len()));
     }
     pub fn redo_len(&self) -> usize {
         self.redo.len()
