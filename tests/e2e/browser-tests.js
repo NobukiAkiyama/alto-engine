@@ -49,6 +49,42 @@ async function event(engine, name, action) {
 async function settled(engine) {
   return engine.unstable.settle();
 }
+/**
+ * Six layers whose 256 px tiles all differ (content addressing cannot merge them), seen
+ * at zoom 0.5: each display tile needs up to 24 inputs, more than a job decodes inline.
+ * cold(workers) renders from empty caches with or without the decode pool.
+ */
+async function decodeFixture(engine) {
+  const doc = await engine.createDocument({ width: 1024, height: 512 });
+  const assets = [];
+  for (let i = 0; i < 6; i++) {
+    const c = new OffscreenCanvas(1024, 512), ctx = c.getContext("2d");
+    ctx.fillStyle = `rgba(${40 * i},${200 - 30 * i},120,.4)`;
+    ctx.fillRect(0, 0, 1024, 512);
+    for (let y = 0; y < 512; y += 256)
+      for (let x = 0; x < 1024; x += 256) {
+        ctx.fillStyle = `rgba(${(x / 4 + i * 30) % 255},${(y / 2 + i * 50) % 255},60,.5)`;
+        ctx.fillRect(x + 16, y + 16, 200, 200);
+      }
+    assets.push(await engine.assets.importImage(await c.convertToBlob()));
+  }
+  await doc.transact("layers", (tx) => assets.forEach((a) => tx.addRasterFromAsset(a)));
+  const view = { center: [512, 256], zoom: 0.5, rotation: 0 };
+  const cold = async (workers, { keepPool = false } = {}) => {
+    if (!keepPool && !(await engine.request("setDecodeWorkers", { enabled: workers })) && workers)
+      return null;
+    // Set the level before clearing, so no tick composes level 0 first.
+    engine.viewport.set(view);
+    await engine.request("resetRenderCache", { cpu: true });
+    engine.viewport.set(view);
+    const frame = await settled(engine);
+    return {
+      frame,
+      tiles: [await engine.unstable.readTileLevel(1, 0, 0), await engine.unstable.readTileLevel(1, 1, 0)],
+    };
+  };
+  return { doc, cold };
+}
 export async function runTests(engine, benchmark, log) {
   const results = [];
   async function test(name, fn) {
@@ -264,41 +300,46 @@ export async function runTests(engine, benchmark, log) {
       await engine.request("enablePrefetch");
     });
     await test("cold frames decode inputs in the decode workers and match inline decoding", async () => {
-      // Six layers at zoom 0.5: each display tile needs up to 24 source tiles, more
-      // than a job decodes inline.
-      doc = await engine.createDocument({ width: 1024, height: 512 });
-      // Each 256 px tile differs, so content addressing cannot merge them.
-      const assets = [];
-      for (let i = 0; i < 6; i++) {
-        const c = new OffscreenCanvas(1024, 512), ctx = c.getContext("2d");
-        ctx.fillStyle = `rgba(${40 * i},${200 - 30 * i},120,.4)`;
-        ctx.fillRect(0, 0, 1024, 512);
-        for (let y = 0; y < 512; y += 256)
-          for (let x = 0; x < 1024; x += 256) {
-            ctx.fillStyle = `rgba(${(x / 4 + i * 30) % 255},${(y / 2 + i * 50) % 255},60,.5)`;
-            ctx.fillRect(x + 16, y + 16, 200, 200);
-          }
-        assets.push(await engine.assets.importImage(await c.convertToBlob()));
-      }
-      await doc.transact("layers", (tx) => assets.forEach((a) => tx.addRasterFromAsset(a)));
-      const view = { center: [512, 256], zoom: 0.5, rotation: 0 };
-      const readAll = async () => [await engine.unstable.readTileLevel(1, 0, 0), await engine.unstable.readTileLevel(1, 1, 0)];
-      const cold = async (workers) => {
-        if (!(await engine.request("setDecodeWorkers", { enabled: workers })) && workers)
-          return null;
-        // Set the level before clearing, so no tick composes level 0 first.
-        engine.viewport.set(view);
-        await engine.request("resetRenderCache", { cpu: true });
-        engine.viewport.set(view);
-        const frame = await settled(engine);
-        return { frame, tiles: await readAll() };
-      };
+      let cold;
+      ({ doc, cold } = await decodeFixture(engine));
       const inline = await cold(false);
       const pooled = await cold(true);
       // A browser without nested Workers decodes inline; nothing more to compare.
       if (pooled) {
         assert(pooled.frame.workerDecodes > 0, "no input was decoded in a decode worker");
+        assert(pooled.frame.decodeWorkerBytes > 0, "decode worker memory was not reported");
         pooled.tiles.forEach((t, i) => assert(same(t, inline.tiles[i]), `tile ${i} differs from inline decoding`));
+      }
+      await engine.request("enablePrefetch");
+    });
+    await test("a decode worker that stops answering hands its tiles back to inline decoding", async () => {
+      let cold;
+      ({ doc, cold } = await decodeFixture(engine));
+      const inline = await cold(false);
+      if (await engine.request("setDecodeWorkers", { enabled: true })) {
+        const stopped = new Promise((resolve) => {
+          const off = engine.on("diagnostic", (v) => {
+            if (String(v?.message).includes("did not answer")) {
+              off();
+              resolve(v.message);
+            }
+          });
+        });
+        assert((await engine.request("stallDecodeWorkers")) > 0, "no decode worker to stall");
+        const started = performance.now();
+        const stalled = await cold(true, { keepPool: true });
+        const elapsed = performance.now() - started;
+        const message = await stopped;
+        assert(/batch \d+ within 2000 ms/.test(message), "timeout did not name the batch: " + message);
+        assert(elapsed < 6000, `inline decoding took over only after ${elapsed.toFixed(0)} ms`);
+        stalled.tiles.forEach((t, i) => assert(same(t, inline.tiles[i]), `tile ${i} differs after the handover`));
+        // A new pool starts on request and is used once a Worker is ready.
+        let on = false;
+        for (let i = 0; i < 100 && !on; i++) {
+          on = await engine.request("setDecodeWorkers", { enabled: true });
+          if (!on) await delay(20);
+        }
+        assert(on, "the decode pool did not restart");
       }
       await engine.request("enablePrefetch");
     });
@@ -959,13 +1000,23 @@ async function benches(engine, log, results) {
   );
   frame = await settled(engine);
   memory.push(frame);
+  // wasmBytes is the engine runtime. Builds with a decode pool also report its
+  // Workers' WASM memory and the batches in transit; older builds report neither.
+  // The pool's peak is tracked in the Worker for its whole life, cold frames included.
+  // Adding the two peaks bounds the total from above: they need not coincide.
   const peakGpu = Math.max(...memory.map((f) => f.gpuBytes)),
-    peakWasm = Math.max(...memory.map((f) => f.wasmBytes));
+    peakWasm = Math.max(...memory.map((f) => f.wasmBytes)),
+    peakPool = Math.max(...memory.map((f) => f.decodePeakBytes || 0));
   record(
     "B6 sampled peak memory MiB",
-    { gpu: peakGpu / 1048576, wasm: peakWasm / 1048576 },
-    "512 / 1024",
-    peakGpu <= 512 * 1048576 && peakWasm <= 1024 * 1048576,
+    {
+      gpu: peakGpu / 1048576,
+      wasm: peakWasm / 1048576,
+      decodePool: peakPool / 1048576,
+      totalBound: (peakWasm + peakPool) / 1048576,
+    },
+    "512 / 1024 (WASM, decode pool included)",
+    peakGpu <= 512 * 1048576 && peakWasm + peakPool <= 1024 * 1048576,
   );
   const bootHash = doc.view.snapshotHash;
   // Older SDKs had no durable(); their open already waited for the checkpoint.

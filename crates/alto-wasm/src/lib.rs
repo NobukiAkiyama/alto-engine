@@ -44,6 +44,22 @@ const FRAME_FIELDS: [&str; 32] = [
     "profile.uniqueInputs",
     "profile.atlasEvictions",
 ];
+/// Release builds abort on panic, which reaches JS only as "RuntimeError: unreachable".
+/// Keep the message and location where the Worker's error handler can report them.
+fn record_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let message = info.to_string();
+            web_sys::console::error_1(&JsValue::from_str(&message));
+            let _ = js_sys::Reflect::set(
+                &js_sys::global(),
+                &JsValue::from_str("altoPanic"),
+                &JsValue::from_str(&message),
+            );
+        }));
+    });
+}
 fn state_hash(digest: ContentHash, head: Option<ContentHash>) -> ContentHash {
     let mut b = digest.0.to_vec();
     if let Some(h) = head {
@@ -121,6 +137,7 @@ impl Runtime {
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
+        record_panics();
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))

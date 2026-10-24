@@ -16,6 +16,8 @@ self.addEventListener("error", (e) => {
       file: e.filename,
       line: e.lineno,
       error: String(e.error),
+      // Set by the runtime's panic hook: a Rust panic otherwise reads "unreachable".
+      panic: self.altoPanic || null,
     },
   });
 });
@@ -87,13 +89,25 @@ function schedulePrefetch() {
 // engine decodes inline as before.
 const DECODE_BATCH = 16;
 const DECODES_IN_FLIGHT_PER_WORKER = 2;
+// A batch of 16 tiles decodes in a few milliseconds. A decode Worker silent for this
+// long is hung; its requests go back to inline decoding.
+const DECODE_TIMEOUT_MS = 2000;
 let decoders = [];
 let decodersOn = false;
+let decodeBatchId = 0;
 // Results wait here: a decode Worker answers at any time, possibly while an async
 // runtime call (endBrush, readTile) holds the runtime. Only the drain loop and
 // waitFrame apply them, between runtime calls.
 let decodedResults = [];
+let decodedResultBytes = 0;
 let decodersAllowed = true;
+// Highest decode pool memory seen in this Worker's life, sampled at every send and
+// answer: frames alone would miss the busiest moment of a cold frame.
+let decodePoolPeak = 0;
+function notePoolBytes() {
+  const { workers, transit } = decodePoolBytes();
+  decodePoolPeak = Math.max(decodePoolPeak, workers + transit);
+}
 function startDecoders() {
   const count = Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 2) - 1));
   for (let i = 0; i < count; i++) {
@@ -103,13 +117,21 @@ function startDecoders() {
     } catch {
       break;
     }
-    const decoder = { worker, busy: 0, ready: false };
+    // pending: batch id -> { timer, bytes } for batches sent and not yet answered.
+    const decoder = { worker, pending: new Map(), ready: false, memory: 0 };
     worker.onmessage = ({ data }) => {
+      decoder.memory = data.memory ?? decoder.memory;
       if (data.ready) decoder.ready = true;
       else {
-        decoder.busy--;
+        const sent = decoder.pending.get(data.id);
+        // An answer to a batch this pool no longer waits for is dropped.
+        if (!sent || !decoders.includes(decoder)) return;
+        clearTimeout(sent.timer);
+        decoder.pending.delete(data.id);
         decodedResults.push(data.out);
+        decodedResultBytes += data.out.byteLength;
       }
+      notePoolBytes();
       wantTick = true;
       void drain();
     };
@@ -117,14 +139,32 @@ function startDecoders() {
     decoders.push(decoder);
   }
 }
-/** Back to inline decoding. The drain loop tells the engine to forget its requests. */
+/**
+ * Back to inline decoding. Never touches the runtime (a timer may call this while an
+ * async runtime call is running); the next pumpDecodes tells the engine to forget its
+ * outstanding requests, and the jobs that asked for them decode them inline.
+ */
 function stopDecoders(why) {
-  for (const decoder of decoders) decoder.worker.terminate();
+  for (const decoder of decoders) {
+    for (const { timer } of decoder.pending.values()) clearTimeout(timer);
+    decoder.worker.terminate();
+  }
   decoders = [];
   decodedResults = [];
+  decodedResultBytes = 0;
   if (why) postMessage({ t: "diagnostic", value: { message: "decode workers stopped: " + why } });
   wantTick = true;
   void drain();
+}
+/** Bytes the decode pool holds: its Workers' WASM memory and batches in transit. */
+function decodePoolBytes() {
+  let workers = 0;
+  let transit = decodedResultBytes;
+  for (const decoder of decoders) {
+    workers += decoder.memory;
+    for (const { bytes } of decoder.pending.values()) transit += bytes;
+  }
+  return { workers, transit };
 }
 /** Only between runtime calls: applies results, then hands out requests. */
 function pumpDecodes() {
@@ -141,13 +181,20 @@ function pumpDecodes() {
       postMessage({ t: "error", value: structured(error) });
     }
   }
+  decodedResultBytes = 0;
   if (!decodersOn) return;
   for (const decoder of decoders) {
-    while (decoder.ready && decoder.busy < DECODES_IN_FLIGHT_PER_WORKER) {
+    while (decoder.ready && decoder.pending.size < DECODES_IN_FLIGHT_PER_WORKER) {
       const batch = runtime.takeDecodeRequests(DECODE_BATCH);
       if (!batch.length) return;
-      decoder.busy++;
-      decoder.worker.postMessage({ batch: batch.buffer }, [batch.buffer]);
+      const id = ++decodeBatchId;
+      const timer = setTimeout(
+        () => stopDecoders(`a decode worker did not answer batch ${id} within ${DECODE_TIMEOUT_MS} ms`),
+        DECODE_TIMEOUT_MS,
+      );
+      decoder.pending.set(id, { timer, bytes: batch.byteLength });
+      decoder.worker.postMessage({ id, batch: batch.buffer }, [batch.buffer]);
+      notePoolBytes();
     }
   }
 }
@@ -224,7 +271,15 @@ function scheduleAutoCheckpoint() {
     // The page sends a tick every animation frame, so only commands count as activity.
     const busy = draining || queue.length || performance.now() - lastCommandAt < AUTO_CHECKPOINT_IDLE_MS;
     if (busy) scheduleAutoCheckpoint();
-    else queueCheckpoint();
+    else {
+      // A timer is outside the drain loop's error handling; a failure here must not
+      // take the Worker down. The journal still holds every edit.
+      try {
+        queueCheckpoint();
+      } catch (error) {
+        freezeStorage(Error("STORAGE: automatic checkpoint failed: " + String(error.message || error)));
+      }
+    }
   }, wait);
 }
 function enqueue(entry) {
@@ -320,7 +375,16 @@ async function writesIdle() {
 let frameFields = [];
 let adapterName = "";
 function decodeFrame(numbers) {
-  const out = { adapter: adapterName, prefetch: {}, profile: null };
+  const pool = decodePoolBytes();
+  // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
+  const out = {
+    adapter: adapterName,
+    prefetch: {},
+    profile: null,
+    decodeWorkerBytes: pool.workers,
+    decodeTransitBytes: pool.transit,
+    decodePeakBytes: decodePoolPeak,
+  };
   const profile = {};
   frameFields.forEach((name, i) => {
     const [group, key] = name.split(".");
@@ -617,10 +681,16 @@ async function execute(m) {
       runtime.destroyGpu();
       return true;
     case "setDecodeWorkers":
-      // Diagnostic: compare inline decoding with the pool.
+      // Diagnostic: compare inline decoding with the pool. Enabling after the pool
+      // stopped starts a new one; it is used once a Worker reports ready.
       decodersAllowed = !!m.enabled;
+      if (decodersAllowed && !decoders.length) startDecoders();
       pumpDecodes();
       return decodersOn;
+    case "stallDecodeWorkers":
+      // Fault injection: the decode Workers keep requests and never answer.
+      for (const decoder of decoders) decoder.worker.postMessage({ stall: true });
+      return decoders.length;
     case "setVisibleTileJobs":
       runtime.setVisibleTileJobs(!!m.enabled);
       return true;

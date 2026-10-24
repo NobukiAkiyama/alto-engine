@@ -609,6 +609,7 @@ export declare class AltoEngine extends Events {
     recoveryAvailable: boolean;
     /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
     storageFailure: AltoError | null;
+    private lastWorkerPanic;
     /** A Worker startup or runtime failure. Independent of journal corruption. */
     engineFailure: AltoError | null;
     get lifecycleState(): EnginePhase;

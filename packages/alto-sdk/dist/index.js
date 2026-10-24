@@ -785,6 +785,7 @@ export class AltoEngine extends Events {
     recoveryAvailable = false;
     /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
     storageFailure = null;
+    lastWorkerPanic = null;
     /** A Worker startup or runtime failure. Independent of journal corruption. */
     engineFailure = null;
     get lifecycleState() { return this.phase; }
@@ -867,6 +868,10 @@ export class AltoEngine extends Events {
                 }
                 else if (data.t === "frame")
                     this.emit("frame", data.value);
+                else if (data.t === "diagnostic" && data.value?.panic) {
+                    this.lastWorkerPanic = data.value.panic;
+                    this.emit("diagnostic", data.value);
+                }
                 else if (data.t === "gpuLost") {
                     if (this.document)
                         this.document.activeTool = null;
@@ -879,7 +884,10 @@ export class AltoEngine extends Events {
         this.worker.onerror = (event) => {
             if (generation !== this.workerGeneration || this.disposed)
                 return;
-            const detail = event.message || event.error?.message || "";
+            // The Worker reports a Rust panic just before its error reaches here.
+            const panic = this.lastWorkerPanic;
+            this.lastWorkerPanic = null;
+            const detail = (event.message || event.error?.message || "") + (panic ? " (panic: " + panic + ")" : "");
             const e = new AltoError(this.phase === "running" ? "WORKER_CRASHED" : "WORKER_UNAVAILABLE", detail || (this.phase === "running" ? "Workerが停止しました" : "Workerを読み込めませんでした"));
             this.emit("workerDiagnostic", {
                 phase: this.phase,
