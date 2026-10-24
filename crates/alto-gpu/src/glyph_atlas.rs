@@ -9,7 +9,7 @@
 //! cached separately and each level measures its own em size, so zooming in past the
 //! threshold switches the glyphs back to the vector path.
 //!
-//! Like `GpuSource::Derived` caches, everything here is rebuildable: the outlines travel
+//! Like the display tile cache, everything here is rebuildable: the outlines travel
 //! with the scene, so after device loss (or eviction) entries are rasterized again.
 use alto_vector::{GlyphOutline, PathCommand};
 use std::collections::HashMap;

@@ -7,7 +7,7 @@ edition = "2024"
 alto-vector = { path = "../alto-vector" }
 alto-core = { path = "../alto-core" }
 alto-doc = { path = "../alto-doc" }
-alto-gpu = { path = "../alto-gpu" }
+alto-scene = { path = "../alto-scene" }
 alto-raster = { path = "../alto-raster" }
 thiserror = "2"
 alto-store = { path = "../alto-store" }

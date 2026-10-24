@@ -309,35 +309,15 @@ fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
 fn mode(m: RenderBlend) -> f32 {
     m as u32 as f32
 }
-pub fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
-    [
-        a[0] * b[0] + a[2] * b[1],
-        a[1] * b[0] + a[3] * b[1],
-        a[0] * b[2] + a[2] * b[3],
-        a[1] * b[2] + a[3] * b[3],
-        a[0] * b[4] + a[2] * b[5] + a[4],
-        a[1] * b[4] + a[3] * b[5] + a[5],
-    ]
+// The renderer keeps raw matrices in its hot loops; the math is `Affine2`'s.
+pub(crate) fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
+    alto_core::Affine2(a).concat(alto_core::Affine2(b)).0
 }
-pub fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
-    let det = m[0] * m[3] - m[1] * m[2];
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
-    }
-    Some([
-        m[3] / det,
-        -m[1] / det,
-        -m[2] / det,
-        m[0] / det,
-        (m[2] * m[5] - m[3] * m[4]) / det,
-        (m[1] * m[4] - m[0] * m[5]) / det,
-    ])
+pub(crate) fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
+    alto_core::Affine2(m).inverse().map(|m| m.0)
 }
-pub fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
-    [
-        m[0] * p[0] + m[2] * p[1] + m[4],
-        m[1] * p[0] + m[3] * p[1] + m[5],
-    ]
+pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
+    alto_core::Affine2(m).apply(p)
 }
 /// Bounding box of `[x0, y0, x1, y1]` mapped through `m`, as (min, max).
 fn bounds_through(m: [f64; 6], r: [f64; 4]) -> ([f64; 2], [f64; 2]) {

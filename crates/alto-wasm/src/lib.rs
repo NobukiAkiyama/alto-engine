@@ -1,13 +1,11 @@
 #![cfg(target_arch = "wasm32")]
 mod spike;
-use alto_core::{AssetId, ContentHash, NodeId, PixelFormat, TileKey};
+use alto_core::{Affine2, AssetId, ContentHash, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine};
-use alto_gpu::{
-    RenderScene,
-    renderer::{Renderer, Viewport, inverse, multiply, point},
-};
+use alto_gpu::renderer::{Renderer, Viewport};
 use alto_raster::{BrushConfig, StrokeSample, StrokeSampler, TileData, TileMap};
+use alto_scene::RenderScene;
 use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -327,23 +325,25 @@ impl Runtime {
         let world = chain
             .into_iter()
             .rev()
-            .fold([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], multiply);
+            .fold(Affine2::default(), |a, m| a.concat(Affine2(m)))
+            .0;
         let world = if mask {
             let props = &doc.node(id).map_err(error)?.props;
-            multiply(
-                if props.mask_linked {
-                    world
-                } else {
-                    [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-                },
-                props.mask_transform.0,
-            )
+            if props.mask_linked {
+                Affine2(world)
+            } else {
+                Affine2::default()
+            }
+            .concat(props.mask_transform)
+            .0
         } else {
             world
         };
         self.mask = mask;
-        self.input_inverse =
-            inverse(world).ok_or_else(|| error("INVALID_ARGUMENT: singular layer transform"))?;
+        self.input_inverse = Affine2(world)
+            .inverse()
+            .ok_or_else(|| error("INVALID_ARGUMENT: singular layer transform"))?
+            .0;
         self.renderer
             .begin_stroke(
                 id,
@@ -374,7 +374,7 @@ impl Runtime {
             .ok_or_else(|| error("CONFLICT: no tool"))?;
         let mut dabs = Vec::new();
         for s in samples.as_chunks::<6>().0 {
-            let p = point(self.input_inverse, [s[0] as f64, s[1] as f64]);
+            let p = Affine2(self.input_inverse).apply([s[0] as f64, s[1] as f64]);
             dabs.extend(sampler.input(StrokeSample {
                 pos: [p[0] as f32, p[1] as f32],
                 pressure: s[2],
@@ -396,8 +396,10 @@ impl Runtime {
             };
             tiles
         };
-        let world = inverse(self.input_inverse)
-            .ok_or_else(|| error("INVALID_ARGUMENT: singular transform"))?;
+        let world = Affine2(self.input_inverse)
+            .inverse()
+            .ok_or_else(|| error("INVALID_ARGUMENT: singular transform"))?
+            .0;
         self.renderer
             .stamp(
                 &dabs,
@@ -522,7 +524,7 @@ impl Runtime {
                 Op::SetProps {
                     id,
                     patch: alto_doc::PropPatch {
-                        mask_transform: Some(alto_core::Affine2::default()),
+                        mask_transform: Some(Affine2::default()),
                         ..Default::default()
                     },
                 },
@@ -775,7 +777,7 @@ impl Runtime {
     /// After an edit of the same document: discard only the display tiles it can change.
     fn refresh(&mut self) -> Result<(), JsValue> {
         let scene = self.engine.render_scene(self.doc).map_err(error)?;
-        let damage = alto_gpu::damage::scene_damage(&self.scene, &scene);
+        let damage = alto_scene::damage::scene_damage(&self.scene, &scene);
         self.scene = scene;
         self.renderer.invalidate_damage(&damage);
         Ok(())

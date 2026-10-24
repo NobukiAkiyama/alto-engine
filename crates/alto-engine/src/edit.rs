@@ -1335,7 +1335,7 @@ mod tests {
     use super::*;
     use alto_core::PixelFormat;
     use alto_doc::{BlendMode, Node};
-    use alto_gpu::RenderBlend;
+    use alto_scene::RenderBlend;
 
     fn layer(engine: &mut Engine, handle: DocHandle) -> NodeId {
         let node = Node::raster("paint");

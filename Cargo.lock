@@ -38,8 +38,8 @@ version = "0.4.0"
 dependencies = [
  "alto-core",
  "alto-doc",
- "alto-gpu",
  "alto-raster",
+ "alto-scene",
  "alto-store",
  "alto-text",
  "alto-vector",
@@ -66,6 +66,7 @@ version = "0.4.0"
 dependencies = [
  "alto-core",
  "alto-raster",
+ "alto-scene",
  "alto-vector",
  "bytemuck",
  "futures-channel",
@@ -80,6 +81,14 @@ dependencies = [
  "alto-core",
  "lz4_flex",
  "serde",
+]
+
+[[package]]
+name = "alto-scene"
+version = "0.4.0"
+dependencies = [
+ "alto-core",
+ "alto-vector",
 ]
 
 [[package]]
@@ -130,6 +139,7 @@ dependencies = [
  "alto-engine",
  "alto-gpu",
  "alto-raster",
+ "alto-scene",
  "alto-vector",
  "futures-channel",
  "js-sys",

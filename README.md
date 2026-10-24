@@ -216,8 +216,9 @@ await doc.undo();
 | `crates/alto-text` | フォント、rustybuzzシェーピング、横組み/縦組みの組版、グリフ→パス、選択 |
 | `crates/alto-doc` | Scene Graph、原子的Transaction、可逆Op、Undo/Redo、スナップショット、コミット・意味的差分 |
 | `crates/alto-store` | 内容アドレス付きオブジェクト、`.alto` ZIPとフォルダ形式、破損検出 |
+| `crates/alto-scene` | 描画シーンの型、描画計画、編集による表示の変更範囲（GPU に依存しない） |
 | `crates/alto-gpu` | wgpu、GPU合成・ブラシ、表示タイルキャッシュ、復旧 |
-| `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合 |
+| `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
 | `packages/alto-sdk` | TypeScript SDK v0.4、Engine Worker、OPFS Storage Worker、フォルダ保存先 |

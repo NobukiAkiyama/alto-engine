@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/alto-core", "crates/alto-vector", "crates/alto-text", "crates/alto-raster", "crates/alto-doc", "crates/alto-store", "crates/alto-gpu", "crates/alto-engine", "crates/alto-git", "crates/alto-wasm"]
+members = ["crates/alto-core", "crates/alto-vector", "crates/alto-text", "crates/alto-raster", "crates/alto-doc", "crates/alto-store", "crates/alto-scene", "crates/alto-gpu", "crates/alto-engine", "crates/alto-git", "crates/alto-wasm"]
 
 [profile.release]
 opt-level = "s"

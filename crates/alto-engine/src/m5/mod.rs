@@ -1,9 +1,9 @@
 //! Selection and mask commands operate on canonical R8 content, never on GPU caches.
 use super::*;
-use alto_core::{NodeId, PixelFormat, TileKey};
+use alto_core::{Affine2, NodeId, PixelFormat, TileKey};
 use alto_doc::{DocError, NodeKind, PropPatch};
-use alto_gpu::{REffect, REffectKind, RMask};
 use alto_raster::{TileData, TileMap};
+use alto_scene::{REffect, REffectKind, RMask};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -442,7 +442,9 @@ impl Engine {
         Ok(chain
             .into_iter()
             .rev()
-            .fold([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], alto_gpu::renderer::multiply))
+            .fold([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], |a, b| {
+                Affine2(a).concat(Affine2(b)).0
+            }))
     }
     pub fn selection_ops(&mut self, h: DocHandle, spec: &Value) -> Result<Vec<Op>, EngineError> {
         if !spec.is_object() {
@@ -628,7 +630,9 @@ impl Engine {
         } else {
             [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
         };
-        let inv = alto_gpu::renderer::inverse(world)
+        let inv = Affine2(world)
+            .inverse()
+            .map(|m| m.0)
             .ok_or_else(|| invalid("Mask transform is singular"))?;
         let source_bounds = selection
             .as_ref()
@@ -637,8 +641,7 @@ impl Engine {
         if selection.as_ref().is_some_and(|s| s.tiles.is_empty()) {
             return Ok(empty());
         }
-        let local =
-            bounds_points(&corners(source_bounds).map(|p| alto_gpu::renderer::point(inv, p)));
+        let local = bounds_points(&corners(source_bounds).map(|p| Affine2(inv).apply(p)));
         let r = checked_bounds(local)?;
         let decoded = selection
             .as_ref()
@@ -651,10 +654,8 @@ impl Engine {
                 let mut pixels = vec![0; 65536];
                 for iy in 0..256 {
                     for ix in 0..256 {
-                        let p = alto_gpu::renderer::point(
-                            world,
-                            [(tx * 256 + ix) as f64 + 0.5, (ty * 256 + iy) as f64 + 0.5],
-                        );
+                        let p = Affine2(world)
+                            .apply([(tx * 256 + ix) as f64 + 0.5, (ty * 256 + iy) as f64 + 0.5]);
                         pixels[(iy * 256 + ix) as usize] =
                             if p[0] < 0.0 || p[1] < 0.0 || p[0] >= w || p[1] >= height {
                                 0

@@ -7,6 +7,7 @@ edition = "2024"
 alto-vector = { path = "../alto-vector" }
 alto-core = { path = "../alto-core" }
 alto-raster = { path = "../alto-raster" }
+alto-scene = { path = "../alto-scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu", "std"] }
 bytemuck = { version = "1", features = ["derive"] }
 futures-channel = "0.3"

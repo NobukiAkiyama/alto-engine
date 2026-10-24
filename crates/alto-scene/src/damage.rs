@@ -3,9 +3,8 @@
 //! Display tiles are composites of the whole scene, so an edit only needs to discard
 //! the tiles it can change. The comparison runs on render scenes, not on document
 //! operations: the scene is exactly what the compositor reads.
-use crate::renderer::{inverse, multiply, point};
 use crate::{RContent, RNode, RenderScene, RenderTile};
-use alto_core::{NodeId, Rect, TILE};
+use alto_core::{Affine2, NodeId, Rect, TILE};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,7 +47,7 @@ fn place(scene: &RenderScene) -> Option<HashMap<NodeId, Placed<'_>>> {
     let mut stack = vec![(scene.root, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], true)];
     while let Some((idx, parent, parent_shown)) = stack.pop() {
         let node = scene.nodes.get(idx)?;
-        let world = multiply(parent, node.transform);
+        let world = Affine2(parent).concat(Affine2(node.transform)).0;
         let shown = parent_shown && node.visible && node.opacity > 0.0;
         let mut children = Vec::new();
         if let RContent::Group { children: c, .. } = &node.content {
@@ -73,7 +72,8 @@ fn place(scene: &RenderScene) -> Option<HashMap<NodeId, Placed<'_>>> {
 
 /// Document pixels a layer-space rectangle can affect once drawn through `world`.
 pub fn layer_rect_damage(world: [f64; 6], r: Rect) -> Rect {
-    let corners = [[r.x0, r.y0], [r.x1, r.y0], [r.x0, r.y1], [r.x1, r.y1]].map(|p| point(world, p));
+    let corners =
+        [[r.x0, r.y0], [r.x1, r.y0], [r.x0, r.y1], [r.x1, r.y1]].map(|p| Affine2(world).apply(p));
     // Filtering reads up to one source pixel beyond the rectangle: `scale` document pixels.
     let scale = world[0]
         .hypot(world[1])
@@ -127,7 +127,7 @@ fn add_node(placed: &HashMap<NodeId, Placed<'_>>, id: NodeId, out: &mut Vec<Rect
             continue;
         }
         if let RContent::Tiles(tiles) = &p.node.content
-            && inverse(p.world).is_some()
+            && Affine2(p.world).inverse().is_some()
         {
             out.extend(tiles.iter().map(|t| tile_rect(p.world, t)));
         }
@@ -210,7 +210,7 @@ pub fn scene_damage(old: &RenderScene, new: &RenderScene) -> Damage {
             continue;
         }
         if let (RContent::Tiles(x), RContent::Tiles(y)) = (&a.node.content, &b.node.content)
-            && inverse(b.world).is_some()
+            && Affine2(b.world).inverse().is_some()
         {
             rects.extend(
                 changed_tiles(x, y)

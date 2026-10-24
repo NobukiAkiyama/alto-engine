@@ -1,18 +1,18 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + incremental display invalidation",
+  "milestone": "M8 + engine without a GPU dependency",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4352117,
-  "gzipBytes": 1108520,
-  "wasmSha256": "95eacad2667b0be112beaec517e7f4685212815b638e993def9f9ad6429ff21f",
+  "wasmBytes": 4355563,
+  "gzipBytes": 1108734,
+  "wasmSha256": "1b1a541dcac20e6f4fbb2f10dee958fd63aff55991fcf6092dafb0febd3e0b76",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 110,
+  "nativeTests": 108,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"

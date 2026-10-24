@@ -4,8 +4,8 @@ pub mod text;
 pub mod versions;
 use alto_core::ContentHash;
 use alto_doc::{BlendMode, ChangeSet, DocError, Document, DocumentMeta, Editor, NodeKind, Op};
-use alto_gpu::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
 use alto_raster::{MemoryTileStore, TileData, TileStore};
+use alto_scene::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
 use std::collections::BTreeMap;
 pub use text::{CaretInfo, ImportedFont, TextInfo};
 
@@ -222,7 +222,7 @@ impl Engine {
                 opacity: node.props.opacity,
                 blend,
                 effects: node.props.effects.len(),
-                features: alto_gpu::RFeatures {
+                features: alto_scene::RFeatures {
                     mask: node
                         .props
                         .mask
