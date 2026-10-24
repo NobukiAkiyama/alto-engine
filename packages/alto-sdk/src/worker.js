@@ -19,7 +19,6 @@ self.addEventListener("error", (e) => {
     },
   });
 });
-let journalBacklog = [];
 let diagnosticProfiles = null;
 let injectedStorageFault = null;
 const readableAfterFailure = new Set([
@@ -32,6 +31,10 @@ let storageFailure = null;
 function freezeStorage(error) {
   if (storageFailure) return;
   storageFailure = structured(error);
+  writes = [];
+  pendingBytes = 0;
+  for (const d of durableWaiters.splice(0)) d.reject(Error(storageFailure.message));
+  for (const wake of roomWaiters.splice(0)) wake();
   postMessage({ t: "storageFailure", value: storageFailure });
 }
 let runtime,
@@ -120,36 +123,95 @@ function structured(error) {
     (/ at line \d+ column \d+/.test(message) ? "INVALID_ARGUMENT" : "INTERNAL");
   return { code, message };
 }
-async function flushJournal() {
-  let b;
-  while ((b = runtime.takeJournal()).length) journalBacklog.push(b);
-  while (journalBacklog.length) {
-    if (injectedStorageFault === "beforeAppend") {
-      injectedStorageFault = null;
-      const error = Error("STORAGE: injected failure before append");
-      freezeStorage(error);
-      throw error;
-    }
-    const a = journalBacklog[0].slice();
-    await io("append", { bytes: a.buffer }, [a.buffer]);
-    if (injectedStorageFault === "afterAppend") {
-      injectedStorageFault = null;
-      const error = Error("STORAGE: injected lost reply after append");
-      freezeStorage(error);
-      throw error;
-    }
-    journalBacklog.shift();
+// Journal and checkpoint writes run in order on their own loop, so neither an edit
+// nor a frame waits for OPFS. An edit waits only when the backlog is over its limit.
+// The runtime may be ahead of the journal; durable() reports when it caught up.
+const MAX_PENDING_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_WRITES = 256;
+let writes = [];
+let pendingBytes = 0;
+let queuedSeq = 0;
+let durableSeq = 0;
+let pumping = null;
+let durableWaiters = [];
+let roomWaiters = [];
+function enqueue(entry) {
+  entry.seq = ++queuedSeq;
+  writes.push(entry);
+  pendingBytes += entry.bytes.length;
+  if (!pumping) pumping = pump().finally(() => (pumping = null));
+}
+function queueJournal() {
+  let bytes;
+  while ((bytes = runtime.takeJournal()).length) enqueue({ kind: "append", bytes });
+}
+/** The package already holds every edit queued so far; their appends are dropped. */
+function queueCheckpoint(bytes, opaque = JSON.parse(runtime.recoveryOpaque())) {
+  for (const w of writes) pendingBytes -= w.bytes.length;
+  writes = writes.filter((w) => w.kind !== "append");
+  for (const w of writes) pendingBytes += w.bytes.length;
+  enqueue({ kind: "checkpoint", bytes, opaque });
+}
+function queuePackageCheckpoint() {
+  queueCheckpoint(runtime.savePackage());
+}
+async function write(w) {
+  if (w.kind === "checkpoint") {
+    await io("checkpoint", { bytes: w.bytes.buffer, opaque: w.opaque }, [w.bytes.buffer]);
+    return;
+  }
+  if (injectedStorageFault === "beforeAppend") {
+    injectedStorageFault = null;
+    throw Error("STORAGE: injected failure before append");
+  }
+  await io("append", { bytes: w.bytes.buffer }, [w.bytes.buffer]);
+  if (injectedStorageFault === "afterAppend") {
+    injectedStorageFault = null;
+    throw Error("STORAGE: injected lost reply after append");
   }
 }
-
-async function checkpoint() {
-  const b = runtime.savePackage();
-  await persistCheckpoint(b);
-  journalBacklog = [];
+async function pump() {
+  while (writes.length && !storageFailure) {
+    const w = writes.shift();
+    pendingBytes -= w.bytes.length;
+    try {
+      await write(w);
+    } catch (error) {
+      freezeStorage(error);
+      return;
+    }
+    durableSeq = w.seq;
+    durableWaiters = durableWaiters.filter((d) => (d.seq <= durableSeq ? (d.resolve(), false) : true));
+    if (hasRoom()) for (const wake of roomWaiters.splice(0)) wake();
+  }
 }
-async function persistCheckpoint(bytes) {
-  const opaque = JSON.parse(runtime.recoveryOpaque());
-  await io("checkpoint", { bytes: bytes.buffer, opaque }, [bytes.buffer]);
+function hasRoom() {
+  return writes.length < MAX_PENDING_WRITES && pendingBytes < MAX_PENDING_BYTES;
+}
+function waitForRoom() {
+  return hasRoom() || storageFailure ? null : new Promise((resolve) => roomWaiters.push(resolve));
+}
+/** Resolves once everything queued so far is in OPFS; rejects if storage failed. */
+function durable() {
+  if (storageFailure) return Promise.reject(Error(storageFailure.message));
+  if (durableSeq >= queuedSeq) return Promise.resolve();
+  return new Promise((resolve, reject) => durableWaiters.push({ seq: queuedSeq, resolve, reject }));
+}
+/** Length-prefixed records, so recovery crosses into WASM once. */
+function frameRecords(records) {
+  const out = new Uint8Array(records.reduce((n, r) => n + 4 + r.length, 0));
+  const view = new DataView(out.buffer);
+  let at = 0;
+  for (const r of records) {
+    view.setUint32(at, r.length, true);
+    out.set(r, at + 4);
+    at += 4 + r.length;
+  }
+  return out;
+}
+/** Hooks that read or damage OPFS directly run after every queued write. */
+async function writesIdle() {
+  while (pumping) await pumping;
 }
 // tick() returns numbers in the order frameFields() names them, fixed for the build.
 let frameFields = [];
@@ -182,6 +244,7 @@ async function execute(m) {
   // Keep it available for an emergency export, but accept no more edits.
   if (storageFailure && !readableAfterFailure.has(m.t))
     throw Error("STORAGE: 保存状態を確認できません。現在の内容を退避してから復旧してください");
+  if (!readableAfterFailure.has(m.t)) await waitForRoom();
   switch (m.t) {
     case "init":
       if (m.protocol !== 4) throw Error("CONFLICT: protocol mismatch");
@@ -196,7 +259,7 @@ async function execute(m) {
       return { protocol: 4, recovery: await io("inspect") };
     case "createDocument": {
       const state = JSON.parse(runtime.createDocument(m.width, m.height));
-      await checkpoint();
+      queuePackageCheckpoint();
       return state;
     }
     case "transact": {
@@ -209,14 +272,14 @@ async function execute(m) {
           }),
         ),
       );
-      await flushJournal();
+      queueJournal();
       postMessage({ t: "patch", value: s });
       return s;
     }
     case "undo":
     case "redo": {
       const s = JSON.parse(runtime[m.t]());
-      await flushJournal();
+      queueJournal();
       postMessage({ t: "patch", value: s });
       return s;
     }
@@ -234,7 +297,7 @@ async function execute(m) {
       return true;
     case "endBrush": {
       const s = JSON.parse(await runtime.endBrush());
-      await flushJournal();
+      queueJournal();
       postMessage({ t: "patch", value: s });
       return s;
     }
@@ -255,7 +318,7 @@ async function execute(m) {
                 !!m.useSelection,
               );
       const state = JSON.parse(result);
-      await flushJournal();
+      queueJournal();
       postMessage({ t: "patch", value: state });
       return state;
     }
@@ -297,9 +360,7 @@ async function execute(m) {
       return JSON.parse(runtime.folderPlan(new Uint8Array(m.bytes)));
     case "openFolder": {
       const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
-      const base = runtime.checkpointBytes();
-      await persistCheckpoint(base);
-      journalBacklog = [];
+      queueCheckpoint(runtime.checkpointBytes());
       return s;
     }
     case "importFont":
@@ -308,8 +369,8 @@ async function execute(m) {
       return runtime.releaseImport(m.hash);
     case "pruneVersions": {
       const state = JSON.parse(runtime.pruneVersions());
-      await flushJournal();
-      await checkpoint();
+      queueJournal();
+      queuePackageCheckpoint();
       postMessage({ t: "patch", value: state });
       return state;
     }
@@ -333,8 +394,8 @@ async function execute(m) {
       );
       const state = JSON.parse(runtime.view());
       // Commits are not journaled operations: checkpoint so a crash keeps them.
-      await flushJournal();
-      await checkpoint();
+      queueJournal();
+      queuePackageCheckpoint();
       postMessage({ t: "patch", value: state });
       return { commit, state };
     }
@@ -344,7 +405,7 @@ async function execute(m) {
       return JSON.parse(runtime.versionDiff(m.from, m.to));
     case "restoreVersion": {
       const state = JSON.parse(runtime.restoreVersion(m.hash));
-      await flushJournal();
+      queueJournal();
       postMessage({ t: "patch", value: state });
       return state;
     }
@@ -353,8 +414,7 @@ async function execute(m) {
       if (!saved) throw Error("INVALID_ARGUMENT: save token expired");
       const state = JSON.parse(runtime.markSaved(saved.hash));
       if (state.document.revision === saved.revision) {
-        await persistCheckpoint(saved.bytes);
-        journalBacklog = [];
+        queueCheckpoint(saved.bytes);
       }
       saves.delete(m.token);
       return state;
@@ -363,11 +423,11 @@ async function execute(m) {
       return saves.delete(m.token);
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
-      await persistCheckpoint(new Uint8Array(m.bytes));
-      journalBacklog = [];
+      queueCheckpoint(new Uint8Array(m.bytes));
       return s;
     }
     case "recover": {
+      await writesIdle();
       const candidates = await io("loadCandidates");
       if (!candidates.length) {
         const state = await io("inspect");
@@ -382,7 +442,7 @@ async function execute(m) {
           if (candidate.metadata)
             runtime.openRecoveryPackage(candidate.base, JSON.stringify(candidate.metadata.opaque));
           else runtime.openPackage(candidate.base);
-          for (const r of candidate.records) runtime.replayRecord(r);
+          runtime.replayRecords(frameRecords(candidate.records));
           recovery = candidate;
           break;
         } catch (error) {
@@ -408,17 +468,21 @@ async function execute(m) {
         new Float32Array(m.samples),
       );
     case "corruptJournalTail":
+      await writesIdle();
       return io("corruptTail");
     case "corruptCheckpoint":
+      await writesIdle();
       return io("corruptCheckpoint");
     case "corruptCheckpointCrc":
+      await writesIdle();
       return io("corruptCheckpointCrc");
     case "corruptBothCheckpoints":
+      await writesIdle();
       return io("corruptBothCheckpoints");
     case "legacyCheckpoint": {
+      await writesIdle();
       const bytes = runtime.savePackage();
       await io("checkpointLegacy", { bytes: bytes.buffer }, [bytes.buffer]);
-      journalBacklog = [];
       return true;
     }
     case "injectStorageFault":
@@ -539,6 +603,14 @@ async function drain() {
 }
 
 self.onmessage = ({ data: m }) => {
+  if (m.t === "durable") {
+    // Answered beside the queue: waiting for OPFS must not hold back edits or frames.
+    durable().then(
+      () => postMessage({ t: "reply", id: m.id, ok: true, value: true }),
+      (error) => postMessage({ t: "reply", id: m.id, ok: false, error: structured(error) }),
+    );
+    return;
+  }
   lastMessageAt = performance.now();
   frameSettled = false;
   if (prefetchTimer !== null) {

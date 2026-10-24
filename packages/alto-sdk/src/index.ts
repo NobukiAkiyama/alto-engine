@@ -843,6 +843,13 @@ export class DocumentHandle {
       return value;
     });
   }
+  /**
+   * Resolves once every edit made so far is in the recovery journal. Edits resolve
+   * when applied; this rejects with STORAGE if the journal could not be written.
+   */
+  durable(): Promise<void> {
+    return this.engine.request("durable");
+  }
   /** The hash of the snapshot a save would write. Computed on request, not per edit. */
   snapshotHash(): Promise<string> {
     return this.engine.request("snapshotHash");

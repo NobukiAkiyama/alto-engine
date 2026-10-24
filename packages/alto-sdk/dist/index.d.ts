@@ -543,6 +543,11 @@ export declare class DocumentHandle {
         begin: (tool: "brush" | "eraser", options: BrushOptions) => ToolSession;
     };
     transact<T>(intent: string, callback: (tx: TransactionBuilder) => T): Promise<T>;
+    /**
+     * Resolves once every edit made so far is in the recovery journal. Edits resolve
+     * when applied; this rejects with STORAGE if the journal could not be written.
+     */
+    durable(): Promise<void>;
     /** The hash of the snapshot a save would write. Computed on request, not per edit. */
     snapshotHash(): Promise<string>;
     /** A raster layer's full tile map (key `tx,ty` to content hash). */

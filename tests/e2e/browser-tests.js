@@ -452,6 +452,8 @@ export async function runTests(engine, benchmark, log) {
         tx.setProps(brushLayer, { name: "Recovered paint" }),
       );
       const hash = (await doc.snapshotHash());
+      // Edits resolve when applied; a crash test must wait for the journal.
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "journal recovery hash mismatch");
@@ -459,6 +461,23 @@ export async function runTests(engine, benchmark, log) {
         same(painted, await engine.unstable.readTile(0, 0)),
         "journal recovery pixels mismatch",
       );
+    });
+    await test("rapid edits keep journal order and survive a crash", async () => {
+      const before = doc.view.revision;
+      const name = doc.view.node(brushLayer).name;
+      // Edits no longer wait for their journal write, so they can run ahead of it.
+      const edits = [];
+      for (let i = 0; i < 300; i++)
+        edits.push(doc.transact("rename " + i, (tx) => tx.setProps(brushLayer, { name: "Rename " + i })));
+      await Promise.all(edits);
+      assert(doc.view.revision === before + 300, "an edit was lost or merged");
+      await doc.durable();
+      const hash = await doc.snapshotHash();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.node(brushLayer).name === "Rename 299", "journal order changed");
+      assert((await doc.snapshotHash()) === hash, "recovered document differs");
+      await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("simultaneous Worker restart requests share one recovery", async () => {
       const hash = (await doc.snapshotHash());
@@ -554,6 +573,7 @@ export async function runTests(engine, benchmark, log) {
       assert((await doc.snapshotHash()) === hash, "V1 checkpoint did not open");
       const bytes = await engine.unstable.saveBytes();
       doc = await engine.openDocument(new Blob([bytes]));
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "V2 migration changed the document");
@@ -564,18 +584,20 @@ export async function runTests(engine, benchmark, log) {
       const name = doc.view.node(brushLayer).name;
       const baseline = await engine.unstable.saveBytes();
       await engine.unstable.injectStorageFault("beforeAppend");
+      // An edit is applied when transact resolves; durable() reports the journal.
+      await doc.transact("unconfirmed edit", (tx) =>
+        tx.setProps(brushLayer, { name: "Unconfirmed paint" }),
+      );
+      assert(doc.view.revision === before + 1, "edit was not applied in memory");
       let failed = false;
       try {
-        await doc.transact("unconfirmed edit", (tx) =>
-          tx.setProps(brushLayer, { name: "Unconfirmed paint" }),
-        );
+        await doc.durable();
       } catch (error) {
         failed = error.code === "STORAGE";
       }
       assert(failed && engine.storageFailure, "append failure was not surfaced");
       assert(!document.querySelector("#storage-failure").hidden, "recovery controls were not shown");
       assert(document.querySelector("main").inert, "editor was not disabled");
-      assert(doc.view.revision === before, "unconfirmed patch reached the view");
       const emergency = await engine.exportEmergencyBytes();
       assert(emergency.length > 100, "emergency export failed");
       let blocked = false;
@@ -595,22 +617,23 @@ export async function runTests(engine, benchmark, log) {
       assert(doc.view.node(brushLayer).name === "Unconfirmed paint", "emergency export lost live edit");
       doc = await engine.openDocument(new Blob([baseline]));
     });
-    await test("lost append reply replays once and reports a changed recovery", async () => {
+    await test("lost append reply replays once and matches the display", async () => {
       const before = doc.view.revision;
       await engine.unstable.injectStorageFault("afterAppend");
+      await doc.transact("reply lost", (tx) =>
+        tx.setProps(brushLayer, { name: "Confirmed despite lost reply" }),
+      );
       let failed = false;
       try {
-        await doc.transact("reply lost", (tx) =>
-          tx.setProps(brushLayer, { name: "Confirmed despite lost reply" }),
-        );
+        await doc.durable();
       } catch (error) {
         failed = error.code === "STORAGE";
       }
       assert(failed && engine.storageFailure, "lost reply was not surfaced");
-      assert(doc.view.revision === before, "unacknowledged patch reached the view");
       const recovered = await engine.recoverAfterStorageFailure();
       doc = recovered.document;
-      assert(recovered.matchesDisplay === false, "recovery difference was hidden");
+      // The record reached OPFS, so the journal agrees with what was on screen.
+      assert(recovered.matchesDisplay === true, "recovery differs from the display");
       assert(doc.view.revision === before + 1, "lost reply replayed twice or not at all");
       assert(doc.view.node(brushLayer).name === "Confirmed despite lost reply", "journal edit missing");
     });
@@ -836,6 +859,8 @@ async function benches(engine, log, results) {
     peakGpu <= 512 * 1048576 && peakWasm <= 1024 * 1048576,
   );
   const bootHash = doc.view.snapshotHash;
+  // Older SDKs had no durable(); their open already waited for the checkpoint.
+  await doc.durable?.();
   const bootStart = performance.now();
   await engine.unstable.crash();
   assert(

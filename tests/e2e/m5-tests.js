@@ -482,6 +482,7 @@ export async function runM5Tests(engine, log) {
         tx.setProps(layer, { mask_enabled: false }),
       );
       const recoveryHash = (await doc.snapshotHash());
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === recoveryHash, "M5 journal hash");

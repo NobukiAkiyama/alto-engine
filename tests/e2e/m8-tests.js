@@ -115,6 +115,8 @@ export async function runM8Tests(engine, log) {
       await stroke(doc, bg, 300, 400, [1, 0, 0, 1]);
       const c = await doc.versions.commit("赤い線");
       const after = await engine.unstable.readTile(1, 1);
+      // The commit's checkpoint is written after the reply.
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       const log = await doc.versions.log();

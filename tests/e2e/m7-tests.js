@@ -254,6 +254,7 @@ export async function runM7Tests(engine, log) {
       assert(same(before, await engine.unstable.readTile(0, 0)), "ZIP pixels");
       await doc.text.replace(id, 0, 1, "東");
       const after = await engine.unstable.readTile(0, 0), saved = (await doc.snapshotHash());
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       assert(saved === (await doc.snapshotHash()) && same(after, await engine.unstable.readTile(0, 0)), "journal");

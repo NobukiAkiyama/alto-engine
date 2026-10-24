@@ -781,6 +781,25 @@ impl Runtime {
             self.journal.remove(0)
         }
     }
+    /// Replays `[u32 little-endian length][record]...` and redraws once at the end.
+    #[wasm_bindgen(js_name=replayRecords)]
+    pub fn replay_records(&mut self, framed: &[u8]) -> Result<String, JsValue> {
+        let mut rest = framed;
+        while !rest.is_empty() {
+            let (len, tail) = rest
+                .split_first_chunk::<4>()
+                .ok_or_else(|| error("CORRUPT_DATA: journal record frame"))?;
+            let len = u32::from_le_bytes(*len) as usize;
+            if tail.len() < len {
+                return Err(error("CORRUPT_DATA: journal record frame"));
+            }
+            let (record, next) = tail.split_at(len);
+            self.engine.replay_record(self.doc, record).map_err(error)?;
+            rest = next;
+        }
+        self.refresh()?;
+        self.view()
+    }
     #[wasm_bindgen(js_name=replayRecord)]
     pub fn replay_record(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
         self.engine.replay_record(self.doc, bytes).map_err(error)?;
