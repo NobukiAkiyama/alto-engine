@@ -1,19 +1,27 @@
 // Two alternating, checksummed OPFS journals. A checkpoint becomes visible after flush.
-// Format 3 checkpoints keep objects once each under objects/, named by their hash, and
-// write only the objects the store lacks. Earlier formats hold a whole package and
-// are still read, so the next checkpoint migrates them.
+// Format 4 checkpoints keep objects once each in pack files under packs/, and write only
+// the objects the store lacks, into one new pack per checkpoint; the journal records
+// where each object is. Format 3 kept one file per object under objects/, which made
+// recovery open thousands of files. Earlier formats hold a whole package. All are still
+// read, so the next checkpoint migrates them.
 const MAGIC = new TextEncoder().encode("ALTOJ001");
 const MAX_RECORD_BYTES = 540 * 1024 * 1024;
 const OBJECT_PATH = /^objects\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
+const PACK_NAME = /^[0-9]+\.pack$/;
 let directory,
   objectsDirectory,
+  packsDirectory,
   active = null,
   candidates = [],
   generation = 0,
   offset = 0,
-  // Object paths on disk that a valid checkpoint references. Deleted only at startup:
-  // a checkpoint skips objects listed here, so one must never vanish mid-session.
-  stored = new Set(),
+  // Where each stored object is: { pack, offset, length }, or { loose: true } for a
+  // format 3 file. Nothing is deleted mid-session: a checkpoint skips objects listed
+  // here, so one must never vanish, and every location recorded stays readable.
+  stored = new Map(),
+  // What a valid checkpoint referenced at startup; the rest is garbage.
+  keptPacks = new Set(),
+  keptLoose = new Set(),
   // Parsed checkpoints and records stay in memory only until recovery is decided.
   released = false,
   // Unreferenced objects are deleted once per session, before its first write.
@@ -105,7 +113,7 @@ function parse(bytes) {
       break;
     }
     if (payload[0] === 0 && base === null) base = payload.slice(1);
-    else if ((payload[0] === 2 || payload[0] === 3) && base === null) {
+    else if (payload[0] >= 2 && payload[0] <= 4 && base === null) {
       if (payload.length < 5) { truncated = true; break; }
       const metaLength = new DataView(payload.buffer, payload.byteOffset + 1, 4).getUint32(0, true);
       if (metaLength > 4 * 1024 * 1024 || 5 + metaLength >= payload.length) {
@@ -149,13 +157,34 @@ async function validMetadata(candidate) {
   if (!Array.isArray(meta.opaque) || meta.opaque.some((hash) => !isHash(hash))) return false;
   if (meta.format === 2)
     return isHash(meta.packageSha256) && (await sha256(candidate.base)) === meta.packageSha256;
-  if (meta.format !== 3) return false;
-  return (
-    isHash(meta.entriesSha256) &&
-    Array.isArray(meta.objects) &&
-    meta.objects.every((path) => typeof path === "string" && OBJECT_PATH.test(path)) &&
-    (await sha256(candidate.base)) === meta.entriesSha256
-  );
+  if (meta.format !== 3 && meta.format !== 4) return false;
+  const objects = meta.objects;
+  if (
+    !isHash(meta.entriesSha256) ||
+    !Array.isArray(objects) ||
+    !objects.every((path) => typeof path === "string" && OBJECT_PATH.test(path))
+  )
+    return false;
+  if (meta.format === 4) {
+    const packs = meta.packs;
+    const valid =
+      Array.isArray(packs) &&
+      packs.every((name) => typeof name === "string" && PACK_NAME.test(name)) &&
+      Array.isArray(meta.locations) &&
+      meta.locations.length === objects.length &&
+      meta.locations.every(
+        (l) =>
+          Array.isArray(l) &&
+          l.length === 3 &&
+          l.every(Number.isSafeInteger) &&
+          l[0] >= 0 &&
+          l[0] < packs.length &&
+          l[1] >= 0 &&
+          l[2] > 0,
+      );
+    if (!valid) return false;
+  }
+  return (await sha256(candidate.base)) === meta.entriesSha256;
 }
 async function listObjects() {
   const present = new Map();
@@ -174,6 +203,7 @@ async function init() {
     await navigator.storage.getDirectory()
   ).getDirectoryHandle("alto-engine", { create: true });
   objectsDirectory = await directory.getDirectoryHandle("objects", { create: true });
+  packsDirectory = await directory.getDirectoryHandle("packs", { create: true });
   await scan();
 }
 /**
@@ -201,7 +231,22 @@ async function scan() {
       candidates.push(candidate);
     }
   candidates.sort((a, b) => b.generation - a.generation);
-  stored = new Set(candidates.flatMap((c) => (c.metadata?.format === 3 ? c.metadata.objects : [])));
+  // Newest first, so an object a later checkpoint copied is read from its new pack. A
+  // rescan keeps what this session wrote: those files are still there.
+  for (const { metadata: meta } of candidates) {
+    if (meta?.format === 3)
+      for (const path of meta.objects) {
+        keptLoose.add(path);
+        if (!stored.has(path)) stored.set(path, { loose: true });
+      }
+    if (meta?.format === 4) {
+      for (const name of meta.packs) keptPacks.add(name);
+      meta.objects.forEach((path, i) => {
+        const [pack, offset, length] = meta.locations[i];
+        if (!stored.has(path)) stored.set(path, { pack: meta.packs[pack], offset, length });
+      });
+    }
+  }
   released = false;
   if (candidates.length) {
     active = candidates[0];
@@ -209,16 +254,19 @@ async function scan() {
   }
 }
 /**
- * Deletes objects no valid checkpoint named at startup: written for a checkpoint that
- * never completed (possibly partial), or only by a generation since replaced. Runs
- * before the session's first write, while `stored` is still exactly the startup set
- * the engine was told about.
+ * Deletes packs and object files no valid checkpoint named at startup: written for a
+ * checkpoint that never completed (possibly partial), or only by a generation since
+ * replaced. Runs before the session's first write, so nothing it deletes was written
+ * or listed to the engine in this session.
  */
 async function collectGarbage() {
   if (collected) return;
   collected = true;
+  for await (const [name, handle] of packsDirectory.entries())
+    if (handle.kind === "file" && !keptPacks.has(name))
+      await packsDirectory.removeEntry(name).catch(() => {});
   for (const [path, dir] of await listObjects())
-    if (!stored.has(path)) await dir.removeEntry(path.split("/")[2]).catch(() => {});
+    if (!keptLoose.has(path)) await dir.removeEntry(path.split("/")[2]).catch(() => {});
 }
 /** After recovery is decided, the parsed packages and records are not needed in memory. */
 function release() {
@@ -247,12 +295,24 @@ async function writeObject(path, bytes) {
     h.close();
   }
 }
-/** The package a candidate recovers from: format 3 rejoins its entries and objects. */
-async function packageOf(candidate) {
-  if (candidate.metadata?.format !== 3) return candidate.base;
-  const entries = unframe(candidate.base);
-  // One OPFS read per object; overlapping them hides most of the per-file latency.
-  const paths = candidate.metadata.objects;
+/** Whole packs, read once each and in parallel. */
+async function readPacks(names) {
+  const unique = [...new Set(names)];
+  const bytes = await Promise.all(
+    unique.map(async (name) => {
+      const file = await (await packsDirectory.getFileHandle(name)).getFile();
+      return new Uint8Array(await file.arrayBuffer());
+    }),
+  );
+  return new Map(unique.map((name, i) => [name, bytes[i]]));
+}
+function slicePack(packs, { pack, offset, length }) {
+  const bytes = packs.get(pack);
+  if (offset + length > bytes.length) throw Error(`pack ${pack} is shorter than its objects`);
+  return bytes.subarray(offset, offset + length);
+}
+/** Format 3 objects, one OPFS read each; overlapping them hides most of the latency. */
+async function readLoose(paths) {
   const objects = new Array(paths.length);
   let next = 0;
   const reader = async () => {
@@ -262,7 +322,24 @@ async function packageOf(candidate) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(32, paths.length) }, reader));
-  paths.forEach((path, i) => entries.set(path, objects[i]));
+  return objects;
+}
+/** The package a candidate recovers from: formats 3 and 4 rejoin entries and objects. */
+async function packageOf(candidate) {
+  const meta = candidate.metadata;
+  if (meta?.format !== 3 && meta?.format !== 4) return candidate.base;
+  const entries = unframe(candidate.base);
+  const paths = meta.objects;
+  if (meta.format === 3) {
+    const objects = await readLoose(paths);
+    paths.forEach((path, i) => entries.set(path, objects[i]));
+  } else {
+    const packs = await readPacks(meta.packs);
+    paths.forEach((path, i) => {
+      const [pack, offset, length] = meta.locations[i];
+      entries.set(path, slicePack(packs, { pack: meta.packs[pack], offset, length }));
+    });
+  }
   return frame(entries);
 }
 async function writeGeneration(tag, payload, metadata) {
@@ -307,31 +384,113 @@ function withMetadata(metadata, bytes) {
   return payload;
 }
 /**
- * Format 3: `framed` is the engine's checkpoint. Objects missing from the store are
- * written and flushed before the journal that names them.
+ * Which stored objects the new pack also takes, so that recovery reads few packs and
+ * little dead data. Packs are visited newest first. One whose live objects come to less
+ * than twice what the new pack already holds is merged into it; packs then grow
+ * geometrically with age, and a store has about log2(total / one checkpoint) of them.
+ * A pack mostly of objects no checkpoint references any more is copied too, and so are
+ * format 3 files.
  */
-async function checkpoint(framed) {
+async function objectsToCopy(paths, newBytes) {
+  const loose = [];
+  const live = new Map();
+  for (const path of paths) {
+    const at = stored.get(path);
+    if (at.loose) loose.push(path);
+    else {
+      const pack = live.get(at.pack) || { bytes: 0, paths: [] };
+      pack.bytes += at.length;
+      pack.paths.push(path);
+      live.set(at.pack, pack);
+    }
+  }
+  const looseBytes = await readLoose(loose);
+  const copied = new Map(loose.map((path, i) => [path, looseBytes[i]]));
+  let pending = newBytes + looseBytes.reduce((n, b) => n + b.length, 0);
+  const merge = [];
+  for (const name of [...live.keys()].sort((a, b) => parseInt(b) - parseInt(a))) {
+    const pack = live.get(name);
+    const size = (await (await packsDirectory.getFileHandle(name)).getFile()).size;
+    if (pack.bytes < 2 * pending || 2 * pack.bytes < size) {
+      merge.push(name);
+      pending += pack.bytes;
+    }
+  }
+  const packs = await readPacks(merge);
+  for (const name of merge)
+    for (const path of live.get(name).paths) copied.set(path, slicePack(packs, stored.get(path)));
+  return copied;
+}
+/** Writes and flushes one pack; returns where each object went. */
+async function writePack(name, objects) {
+  const file = await packsDirectory.getFileHandle(name, { create: true });
+  const h = await file.createSyncAccessHandle();
+  const locations = new Map();
+  try {
+    h.truncate(0);
+    let at = 0;
+    for (const [path, bytes] of objects) {
+      if (h.write(bytes, { at }) !== bytes.length) throw Error("Short pack write");
+      locations.set(path, { pack: name, offset: at, length: bytes.length });
+      at += bytes.length;
+    }
+    h.flush();
+  } finally {
+    h.close();
+  }
+  return locations;
+}
+/**
+ * `framed` is the engine's checkpoint. Objects missing from the store are written and
+ * flushed, in a new pack, before the journal that names them. With `loose`, every
+ * object it names is written as its own file instead (format 3), so tests can produce
+ * a journal the previous SDK wrote.
+ */
+async function checkpoint(framed, loose = false) {
   await init();
   await collectGarbage();
   const entries = unframe(framed);
   const meta = JSON.parse(decoder.decode(entries.get("checkpoint.json")));
   entries.delete("checkpoint.json");
+  const added = new Map();
   for (const [path, bytes] of entries) {
     if (!OBJECT_PATH.test(path)) continue;
-    if (!stored.has(path)) await writeObject(path, bytes);
-    stored.add(path);
+    if (!stored.has(path)) added.set(path, bytes);
     entries.delete(path);
   }
-  const missing = meta.objects.filter((path) => !stored.has(path));
+  const missing = meta.objects.filter((path) => !stored.has(path) && !added.has(path));
   if (missing.length) throw Error("checkpoint names objects the store lacks: " + missing.slice(0, 3).join(", "));
   const base = frame(entries);
   const metadata = {
-    format: 3,
+    format: loose ? 3 : 4,
     entriesSha256: await sha256(base),
     objects: meta.objects,
     opaque: meta.opaque,
   };
-  await writeGeneration(3, withMetadata(metadata, base), metadata);
+  let moved;
+  if (loose) {
+    const old = meta.objects.filter((path) => stored.get(path) && !stored.get(path).loose);
+    const packs = await readPacks(old.map((path) => stored.get(path).pack));
+    for (const path of old) added.set(path, slicePack(packs, stored.get(path)));
+    for (const [path, bytes] of added) await writeObject(path, bytes);
+    moved = new Map([...added.keys()].map((path) => [path, { loose: true }]));
+  } else {
+    let newBytes = 0;
+    for (const bytes of added.values()) newBytes += bytes.length;
+    const copied = await objectsToCopy(meta.objects.filter((path) => stored.has(path)), newBytes);
+    for (const [path, bytes] of copied) added.set(path, bytes);
+    moved = added.size ? await writePack(`${generation + 1}.pack`, added) : new Map();
+    const at = (path) => moved.get(path) || stored.get(path);
+    metadata.packs = [...new Set(meta.objects.map((path) => at(path).pack))];
+    const index = new Map(metadata.packs.map((name, i) => [name, i]));
+    metadata.locations = meta.objects.map((path) => {
+      const { pack, offset, length } = at(path);
+      return [index.get(pack), offset, length];
+    });
+  }
+  await writeGeneration(metadata.format, withMetadata(metadata, base), metadata);
+  // Only now: a failed write leaves the store as the engine was told it is.
+  for (const [path, location] of moved) stored.set(path, location);
   release();
 }
 /** Format 1, kept so tests can produce a journal an older engine wrote. */
@@ -372,7 +531,8 @@ export async function handle(data) {
       records: active?.recordCount || 0,
       truncated: !!active?.truncated,
       latestGeneration: generation,
-      objects: [...stored],
+      objects: [...stored.keys()],
+      packs: active?.metadata?.packs?.length || 0,
     };
   else if (data.t === "loadCandidates") {
     // Newest first, without their contents: recovery usually needs only the first.
@@ -410,6 +570,9 @@ export async function handle(data) {
     value = true;
   } else if (data.t === "checkpoint") {
     await checkpoint(new Uint8Array(data.entries));
+    value = true;
+  } else if (data.t === "checkpointLoose") {
+    await checkpoint(new Uint8Array(data.entries), true);
     value = true;
   } else if (data.t === "checkpointLegacy") {
     await checkpointLegacy(new Uint8Array(data.bytes));

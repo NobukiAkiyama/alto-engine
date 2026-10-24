@@ -1,23 +1,23 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + GPU objects released on WebGPU",
+  "milestone": "M8 + typed renderer errors + packed recovery objects",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4516278,
-  "gzipBytes": 1142406,
-  "wasmSha256": "05395e887484775c0f2a1d37b4f97b6d9df986c2ae1d63391732a2d2d4c928ed",
+  "wasmBytes": 4517370,
+  "gzipBytes": 1142922,
+  "wasmSha256": "55b31fe549d57337d9123e674c8788f40b34e6fa7dc14c6f2e7263dd05bc80f5",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 116,
+  "nativeTests": 117,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
   ],
-  "browserFunctionalTests": 30,
+  "browserFunctionalTests": 32,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,

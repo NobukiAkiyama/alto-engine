@@ -1219,6 +1219,7 @@ export class AltoEngine extends Events {
         corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),
         corruptBothCheckpoints: () => this.request("corruptBothCheckpoints"),
         legacyCheckpoint: () => this.request("legacyCheckpoint"),
+        looseCheckpoint: () => this.request("looseCheckpoint"),
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position) => this.request("injectStorageFault", { position }),
         saveBytes: async () => {

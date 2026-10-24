@@ -702,12 +702,14 @@ export declare class AltoEngine extends Events {
             latestGeneration: number;
             records: number;
             objects: number;
+            packs: number;
         }>;
         corruptJournalTail: () => Promise<any>;
         corruptCheckpoint: () => Promise<any>;
         corruptCheckpointCrc: () => Promise<any>;
         corruptBothCheckpoints: () => Promise<any>;
         legacyCheckpoint: () => Promise<any>;
+        looseCheckpoint: () => Promise<any>;
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<any>;
         saveBytes: () => Promise<Uint8Array<any>>;

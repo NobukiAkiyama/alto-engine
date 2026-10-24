@@ -1417,13 +1417,14 @@ export class AltoEngine extends Events {
     setWorkerURL: (url: URL | string | undefined) => { this.options.workerURL = url; },
     pendingRequests: () => this.pending.size,
     /** Generation, record count and object count of the OPFS recovery store. */
-    recoveryStore: (): Promise<{ latestGeneration: number; records: number; objects: number }> =>
+    recoveryStore: (): Promise<{ latestGeneration: number; records: number; objects: number; packs: number }> =>
       this.request("recoveryStore"),
     corruptJournalTail: () => this.request("corruptJournalTail"),
     corruptCheckpoint: () => this.request("corruptCheckpoint"),
     corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),
     corruptBothCheckpoints: () => this.request("corruptBothCheckpoints"),
     legacyCheckpoint: () => this.request("legacyCheckpoint"),
+    looseCheckpoint: () => this.request("looseCheckpoint"),
     /** Fault injection for recovery tests only. */
     injectStorageFault: (position: "beforeAppend" | "afterAppend") =>
       this.request("injectStorageFault", { position }),

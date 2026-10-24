@@ -612,7 +612,7 @@ async function execute(m) {
           // A candidate that cannot be read (a missing object) is skipped like one that
           // cannot be opened; it does not stop storage.
           const full = await journal.request("loadCandidate", { generation: candidate.generation });
-          if (full.metadata?.format === 3)
+          if (full.metadata?.format >= 3)
             runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
           else if (full.metadata)
             runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
@@ -645,7 +645,12 @@ async function execute(m) {
     case "recoveryStore": {
       await writesIdle();
       const store = await io("inspect");
-      return { latestGeneration: store.latestGeneration, records: store.records, objects: store.objects.length };
+      return {
+        latestGeneration: store.latestGeneration,
+        records: store.records,
+        objects: store.objects.length,
+        packs: store.packs,
+      };
     }
     case "corruptJournalTail":
       await writesIdle();
@@ -659,6 +664,12 @@ async function execute(m) {
     case "corruptBothCheckpoints":
       await writesIdle();
       return io("corruptBothCheckpoints");
+    case "looseCheckpoint": {
+      await writesIdle();
+      const entries = runtime.checkpointParts();
+      await io("checkpointLoose", { entries: entries.buffer }, [entries.buffer]);
+      return true;
+    }
     case "legacyCheckpoint": {
       await writesIdle();
       const bytes = runtime.savePackage();

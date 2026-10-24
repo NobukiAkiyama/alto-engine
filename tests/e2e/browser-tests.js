@@ -729,6 +729,46 @@ export async function runTests(engine, benchmark, log) {
       assert((await doc.snapshotHash()) === hash, "V2 migration changed the document");
       assert(same(painted, await engine.unstable.readTile(0, 0)), "migration pixels changed");
     });
+    await test("a checkpoint of one file per object opens and the next one packs them", async () => {
+      const hash = await doc.snapshotHash();
+      await engine.unstable.looseCheckpoint();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert((await doc.snapshotHash()) === hash, "format 3 checkpoint did not open");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "format 3 pixels changed");
+      const start = await engine.unstable.recoveryStore();
+      assert(start.packs === 0, "the format 3 checkpoint named packs");
+      const name = doc.view.node(brushLayer).name;
+      await doc.transact("rename", (tx) => tx.setProps(brushLayer, { name: "Packed" }));
+      await doc.versions.commit("pack the objects");
+      await doc.durable();
+      const after = await engine.unstable.recoveryStore();
+      assert(after.latestGeneration === start.latestGeneration + 1, "the commit did not checkpoint");
+      assert(after.packs === 1, `the objects went into ${after.packs} packs`);
+      const packed = await doc.snapshotHash();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert((await doc.snapshotHash()) === packed, "the packed checkpoint changed the document");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "packed pixels changed");
+      await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
+    });
+    await test("checkpoints that each add objects keep the packs few", async () => {
+      // Each stroke changes tile (1,0) again, so each commit stores one new object.
+      for (let i = 0; i < 12; i++) {
+        await stroke(doc, brushLayer, "brush", [{ x: 300 + 12 * i, y: 200, pressure: 1 }]);
+        await doc.versions.commit("pack " + i);
+      }
+      await doc.durable();
+      const store = await engine.unstable.recoveryStore();
+      // One pack for the first checkpoint, then sizes doubling with age: about log2(12) more.
+      assert(store.packs <= 5, `${store.packs} packs after 12 checkpoints`);
+      const hash = await doc.snapshotHash();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert((await doc.snapshotHash()) === hash, "recovery from packs changed the document");
+      for (let i = 0; i < 12; i++) await doc.undo();
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "recovered pixels changed");
+    });
     await test("failed append freezes edits and preserves live emergency export", async () => {
       const before = doc.view.revision;
       const name = doc.view.node(brushLayer).name;
