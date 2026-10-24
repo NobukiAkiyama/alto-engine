@@ -143,6 +143,7 @@ export async function runTests(engine, benchmark, log) {
           tx.addRasterFromAsset(red);
           tx.addRasterFromAsset(blue);
         });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0 });
         await engine.request("setVisibleTileJobs", { enabled: false });
         await engine.request("resetRenderCache", { cpu: true });
         const direct = await engine.unstable.readTileLevel(1, 0, 0);
@@ -182,6 +183,10 @@ export async function runTests(engine, benchmark, log) {
       });
       for (const edit of [false, true, false]) {
         if (edit) await doc.transact("hide", tx => tx.setProps(top, { visible: false }));
+        // Set the target level before clearing: otherwise an automatic tick
+        // can populate level-0 children and change the reference into a pyramid
+        // downsample. Transformed edge sampling differs from direct level 1.
+        engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
         await engine.request("setVisibleTileJobs", { enabled: false });
         await engine.request("resetRenderCache", { cpu: true });
         const reference = await engine.unstable.readTileLevel(1, 0, 0);
