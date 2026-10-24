@@ -153,9 +153,11 @@ export async function runTests(engine, benchmark, log) {
         await settled(engine);
         assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
           `cold visible job differs from direct composite for ${size}px canvas`);
-        await engine.request("enablePrefetch");
-        await engine.request("validateFrame"); // Clear the direct tile and rebuild the visible level.
         engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
+        // Remove the parent used by the preceding parity probes so this must
+        // actually prepare a new parent from the level-0 view.
+        await engine.request("resetRenderCache", { cpu: false });
+        await engine.request("enablePrefetch");
         let frame = await settled(engine);
         for (let i = 0; i < 20 && frame.prefetch.ready < frame.prefetch.candidates; i++) {
           await delay(10);
