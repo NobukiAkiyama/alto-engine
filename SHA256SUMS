@@ -75,6 +75,7 @@ e47001c21e5174cc823ba34fa9e01018ad8dcb8a4cc0c783abb543b8022d0173  crates/alto-wa
 de4cc115093c121e88dd8fce3aa8162eb0d6beff223a13faeda35909eecfcfb0  crates/alto-wasm/src/m78.rs
 b2e0538ad80d07eb06d9d2d8918fe59133dce18a540d2cefb79cd7b6c1bd0d94  crates/alto-wasm/src/spike.rs
 b84cb6a19ff9725419d137bfcc85906327f82485ffe0326950fb5396a27b8919  crates/alto-wasm/src/vector_probe.rs
+f77b2a27ecae98f93f3187f19d2adddebc1fded3716facf758361544d5c91668  docs/design/2026-10-24-engine-redesign-phase2.md
 5315d49914591e731a289de007486c28995f8bd68e3b012923ba9c1f74563841  docs/design/2026-10-24-engine-redesign.md
 3ff8c6d8c1e3d7ab3678eee6bb98ea89b52a8c4034e82bb49e17de41aace9e4b  examples/browser-playground/index.html
 aff26255c8f40feef8b23ade2aad1908775260f6ac890cff41fe7a5821803dc2  examples/browser-playground/m5-ui.js
