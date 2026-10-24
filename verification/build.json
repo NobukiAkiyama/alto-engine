@@ -1,12 +1,12 @@
 {
-  "date": "2026-10-23",
+  "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + resumable low-zoom prefetch",
+  "milestone": "M8 + resumable visible cold rendering",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4328183,
-  "gzipBytes": 1101543,
-  "wasmSha256": "65d988114c677d07806a7251c315ee33653c4ad7e8d12b3b9adcc8e07e37ea6c",
+  "wasmBytes": 4347682,
+  "gzipBytes": 1106943,
+  "wasmSha256": "6cc46a2f31b9386310e54390fb650291f7ad803864dcacb0f6a6af402dd8b86d",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
@@ -17,13 +17,13 @@
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
   ],
-  "browserFunctionalTests": 21,
+  "browserFunctionalTests": 23,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,
   "browserM5RegressionTests": 8,
   "browserM4RegressionTests": 11,
-  "browserBenchmarks": 7,
+  "browserBenchmarks": 11,
   "comparisonWasmNote": "comparisonWasm is the M6 vello comparison build and was not rebuilt on 2026-10-21",
   "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4."
 }

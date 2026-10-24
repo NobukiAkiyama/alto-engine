@@ -90,6 +90,10 @@ pub struct RenderProfile {
     pub atlas_hits: u32,
     pub upload_bytes: u64,
     pub pyramid_hits: u32,
+    pub max_step_ms: f64,
+    pub steps: u32,
+    pub unique_inputs: u32,
+    pub atlas_evictions: u32,
 }
 #[derive(Default, Clone, Copy, Debug)]
 pub struct PrefetchStatus {
@@ -138,7 +142,7 @@ enum PlanTask {
         start: u32,
     },
 }
-struct PrefetchJob {
+struct TileJob {
     key: CacheKey,
     region: [f64; 4],
     stack: Vec<PlanTask>,
@@ -196,7 +200,9 @@ pub struct Renderer {
     last_pending: u32,
     prefetch_stats: PrefetchStatus,
     prefetching: bool,
-    prefetch_job: Option<PrefetchJob>,
+    prefetch_job: Option<TileJob>,
+    visible_job: Option<TileJob>,
+    visible_tile_jobs: bool,
     composite: wgpu::ComputePipeline,
     downsample: wgpu::ComputePipeline,
     present: wgpu::RenderPipeline,
@@ -314,7 +320,7 @@ pub fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
         m[1] * p[0] + m[3] * p[1] + m[5],
     ]
 }
-impl PrefetchJob {
+impl TileJob {
     fn new(scene: &RenderScene, key: CacheKey) -> Self {
         let s = 2f64.powi(key.0);
         Self {
@@ -690,6 +696,8 @@ impl Renderer {
             prefetch_stats: PrefetchStatus::default(),
             prefetching: false,
             prefetch_job: None,
+            visible_job: None,
+            visible_tile_jobs: true,
             composite,
             downsample,
             present,
@@ -747,8 +755,22 @@ impl Renderer {
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
     }
+    /// Allows a controlled comparison with the synchronous reference path.
+    pub fn set_visible_tile_jobs(&mut self, enabled: bool) {
+        if self.visible_tile_jobs != enabled {
+            self.visible_tile_jobs = enabled;
+            self.invalidate(None);
+        }
+    }
+    /// Diagnostic reset: keep the document, discard all GPU-derived tiles.
+    pub fn reset_render_cache(&mut self) {
+        self.invalidate(None);
+        self.atlas_map.clear();
+        self.atlas_slots.iter_mut().for_each(|slot| *slot = None);
+    }
     pub fn invalidate(&mut self, bounds: Option<Rect>) {
         self.cancel_prefetch();
+        self.visible_job = None;
         self.last_view = None;
         self.last_pending = 0;
         self.visible_keys.clear();
@@ -836,6 +858,9 @@ impl Renderer {
             })
             .ok_or("GPU budget too small for one display tile")?;
         if let Some(old) = self.atlas_slots[slot].take() {
+            if self.profiling {
+                self.profile.atlas_evictions += 1;
+            }
             self.atlas_map.remove(&old.hash);
         }
         if let Some(preview) = previews.get(&hash) {
@@ -1182,6 +1207,9 @@ impl Renderer {
                 .cache_map
                 .remove(&old)
                 .ok_or("INTERNAL: cache missing")?;
+            // A resumable caller may defer submission or cancel. Keep the
+            // reverse map consistent even before a replacement is published.
+            self.cache_slots[c.slot as usize] = None;
             c.slot as usize
         };
         Ok(Some(slot))
@@ -1340,7 +1368,7 @@ impl Renderer {
         );
         Ok(true)
     }
-    fn prefetch_keys(&self, scene: &RenderScene, view: Viewport) -> Vec<CacheKey> {
+    fn resumable_scene(&self, scene: &RenderScene) -> bool {
         if self.stroke.is_some()
             || scene.nodes.iter().any(|n| {
                 n.features.vector_mask.is_some()
@@ -1352,6 +1380,12 @@ impl Renderer {
                     || matches!(n.content, RContent::Adjustment(_))
             })
         {
+            return false;
+        }
+        true
+    }
+    fn prefetch_keys(&self, scene: &RenderScene, view: Viewport) -> Vec<CacheKey> {
+        if !self.resumable_scene(scene) {
             return Vec::new();
         }
         let zoom = view.zoom.max(0.01);
@@ -1451,13 +1485,13 @@ impl Renderer {
             else {
                 return Ok(PrefetchStep::Idle);
             };
-            self.prefetch_job = Some(PrefetchJob::new(scene, key));
+            self.prefetch_job = Some(TileJob::new(scene, key));
         }
         let mut job = self.prefetch_job.take().ok_or("INTERNAL: prefetch job")?;
         self.profile_now = now;
         self.prefetching = true;
         let start = now();
-        let result = self.advance_prefetch(&mut job, scene, store, now);
+        let result = self.advance_tile_job(&mut job, scene, store, now, true);
         let elapsed = now() - start;
         self.prefetching = false;
         if result.is_ok() {
@@ -1471,12 +1505,13 @@ impl Renderer {
         }
         result
     }
-    fn advance_prefetch(
+    fn advance_tile_job(
         &mut self,
-        job: &mut PrefetchJob,
+        job: &mut TileJob,
         scene: &RenderScene,
         store: &dyn TileStore,
         now: fn() -> f64,
+        prefetch: bool,
     ) -> Result<PrefetchStep> {
         if !job.planned {
             let start = now();
@@ -1486,7 +1521,16 @@ impl Renderer {
                     break;
                 }
             }
-            self.prefetch_stats.max_plan_ms = self.prefetch_stats.max_plan_ms.max(now() - start);
+            if self.profiling && !prefetch {
+                self.profile.commands_ms += now() - start;
+                if job.planned {
+                    self.profile.unique_inputs += job.unique.len() as u32;
+                }
+            }
+            if prefetch {
+                self.prefetch_stats.max_plan_ms =
+                    self.prefetch_stats.max_plan_ms.max(now() - start);
+            }
             if job.unique.len() > self.atlas_slots.len() {
                 return Ok(PrefetchStep::Blocked);
             }
@@ -1501,21 +1545,26 @@ impl Renderer {
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("prefetch upload"),
+                    label: Some("tile job upload"),
                 });
+            // Pin every resident input once per slice, including inputs later in
+            // the plan. Rebuilding a prefix set for each upload is quadratic and
+            // can evict inputs that the same job will shortly need.
+            let mut pinned: HashSet<u32> = job
+                .unique
+                .iter()
+                .filter_map(|h| self.atlas_map.get(h).copied())
+                .collect();
             while job.cursor < job.unique.len() {
                 let hash = job.unique[job.cursor];
                 if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
-                    let pinned: HashSet<u32> = job.unique[..job.cursor]
-                        .iter()
-                        .filter_map(|h| self.atlas_map.get(h).copied())
-                        .collect();
-                    let mut pinned = pinned;
                     let input_start = now();
                     let slot =
                         self.upload(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
-                    self.prefetch_stats.max_input_ms =
-                        self.prefetch_stats.max_input_ms.max(now() - input_start);
+                    if prefetch {
+                        self.prefetch_stats.max_input_ms =
+                            self.prefetch_stats.max_input_ms.max(now() - input_start);
+                    }
                     if slot == u32::MAX {
                         job.missing.insert(hash);
                     } else {
@@ -1545,7 +1594,7 @@ impl Renderer {
                 PrefetchStep::Progress
             });
         }
-        let Some(slot) = self.cache_slot(job.key, true)? else {
+        let Some(slot) = self.cache_slot(job.key, prefetch)? else {
             return Ok(PrefetchStep::Blocked);
         };
         let entries = job
@@ -1560,7 +1609,7 @@ impl Renderer {
         let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("prefetch compose"),
+                label: Some("tile job compose"),
             });
         let submit_start = now();
         self.submit_composite(
@@ -1570,10 +1619,12 @@ impl Renderer {
             std::mem::take(&mut job.commands),
             entries,
             encoder,
-            true,
+            prefetch,
         )?;
-        self.prefetch_stats.max_submit_ms =
-            self.prefetch_stats.max_submit_ms.max(now() - submit_start);
+        if prefetch {
+            self.prefetch_stats.max_submit_ms =
+                self.prefetch_stats.max_submit_ms.max(now() - submit_start);
+        }
         Ok(PrefetchStep::Ready)
     }
     pub fn render(
@@ -1646,26 +1697,93 @@ impl Renderer {
                 entry.prefetched = false;
             }
         }
+        // Keep the current job across viewport changes only while its tile is
+        // still required. Document invalidation always drops it.
+        if self.visible_job.as_ref().is_some_and(|job| {
+            !self.visible_keys.contains(&job.key) || self.cache_map.contains_key(&job.key)
+        }) {
+            self.visible_job = None;
+        }
+        required.sort_by(|a, b| {
+            let distance = |k: &CacheKey| {
+                let x = (k.1 as f64 + 0.5) * 256.0 * scale - view.center[0];
+                let y = (k.2 as f64 + 0.5) * 256.0 * scale - view.center[1];
+                x * x + y * y
+            };
+            distance(a).total_cmp(&distance(b)).then(a.cmp(b))
+        });
         let mut composed = 0;
         for key in &required {
-            if !self.cache_map.contains_key(key) {
-                if composed > 0 && now() - start >= budget_ms {
-                    break;
+            if self.cache_map.contains_key(key) {
+                continue;
+            }
+            if now() - start >= budget_ms && self.profile.steps > 0 {
+                break;
+            }
+            let step_start = now();
+            if self.visible_tile_jobs && self.resumable_scene(scene) {
+                // Reuse already-composited children before touching source tiles.
+                if self.visible_job.is_none() {
+                    let slot = self
+                        .cache_slot(*key, false)?
+                        .ok_or("GPU budget: visible tile")?;
+                    if self.downsample_cached(scene, *key, slot as u32)? {
+                        self.cache_slots[slot] = Some(*key);
+                        self.cache_map.insert(
+                            *key,
+                            Cached {
+                                slot: slot as u32,
+                                used: self.frame,
+                                prefetched: false,
+                            },
+                        );
+                        self.profile.pyramid_hits += 1;
+                        composed += 1;
+                        self.profile.steps += 1;
+                        self.profile.max_step_ms = self.profile.max_step_ms.max(now() - step_start);
+                        continue;
+                    }
+                    self.visible_job = Some(TileJob::new(scene, *key));
                 }
-                let compose_start = if self.profiling { now() } else { 0.0 };
+                let mut job = self.visible_job.take().ok_or("INTERNAL: visible job")?;
+                match self.advance_tile_job(&mut job, scene, store, now, false)? {
+                    PrefetchStep::Ready => {
+                        composed += 1;
+                    }
+                    PrefetchStep::Blocked => {
+                        return Err("GPU budget too small for one display tile".into());
+                    }
+                    _ => {
+                        self.visible_job = Some(job);
+                    }
+                }
+            } else {
                 self.compose(scene, *key, store, false)?;
-                if self.profiling {
-                    self.profile.compose_ms += now() - compose_start;
-                }
                 composed += 1;
+            }
+            let elapsed = now() - step_start;
+            self.profile.steps += 1;
+            self.profile.max_step_ms = self.profile.max_step_ms.max(elapsed);
+            if self.profiling {
+                self.profile.compose_ms += elapsed;
+            }
+            // Each incomplete job yields to the Worker before its next slice.
+            if self.visible_job.is_some() {
+                break;
             }
         }
         let pending = required
             .iter()
             .filter(|k| !self.cache_map.contains_key(k))
             .count() as u32;
+        let unchanged = self.last_view == Some(view);
         self.last_view = Some(view);
         self.last_pending = pending;
+        // Preparing inputs does not change any displayed pixel. Avoid submitting
+        // an identical present pass on every resumable slice.
+        if composed == 0 && pending > 0 && unchanged {
+            return self.frame_report(composed, pending);
+        }
         let mut visible = Vec::new();
         if pending > 0 {
             for (&key, entry) in &self.cache_map {
@@ -1779,6 +1897,9 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        self.frame_report(composed, pending)
+    }
+    fn frame_report(&self, composed: u32, pending: u32) -> Result<FrameReport> {
         Ok(FrameReport {
             composed,
             pending,

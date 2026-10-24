@@ -4,7 +4,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 [実装状況](MILESTONES.md) / [最終検証結果](verification/RESULTS.md) / [M7/M8サンプル文書](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](verification/m8-git-transcript.txt)
 
-[コールド表示と低倍率描画の改善設計](COLD-RENDERING-DESIGN.md)は設計のみで、実装・性能検証はこれからです。
+[コールド表示の実装・測定結果](verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
 ## まず起動する
 
@@ -28,7 +28,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 - 「保存 .alto」で保存。「開く」で復元。File System Access API対応環境ではファイルへ書き込み、それ以外ではダウンロードします。
 - 異常終了後、同じオリジンで開き直すと「編集を復旧」が表示されます。OPFSの記録はブラウザのサイトデータに保存されます。
 
-「検証と計測」から機能テスト13件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+「検証と計測」から機能テスト23件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
 
 ## M7の使い方（テキスト・縦組み）
 

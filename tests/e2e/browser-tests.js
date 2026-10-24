@@ -143,7 +143,16 @@ export async function runTests(engine, benchmark, log) {
           tx.addRasterFromAsset(red);
           tx.addRasterFromAsset(blue);
         });
+        await engine.request("setVisibleTileJobs", { enabled: false });
+        await engine.request("resetRenderCache", { cpu: true });
         const direct = await engine.unstable.readTileLevel(1, 0, 0);
+        await engine.request("setVisibleTileJobs", { enabled: true });
+        await engine.request("resetRenderCache", { cpu: true });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0.17 });
+        await settled(engine);
+        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+          `cold visible job differs from direct composite for ${size}px canvas`);
+        await engine.request("enablePrefetch");
         await engine.request("validateFrame"); // Clear the direct tile and rebuild the visible level.
         engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
         let frame = await settled(engine);
@@ -156,6 +165,46 @@ export async function runTests(engine, benchmark, log) {
         assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
           `prefetched parent differs from direct composite for ${size}px canvas`);
       }
+    });
+    await test("cold jobs preserve transformed isolated groups through edit and Undo", async () => {
+      doc = await engine.createDocument({ width: 600, height: 400 });
+      const a = await image(engine, "rgba(240,30,10,.6)", 600, 400);
+      const b = await image(engine, "rgba(10,50,240,.5)", 600, 400);
+      let top;
+      await doc.transact("group", tx => {
+        const group = tx.addGroup({ isolated: true });
+        tx.setProps(group, { opacity: 0.7 });
+        tx.addRasterFromAsset(a);
+        top = tx.addRasterFromAsset(b);
+        tx.moveNode(top, group, 0);
+        tx.setProps(top, { blend: "multiply" });
+        tx.setTransform(top, { x: 23, y: 11, scaleX: 0.9, scaleY: 1.1, rotation: 0.13 });
+      });
+      for (const edit of [false, true, false]) {
+        if (edit) await doc.transact("hide", tx => tx.setProps(top, { visible: false }));
+        await engine.request("setVisibleTileJobs", { enabled: false });
+        await engine.request("resetRenderCache", { cpu: true });
+        const reference = await engine.unstable.readTileLevel(1, 0, 0);
+        await engine.request("setVisibleTileJobs", { enabled: true });
+        await engine.request("resetRenderCache", { cpu: true });
+        engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
+        await settled(engine);
+        assert(same(reference, await engine.unstable.readTileLevel(1, 0, 0)), "cold group pixels differ");
+        if (edit) await doc.undo();
+      }
+      await engine.request("enablePrefetch");
+    });
+    await test("full display cache can yield and replace tiles without orphaning slots", async () => {
+      doc = await engine.createDocument({ width: 300, height: 300 });
+      const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);
+      await doc.transact("layer", tx => tx.addRasterFromAsset(asset));
+      await engine.request("resetRenderCache", { cpu: true });
+      for (let x = 1000; x < 1256; x++) await engine.unstable.readTile(x, 0);
+      engine.viewport.set({ center: [150, 150], zoom: 0.5, rotation: 0 });
+      await settled(engine);
+      const tile = await engine.unstable.readTileLevel(1, 0, 0);
+      assert(pixel(tile)[3] > 0, "full cache lost the visible tile");
+      await engine.request("enablePrefetch");
     });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
@@ -591,6 +640,24 @@ async function benches(engine, log, results) {
     );
     if (i % 5 === 4) log("Prepared " + (i + 1) + " layers");
   }
+  // Cold runs have no opportunity for parent prefetch. The hook clears GPU
+  // inputs and outputs; C3 additionally drops the decoded CPU tile cache.
+  for (const jobs of [false, true]) {
+    await engine.request("setVisibleTileJobs", { enabled: jobs });
+    for (const cpu of [false, true]) {
+      await engine.request("resetRenderCache", { cpu });
+      engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale, rotation: 0 });
+      const began = performance.now();
+      const coldFrame = await settled(engine);
+      results.push({ id: (cpu ? "C3 CPU+GPU cold ms" : "C2 GPU cold ms") + (jobs ? "" : " (synchronous reference)"),
+        value: performance.now() - began, pass: true, profile: coldFrame.profile,
+        canvasPixels: [engine.canvas.width, engine.canvas.height],
+        physicalZoom: engine.viewport.zoom });
+      log("COLD " + JSON.stringify(results.at(-1)));
+    }
+  }
+  await engine.request("resetRenderCache", { cpu: false });
+  await engine.request("enablePrefetch");
   engine.viewport.set({ center: [1920, 1080], zoom: zoomScale, rotation: 0 });
   let frame = await settled(engine);
   const record = (id, value, target, pass) => {

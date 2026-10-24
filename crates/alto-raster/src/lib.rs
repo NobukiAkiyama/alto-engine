@@ -122,6 +122,14 @@ impl Default for MemoryTileStore {
     }
 }
 impl MemoryTileStore {
+    /// Drops decoded data without dropping compressed source tiles.
+    pub fn clear_decoded_cache(&mut self) {
+        let c = self.cache.get_mut();
+        c.tiles.clear();
+        c.order.clear();
+        c.bytes = 0;
+    }
+
     pub fn retain(&mut self, keep: &BTreeSet<ContentHash>) {
         self.tiles.retain(|h, _| keep.contains(h));
         self.cold.borrow_mut().retain(|h, _| keep.contains(h));
@@ -388,9 +396,7 @@ mod tests {
         let mut store = MemoryTileStore::default();
         let tile = TileData::new(PixelFormat::Rgba8, vec![7; (TILE * TILE * 4) as usize]).unwrap();
         let hash = store.put(tile);
-        store.cache.borrow_mut().tiles.clear();
-        store.cache.borrow_mut().order.clear();
-        store.cache.borrow_mut().bytes = 0;
+        store.clear_decoded_cache();
         store.separate(&BTreeSet::new(), &BTreeSet::from([hash]));
         assert!(store.tamper_cold(&hash));
         assert!(

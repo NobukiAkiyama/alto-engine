@@ -1,3 +1,11 @@
+// MessageChannel yields to Worker messages without nested timer clamping.
+const yieldTask = () => new Promise((resolve) => {
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => {
+    channel.port1.close(); channel.port2.close(); resolve();
+  };
+  channel.port2.postMessage(null);
+});
 import init, { Runtime } from "./pkg/alto_wasm.js";
 import { createStorageSession } from "./storage-session.js";
 self.addEventListener("error", (e) => {
@@ -12,6 +20,7 @@ self.addEventListener("error", (e) => {
   });
 });
 let journalBacklog = [];
+let diagnosticProfiles = null;
 let injectedStorageFault = null;
 const readableAfterFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
@@ -398,23 +407,35 @@ async function execute(m) {
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
+    case "setVisibleTileJobs":
+      runtime.setVisibleTileJobs(!!m.enabled);
+      return true;
+    case "resetRenderCache":
+      prefetchDisabled = true;
+      runtime.resetRenderCache(!!m.cpu);
+      diagnosticProfiles = [];
+      return true;
+    case "enablePrefetch":
+      prefetchDisabled = false;
+      return true;
     case "setProfiling":
       runtime.setProfiling(!!m.enabled);
       return true;
     case "waitFrame": {
       let frame;
-      const profiles = [];
+      const profiles = diagnosticProfiles || [];
       do {
         frame = JSON.parse(runtime.tick(8));
         if (frame.profile) profiles.push(frame.profile);
-        if (frame.pending) await new Promise((r) => setTimeout(r, 0));
+        if (frame.pending) await yieldTask();
       } while (frame.pending);
       await runtime.gpuIdle();
+      diagnosticProfiles = null;
       frameSettled = true;
       prefetchSpentMs = 0;
       if (profiles.length) {
         frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
-          [key, profiles.reduce((sum, profile) => sum + profile[key], 0)]));
+          [key, key === "maxStepMs" ? profiles.reduce((max, profile) => Math.max(max, profile[key]), 0) : profiles.reduce((sum, profile) => sum + profile[key], 0)]));
       }
       return { ...frame, viewVersion };
     }
@@ -462,9 +483,12 @@ async function drain() {
         if (runtime)
           try {
             const value = { ...JSON.parse(runtime.tick(8)), viewVersion };
+            if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0;
+            if (value.pending) wantTick = true;
             if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });
+            if (value.pending) await yieldTask();
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
               postMessage({ t: "gpuLost" });

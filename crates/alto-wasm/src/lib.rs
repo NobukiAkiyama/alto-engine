@@ -229,6 +229,17 @@ impl Runtime {
         };
         Ok(())
     }
+    #[wasm_bindgen(js_name=setVisibleTileJobs)]
+    pub fn set_visible_tile_jobs(&mut self, enabled: bool) {
+        self.renderer.set_visible_tile_jobs(enabled);
+    }
+    #[wasm_bindgen(js_name=resetRenderCache)]
+    pub fn reset_render_cache(&mut self, cpu: bool) {
+        self.renderer.reset_render_cache();
+        if cpu {
+            self.engine.clear_decoded_tile_cache();
+        }
+    }
     pub fn tick(&mut self, budget_ms: f64) -> Result<String, JsValue> {
         let start = clock();
         let r = self
@@ -241,6 +252,8 @@ impl Runtime {
                 "getMs": p.get_ms, "writeMs": p.write_ms,
                 "uploads": p.uploads, "atlasHits": p.atlas_hits,
                 "uploadBytes": p.upload_bytes, "pyramidHits": p.pyramid_hits,
+                "maxStepMs": p.max_step_ms, "steps": p.steps,
+                "uniqueInputs": p.unique_inputs, "atlasEvictions": p.atlas_evictions,
             })
         });
         let prefetch = self.renderer.prefetch_status(&self.scene, self.viewport);

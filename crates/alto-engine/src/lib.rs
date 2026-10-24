@@ -71,6 +71,9 @@ impl Default for Engine {
 }
 
 impl Engine {
+    pub fn clear_decoded_tile_cache(&mut self) {
+        self.tiles.clear_decoded_cache();
+    }
     pub fn new() -> Self {
         Self {
             documents: BTreeMap::new(),
