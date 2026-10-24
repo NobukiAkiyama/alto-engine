@@ -457,13 +457,18 @@ export async function runM5Tests(engine, log) {
         feather: 8,
       });
       await doc.effects.set(layer, [{ type: "gaussian_blur", radius: 8 }]);
+      // Each readback names its step, so an intermittent failure says where it was.
+      const read = (step) =>
+        engine.unstable.readTile(0, 0).catch((error) => {
+          throw Error(`readTile after ${step}: ${error.code || ""} ${error.message}`);
+        });
       const hash = (await doc.snapshotHash()),
-        reference = await engine.unstable.readTile(0, 0),
+        reference = await read("effects"),
         bytes = await engine.unstable.saveBytes();
       doc = await engine.openDocument(new Blob([bytes]));
       assert((await doc.snapshotHash()) === hash, "M5 snapshot changed on open");
       assert(
-        same(reference, await engine.unstable.readTile(0, 0)),
+        same(reference, await read("ZIP open")),
         "M5 ZIP pixels",
       );
       const restored = new Promise((resolve) => {
@@ -475,7 +480,7 @@ export async function runM5Tests(engine, log) {
       await engine.unstable.destroyGpu();
       await restored;
       assert(
-        same(reference, await engine.unstable.readTile(0, 0)),
+        same(reference, await read("GPU recovery")),
         "M5 GPU loss",
       );
       await doc.transact("journal mask state", (tx) =>
@@ -487,7 +492,7 @@ export async function runM5Tests(engine, log) {
       doc = engine.document;
       assert((await doc.snapshotHash()) === recoveryHash, "M5 journal hash");
       assert(
-        same(reference, await engine.unstable.readTile(0, 0)),
+        same(reference, await read("journal recovery")),
         "M5 recovery pixels",
       );
       const before = (await doc.snapshotHash()),

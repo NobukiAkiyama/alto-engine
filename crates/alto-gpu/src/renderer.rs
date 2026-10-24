@@ -2439,9 +2439,16 @@ impl Renderer {
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        rx.await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+        let mapped = rx.await.map_err(|e| e.to_string())?;
+        // A map fails when the device is lost while it waits; say so, so the caller
+        // can tell device loss from a renderer bug.
+        if let Err(e) = mapped {
+            return Err(if self.is_lost() {
+                format!("GPU_LOST: device lost while reading display tile {key:?}: {e}")
+            } else {
+                format!("INTERNAL: reading display tile {key:?}: {e}")
+            });
+        }
         let view = b.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
         let data = view.to_vec();
         drop(view);

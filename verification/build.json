@@ -4,9 +4,9 @@
   "milestone": "M8 + parallel tile decoding",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4503180,
-  "gzipBytes": 1137764,
-  "wasmSha256": "46ba2e7f056b242e1404a1998dbc9f11ded8a555c74ef4a0fea234cebe6ff109",
+  "wasmBytes": 4504007,
+  "gzipBytes": 1137854,
+  "wasmSha256": "397896e15bae62c7c59a27d6f66b06f1f4a16997fc8feeab86fff16f16f0fcb0",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
