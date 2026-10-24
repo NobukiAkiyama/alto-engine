@@ -1,12 +1,12 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + decode pool timeout",
+  "milestone": "M8 + GPU objects released on WebGPU",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4506478,
-  "gzipBytes": 1139050,
-  "wasmSha256": "3df11e43b03fc120ecd2ba1ff7b766de609868519c0bd11a65d0acff3335fb21",
+  "wasmBytes": 4516278,
+  "gzipBytes": 1142406,
+  "wasmSha256": "05395e887484775c0f2a1d37b4f97b6d9df986c2ae1d63391732a2d2d4c928ed",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,

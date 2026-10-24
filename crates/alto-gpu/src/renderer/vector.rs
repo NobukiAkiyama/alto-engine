@@ -37,6 +37,14 @@ struct CachedMesh {
     bytes: u64,
     used: u64,
 }
+impl CachedMesh {
+    fn retire(self, retired: &mut super::Retired) {
+        for b in self.batches {
+            retired.buffer(&b.vertices);
+            retired.buffer(&b.indices);
+        }
+    }
+}
 struct Coverage {
     multi: wgpu::Texture,
     resolved: wgpu::Texture,
@@ -54,6 +62,9 @@ pub struct VectorResources {
     glyph_stats: AtlasStats,
     pub hits: u64,
     pub misses: u64,
+    /// Per-draw buffers and replaced textures; the renderer destroys them after it
+    /// submits the commands that use them.
+    pub(crate) retired: super::Retired,
 }
 impl VectorResources {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -167,6 +178,7 @@ impl VectorResources {
             atlas: None,
             glyph_stats: AtlasStats::default(),
             hits: 0,
+            retired: super::Retired::default(),
             misses: 0,
         }
     }
@@ -175,7 +187,21 @@ impl VectorResources {
     }
     /// Drops tessellation caches. Coverage and the glyph atlas stay; they belong to the frame.
     pub fn discard_meshes(&mut self) {
-        self.meshes.clear();
+        for (_, mesh) in self.meshes.drain() {
+            mesh.retire(&mut self.retired);
+        }
+    }
+    /// Hands every GPU object to `retired`, for when these resources are discarded.
+    pub(crate) fn retire(mut self, retired: &mut super::Retired) {
+        self.discard_meshes();
+        retired.take(&mut self.retired);
+        if let Some(c) = self.coverage.take() {
+            retired.texture(c.multi);
+            retired.texture(c.resolved);
+        }
+        if let Some(a) = self.atlas.take() {
+            retired.texture(a.texture);
+        }
     }
     pub fn bytes(&self) -> u64 {
         self.mesh_bytes()
@@ -325,22 +351,28 @@ impl VectorResources {
         self.glyph_stats.atlas_glyphs += instances.len() as u64;
         self.glyph_stats.fallback_glyphs += fallback.len() as u64;
         vector.extend(fallback.iter());
-        self.render(device, encoder, target, &vector, world, roi, frame, budget)?;
+        self.render(
+            device, queue, encoder, target, &vector, world, roi, frame, budget,
+        )?;
         let Some(atlas) = self.atlas.as_ref().filter(|_| !instances.is_empty()) else {
             return Ok(());
         };
         let uniform = buffer(
             device,
+            queue,
             "glyph atlas config",
             &[[w as f32, h as f32, 0.0, 0.0]],
             wgpu::BufferUsages::UNIFORM,
         );
         let glyphs = buffer(
             device,
+            queue,
             "glyph instances",
             &instances,
             wgpu::BufferUsages::VERTEX,
         );
+        self.retired.buffer(&uniform);
+        self.retired.buffer(&glyphs);
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("glyph atlas"),
             layout: &self.glyph.get_bind_group_layout(0),
@@ -380,6 +412,7 @@ impl VectorResources {
     pub fn render(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::Texture,
         paths: &[&StyledPath],
@@ -450,7 +483,9 @@ impl VectorResources {
                     .min_by_key(|(_, m)| m.used)
                     .map(|(k, _)| *k)
                     .ok_or("INVALID_ARGUMENT: visible vector meshes exceed GPU budget")?;
-                self.meshes.remove(&old);
+                if let Some(mesh) = self.meshes.remove(&old) {
+                    mesh.retire(&mut self.retired);
+                }
             }
             let batches = meshes
                 .into_iter()
@@ -475,12 +510,14 @@ impl VectorResources {
                     ),
                     vertices: buffer(
                         device,
+                        queue,
                         "vector vertices",
                         &m.vertices,
                         wgpu::BufferUsages::VERTEX,
                     ),
                     indices: buffer(
                         device,
+                        queue,
                         "vector indices",
                         &m.indices,
                         wgpu::BufferUsages::INDEX,
@@ -508,9 +545,15 @@ impl VectorResources {
                 .min_by_key(|(_, m)| m.used)
                 .map(|(k, _)| *k)
                 .ok_or("INVALID_ARGUMENT: vector coverage exceeds GPU budget")?;
-            self.meshes.remove(&old);
+            if let Some(mesh) = self.meshes.remove(&old) {
+                mesh.retire(&mut self.retired);
+            }
         }
         if self.coverage.as_ref().is_none_or(|c| c.w != w || c.h != h) {
+            if let Some(old) = self.coverage.take() {
+                self.retired.texture(old.multi);
+                self.retired.texture(old.resolved);
+            }
             let make = |samples, usage| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("R8 vector coverage"),
@@ -604,6 +647,7 @@ impl VectorResources {
                 }
                 let uniform = buffer(
                     device,
+                    queue,
                     "vector ROI uniform",
                     &[Uniform {
                         matrix: [
@@ -622,6 +666,7 @@ impl VectorResources {
                     }],
                     wgpu::BufferUsages::UNIFORM,
                 );
+                self.retired.buffer(&uniform);
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("vector geometry"),
                     layout: &self.geometry.get_bind_group_layout(0),

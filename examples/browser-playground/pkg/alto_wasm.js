@@ -1402,7 +1402,13 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbg_destroy_249478e98a7943d5: function(arg0) {
+            arg0.destroy();
+        },
         __wbg_destroy_275564a0a8b8d071: function(arg0) {
+            arg0.destroy();
+        },
+        __wbg_destroy_637537007d9eaa44: function(arg0) {
             arg0.destroy();
         },
         __wbg_dispatchWorkgroups_56b943172790add0: function(arg0, arg1, arg2, arg3) {

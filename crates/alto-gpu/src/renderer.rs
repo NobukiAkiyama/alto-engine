@@ -10,7 +10,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use wgpu::util::DeviceExt;
 
 mod m5;
 pub mod vector;
@@ -204,6 +203,18 @@ pub struct StrokeTile {
     pub before: Option<ContentHash>,
     selection: Option<wgpu::Texture>,
 }
+impl StrokeTile {
+    /// Dropping GPU objects does nothing on WebGPU; a finished stroke frees its
+    /// textures now instead of whenever JS collects them.
+    fn destroy(self) {
+        self.output.destroy();
+        self.base.destroy();
+        self.coverage.destroy();
+        if let Some(selection) = self.selection {
+            selection.destroy();
+        }
+    }
+}
 pub struct GpuStroke {
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
@@ -257,6 +268,7 @@ pub struct Renderer {
     profiling: bool,
     /// Some while the host decodes job inputs on other threads.
     decoder: Option<Decoder>,
+    pub(crate) retired: Retired,
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
@@ -295,23 +307,69 @@ fn array_view(t: &wgpu::Texture) -> wgpu::TextureView {
         ..Default::default()
     })
 }
+/// GPU objects to destroy once the commands using them are submitted. On WebGPU,
+/// dropping a wgpu object does nothing: the JS object, and the memory behind it, lives
+/// until JS collects it. Short-lived buffers and replaced textures are destroyed here
+/// instead; WebGPU defers the actual release until submitted work no longer uses them.
+#[derive(Default)]
+pub(crate) struct Retired {
+    buffers: Vec<wgpu::Buffer>,
+    textures: Vec<wgpu::Texture>,
+}
+impl Retired {
+    pub(crate) fn buffer(&mut self, b: &wgpu::Buffer) {
+        self.buffers.push(b.clone());
+    }
+    pub(crate) fn texture(&mut self, t: wgpu::Texture) {
+        self.textures.push(t);
+    }
+    pub(crate) fn take(&mut self, other: &mut Retired) {
+        self.buffers.append(&mut other.buffers);
+        self.textures.append(&mut other.textures);
+    }
+    /// Only after the submit that used them.
+    pub(crate) fn release(&mut self) {
+        for b in self.buffers.drain(..) {
+            b.destroy();
+        }
+        for t in self.textures.drain(..) {
+            t.destroy();
+        }
+    }
+}
+/// A buffer filled through the queue. Not mapped at creation: on WebGPU a mapped
+/// buffer needs shared memory that lives until JS collects the GPUBuffer (dropping
+/// it in Rust does nothing there), and creating one per composed tile ran the
+/// renderer out of mappings on slow machines ("size (144) is too large").
 fn buffer<T: Pod>(
     d: &wgpu::Device,
+    q: &wgpu::Queue,
     label: &str,
     data: &[T],
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
     // WGSL runtime arrays still require space for one element when their logical length is zero.
     let zero = T::zeroed();
-    d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let bytes: &[u8] = if data.is_empty() {
+        bytemuck::bytes_of(&zero)
+    } else {
+        bytemuck::cast_slice(data)
+    };
+    let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+    let b = d.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        contents: if data.is_empty() {
-            bytemuck::bytes_of(&zero)
-        } else {
-            bytemuck::cast_slice(data)
-        },
-        usage,
-    })
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if bytes.len() as u64 == size {
+        q.write_buffer(&b, 0, bytes);
+    } else {
+        let mut padded = bytes.to_vec();
+        padded.resize(size as usize, 0);
+        q.write_buffer(&b, 0, &padded);
+    }
+    b
 }
 fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
     let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -703,6 +761,7 @@ impl Renderer {
             glyph_atlas: true,
             profiling: false,
             decoder: None,
+            retired: Retired::default(),
             clock: || 0.0,
             profile: RenderProfile::default(),
         })
@@ -1328,8 +1387,14 @@ impl Renderer {
             );
             return Ok(true);
         }
-        self.m5 = None;
-        self.vector = None;
+        // A plain scene needs neither; their GPU objects are destroyed, not dropped.
+        if let Some(m5) = self.m5.take() {
+            m5.retire(&mut self.retired);
+        }
+        if let Some(vector) = self.vector.take() {
+            vector.retire(&mut self.retired);
+        }
+        self.retired.release();
         if self.downsample_cached(scene, key, slot as u32)? {
             if self.profiling {
                 self.profile.pyramid_hits += 1;
@@ -1370,19 +1435,24 @@ impl Renderer {
     ) -> Result<bool> {
         let cb = buffer(
             &self.device,
+            &self.queue,
             "scene commands",
             &commands,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&cb);
         let tb = buffer(
             &self.device,
+            &self.queue,
             "sparse tile index",
             &entries,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&tb);
         let scale = 2f32.powi(key.0);
         let ub = buffer(
             &self.device,
+            &self.queue,
             "tile config",
             &[Config {
                 origin_scale: [
@@ -1400,6 +1470,7 @@ impl Renderer {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
+        self.retired.buffer(&ub);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
             layout: &self.composite.get_bind_group_layout(0),
@@ -1436,6 +1507,7 @@ impl Renderer {
             pass.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         self.cache_slots[slot] = Some(key);
         self.cache_map.insert(
             key,
@@ -1673,6 +1745,7 @@ impl Renderer {
             }
             if uploaded {
                 self.queue.submit(Some(encoder.finish()));
+                self.retired.release();
             }
             return Ok(JobStep::Progress);
         }
@@ -1915,6 +1988,7 @@ impl Renderer {
             .collect();
         let ub = buffer(
             &self.device,
+            &self.queue,
             "viewport",
             &[ViewUniform {
                 center_zoom: [
@@ -1933,12 +2007,15 @@ impl Renderer {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
+        self.retired.buffer(&ub);
         let tb = buffer(
             &self.device,
+            &self.queue,
             "visible tiles",
             &tiles,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&tb);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present"),
             layout: &self.present.get_bind_group_layout(0),
@@ -1999,6 +2076,7 @@ impl Renderer {
             pass.draw(0..6, 0..tiles.len() as u32);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         self.queue.present(frame);
         self.frame_report(composed, pending)
     }
@@ -2231,9 +2309,17 @@ impl Renderer {
                 });
             }
             let tile = stroke.tiles.get(&key).ok_or("INTERNAL: stroke tile")?;
-            let db = buffer(&self.device, "dabs", &dabs, wgpu::BufferUsages::STORAGE);
+            let db = buffer(
+                &self.device,
+                &self.queue,
+                "dabs",
+                &dabs,
+                wgpu::BufferUsages::STORAGE,
+            );
+            self.retired.buffer(&db);
             let ub = buffer(
                 &self.device,
+                &self.queue,
                 "brush config",
                 &[BrushUniform {
                     color: stroke.color,
@@ -2248,6 +2334,7 @@ impl Renderer {
                 }],
                 wgpu::BufferUsages::UNIFORM,
             );
+            self.retired.buffer(&ub);
             let base = tile.base.create_view(&Default::default());
             let output = tile.output.create_view(&Default::default());
             let selected = tile
@@ -2291,6 +2378,7 @@ impl Renderer {
             pass.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         stroke.epoch += 1;
         let damage = crate::damage::layer_rect_damage(stroke.world, bounds);
         stroke.damage = Some(
@@ -2305,6 +2393,7 @@ impl Renderer {
     pub async fn finish_stroke(&mut self) -> Result<Vec<(TileKey, Option<ContentHash>, TileData)>> {
         let stroke = self.stroke.take().ok_or("CONFLICT: no stroke")?;
         let mut buffers = Vec::new();
+        let mut finished = Vec::new();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for (key, tile) in stroke.tiles {
             let b = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2330,8 +2419,10 @@ impl Renderer {
                 },
             );
             buffers.push((key, tile.before, b));
+            finished.push(tile);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         let mut waits = Vec::new();
         for (_, _, b) in &buffers {
             let (tx, rx) = futures_channel::oneshot::channel();
@@ -2340,10 +2431,28 @@ impl Renderer {
             });
             waits.push(rx);
         }
+        let mut failed = None;
         for w in waits {
-            w.await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = w.await.map_err(|e| e.to_string())? {
+                failed.get_or_insert(e);
+            }
+        }
+        if let Some(e) = failed {
+            for (_, _, b) in &buffers {
+                b.destroy();
+            }
+            for tile in finished {
+                tile.destroy();
+            }
+            // As in read_tile: say whether the device was lost while the maps waited.
+            return Err(if self.is_lost() {
+                format!("GPU_LOST: device lost while reading back a stroke: {e}")
+            } else {
+                format!(
+                    "INTERNAL: reading back a stroke ({} tiles): {e}",
+                    buffers.len()
+                )
+            });
         }
         let mut out = Vec::new();
         for (k, before, b) in buffers {
@@ -2363,7 +2472,12 @@ impl Renderer {
             .map_err(|_| "CORRUPT_DATA: readback")?;
             drop(mapped);
             b.unmap();
+            b.destroy();
             out.push((k, before, data));
+        }
+        // Every readback has completed, so nothing still reads these textures.
+        for tile in finished {
+            tile.destroy();
         }
         // Tiles outside the stroke were composed from the same pixels with or without it.
         if let Some(damage) = stroke.damage {
@@ -2372,7 +2486,13 @@ impl Renderer {
         Ok(out)
     }
     pub fn cancel_stroke(&mut self) {
-        if let Some(damage) = self.stroke.take().and_then(|s| s.damage) {
+        let Some(stroke) = self.stroke.take() else {
+            return;
+        };
+        for tile in stroke.tiles.into_values() {
+            tile.destroy();
+        }
+        if let Some(damage) = stroke.damage {
             self.invalidate(Some(damage));
         }
     }
@@ -2435,6 +2555,7 @@ impl Renderer {
             },
         );
         self.queue.submit(Some(e.finish()));
+        self.retired.release();
         let (tx, rx) = futures_channel::oneshot::channel();
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
@@ -2443,6 +2564,7 @@ impl Renderer {
         // A map fails when the device is lost while it waits; say so, so the caller
         // can tell device loss from a renderer bug.
         if let Err(e) = mapped {
+            b.destroy();
             return Err(if self.is_lost() {
                 format!("GPU_LOST: device lost while reading display tile {key:?}: {e}")
             } else {
@@ -2453,6 +2575,9 @@ impl Renderer {
         let data = view.to_vec();
         drop(view);
         b.unmap();
+        // Dropping a buffer does nothing on WebGPU; its mapping memory would stay
+        // until JS collects it. Readbacks are frequent: release it now.
+        b.destroy();
         Ok(data)
     }
 }
@@ -2528,6 +2653,7 @@ impl Renderer {
         let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
             &self.device,
+            &self.queue,
             "pyramid slot",
             &[[slot, 0, 0, 0]],
             wgpu::BufferUsages::UNIFORM,
@@ -2557,6 +2683,8 @@ impl Renderer {
             p.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(e.finish()));
+        // This takes &self; the uniform is its own and the submit above was its use.
+        ub.destroy();
         Ok(true)
     }
 }

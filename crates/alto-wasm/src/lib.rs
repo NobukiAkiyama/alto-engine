@@ -659,7 +659,17 @@ impl Runtime {
     #[wasm_bindgen(js_name=endBrush)]
     pub async fn end_brush(&mut self) -> Result<String, JsValue> {
         let layer = self.layer.ok_or_else(|| error("CONFLICT: no tool"))?;
-        let results = self.renderer.finish_stroke().await.map_err(error)?;
+        let results = match self.renderer.finish_stroke().await {
+            Ok(results) => results,
+            Err(e) => {
+                // The stroke is gone either way; leaving the tool set would refuse
+                // every later edit with CONFLICT.
+                self.sampler = None;
+                self.layer = None;
+                self.renderer.invalidate(None);
+                return Err(error(e));
+            }
+        };
         let mut changes = vec![];
         for (key, before, tile) in results {
             let after = self.engine.put_tile(tile);

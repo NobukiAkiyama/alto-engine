@@ -116,6 +116,12 @@ impl Resources {
     pub(super) fn bytes(&self) -> u64 {
         self.pool.iter().map(|p| p.w as u64 * p.h as u64 * 8).sum()
     }
+    /// Hands every target to `retired`, for when these resources are discarded.
+    pub(super) fn retire(self, retired: &mut super::Retired) {
+        for p in self.pool {
+            retired.texture(p.texture);
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum StackInput<'a> {
@@ -262,7 +268,9 @@ impl Context<'_> {
             if index == self.resources.pool.len() {
                 self.resources.pool.push(p);
             } else {
-                self.resources.pool[index] = p;
+                // Commands already recorded may still read the old target.
+                let old = std::mem::replace(&mut self.resources.pool[index], p);
+                self.r.retired.texture(old.texture);
             }
         }
         Ok(Target { index, roi })
@@ -294,16 +302,20 @@ impl Context<'_> {
             .create_view(&Default::default());
         let tiles = buffer(
             &self.r.device,
+            &self.r.queue,
             "M5 sparse tiles",
             entries,
             wgpu::BufferUsages::STORAGE,
         );
         let uniform = buffer(
             &self.r.device,
+            &self.r.queue,
             "M5 ROI",
             &[params],
             wgpu::BufferUsages::UNIFORM,
         );
+        self.r.retired.buffer(&tiles);
+        self.r.retired.buffer(&uniform);
         let bg = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("M5 stage"),
             layout: &self.resources.pipeline.get_bind_group_layout(0),
@@ -445,6 +457,7 @@ impl Context<'_> {
         let result = match content {
             VectorContent::Paths(paths) => resources.render(
                 &self.r.device,
+                &self.r.queue,
                 &mut self.encoder,
                 &target,
                 &paths.iter().collect::<Vec<_>>(),
@@ -466,6 +479,7 @@ impl Context<'_> {
                 self.r.glyph_atlas,
             ),
         };
+        self.r.retired.take(&mut resources.retired);
         self.r.vector = Some(resources);
         result?;
         Ok(out)
@@ -1043,6 +1057,7 @@ impl Renderer {
                 .create_view(&Default::default());
             let uniform = buffer(
                 &cx.r.device,
+                &cx.r.queue,
                 "M5 resolve config",
                 &[Config {
                     origin_scale: [roi.x, roi.y, roi.scale, scene.canvas.x1 as f32],
@@ -1050,6 +1065,7 @@ impl Renderer {
                 }],
                 wgpu::BufferUsages::UNIFORM,
             );
+            cx.r.retired.buffer(&uniform);
             let bg = cx.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("M5 resolve"),
                 layout: &cx.resources.resolve.get_bind_group_layout(0),
@@ -1074,8 +1090,11 @@ impl Renderer {
                 pass.set_bind_group(0, &bg, &[]);
                 pass.dispatch_workgroups(16, 16, 1);
             }
-            cx.resources.pool.truncate(cx.next);
+            for unused in cx.resources.pool.drain(cx.next..) {
+                cx.r.retired.texture(unused.texture);
+            }
             cx.r.queue.submit(Some(cx.encoder.finish()));
+            cx.r.retired.release();
             Ok(())
         })();
         self.m5 = Some(resources);
