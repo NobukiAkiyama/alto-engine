@@ -117,6 +117,12 @@
     }
     #storage-failure p { margin: 0 0 10px; }
     #storage-failure button { margin-right: 8px; }
+    #engine-failure {
+      padding: 14px 16px;
+      background: #5a2828;
+      border-bottom: 2px solid #ff9b9b;
+    }
+    #engine-failure p { margin: 0 0 10px; }
     #recovery-result {
       padding: 10px 16px;
       background: #263c4f;
@@ -303,6 +309,11 @@
     <p>保存状態を確認できません。最後の編集が記録されていない可能性があります。編集を停止しました。現在の内容を退避してから復旧してください。</p>
     <button id="emergency-export">現在の内容を .alto に退避</button>
     <button id="recover-storage">記録から復旧して再開（未確認の編集は失う可能性）</button>
+    <button id="open-recovery-file" hidden>保存済み .alto ファイルから再開</button>
+  </div>
+  <div id="engine-failure" role="alert" hidden>
+    <p id="engine-failure-message">エンジンを読み込めません。</p>
+    <button id="retry-worker">再試行</button>
   </div>
   <div id="recovery-result" role="status" hidden></div>
   <div id="status">エンジン起動中…</div>

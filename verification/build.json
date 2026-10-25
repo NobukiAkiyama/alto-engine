@@ -1,28 +1,29 @@
 {
-  "date": "2026-10-22",
+  "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M7/M8",
+  "milestone": "M8 + resumable visible cold rendering",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4313895,
-  "gzipBytes": 1088017,
-  "wasmSha256": "e29c7306aed94d786715d0ccf5f8802b9c75c867e3e0a52287e506f2c0fdbe55",
+  "wasmBytes": 4347682,
+  "gzipBytes": 1106943,
+  "wasmSha256": "6cc46a2f31b9386310e54390fb650291f7ad803864dcacb0f6a6af402dd8b86d",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 91,
+  "nativeTests": 94,
   "targets": [
-    "Codex in-app browser on macOS"
+    "Chrome 155 / Apple Metal on macOS",
+    "Chrome 155 / SwiftShader"
   ],
-  "browserFunctionalTests": 13,
+  "browserFunctionalTests": 23,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
   "browserM6RegressionTests": 10,
   "browserM5RegressionTests": 8,
   "browserM4RegressionTests": 11,
-  "browserBenchmarks": 7,
+  "browserBenchmarks": 11,
   "comparisonWasmNote": "comparisonWasm is the M6 vello comparison build and was not rebuilt on 2026-10-21",
   "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4."
 }

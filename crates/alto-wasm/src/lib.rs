@@ -229,13 +229,53 @@ impl Runtime {
         };
         Ok(())
     }
+    #[wasm_bindgen(js_name=setVisibleTileJobs)]
+    pub fn set_visible_tile_jobs(&mut self, enabled: bool) {
+        self.renderer.set_visible_tile_jobs(enabled);
+    }
+    #[wasm_bindgen(js_name=resetRenderCache)]
+    pub fn reset_render_cache(&mut self, cpu: bool) {
+        self.renderer.reset_render_cache();
+        if cpu {
+            self.engine.clear_decoded_tile_cache();
+        }
+    }
     pub fn tick(&mut self, budget_ms: f64) -> Result<String, JsValue> {
         let start = clock();
         let r = self
             .renderer
             .render(&self.scene, &self.engine, self.viewport, budget_ms, clock)
             .map_err(error)?;
-        Ok(json!({"composed":r.composed,"pending":r.pending,"gpuBytes":r.gpu_bytes,"cpuMs":clock()-start,"wasmBytes":wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),"adapter":self.renderer.adapter_name}).to_string())
+        let profile = r.profile.map(|p| {
+            json!({
+                "composeMs": p.compose_ms, "commandsMs": p.commands_ms,
+                "getMs": p.get_ms, "writeMs": p.write_ms,
+                "uploads": p.uploads, "atlasHits": p.atlas_hits,
+                "uploadBytes": p.upload_bytes, "pyramidHits": p.pyramid_hits,
+                "maxStepMs": p.max_step_ms, "steps": p.steps,
+                "uniqueInputs": p.unique_inputs, "atlasEvictions": p.atlas_evictions,
+            })
+        });
+        let prefetch = self.renderer.prefetch_status(&self.scene, self.viewport);
+        Ok(json!({"composed":r.composed,"pending":r.pending,"gpuBytes":r.gpu_bytes,"cpuMs":clock()-start,"wasmBytes":wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>().buffer().unchecked_into::<js_sys::ArrayBuffer>().byte_length(),"adapter":self.renderer.adapter_name,"profile":profile,"prefetch":{"candidates":prefetch.candidates,"ready":prefetch.ready,"composed":prefetch.composed,"totalMs":prefetch.total_ms,"maxStepMs":prefetch.max_step_ms,"maxPlanMs":prefetch.max_plan_ms,"maxInputMs":prefetch.max_input_ms,"maxGetMs":prefetch.max_get_ms,"maxConvertMs":prefetch.max_convert_ms,"maxWriteMs":prefetch.max_write_ms,"maxSubmitMs":prefetch.max_submit_ms,"cancelled":prefetch.cancelled,"uploadBytes":prefetch.upload_bytes}}).to_string())
+    }
+    #[wasm_bindgen(js_name=prefetchStep)]
+    pub fn prefetch_step(&mut self) -> Result<String, JsValue> {
+        let result = self
+            .renderer
+            .prefetch_step(&self.scene, &self.engine, self.viewport, clock)
+            .map_err(error)?;
+        Ok(match result {
+            alto_gpu::renderer::PrefetchStep::Idle => "idle",
+            alto_gpu::renderer::PrefetchStep::Progress => "progress",
+            alto_gpu::renderer::PrefetchStep::Ready => "ready",
+            alto_gpu::renderer::PrefetchStep::Blocked => "blocked",
+        }
+        .into())
+    }
+    #[wasm_bindgen(js_name=setProfiling)]
+    pub fn set_profiling(&mut self, enabled: bool) {
+        self.renderer.set_profiling(enabled);
     }
     #[wasm_bindgen(js_name=beginBrush)]
     pub fn begin_brush(
@@ -559,6 +599,27 @@ impl Runtime {
             return Err(error("CONFLICT: active tool must be flushed"));
         }
         self.engine.save_package(self.doc).map_err(error)
+    }
+    #[wasm_bindgen(js_name=recoveryOpaque)]
+    pub fn recovery_opaque(&self) -> Result<String, JsValue> {
+        serde_json::to_string(
+            &self
+                .engine
+                .recovery_opaque_hashes(self.doc)
+                .map_err(error)?,
+        )
+        .map_err(error)
+    }
+    /// Only called by the journal worker after verifying the checkpoint digest.
+    #[wasm_bindgen(js_name=openRecoveryPackage)]
+    pub fn open_recovery_package(&mut self, bytes: &[u8], opaque: &str) -> Result<String, JsValue> {
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_str(opaque).map_err(error)?;
+        let mut engine = Engine::new();
+        let (doc, warnings) = engine
+            .open_recovery_package(bytes, &opaque)
+            .map_err(error)?;
+        self.install(engine, doc, warnings)
     }
     #[wasm_bindgen(js_name=openPackage)]
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<String, JsValue> {

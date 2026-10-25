@@ -337,6 +337,7 @@ export class AltoError extends Error {
     this.name = "AltoError";
   }
 }
+type EnginePhase = "booting" | "running" | "recovering" | "failed" | "disposed";
 class Events {
   private listeners = new Map<string, Set<(v: any) => void>>();
   on(name: string, fn: (v: any) => void) {
@@ -921,24 +922,34 @@ export class AltoEngine extends Events {
   private sequence = 1;
   private pending = new Map<
     number,
-    { resolve: (v: any) => void; reject: (e: any) => void }
+    { resolve: (v: any) => void; reject: (e: any) => void; timer?: ReturnType<typeof setTimeout> }
   >();
   private mutation: Promise<any> = Promise.resolve();
   private raf = 0;
   private disposed = false;
+  private pixelRatio = Math.min(devicePixelRatio || 1, 2);
+  private phase: EnginePhase = "booting";
+  private workerGeneration = 0;
+  private restartPromise: Promise<void> | null = null;
   private releaseLease?: () => void;
   private onPageHide = () => this.dispose();
+  private onWindowResize = () => this.resize();
   private boot: any;
   private options: any;
   document: DocumentHandle | null = null;
   recoveryAvailable = false;
   /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
   storageFailure: AltoError | null = null;
+  /** A Worker startup or runtime failure. Independent of journal corruption. */
+  engineFailure: AltoError | null = null;
+  get lifecycleState(): EnginePhase { return this.phase; }
+  get effectiveDpr(): number { return this.pixelRatio; }
   private constructor(options: any) {
     super();
     this.options = options;
     this.canvas = options.canvas;
     window.addEventListener("pagehide", this.onPageHide);
+    window.addEventListener("resize", this.onWindowResize);
   }
   static async create(options: {
     canvas: HTMLCanvasElement;
@@ -951,6 +962,8 @@ export class AltoEngine extends Events {
     try {
       await e.acquireLease();
       await e.start();
+      e.phase = "running";
+      e.startLoop();
       return e;
     } catch (error) {
       e.dispose();
@@ -992,15 +1005,20 @@ export class AltoEngine extends Events {
     });
   }
   private async start() {
+    this.boot = undefined;
     this.worker = new Worker(
       this.options.workerURL || new URL("./worker.js", import.meta.url),
       { type: "module" },
     );
+    const worker = this.worker;
+    const generation = ++this.workerGeneration;
     this.worker.onmessage = ({ data }) => {
+      if (generation !== this.workerGeneration || this.disposed) return;
       if (data.t === "reply") {
         const p = this.pending.get(data.id);
         if (!p) return;
         this.pending.delete(data.id);
+        if (p.timer) clearTimeout(p.timer);
         data.ok
           ? p.resolve(data.value)
           : p.reject(new AltoError(data.error.code, data.error.message));
@@ -1021,23 +1039,26 @@ export class AltoEngine extends Events {
       }
     };
     this.worker.onerror = (event) => {
+      if (generation !== this.workerGeneration || this.disposed) return;
+      const detail = event.message || event.error?.message || "";
       const e = new AltoError(
-        "INTERNAL",
-        JSON.stringify({
-          message: event.message,
-          file: event.filename,
-          line: event.lineno,
-          error: String(event.error),
-        }),
+        this.phase === "running" ? "WORKER_CRASHED" : "WORKER_UNAVAILABLE",
+        detail || (this.phase === "running" ? "Workerが停止しました" : "Workerを読み込めませんでした"),
       );
-      console.error(e.message);
-      this.emit("error", e);
-      for (const p of this.pending.values()) p.reject(e);
-      this.pending.clear();
-      if (this.boot) void this.restart();
+      this.emit("workerDiagnostic", {
+        phase: this.phase,
+        workerURL: String(this.options.workerURL || new URL("./worker.js", import.meta.url)),
+        message: event.message || null,
+        file: event.filename || null,
+        line: event.lineno || null,
+      });
+      this.rejectPending(e);
+      if (this.phase === "running") {
+        void this.restart().catch((failure) => this.emit("error", failure));
+      }
     };
     const offscreen = this.canvas.transferControlToOffscreen();
-    this.boot = await this.request(
+    this.boot = await this.requestCore(
       "init",
       {
         protocol: 4,
@@ -1046,15 +1067,22 @@ export class AltoEngine extends Events {
         budget: this.options.gpu?.memoryBudgetMB ?? 512,
       },
       [offscreen],
+      true,
+      30000,
     );
+    if (this.worker !== worker || this.disposed)
+      throw new AltoError("WORKER_UNAVAILABLE", "Workerの起動が中断されました");
     if (this.boot.protocol !== 4)
       throw new AltoError("CONFLICT", "SDK/WASM protocol mismatch");
     this.recoveryAvailable = !!this.boot.recovery.available;
     if (this.recoveryAvailable)
       this.emit("recoveryAvailable", this.boot.recovery);
     this.resize();
+  }
+  private startLoop() {
+    const generation = this.workerGeneration;
     const loop = () => {
-      if (this.disposed) return;
+      if (this.disposed || this.phase !== "running" || generation !== this.workerGeneration) return;
       void this.document?.activeTool
         ?.flush()
         .catch((e) => this.emit("error", e));
@@ -1068,20 +1096,52 @@ export class AltoEngine extends Events {
     payload: any = {},
     transfer: Transferable[] = [],
   ): Promise<any> {
-    if (this.storageFailure && !readableAfterStorageFailure.has(t))
+    return this.requestCore(t, payload, transfer, false);
+  }
+  private requestCore(
+    t: string,
+    payload: any = {},
+    transfer: Transferable[] = [],
+    internal = false,
+    timeoutMs = 0,
+  ): Promise<any> {
+    if (this.disposed) return Promise.reject(new AltoError("WORKER_UNAVAILABLE", "Engineは終了しました"));
+    if (!internal && this.phase !== "running")
+      return Promise.reject(this.engineFailure || new AltoError("WORKER_UNAVAILABLE", "Engineは復旧中です"));
+    if (this.storageFailure && !readableAfterStorageFailure.has(t) &&
+        !(t === "open" && this.storageFailure.code === "CORRUPT_DATA") && !internal)
       return Promise.reject(this.storageFailure);
     const id = this.sequence++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = timeoutMs ? setTimeout(() => {
+        this.pending.delete(id);
+        reject(new AltoError("WORKER_TIMEOUT", `${t} の応答がありません`));
+      }, timeoutMs) : undefined;
+      this.pending.set(id, { resolve, reject, timer });
       // Request fields come last so a payload can never replace the reply id.
-      this.worker.postMessage({ ...payload, t, id }, transfer);
+      try {
+        this.worker.postMessage({ ...payload, t, id }, transfer);
+      } catch (error) {
+        if (timer) clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
+  private rejectPending(error: AltoError) {
+    for (const p of this.pending.values()) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(error);
+    }
+    this.pending.clear();
+  }
   stream(message: any, transfer: Transferable[] = []) {
+    if (this.disposed || this.phase === "failed" || !this.worker) return;
     this.worker.postMessage(message, transfer);
   }
   mutate<T>(fn: () => Promise<T>): Promise<T> {
     const p = this.mutation.then(() => {
+      if (this.engineFailure) throw this.engineFailure;
       if (this.storageFailure) throw this.storageFailure;
       return fn();
     });
@@ -1091,6 +1151,11 @@ export class AltoEngine extends Events {
   resize() {
     const r = this.canvas.getBoundingClientRect();
     const ratio = Math.min(devicePixelRatio || 1, 2);
+    if (ratio !== this.pixelRatio) {
+      const cssZoom = this.viewport.zoom / this.pixelRatio;
+      this.pixelRatio = ratio;
+      if (this.phase === "running") this.viewport.set({ zoom: cssZoom * ratio });
+    }
     this.stream({
       t: "resize",
       width: Math.max(1, Math.round(r.width * ratio)),
@@ -1114,12 +1179,15 @@ export class AltoEngine extends Events {
     else blob = await source.getFile();
     const bytes = await blob.arrayBuffer();
     const state = await this.request("open", { bytes }, [bytes]);
+    const reopeningAfterDamage = this.storageFailure?.code === "CORRUPT_DATA";
+    if (reopeningAfterDamage) this.storageFailure = null;
     this.document = new DocumentHandle(this, state);
     this.viewport.set({
       center: [state.document.meta.width / 2, state.document.meta.height / 2],
       zoom: 1,
       rotation: 0,
     });
+    if (reopeningAfterDamage) this.emit("recovered", null);
     return this.document;
   }
   /** Opens the folder form, reading only objects reachable from the document and its history. */
@@ -1218,6 +1286,8 @@ export class AltoEngine extends Events {
     center: [512, 384] as [number, number],
     zoom: 1,
     rotation: 0,
+    getCssZoom: () => this.viewport.zoom / this.pixelRatio,
+    setCssZoom: (zoom: number) => this.viewport.set({ zoom: zoom * this.pixelRatio }),
     set: (v: {
       center?: [number, number];
       zoom?: number;
@@ -1238,7 +1308,7 @@ export class AltoEngine extends Events {
     },
     screenToDocument: (x: number, y: number): [number, number] => {
       const r = this.canvas.getBoundingClientRect();
-      const ratio = Math.min(devicePixelRatio || 1, 2);
+      const ratio = this.pixelRatio;
       const dx = ((x - r.left - r.width / 2) * ratio) / this.viewport.zoom;
       const dy = ((y - r.top - r.height / 2) * ratio) / this.viewport.zoom;
       const c = Math.cos(this.viewport.rotation),
@@ -1299,7 +1369,14 @@ export class AltoEngine extends Events {
     setGlyphAtlas:(enabled:boolean)=>this.request("setGlyphAtlas",{enabled}),
     destroyGpu: () => this.request("destroyGpu"),
     crash: () => this.restart(),
+    /** Temporarily changes the module URL for Worker load-failure tests. */
+    setWorkerURL: (url: URL | string | undefined) => { this.options.workerURL = url; },
+    pendingRequests: () => this.pending.size,
     corruptJournalTail: () => this.request("corruptJournalTail"),
+    corruptCheckpoint: () => this.request("corruptCheckpoint"),
+    corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),
+    corruptBothCheckpoints: () => this.request("corruptBothCheckpoints"),
+    legacyCheckpoint: () => this.request("legacyCheckpoint"),
     /** Fault injection for recovery tests only. */
     injectStorageFault: (position: "beforeAppend" | "afterAppend") =>
       this.request("injectStorageFault", { position }),
@@ -1308,31 +1385,87 @@ export class AltoEngine extends Events {
       return new Uint8Array((await this.request("save")).bytes);
     },
   };
-  private async restart() {
-    if (this.disposed) return;
+  /** Retries a failed Worker without discarding the confirmed journal. */
+  retryWorker(): Promise<void> {
+    if (this.phase !== "failed")
+      return Promise.reject(new AltoError("CONFLICT", "Workerは失敗状態ではありません"));
+    const previous = this.restartPromise;
+    return previous ? previous.catch(() => {}).then(() => this.restart()) : this.restart();
+  }
+  private restart(): Promise<void> {
+    if (this.disposed)
+      return Promise.reject(new AltoError("WORKER_UNAVAILABLE", "Engineは終了しました"));
+    if (this.restartPromise) return this.restartPromise;
+    this.phase = "recovering";
+    this.engineFailure = null;
+    if (this.document) this.document.activeTool = null;
+    const task = Promise.resolve().then(() => this.performRestart());
+    this.restartPromise = task;
+    this.emit("recovering", null);
+    void task.then(
+      () => { if (this.restartPromise === task) this.restartPromise = null; },
+      () => { if (this.restartPromise === task) this.restartPromise = null; },
+    );
+    return task;
+  }
+  private async performRestart(): Promise<void> {
     cancelAnimationFrame(this.raf);
-    this.worker.terminate();
-    for (const p of this.pending.values())
-      p.reject(new AltoError("INTERNAL", "Worker restarted"));
-    this.pending.clear();
+    ++this.workerGeneration;
+    this.worker?.terminate();
+    this.rejectPending(new AltoError("WORKER_CRASHED", "Workerを再起動しました"));
     const replacement = this.canvas.cloneNode(false) as HTMLCanvasElement;
     this.canvas.replaceWith(replacement);
     this.canvas = replacement;
-    this.storageFailure = null;
-    await this.start();
-    if (this.document || this.recoveryAvailable) await this.recover();
     this.emit("canvasReplaced", replacement);
-    this.emit("recovered", null);
+    try {
+      await this.start();
+      if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "Engineは終了しました");
+      if (this.document || this.recoveryAvailable) {
+        const state = await this.requestCore("recover", {}, [], true, 30000);
+        if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "Engineは終了しました");
+        this.document = new DocumentHandle(this, state);
+        this.recoveryAvailable = false;
+        this.viewport.set({
+          center: [state.document.meta.width / 2, state.document.meta.height / 2],
+          zoom: 1,
+          rotation: 0,
+        });
+      }
+      this.storageFailure = null;
+      this.engineFailure = null;
+      this.phase = "running";
+      this.startLoop();
+      this.emit("recovered", null);
+    } catch (cause) {
+      if (this.disposed) throw cause;
+      const error = cause instanceof AltoError
+        ? cause
+        : new AltoError("WORKER_UNAVAILABLE", cause instanceof Error ? cause.message : String(cause));
+      this.document = null;
+      if (error.code === "CORRUPT_DATA") {
+        this.storageFailure = error;
+        this.phase = "running";
+        this.startLoop();
+        this.emit("storageFailure", error);
+      } else {
+        this.engineFailure = error;
+        this.phase = "failed";
+        this.worker?.terminate();
+        this.emit("engineFailure", error);
+      }
+      throw error;
+    }
   }
   dispose() {
     this.disposed = true;
+    this.phase = "disposed";
+    ++this.workerGeneration;
     cancelAnimationFrame(this.raf);
     this.worker?.terminate();
     this.releaseLease?.();
     this.releaseLease = undefined;
     window.removeEventListener("pagehide", this.onPageHide);
-    for (const p of this.pending.values())
-      p.reject(new AltoError("INTERNAL", "Engine disposed"));
-    this.pending.clear();
+    window.removeEventListener("resize", this.onWindowResize);
+    this.rejectPending(new AltoError("WORKER_UNAVAILABLE", "Engineは終了しました"));
   }
 }

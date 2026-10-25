@@ -365,6 +365,7 @@ export declare class AltoError extends Error {
     code: string;
     constructor(code: string, message: string);
 }
+type EnginePhase = "booting" | "running" | "recovering" | "failed" | "disposed";
 declare class Events {
     private listeners;
     on(name: string, fn: (v: any) => void): () => boolean;
@@ -576,14 +577,23 @@ export declare class AltoEngine extends Events {
     private mutation;
     private raf;
     private disposed;
+    private pixelRatio;
+    private phase;
+    private workerGeneration;
+    private restartPromise;
     private releaseLease?;
     private onPageHide;
+    private onWindowResize;
     private boot;
     private options;
     document: DocumentHandle | null;
     recoveryAvailable: boolean;
     /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
     storageFailure: AltoError | null;
+    /** A Worker startup or runtime failure. Independent of journal corruption. */
+    engineFailure: AltoError | null;
+    get lifecycleState(): EnginePhase;
+    get effectiveDpr(): number;
     private constructor();
     static create(options: {
         canvas: HTMLCanvasElement;
@@ -595,7 +605,10 @@ export declare class AltoEngine extends Events {
     }): Promise<AltoEngine>;
     private acquireLease;
     private start;
+    private startLoop;
     request(t: string, payload?: any, transfer?: Transferable[]): Promise<any>;
+    private requestCore;
+    private rejectPending;
     stream(message: any, transfer?: Transferable[]): void;
     mutate<T>(fn: () => Promise<T>): Promise<T>;
     resize(): void;
@@ -630,6 +643,8 @@ export declare class AltoEngine extends Events {
         center: [number, number];
         zoom: number;
         rotation: number;
+        getCssZoom: () => number;
+        setCssZoom: (zoom: number) => void;
         set: (v: {
             center?: [number, number];
             zoom?: number;
@@ -659,12 +674,22 @@ export declare class AltoEngine extends Events {
         setGlyphAtlas: (enabled: boolean) => Promise<any>;
         destroyGpu: () => Promise<any>;
         crash: () => Promise<void>;
+        /** Temporarily changes the module URL for Worker load-failure tests. */
+        setWorkerURL: (url: URL | string | undefined) => void;
+        pendingRequests: () => number;
         corruptJournalTail: () => Promise<any>;
+        corruptCheckpoint: () => Promise<any>;
+        corruptCheckpointCrc: () => Promise<any>;
+        corruptBothCheckpoints: () => Promise<any>;
+        legacyCheckpoint: () => Promise<any>;
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<any>;
         saveBytes: () => Promise<Uint8Array<any>>;
     };
+    /** Retries a failed Worker without discarding the confirmed journal. */
+    retryWorker(): Promise<void>;
     private restart;
+    private performRestart;
     dispose(): void;
 }
 export {};

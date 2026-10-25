@@ -1,3 +1,11 @@
+// MessageChannel yields to Worker messages without nested timer clamping.
+const yieldTask = () => new Promise((resolve) => {
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => {
+    channel.port1.close(); channel.port2.close(); resolve();
+  };
+  channel.port2.postMessage(null);
+});
 import init, { Runtime } from "./pkg/alto_wasm.js";
 import { createStorageSession } from "./storage-session.js";
 self.addEventListener("error", (e) => {
@@ -12,6 +20,7 @@ self.addEventListener("error", (e) => {
   });
 });
 let journalBacklog = [];
+let diagnosticProfiles = null;
 let injectedStorageFault = null;
 const readableAfterFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
@@ -33,7 +42,42 @@ let runtime,
   wantTick = false,
   pendingViewport = null,
   pendingResize = null,
-  viewVersion = 0;
+  viewVersion = 0,
+  frameSettled = false,
+  prefetchTimer = null,
+  prefetchDisabled = false,
+  prefetchSpentMs = 0,
+  lastMessageAt = performance.now();
+function schedulePrefetch() {
+  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure)
+    return;
+  const quietFor = performance.now() - lastMessageAt;
+  const delay = prefetchSpentMs >= 4 ? Math.max(0, 100 - quietFor) : 0;
+  prefetchTimer = setTimeout(() => {
+    prefetchTimer = null;
+    if (draining || queue.length || wantTick || pendingViewport || pendingResize || !frameSettled)
+      return;
+    if (prefetchSpentMs >= 4 && performance.now() - lastMessageAt < 100) {
+      schedulePrefetch();
+      return;
+    }
+    try {
+      const started = performance.now();
+      const status = runtime.prefetchStep();
+      prefetchSpentMs += performance.now() - started;
+      // Each call returns to the event loop so an incoming edit or visible frame wins.
+      if (status === "progress" || status === "ready") schedulePrefetch();
+    } catch (error) {
+      if (String(error).includes("GPU_LOST")) {
+        wantTick = true;
+        void drain();
+      } else {
+        prefetchDisabled = true;
+        postMessage({ t: "diagnostic", value: { message: "prefetch disabled: " + error } });
+      }
+    }
+  }, delay);
+}
 // The journal normally runs in a nested Storage Worker. Some embedded browsers cannot
 // start workers from a worker; then the same journal code runs on this thread.
 const journal = createStorageSession({
@@ -101,8 +145,12 @@ async function flushJournal() {
 
 async function checkpoint() {
   const b = runtime.savePackage();
-  await io("checkpoint", { bytes: b.buffer }, [b.buffer]);
+  await persistCheckpoint(b);
   journalBacklog = [];
+}
+async function persistCheckpoint(bytes) {
+  const opaque = JSON.parse(runtime.recoveryOpaque());
+  await io("checkpoint", { bytes: bytes.buffer, opaque }, [bytes.buffer]);
 }
 let savedToken = 0;
 const saves = new Map();
@@ -227,7 +275,7 @@ async function execute(m) {
     case "openFolder": {
       const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
       const base = runtime.checkpointBytes();
-      await io("checkpoint", { bytes: base.buffer }, [base.buffer]);
+      await persistCheckpoint(base);
       journalBacklog = [];
       return s;
     }
@@ -278,9 +326,7 @@ async function execute(m) {
       if (!saved) throw Error("INVALID_ARGUMENT: save token expired");
       const state = JSON.parse(runtime.markSaved(saved.hash));
       if (state.document.revision === saved.revision) {
-        await io("checkpoint", { bytes: saved.bytes.buffer }, [
-          saved.bytes.buffer,
-        ]);
+        await persistCheckpoint(saved.bytes);
         journalBacklog = [];
       }
       saves.delete(m.token);
@@ -288,16 +334,37 @@ async function execute(m) {
     }
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
-      await io("checkpoint", { bytes: m.bytes }, [m.bytes]);
+      await persistCheckpoint(new Uint8Array(m.bytes));
       journalBacklog = [];
       return s;
     }
     case "recover": {
-      const recovery = await io("load");
-      if (!recovery) throw Error("NOT_FOUND: recovery journal");
-      runtime.openPackage(recovery.base);
-      for (const r of recovery.records) runtime.replayRecord(r);
+      const candidates = await io("loadCandidates");
+      if (!candidates.length) {
+        const state = await io("inspect");
+        throw Error(state.latestGeneration
+          ? "CORRUPT_DATA: no usable recovery generation"
+          : "NOT_FOUND: recovery journal");
+      }
+      let recovery = null;
+      let lastError;
+      for (const candidate of candidates) {
+        try {
+          if (candidate.metadata)
+            runtime.openRecoveryPackage(candidate.base, JSON.stringify(candidate.metadata.opaque));
+          else runtime.openPackage(candidate.base);
+          for (const r of candidate.records) runtime.replayRecord(r);
+          recovery = candidate;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!recovery) throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
+      await io("activate", { generation: recovery.generation });
       const s = JSON.parse(runtime.view());
+      if (recovery.generation !== recovery.latestGeneration)
+        s.warnings.push("新しい復旧記録が破損していたため、前の世代を開きました");
       if (recovery.truncated)
         s.warnings.push("最後の不完全な記録を除いて復旧しました");
       return s;
@@ -313,6 +380,18 @@ async function execute(m) {
       );
     case "corruptJournalTail":
       return io("corruptTail");
+    case "corruptCheckpoint":
+      return io("corruptCheckpoint");
+    case "corruptCheckpointCrc":
+      return io("corruptCheckpointCrc");
+    case "corruptBothCheckpoints":
+      return io("corruptBothCheckpoints");
+    case "legacyCheckpoint": {
+      const bytes = runtime.savePackage();
+      await io("checkpointLegacy", { bytes: bytes.buffer }, [bytes.buffer]);
+      journalBacklog = [];
+      return true;
+    }
     case "injectStorageFault":
       if (m.position !== "beforeAppend" && m.position !== "afterAppend")
         throw Error("INVALID_ARGUMENT: storage fault position");
@@ -328,13 +407,36 @@ async function execute(m) {
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
+    case "setVisibleTileJobs":
+      runtime.setVisibleTileJobs(!!m.enabled);
+      return true;
+    case "resetRenderCache":
+      prefetchDisabled = true;
+      runtime.resetRenderCache(!!m.cpu);
+      diagnosticProfiles = [];
+      return true;
+    case "enablePrefetch":
+      prefetchDisabled = false;
+      return true;
+    case "setProfiling":
+      runtime.setProfiling(!!m.enabled);
+      return true;
     case "waitFrame": {
       let frame;
+      const profiles = diagnosticProfiles || [];
       do {
         frame = JSON.parse(runtime.tick(8));
-        if (frame.pending) await new Promise((r) => setTimeout(r, 0));
+        if (frame.profile) profiles.push(frame.profile);
+        if (frame.pending) await yieldTask();
       } while (frame.pending);
       await runtime.gpuIdle();
+      diagnosticProfiles = null;
+      frameSettled = true;
+      prefetchSpentMs = 0;
+      if (profiles.length) {
+        frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
+          [key, key === "maxStepMs" ? profiles.reduce((max, profile) => Math.max(max, profile[key]), 0) : profiles.reduce((sum, profile) => sum + profile[key], 0)]));
+      }
       return { ...frame, viewVersion };
     }
     case "view":
@@ -381,7 +483,12 @@ async function drain() {
         if (runtime)
           try {
             const value = { ...JSON.parse(runtime.tick(8)), viewVersion };
+            if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
+            frameSettled = value.pending === 0;
+            if (value.pending) wantTick = true;
+            if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });
+            if (value.pending) await yieldTask();
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
               postMessage({ t: "gpuLost" });
@@ -397,10 +504,17 @@ async function drain() {
     }
   } finally {
     draining = false;
+    schedulePrefetch();
   }
 }
 
 self.onmessage = ({ data: m }) => {
+  lastMessageAt = performance.now();
+  frameSettled = false;
+  if (prefetchTimer !== null) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = null;
+  }
   if (m.t === "tick") {
     wantTick = true;
   } else if (m.t === "viewport") {

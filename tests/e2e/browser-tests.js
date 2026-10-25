@@ -134,6 +134,85 @@ export async function runTests(engine, benchmark, log) {
         "group undo/redo",
       );
     });
+    await test("low-zoom prefetch matches direct composite pixels", async () => {
+      for (const size of [512, 300]) {
+        doc = await engine.createDocument({ width: size, height: size });
+        const red = await image(engine, "rgba(255,0,0,.5)", size, size);
+        const blue = await image(engine, "rgba(0,0,255,.5)", size, size);
+        await doc.transact("two translucent layers", (tx) => {
+          tx.addRasterFromAsset(red);
+          tx.addRasterFromAsset(blue);
+        });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0 });
+        await engine.request("setVisibleTileJobs", { enabled: false });
+        await engine.request("resetRenderCache", { cpu: true });
+        const direct = await engine.unstable.readTileLevel(1, 0, 0);
+        await engine.request("setVisibleTileJobs", { enabled: true });
+        await engine.request("resetRenderCache", { cpu: true });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0.17 });
+        await settled(engine);
+        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+          `cold visible job differs from direct composite for ${size}px canvas`);
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
+        // Remove the parent used by the preceding parity probes so this must
+        // actually prepare a new parent from the level-0 view.
+        await engine.request("resetRenderCache", { cpu: false });
+        await engine.request("enablePrefetch");
+        let frame = await settled(engine);
+        for (let i = 0; i < 20 && frame.prefetch.ready < frame.prefetch.candidates; i++) {
+          await delay(10);
+          frame = await settled(engine);
+        }
+        assert(frame.prefetch.candidates === 1 && frame.prefetch.ready === 1,
+          `low-zoom parent was not prepared for ${size}px canvas`);
+        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+          `prefetched parent differs from direct composite for ${size}px canvas`);
+      }
+    });
+    await test("cold jobs preserve transformed isolated groups through edit and Undo", async () => {
+      doc = await engine.createDocument({ width: 600, height: 400 });
+      const a = await image(engine, "rgba(240,30,10,.6)", 600, 400);
+      const b = await image(engine, "rgba(10,50,240,.5)", 600, 400);
+      let top;
+      await doc.transact("group", tx => {
+        const group = tx.addGroup({ isolated: true });
+        tx.setProps(group, { opacity: 0.7 });
+        tx.addRasterFromAsset(a);
+        top = tx.addRasterFromAsset(b);
+        tx.moveNode(top, group, 0);
+        tx.setProps(top, { blend: "multiply" });
+        tx.setTransform(top, { x: 23, y: 11, scaleX: 0.9, scaleY: 1.1, rotation: 0.13 });
+      });
+      for (const edit of [false, true, false]) {
+        if (edit) await doc.transact("hide", tx => tx.setProps(top, { visible: false }));
+        // Set the target level before clearing: otherwise an automatic tick
+        // can populate level-0 children and change the reference into a pyramid
+        // downsample. Transformed edge sampling differs from direct level 1.
+        engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
+        await engine.request("setVisibleTileJobs", { enabled: false });
+        await engine.request("resetRenderCache", { cpu: true });
+        const reference = await engine.unstable.readTileLevel(1, 0, 0);
+        await engine.request("setVisibleTileJobs", { enabled: true });
+        await engine.request("resetRenderCache", { cpu: true });
+        engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
+        await settled(engine);
+        assert(same(reference, await engine.unstable.readTileLevel(1, 0, 0)), "cold group pixels differ");
+        if (edit) await doc.undo();
+      }
+      await engine.request("enablePrefetch");
+    });
+    await test("full display cache can yield and replace tiles without orphaning slots", async () => {
+      doc = await engine.createDocument({ width: 300, height: 300 });
+      const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);
+      await doc.transact("layer", tx => tx.addRasterFromAsset(asset));
+      await engine.request("resetRenderCache", { cpu: true });
+      for (let x = 1000; x < 1256; x++) await engine.unstable.readTile(x, 0);
+      engine.viewport.set({ center: [150, 150], zoom: 0.5, rotation: 0 });
+      await settled(engine);
+      const tile = await engine.unstable.readTileLevel(1, 0, 0);
+      assert(pixel(tile)[3] > 0, "full cache lost the visible tile");
+      await engine.request("enablePrefetch");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -319,6 +398,55 @@ export async function runTests(engine, benchmark, log) {
         "journal recovery pixels mismatch",
       );
     });
+    await test("simultaneous Worker restart requests share one recovery", async () => {
+      const hash = doc.view.snapshotHash;
+      let replacements = 0;
+      let nested;
+      const off = engine.on("canvasReplaced", () => { replacements++; });
+      const offRecovering = engine.on("recovering", () => { nested = engine.unstable.crash(); });
+      try {
+        const first = engine.unstable.crash();
+        const second = engine.unstable.crash();
+        assert(first === second, "restart requests did not share a promise");
+        assert(first === nested, "reentrant restart did not share a promise");
+        await first;
+      } finally { off(); offRecovering(); }
+      doc = engine.document;
+      assert(replacements === 1, "Worker canvas was replaced more than once");
+      assert(doc.view.snapshotHash === hash, "concurrent restart changed the document");
+    });
+    await test("uncloneable request does not leave a pending reply", async () => {
+      const before = engine.unstable.pendingRequests();
+      let rejected = false;
+      try { await engine.request("view", { invalid: () => true }); }
+      catch { rejected = true; }
+      assert(rejected, "uncloneable request was accepted");
+      assert(engine.unstable.pendingRequests() === before, "failed postMessage leaked a pending reply");
+      await engine.request("view");
+    });
+    await test("missing Worker script stops once and retries without corrupting the journal", async () => {
+      const hash = doc.view.snapshotHash;
+      engine.unstable.setWorkerURL("/missing-alto-engine-worker.js");
+      let code = null;
+      try { await engine.unstable.crash(); }
+      catch (error) { code = error.code; }
+      finally { engine.unstable.setWorkerURL(undefined); }
+      assert(code === "WORKER_UNAVAILABLE", "missing script was not classified: " + code);
+      assert(engine.lifecycleState === "failed" && engine.engineFailure, "Worker failure did not stop the engine");
+      assert(!engine.storageFailure, "Worker failure was mislabeled as saved-data corruption");
+      assert(engine.document === null, "stale document remained active");
+      assert(!document.querySelector("#engine-failure").hidden, "retry control was not shown");
+      let blocked = false;
+      try { await engine.request("save"); }
+      catch (error) { blocked = error.code === "WORKER_UNAVAILABLE"; }
+      assert(blocked, "editing request continued after Worker failure");
+      await event(engine, "recovered", () => document.querySelector("#retry-worker").click());
+      doc = engine.document;
+      assert(engine.lifecycleState === "running" && !engine.engineFailure, "retry did not restore the engine");
+      assert(doc?.view.snapshotHash === hash, "retry opened the wrong document");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "retry changed saved pixels");
+      assert(document.querySelector("#engine-failure").hidden, "failure controls remained open");
+    });
     await test("truncated journal tail is excluded during recovery", async () => {
       const hash = doc.view.snapshotHash;
       await engine.unstable.corruptJournalTail();
@@ -332,6 +460,42 @@ export async function runTests(engine, benchmark, log) {
         doc.view.warnings.some((w) => w.includes("不完全")),
         "truncation warning missing",
       );
+    });
+    await test("damaged latest checkpoint falls back to the previous generation", async () => {
+      const before = await engine.unstable.saveBytes();
+      const previousHash = doc.view.snapshotHash;
+      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.createDocument({ width: 64, height: 64 });
+      await engine.unstable.corruptCheckpoint();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === previousHash, "previous checkpoint was not opened");
+      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "fallback warning missing");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "fallback pixels changed");
+    });
+    await test("checkpoint CRC failure falls back without losing the older journal", async () => {
+      const before = await engine.unstable.saveBytes();
+      const previousHash = doc.view.snapshotHash;
+      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.createDocument({ width: 64, height: 64 });
+      await engine.unstable.corruptCheckpointCrc();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === previousHash, "CRC fallback opened the wrong generation");
+      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "CRC fallback warning missing");
+    });
+    await test("V1 checkpoint opens and the next checkpoint migrates to V2", async () => {
+      const hash = doc.view.snapshotHash;
+      await engine.unstable.legacyCheckpoint();
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === hash, "V1 checkpoint did not open");
+      const bytes = await engine.unstable.saveBytes();
+      doc = await engine.openDocument(new Blob([bytes]));
+      await engine.unstable.crash();
+      doc = engine.document;
+      assert(doc.view.snapshotHash === hash, "V2 migration changed the document");
+      assert(same(painted, await engine.unstable.readTile(0, 0)), "migration pixels changed");
     });
     await test("failed append freezes edits and preserves live emergency export", async () => {
       const before = doc.view.revision;
@@ -419,12 +583,29 @@ export async function runTests(engine, benchmark, log) {
         "second engine acquired the journal",
       );
     });
+    await test("two damaged journals freeze editing until an external file opens", async () => {
+      const backup = await engine.unstable.saveBytes();
+      const hash = doc.view.snapshotHash;
+      await engine.unstable.corruptBothCheckpoints();
+      let rejected = false;
+      try { await engine.unstable.crash(); }
+      catch (error) { rejected = error.code === "CORRUPT_DATA"; }
+      assert(rejected && engine.storageFailure?.code === "CORRUPT_DATA", "damage was hidden");
+      assert(engine.document === null, "stale document remained editable");
+      assert(!document.querySelector("#storage-failure").hidden, "damage controls were not shown");
+      assert(!document.querySelector("#open-recovery-file").hidden, "external recovery was not offered");
+      doc = await engine.openDocument(new Blob([backup]));
+      assert(doc.view.snapshotHash === hash, "external recovery changed the document");
+      assert(!engine.storageFailure, "editing stayed frozen after external recovery");
+      assert(document.querySelector("#storage-failure").hidden, "damage controls stayed open");
+    });
     log("ALL " + results.length + " TESTS PASSED");
   } catch (e) {
     results.push({ pass: false, error: String(e) });
     log("FAIL " + e);
     throw e;
   } finally {
+    const canvas = engine.canvas.getBoundingClientRect();
     document.querySelector("#test-results").dataset.report = JSON.stringify({
       date: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -433,12 +614,19 @@ export async function runTests(engine, benchmark, log) {
         width: innerWidth,
         height: innerHeight,
         dpr: devicePixelRatio,
+        canvasCss: [canvas.width, canvas.height],
+        canvasPixels: [engine.canvas.width, engine.canvas.height],
+        benchmarkView: new URLSearchParams(location.search).get("benchmarkView") || "physical",
       },
       results,
     });
   }
 }
 async function benches(engine, log, results) {
+  const profiling = new URLSearchParams(location.search).has("profile");
+  const sameView = new URLSearchParams(location.search).get("benchmarkView") === "css";
+  const zoomScale = sameView ? engine.effectiveDpr : 1;
+  if (profiling) await engine.request("setProfiling", { enabled: true });
   let doc = await engine.createDocument({ width: 3840, height: 2160 });
   const layers = [];
   log("Preparing 4K × 20 translucent raster layers…");
@@ -459,7 +647,25 @@ async function benches(engine, log, results) {
     );
     if (i % 5 === 4) log("Prepared " + (i + 1) + " layers");
   }
-  engine.viewport.set({ center: [1920, 1080], zoom: 1, rotation: 0 });
+  // Cold runs have no opportunity for parent prefetch. The hook clears GPU
+  // inputs and outputs; C3 additionally drops the decoded CPU tile cache.
+  for (const jobs of [false, true]) {
+    await engine.request("setVisibleTileJobs", { enabled: jobs });
+    for (const cpu of [false, true]) {
+      await engine.request("resetRenderCache", { cpu });
+      engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale, rotation: 0 });
+      const began = performance.now();
+      const coldFrame = await settled(engine);
+      results.push({ id: (cpu ? "C3 CPU+GPU cold ms" : "C2 GPU cold ms") + (jobs ? "" : " (synchronous reference)"),
+        value: performance.now() - began, pass: true, profile: coldFrame.profile,
+        canvasPixels: [engine.canvas.width, engine.canvas.height],
+        physicalZoom: engine.viewport.zoom });
+      log("COLD " + JSON.stringify(results.at(-1)));
+    }
+  }
+  await engine.request("resetRenderCache", { cpu: false });
+  await engine.request("enablePrefetch");
+  engine.viewport.set({ center: [1920, 1080], zoom: zoomScale, rotation: 0 });
   let frame = await settled(engine);
   const record = (id, value, target, pass) => {
     results.push({ id, value, target, pass });
@@ -475,7 +681,7 @@ async function benches(engine, log, results) {
     engine.viewport.set({
       center: [1920 + Math.sin(i * 0.07) * 100, 1080 + Math.cos(i * 0.07) * 60],
     });
-    await settled(engine);
+    frame = await settled(engine);
     frames.push(performance.now() - start);
     await new Promise(requestAnimationFrame);
   }
@@ -486,12 +692,25 @@ async function benches(engine, log, results) {
     16.7,
     frames[Math.floor(frames.length * 0.95)] <= 16.7,
   );
+  const prefetchBeforeZoom = frame.prefetch;
   let start = performance.now();
-  engine.viewport.set({ center: [1920, 1080], zoom: 0.5 });
+  engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale });
   frame = await settled(engine);
   const zoom = performance.now() - start;
+  if (profiling) log("B2 profile: " + JSON.stringify(frame.profile));
   record("B2 zoom ms", zoom, 250, zoom <= 250);
-  engine.viewport.set({ zoom: 1 });
+  if (profiling) results.at(-1).profile = frame.profile;
+  results.at(-1).prefetchBeforeZoom = prefetchBeforeZoom;
+  const canvasCss = engine.canvas.getBoundingClientRect();
+  results.at(-1).canvasCss = [canvasCss.width, canvasCss.height];
+  results.at(-1).canvasPixels = [engine.canvas.width, engine.canvas.height];
+  results.at(-1).physicalZoom = engine.viewport.zoom;
+  results.at(-1).cssZoom = engine.viewport.getCssZoom();
+  results.at(-1).visibleDocument = {
+    width: engine.canvas.width / engine.viewport.zoom,
+    height: engine.canvas.height / engine.viewport.zoom,
+  };
+  engine.viewport.set({ zoom: zoomScale });
   await settled(engine);
   const s = doc.tools.begin("brush", {
     layer: layers.at(-1),

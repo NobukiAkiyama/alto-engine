@@ -3,6 +3,7 @@
 use crate::{DocHandle, Engine, EngineError, node_hashes};
 use alto_core::{ContentHash, NodeId};
 use alto_doc::{Commit, DiffItem, DocError, Document, version::summarize};
+use alto_raster::TileStore;
 use alto_store::PackageParts;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -347,10 +348,23 @@ impl Engine {
         let store = self.versions(h)?;
         let mut hashes = doc_hashes(doc);
         hashes.extend(store.retained.iter().copied());
-        let objects = hashes
-            .into_iter()
-            .filter_map(|hash| self.encoded(hash).map(|b| (hash, b)))
-            .collect();
+        let mut objects = BTreeMap::new();
+        for hash in hashes {
+            match self.encoded(hash) {
+                Some(bytes) => {
+                    objects.insert(hash, bytes);
+                }
+                None => {
+                    if let Some(error) = self.take_fault_error() {
+                        return Err(alto_store::StoreError::Corrupt(error).into());
+                    }
+                    return Err(EngineError::MissingTile(hash));
+                }
+            }
+        }
+        if let Some(error) = self.take_fault_error() {
+            return Err(alto_store::StoreError::Corrupt(error).into());
+        }
         Ok(PackageParts {
             snapshot: doc.snapshot_bytes()?,
             objects,
@@ -358,6 +372,16 @@ impl Engine {
             commits: store.commit_bytes.clone(),
             head: store.head,
         })
+    }
+
+    pub fn recovery_opaque_hashes(&self, h: DocHandle) -> Result<Vec<ContentHash>, EngineError> {
+        let doc = self.document(h)?;
+        let mut hashes = doc_hashes(doc);
+        hashes.extend(self.versions(h)?.retained.iter().copied());
+        Ok(hashes
+            .into_iter()
+            .filter(|hash| self.tiles.is_opaque(hash))
+            .collect())
     }
 
     pub fn folder_entries(&self, h: DocHandle) -> Result<BTreeMap<String, Vec<u8>>, EngineError> {
@@ -424,8 +448,33 @@ impl Engine {
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let p = alto_store::decode_entries(entries)?;
-        let (handle, mut warnings) =
-            self.install_package(p.objects, p.opaque, &p.snapshot, p.warnings)?;
+        self.open_decoded_package(p, false)
+    }
+
+    /// Journal-only fast path. The caller must verify the entire checkpoint's
+    /// digest before using the persisted opaque metadata.
+    pub fn open_recovery_package(
+        &mut self,
+        bytes: &[u8],
+        opaque: &std::collections::BTreeSet<ContentHash>,
+    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+        let entries = alto_store::read_entries(bytes)?;
+        let p = alto_store::decode_recovery_entries(entries, opaque)?;
+        self.open_decoded_package(p, true)
+    }
+
+    fn open_decoded_package(
+        &mut self,
+        p: alto_store::Package,
+        deferred_verify: bool,
+    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+        let (handle, mut warnings) = self.install_package(
+            p.objects,
+            p.opaque,
+            &p.snapshot,
+            p.warnings,
+            deferred_verify,
+        )?;
         let current = ContentHash::of(&p.snapshot);
         let mut store = VersionStore::default();
         for (hash, bytes) in &p.commits {

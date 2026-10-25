@@ -101,8 +101,8 @@ function fit() {
     center: [doc.view.meta.width / 2, doc.view.meta.height / 2],
     zoom:
       Math.min(
-        (r.width * devicePixelRatio) / doc.view.meta.width,
-        (r.height * devicePixelRatio) / doc.view.meta.height,
+        (r.width * engine.effectiveDpr) / doc.view.meta.width,
+        (r.height * engine.effectiveDpr) / doc.view.meta.height,
       ) * 0.88,
     rotation: 0,
   });
@@ -161,7 +161,7 @@ function bindCanvas() {
     if (gesture.text) run(() => m7UI.pointer(e, "move"));
     else if (gesture.brush) gesture.brush.input(e);
     else {
-      const ratio = Math.min(devicePixelRatio, 2) / engine.viewport.zoom,
+      const ratio = engine.effectiveDpr / engine.viewport.zoom,
         dx = (e.clientX - gesture.x) * ratio,
         dy = (e.clientY - gesture.y) * ratio;
       const a = engine.viewport.rotation;
@@ -334,12 +334,45 @@ $("#discard").onclick = () =>
 function showStorageFailure(error) {
   gesture = null;
   $("#storage-failure").hidden = false;
+  const damaged = error.code === "CORRUPT_DATA";
+  $("#storage-failure p").textContent = damaged
+    ? "復旧記録の両世代を読み取れません。編集を停止しました。保存済みの .alto ファイルを開いて再開してください。"
+    : "保存状態を確認できません。最後の編集が記録されていない可能性があります。編集を停止しました。現在の内容を退避してから復旧してください。";
+  $("#emergency-export").hidden = damaged;
+  $("#recover-storage").hidden = damaged;
+  $("#open-recovery-file").hidden = !damaged;
   $("#recovery-result").hidden = true;
   for (const selector of ["header", "nav", "main"])
     $(selector).inert = true;
   status("保存障害：編集を停止しました");
   fail(error);
 }
+function showEngineFailure(error) {
+  gesture = null;
+  $("#engine-failure").hidden = false;
+  $("#engine-failure-message").textContent =
+    error.code === "WORKER_TIMEOUT"
+      ? "エンジンから応答がありません。接続を確認して再試行してください。"
+      : error.code === "STORAGE"
+        ? "保存記録を読み取れません。保存先を確認して再試行してください。"
+      : error.code === "GPU_UNSUPPORTED" || error.code === "GPU_LOST"
+        ? "GPUを初期化できません。ブラウザやGPUの状態を確認して再試行してください。"
+      : "エンジンを読み込めません。接続を確認して再試行してください。";
+  for (const selector of ["header", "nav", "main"])
+    $(selector).inert = true;
+  status("エンジン停止：編集を停止しました");
+  fail(error);
+}
+$("#retry-worker").onclick = () => run(async () => {
+  if (!engine || engine.lifecycleState !== "failed") {
+    location.reload();
+    return;
+  }
+  $("#retry-worker").disabled = true;
+  try { await engine.retryWorker(); }
+  finally { $("#retry-worker").disabled = false; }
+});
+$("#open-recovery-file").onclick = () => $("#alto-file").click();
 $("#emergency-export").onclick = () => run(async () => {
   // The picker needs a user gesture; request it before awaiting the Worker.
   const destination = await engine.storage.pickSaveFile({ suggestedName: "alto-emergency.alto" });
@@ -415,7 +448,15 @@ window.addEventListener("keydown", (e) => {
 try {
   engine = await AltoEngine.create({ canvas: $("#canvas") });
   engine.on("error", fail);
+  engine.on("engineFailure", showEngineFailure);
+  engine.on("recovering", () => {
+    gesture = null;
+    for (const selector of ["header", "nav", "main"])
+      $(selector).inert = true;
+    status("エンジンを復旧しています…");
+  });
   engine.on("storageFailure", showStorageFailure);
+  engine.on("workerDiagnostic", (detail) => console.error("Worker diagnostic", detail));
   engine.on("diagnostic", (d) => fail(JSON.stringify(d)));
   engine.on("frame", (f) =>
     !engine.storageFailure && status(
@@ -426,9 +467,10 @@ try {
   engine.on("gpuRestored", () => status("GPUを復旧しました"));
   engine.on("canvasReplaced", () => {
     bindCanvas();
-    attach(engine.document);
   });
   engine.on("recovered", () => {
+    if (engine.document) attach(engine.document);
+    $("#engine-failure").hidden = true;
     if (!engine.storageFailure) {
       $("#storage-failure").hidden = true;
       $("#error").textContent = "";
@@ -468,6 +510,8 @@ try {
 } catch (e) {
   fail(e);
   status("起動できませんでした");
+  if (["WORKER_UNAVAILABLE", "WORKER_TIMEOUT"].includes(e?.code))
+    showEngineFailure(e);
 }
 
 $("#report").onclick = () => {

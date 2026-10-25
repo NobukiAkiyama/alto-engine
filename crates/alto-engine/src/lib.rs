@@ -71,6 +71,9 @@ impl Default for Engine {
 }
 
 impl Engine {
+    pub fn clear_decoded_tile_cache(&mut self) {
+        self.tiles.clear_decoded_cache();
+    }
     pub fn new() -> Self {
         Self {
             documents: BTreeMap::new(),
@@ -117,6 +120,15 @@ impl Engine {
 
     pub fn tile(&self, hash: &ContentHash) -> Option<std::sync::Arc<TileData>> {
         self.tiles.get(hash)
+    }
+    pub fn tile_checked(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<std::sync::Arc<TileData>, EngineError> {
+        self.tiles
+            .get_checked(hash)
+            .map_err(alto_store::StoreError::Corrupt)?
+            .ok_or(EngineError::MissingTile(*hash))
     }
 
     pub fn transact(
@@ -360,6 +372,9 @@ mod tests {
 }
 
 impl TileStore for Engine {
+    fn get_checked(&self, h: &ContentHash) -> Result<Option<std::sync::Arc<TileData>>, String> {
+        self.tiles.get_checked(h)
+    }
     fn is_opaque(&self, h: &ContentHash) -> bool {
         self.tiles.is_opaque(h)
     }
@@ -495,10 +510,17 @@ impl Engine {
         opaque: std::collections::BTreeSet<ContentHash>,
         snapshot: &[u8],
         mut warnings: Vec<String>,
+        deferred_verify: bool,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
-                self.tiles.insert_verified(
+                let insert = if deferred_verify {
+                    MemoryTileStore::insert_deferred
+                } else {
+                    MemoryTileStore::insert_verified
+                };
+                insert(
+                    &mut self.tiles,
                     h,
                     if b[8] == 4 {
                         alto_core::PixelFormat::Rgba8

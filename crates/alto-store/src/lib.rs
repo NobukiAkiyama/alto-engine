@@ -135,6 +135,12 @@ pub fn encode_object(tag: u8, data: &[u8]) -> Vec<u8> {
     out
 }
 pub fn decode_object(bytes: &[u8]) -> Result<(u8, Vec<u8>)> {
+    let (tag, _) = object_header(bytes)?;
+    let data = lz4_flex::decompress_size_prepended(&bytes[9..])
+        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+    Ok((tag, data))
+}
+fn object_header(bytes: &[u8]) -> Result<(u8, usize)> {
     if bytes.len() < 13 || &bytes[..8] != b"ALTOOBJ1" {
         return Err(StoreError::Corrupt("object header".into()));
     }
@@ -152,9 +158,7 @@ pub fn decode_object(bytes: &[u8]) -> Result<(u8, Vec<u8>)> {
     if size > 268_435_456 {
         return Err(StoreError::Corrupt("object too large".into()));
     }
-    let data = lz4_flex::decompress_size_prepended(&bytes[9..])
-        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-    Ok((bytes[8], data))
+    Ok((bytes[8], size))
 }
 pub fn object_hash(tag: u8, data: &[u8]) -> ContentHash {
     if tag == 0 {
@@ -250,7 +254,21 @@ fn named(entries: &BTreeMap<String, Vec<u8>>, dir: &str) -> BTreeMap<ContentHash
         .collect()
 }
 /// Reads the logical entries of either form. Damaged parts become warnings.
-pub fn decode_entries(mut entries: BTreeMap<String, Vec<u8>>) -> Result<Package> {
+pub fn decode_entries(entries: BTreeMap<String, Vec<u8>>) -> Result<Package> {
+    decode_entries_impl(entries, None)
+}
+/// Only for an engine-created checkpoint whose complete ZIP and metadata were
+/// verified against the journal digest. External packages use decode_entries.
+pub fn decode_recovery_entries(
+    entries: BTreeMap<String, Vec<u8>>,
+    opaque: &std::collections::BTreeSet<ContentHash>,
+) -> Result<Package> {
+    decode_entries_impl(entries, Some(opaque))
+}
+fn decode_entries_impl(
+    mut entries: BTreeMap<String, Vec<u8>>,
+    trusted_opaque: Option<&std::collections::BTreeSet<ContentHash>>,
+) -> Result<Package> {
     let mut warnings = Vec::new();
     let manifest = entries
         .get("manifest.json")
@@ -304,16 +322,39 @@ pub fn decode_entries(mut entries: BTreeMap<String, Vec<u8>>) -> Result<Package>
             .and_then(|s| s.split('/').nth(1))
             .and_then(|s| s.parse::<ContentHash>().ok())
         {
-            match decode_object(&data) {
-                Ok((tag, pixels)) if object_hash(tag, &pixels) == hash => {
-                    if tag == 4 && pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
-                        opaque.insert(hash);
-                    }
-                    objects.insert(hash, data);
+            if let Some(known_opaque) = trusted_opaque {
+                if name != object_path(&hash) {
+                    return Err(StoreError::Corrupt(format!(
+                        "invalid recovery object path {name}"
+                    )));
                 }
-                _ => warnings.push(format!("damaged object {hash}")),
+                let (tag, _) = object_header(&data)?;
+                if known_opaque.contains(&hash) {
+                    if tag != 4 {
+                        return Err(StoreError::Corrupt(format!(
+                            "opaque object is not RGBA {hash}"
+                        )));
+                    }
+                    opaque.insert(hash);
+                }
+                objects.insert(hash, data);
+            } else {
+                match decode_object(&data) {
+                    Ok((tag, pixels)) if object_hash(tag, &pixels) == hash => {
+                        if tag == 4 && pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
+                            opaque.insert(hash);
+                        }
+                        objects.insert(hash, data);
+                    }
+                    _ => warnings.push(format!("damaged object {hash}")),
+                }
             }
         }
+    }
+    if trusted_opaque.is_some_and(|known| !known.is_subset(&opaque)) {
+        return Err(StoreError::Corrupt(
+            "recovery opaque index contains missing objects".into(),
+        ));
     }
     Ok(Package {
         snapshot,
@@ -554,6 +595,26 @@ mod tests {
         let package = decode_package(&bytes).unwrap();
         assert_eq!(decode_object(&package.objects[&h]).unwrap().1, pixels);
         assert!(package.warnings.is_empty());
+    }
+    #[test]
+    fn recovery_decoder_checks_object_paths_and_opaque_index() {
+        let pixels = vec![255; 262144];
+        let h = object_hash(4, &pixels);
+        let parts = PackageParts {
+            snapshot: b"{\"nodes\":[]}".to_vec(),
+            objects: BTreeMap::from([(h, encode_object(4, &pixels))]),
+            ..Default::default()
+        };
+        let entries = package_entries(&parts).unwrap();
+        let opaque = std::collections::BTreeSet::from([h]);
+        let package = decode_recovery_entries(entries.clone(), &opaque).unwrap();
+        assert!(package.opaque.contains(&h));
+        let mut wrong_path = entries.clone();
+        let object = wrong_path.remove(&object_path(&h)).unwrap();
+        wrong_path.insert(format!("objects/ff/{h}"), object);
+        assert!(decode_recovery_entries(wrong_path, &opaque).is_err());
+        let missing = std::collections::BTreeSet::from([ContentHash::of(b"missing")]);
+        assert!(decode_recovery_entries(entries, &missing).is_err());
     }
     #[test]
     fn bad_object_is_reported_without_losing_document() {
