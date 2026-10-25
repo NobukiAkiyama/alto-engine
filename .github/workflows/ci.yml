@@ -3,6 +3,16 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      chrome_version:
+        description: Chrome for Testing version (exact four-part version)
+        default: '156.0.8078.47'
+        type: string
+      gpu_watchdog:
+        description: Keep Chrome's GPU watchdog enabled (disable only to investigate a timeout)
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -13,6 +23,9 @@ jobs:
     # rebuild check on the same Rust host target as the release build.
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -30,6 +43,19 @@ jobs:
             packages/alto-sdk/pnpm-lock.yaml
             examples/*/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          chrome_dir="$RUNNER_TEMP/alto-chrome"
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/mac-arm64/chrome-mac-arm64.zip" \
+            --output "$RUNNER_TEMP/alto-chrome.zip"
+          unzip -q "$RUNNER_TEMP/alto-chrome.zip" -d "$chrome_dir"
+          chrome_executable="$chrome_dir/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          "$chrome_executable" --version
+          echo "CHROME=$chrome_executable" >> "$GITHUB_ENV"
+          echo "ALTO_BROWSER_EXPECTED_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
       - name: Confirm release build host
         run: |
           test "$(uname -m)" = arm64
@@ -43,6 +69,7 @@ jobs:
       - name: Build the embedding examples with Vite and run them
         env:
           ALTO_BROWSER_GPU: swiftshader
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/examples
         run: sh scripts/check-examples.sh
       - uses: actions/upload-artifact@v7
         if: always()
