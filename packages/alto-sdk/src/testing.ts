@@ -7,21 +7,21 @@ import { coreOf } from "./internal.js";
 
 export function testing(engine: Engine) {
   const core = coreOf(engine);
-  const request = (t: string, payload: Record<string, unknown> = {}) => core.request(t, payload);
+  const request = core.request.bind(core);
   return {
     /** Any Worker request by name. */
-    request,
+    request: (t: string, payload?: Record<string, unknown>) => core.requestRaw(t, payload),
     /** Restarts the Worker as a crash would. */
     crash: () => core.restart(),
     destroyGpu: () => request("destroyGpu"),
-    /** The module URL the next Worker start loads. */
-    setWorkerURL: (url: URL | string) => {
+    /** The module URL the next Worker start loads; null for the bundled one. */
+    setWorkerURL: (url: URL | string | null) => {
       core.workerURL = url;
     },
     pendingRequests: () => (core as unknown as { pending: Map<number, unknown> }).pending.size,
     /** Generation, record count, object count and pack count of the recovery store. */
     recoveryStore: () =>
-      request("recoveryStore") as Promise<{ latestGeneration: number; records: number; objects: number; packs: number }>,
+      request("recoveryStore"),
     corruptJournalTail: () => request("corruptJournalTail"),
     corruptCheckpoint: () => request("corruptCheckpoint"),
     corruptCheckpointCrc: () => request("corruptCheckpointCrc"),
@@ -34,9 +34,9 @@ export function testing(engine: Engine) {
     /** The `.alto` bytes a save would write, without marking the document saved. */
     saveBytes: async () => {
       await core.document?.endTool();
-      return new Uint8Array(((await request("save")) as { bytes: ArrayBuffer }).bytes);
+      return new Uint8Array((await request("save")).bytes);
     },
     validateFrame: () => request("validateFrame"),
-    stallDecodeWorkers: () => request("stallDecodeWorkers") as Promise<number>,
+    stallDecodeWorkers: () => request("stallDecodeWorkers"),
   };
 }

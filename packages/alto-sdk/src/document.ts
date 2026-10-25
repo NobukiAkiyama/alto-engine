@@ -1,6 +1,7 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
 import { intentRecord, type Intent } from "./intents.js";
+import type { Args } from "./protocol.js";
 import { SnapshotStore, type DocumentChange, type DocumentSnapshot, type WireState } from "./snapshot.js";
 import {
   immutable,
@@ -109,9 +110,12 @@ export class DocumentHandle {
     return this.tool?.flush();
   }
 
-  private command(type: string, payload: Record<string, unknown>): Promise<void> {
+  private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion">(
+    type: K,
+    payload: Args<K>,
+  ): Promise<void> {
     return this.edit(async () => {
-      this.apply(await this.core.request(type, payload));
+      this.apply(await (this.core.request as (t: K, a: Args<K>) => Promise<unknown>)(type, payload));
     });
   }
   private async edit<T>(fn: () => Promise<T>): Promise<T> {
@@ -151,15 +155,15 @@ export class DocumentHandle {
    * when applied; this rejects with STORAGE if the journal could not be written.
    */
   durable(): Promise<void> {
-    return this.core.request("durable", {}) as Promise<void>;
+    return this.core.request("durable").then(() => {});
   }
   /** The hash of the snapshot a save would write. Computed on request, not per edit. */
   snapshotHash(): Promise<string> {
-    return this.core.request("snapshotHash", {}) as Promise<string>;
+    return this.core.request("snapshotHash", {});
   }
   /** A raster layer's full tile map. */
   nodeTiles(id: NodeId): Promise<TileRef> {
-    return this.core.request("nodeTiles", { node: id }) as Promise<TileRef>;
+    return this.core.request("nodeTiles", { node: id });
   }
 
   /** Brush and eraser strokes. */
@@ -201,17 +205,17 @@ export class DocumentHandle {
         c.tcy = on ? [...rest, { start, end }].sort((a, b) => a.start - b.start) : rest;
         tx.setText(id, c);
       }),
-    info: (id: NodeId) => this.core.request("textInfo", { node: id }) as Promise<TextInfo>,
+    info: (id: NodeId) => this.core.request("textInfo", { node: id }),
     /** UTF-16 offset nearest to a document point. */
     hitTest: (id: NodeId, x: number, y: number) =>
-      this.core.request("textHitTest", { node: id, x, y }) as Promise<number>,
+      this.core.request("textHitTest", { node: id, x, y }),
     caret: (id: NodeId, offset: number) =>
-      this.core.request("textCaret", { node: id, offset }) as Promise<TextCaret | null>,
+      this.core.request("textCaret", { node: id, offset }),
     /** Highlight quads in document coordinates. */
     selectionRects: (id: NodeId, start: number, end: number) =>
-      this.core.request("textSelection", { node: id, start, end }) as Promise<[number, number][][]>,
+      this.core.request("textSelection", { node: id, start, end }),
     navigate: (id: NodeId, offset: number, motion: TextMotion) =>
-      this.core.request("textNavigate", { node: id, offset, motion }) as Promise<number>,
+      this.core.request("textNavigate", { node: id, offset, motion }),
   };
   /** Vector paths, vector masks and clipping paths. */
   readonly vectors = {
@@ -225,7 +229,7 @@ export class DocumentHandle {
   readonly selection = {
     apply: (spec: SelectionSpec) => this.command("select", { spec }),
     /** The selection's outline as SVG path data in document coordinates. */
-    outline: () => this.core.request("selectionOutline", {}) as Promise<string>,
+    outline: () => this.core.request("selectionOutline", {}),
     clear: () => this.command("select", { spec: { kind: "clear" } }),
     invert: () => this.command("select", { spec: { kind: "invert" } }),
     all: () => this.command("select", { spec: { kind: "all" } }),
@@ -247,25 +251,25 @@ export class DocumentHandle {
     /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
     commit: (message: string, options: { author?: string; allowEmpty?: boolean } = {}): Promise<CommitView> =>
       this.edit(async () => {
-        const r = (await this.core.request("commit", {
+        const r = await this.core.request("commit", {
           message,
           author: options.author || "",
           allowEmpty: !!options.allowEmpty,
           time: Date.now(),
-        })) as { state: unknown; commit: CommitView };
+        });
         this.apply(r.state);
         return r.commit;
       }),
-    log: () => this.core.request("versionLog", {}) as Promise<CommitView[]>,
+    log: () => this.core.request("versionLog", {}),
     /** Semantic, layer-level diff. Use "working" for the current document. */
-    diff: (from: string, to = "working") => this.core.request("versionDiff", { from, to }) as Promise<VersionDiff>,
+    diff: (from: string, to = "working") => this.core.request("versionDiff", { from, to }),
     status: (): VersionStatus => this.getSnapshot().versions,
     /** Restores a version as one undoable edit; history is kept. */
     restore: (hash: string) => this.command("restoreVersion", { hash }),
     /** Drops versions that cannot be reached from the head. Returns how many. */
     prune: (): Promise<number> =>
       this.edit(async () => {
-        const state = (await this.core.request("pruneVersions", {})) as { removed?: number };
+        const state = await this.core.request("pruneVersions");
         this.apply(state);
         return state.removed ?? 0;
       }),
@@ -290,7 +294,7 @@ export class DocumentHandle {
     if (region.x1 <= region.x0 || region.y1 <= region.y0)
       throw new AltoError("INVALID_ARGUMENT", "region is empty or outside the document");
     await this.endTool();
-    return this.core.request("exportImage", { region, scale, type: options.type ?? "image/png" }) as Promise<Blob>;
+    return this.core.request("exportImage", { region, scale, type: options.type ?? "image/png" });
   }
   /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
   async save(target: ArchiveTarget): Promise<void> {
@@ -298,9 +302,9 @@ export class DocumentHandle {
     this.core.emit("saveState", "saving");
     let token: number | undefined;
     try {
-      const saved = (await this.core.request("save", {})) as { token: number; bytes: ArrayBuffer };
+      const saved = await this.core.request("save");
       token = saved.token;
-      await target.write(new Blob([saved.bytes]).stream());
+      await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
       this.apply(await this.core.request("saved", { token }));
       token = undefined;
       this.core.emit("saveState", "saved");
@@ -329,7 +333,7 @@ export class DocumentHandle {
         throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
-      const saved = (await this.core.request("folderEntries", {})) as { token: number; bytes: ArrayBuffer };
+      const saved = await this.core.request("folderEntries");
       token = saved.token;
       const entries = unframeEntries(new Uint8Array(saved.bytes));
       const manifest = entries.get("manifest.json");

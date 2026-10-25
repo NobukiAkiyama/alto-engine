@@ -1,9 +1,9 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
+import { PROTOCOL } from "./protocol.js";
 import { frameEntries, sha256Hex } from "./storage.js";
 import { ViewportControl } from "./viewport.js";
-const PROTOCOL = 4;
 const SDK_VERSION = "0.5.0";
 const readableAfterStorageFailure = new Set([
     "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
@@ -41,7 +41,7 @@ export class EngineCore extends Emitter {
     ratioQuery = null;
     onRatioChange = () => this.watchPixelRatio();
     onPageHide = () => this.shutdown();
-    /** @internal */
+    /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
     workerURL;
     constructor(options) {
         super();
@@ -50,7 +50,7 @@ export class EngineCore extends Emitter {
         this.pixelRatio = this.currentRatio();
         this.workerURL = options.assets?.baseURL
             ? new URL("worker.js", new URL(options.assets.baseURL, location.href))
-            : new URL("./worker.js", import.meta.url);
+            : null;
         this.element = this.makeCanvas();
         options.container.appendChild(this.element);
         this.viewport = new ViewportControl({
@@ -173,7 +173,10 @@ export class EngineCore extends Emitter {
         });
     }
     async start() {
-        const worker = new Worker(this.workerURL, { type: "module" });
+        // Written out literally so bundlers (Vite, webpack) see the Worker and bundle it.
+        const worker = this.workerURL
+            ? new Worker(this.workerURL, { type: "module" })
+            : new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
         this.worker = worker;
         const generation = ++this.workerGeneration;
         worker.onmessage = ({ data }) => {
@@ -192,7 +195,7 @@ export class EngineCore extends Emitter {
             const e = new AltoError(running ? "WORKER_CRASHED" : "WORKER_UNAVAILABLE", detail || (running ? "the Worker stopped" : "the Worker could not be loaded"));
             this.diagnostics.emit("workerDiagnostic", {
                 state: this.state.state,
-                workerURL: String(this.workerURL),
+                workerURL: String(this.workerURL ?? new URL("./worker.js", import.meta.url)),
                 message: event.message || null,
                 file: event.filename || null,
                 line: event.lineno || null,
@@ -275,9 +278,14 @@ export class EngineCore extends Emitter {
         };
         this.raf = requestAnimationFrame(loop);
     }
-    /** @internal */
-    request(t, payload = {}, transfer = []) {
-        return this.requestCore(t, payload, transfer, false);
+    /** @internal A Worker request, typed by `protocol.ts`. Requests without arguments may omit them. */
+    request(t, ...rest) {
+        const [args, transfer = []] = rest;
+        return this.requestCore(t, (args ?? {}), transfer, false);
+    }
+    /** @internal Any request by name, for the testing entry point. */
+    requestRaw(t, payload = {}) {
+        return this.requestCore(t, payload, [], false);
     }
     requestCore(t, payload, transfer, internal, timeoutMs = 0) {
         if (this.disposed)
@@ -342,7 +350,7 @@ export class EngineCore extends Emitter {
     /** @internal */
     toolHost(doc) {
         return {
-            request: (t, payload) => this.request(t, payload),
+            request: this.request.bind(this),
             stream: (m, transfer) => this.stream(m, transfer),
             screenToDocument: (x, y) => this.viewport.screenToDocument(x, y),
             storageError: () => this.storageError(),
@@ -407,7 +415,7 @@ export class EngineCore extends Emitter {
                 entries.set(p, d);
         }
         const meta = frameEntries(entries);
-        const plan = (await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]));
+        const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
         for (const p of plan) {
             const d = await provider.getObject(p);
             if (d)
@@ -470,12 +478,12 @@ export class EngineCore extends Emitter {
             bitmap.close();
             const pixels = ctx.getImageData(0, 0, c.width, c.height).data;
             const encoded = await file.arrayBuffer();
-            const asset = (await this.request("import", { width: c.width, height: c.height, pixels: pixels.buffer, encoded, mime: file.type || "image/png" }, [pixels.buffer, encoded]));
+            const asset = await this.request("import", { width: c.width, height: c.height, pixels: pixels.buffer, encoded, mime: file.type || "image/png" }, [pixels.buffer, encoded]);
             return { ...asset, id: asset.record.id };
         },
         importFont: async (file, options = {}) => {
             const bytes = await file.arrayBuffer();
-            const font = (await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]));
+            const font = await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]);
             return { ...font, id: font.record.id };
         },
         releaseImport: (asset) => {

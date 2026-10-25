@@ -8,18 +8,18 @@ import type { PathData } from "./types.js";
 export type FrameStats = Record<string, unknown>;
 export declare function unstable(engine: Engine): {
     /** Resolves when the current view has finished drawing. */
-    settle: () => Promise<FrameStats>;
-    readTile: (x: number, y: number) => Promise<Uint8Array<ArrayBuffer>>;
-    readTileLevel: (level: number, x: number, y: number) => Promise<Uint8Array<ArrayBuffer>>;
+    settle: () => Promise<import("./protocol.js").FrameStats>;
+    readTile: (x: number, y: number) => Promise<Uint8Array<ArrayBufferLike>>;
+    readTileLevel: (level: number, x: number, y: number) => Promise<Uint8Array<ArrayBufferLike>>;
     vectorStats: () => Promise<Record<string, number>>;
     /** Small text through the glyph atlas (default) or always through the vector path. */
-    setGlyphAtlas: (enabled: boolean) => Promise<unknown>;
-    setVisibleTileJobs: (enabled: boolean) => Promise<unknown>;
+    setGlyphAtlas: (enabled: boolean) => Promise<true>;
+    setVisibleTileJobs: (enabled: boolean) => Promise<true>;
     /** Resumes prefetching after `resetRenderCache` paused it. */
-    enablePrefetch: () => Promise<unknown>;
+    enablePrefetch: () => Promise<true>;
     /** Empties the display caches (and the CPU tile cache with `cpu`); pauses prefetching. */
-    resetRenderCache: (cpu: boolean) => Promise<unknown>;
-    setProfiling: (enabled: boolean) => Promise<unknown>;
+    resetRenderCache: (cpu: boolean) => Promise<true>;
+    setProfiling: (enabled: boolean) => Promise<true>;
     /** Resolves to whether decode Workers are running afterwards. */
     setDecodeWorkers: (enabled: boolean) => Promise<boolean>;
     /** The device pixel ratio the canvas renders at. */

@@ -1,4 +1,6 @@
+import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
+import type { StreamMessage } from "./protocol.js";
 import type { Color, NodeId } from "./types.js";
 
 export interface BrushOptions {
@@ -29,8 +31,8 @@ export interface InputSample {
 
 /** @internal What a tool session needs from the engine. */
 export interface ToolHost {
-  request(t: string, payload: Record<string, unknown>): Promise<unknown>;
-  stream(message: Record<string, unknown>, transfer: Transferable[]): void;
+  request: EngineCore["request"];
+  stream(message: StreamMessage, transfer: Transferable[]): void;
   screenToDocument(clientX: number, clientY: number): [number, number];
   storageError(): AltoError | null;
   ended(session: ToolSession, state: unknown): void;
@@ -111,7 +113,7 @@ export class ToolSession {
     this.done = true;
     try {
       await this.flush();
-      const state = await this.host.request("endBrush", {});
+      const state = await this.host.request("endBrush");
       this.host.ended(this, state);
     } catch (error) {
       this.host.ended(this, null);
@@ -125,7 +127,7 @@ export class ToolSession {
     this.samples = [];
     try {
       await this.ready;
-      await this.host.request("cancelBrush", {});
+      await this.host.request("cancelBrush");
     } finally {
       this.host.ended(this, null);
     }

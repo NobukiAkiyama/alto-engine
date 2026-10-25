@@ -102,7 +102,7 @@ export class DocumentHandle {
      * when applied; this rejects with STORAGE if the journal could not be written.
      */
     durable() {
-        return this.core.request("durable", {});
+        return this.core.request("durable").then(() => { });
     }
     /** The hash of the snapshot a save would write. Computed on request, not per edit. */
     snapshotHash() {
@@ -191,12 +191,12 @@ export class DocumentHandle {
     versions = {
         /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
         commit: (message, options = {}) => this.edit(async () => {
-            const r = (await this.core.request("commit", {
+            const r = await this.core.request("commit", {
                 message,
                 author: options.author || "",
                 allowEmpty: !!options.allowEmpty,
                 time: Date.now(),
-            }));
+            });
             this.apply(r.state);
             return r.commit;
         }),
@@ -208,7 +208,7 @@ export class DocumentHandle {
         restore: (hash) => this.command("restoreVersion", { hash }),
         /** Drops versions that cannot be reached from the head. Returns how many. */
         prune: () => this.edit(async () => {
-            const state = (await this.core.request("pruneVersions", {}));
+            const state = await this.core.request("pruneVersions");
             this.apply(state);
             return state.removed ?? 0;
         }),
@@ -240,7 +240,7 @@ export class DocumentHandle {
         this.core.emit("saveState", "saving");
         let token;
         try {
-            const saved = (await this.core.request("save", {}));
+            const saved = await this.core.request("save");
             token = saved.token;
             await target.write(new Blob([saved.bytes]).stream());
             this.apply(await this.core.request("saved", { token }));
@@ -269,7 +269,7 @@ export class DocumentHandle {
                 throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
             if (base !== undefined && base !== currentHash)
                 throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
-            const saved = (await this.core.request("folderEntries", {}));
+            const saved = await this.core.request("folderEntries");
             token = saved.token;
             const entries = unframeEntries(new Uint8Array(saved.bytes));
             const manifest = entries.get("manifest.json");

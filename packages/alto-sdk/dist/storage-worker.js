@@ -2,11 +2,12 @@
 import { handle } from "./storage-core.js";
 let chain = Promise.resolve();
 self.onmessage = ({ data }) => {
-  chain = chain.then(async () => {
-    try {
-      postMessage({ id: data.id, ok: true, value: await handle(data) });
-    } catch (e) {
-      postMessage({ id: data.id, ok: false, error: String(e) });
-    }
-  });
+    chain = chain.then(async () => {
+        try {
+            postMessage({ id: data.id, ok: true, value: await handle(data) });
+        }
+        catch (e) {
+            postMessage({ id: data.id, ok: false, error: String(e) });
+        }
+    });
 };

@@ -2,11 +2,11 @@
 // The handler is installed before the module loads, so no request is dropped. Every
 // answer reports this Worker's WASM memory so the engine can count the whole pool.
 import init, { decodeBatch } from "./pkg/alto_decode.js";
-let memory = null;
+let memory: WebAssembly.Memory | null = null;
 let stalled = false;
 const ready = init().then((wasm) => {
   memory = wasm.memory;
-  postMessage({ ready: true, memory: memory.buffer.byteLength });
+  postMessage({ ready: true, memory: memory!.buffer.byteLength });
 });
 self.onmessage = async ({ data }) => {
   await ready;
@@ -14,5 +14,5 @@ self.onmessage = async ({ data }) => {
   if (data.stall) stalled = true;
   if (stalled) return;
   const out = decodeBatch(new Uint8Array(data.batch));
-  postMessage({ id: data.id, out: out.buffer, memory: memory.buffer.byteLength }, [out.buffer]);
+  postMessage({ id: data.id, out: out.buffer, memory: memory!.buffer.byteLength }, [out.buffer]);
 };

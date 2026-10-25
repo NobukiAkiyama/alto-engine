@@ -8,9 +8,9 @@ export declare function testing(engine: Engine): {
     request: (t: string, payload?: Record<string, unknown>) => Promise<unknown>;
     /** Restarts the Worker as a crash would. */
     crash: () => Promise<void>;
-    destroyGpu: () => Promise<unknown>;
-    /** The module URL the next Worker start loads. */
-    setWorkerURL: (url: URL | string) => void;
+    destroyGpu: () => Promise<true>;
+    /** The module URL the next Worker start loads; null for the bundled one. */
+    setWorkerURL: (url: URL | string | null) => void;
     pendingRequests: () => number;
     /** Generation, record count, object count and pack count of the recovery store. */
     recoveryStore: () => Promise<{
@@ -24,12 +24,12 @@ export declare function testing(engine: Engine): {
     corruptCheckpointCrc: () => Promise<unknown>;
     corruptBothCheckpoints: () => Promise<unknown>;
     /** Writes a format 1 checkpoint, as an older engine did. */
-    legacyCheckpoint: () => Promise<unknown>;
+    legacyCheckpoint: () => Promise<true>;
     /** Writes a format 3 checkpoint (one file per object). */
-    looseCheckpoint: () => Promise<unknown>;
-    injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<unknown>;
+    looseCheckpoint: () => Promise<true>;
+    injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<true>;
     /** The `.alto` bytes a save would write, without marking the document saved. */
     saveBytes: () => Promise<Uint8Array<ArrayBuffer>>;
-    validateFrame: () => Promise<unknown>;
+    validateFrame: () => Promise<true>;
     stallDecodeWorkers: () => Promise<number>;
 };

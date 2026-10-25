@@ -69,7 +69,7 @@ export class ToolSession {
         this.done = true;
         try {
             await this.flush();
-            const state = await this.host.request("endBrush", {});
+            const state = await this.host.request("endBrush");
             this.host.ended(this, state);
         }
         catch (error) {
@@ -85,7 +85,7 @@ export class ToolSession {
         this.samples = [];
         try {
             await this.ready;
-            await this.host.request("cancelBrush", {});
+            await this.host.request("cancelBrush");
         }
         finally {
             this.host.ended(this, null);

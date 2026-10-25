@@ -1,6 +1,7 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
+import { PROTOCOL, type Args, type RequestName, type Result, type StreamMessage, type WorkerMessage } from "./protocol.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { ToolHost, ToolSession } from "./tools.js";
@@ -8,7 +9,6 @@ import type { ImportedImage } from "./transaction.js";
 import type { FontAsset, ImageAsset, PathData } from "./types.js";
 import { ViewportControl, type Viewport } from "./viewport.js";
 
-const PROTOCOL = 4;
 const SDK_VERSION = "0.5.0";
 
 export interface EngineOptions {
@@ -144,8 +144,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private ratioQuery: MediaQueryList | null = null;
   private onRatioChange = () => this.watchPixelRatio();
   private onPageHide = () => this.shutdown();
-  /** @internal */
-  workerURL: URL | string;
+  /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
+  workerURL: URL | string | null;
 
   private constructor(private readonly options: EngineOptions) {
     super();
@@ -153,7 +153,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.pixelRatio = this.currentRatio();
     this.workerURL = options.assets?.baseURL
       ? new URL("worker.js", new URL(options.assets.baseURL, location.href))
-      : new URL("./worker.js", import.meta.url);
+      : null;
     this.element = this.makeCanvas();
     options.container.appendChild(this.element);
     this.viewport = new ViewportControl({
@@ -279,7 +279,10 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
 
   private async start() {
-    const worker = new Worker(this.workerURL, { type: "module" });
+    // Written out literally so bundlers (Vite, webpack) see the Worker and bundle it.
+    const worker = this.workerURL
+      ? new Worker(this.workerURL, { type: "module" })
+      : new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
     this.worker = worker;
     const generation = ++this.workerGeneration;
     worker.onmessage = ({ data }) => {
@@ -299,7 +302,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       );
       this.diagnostics.emit("workerDiagnostic", {
         state: this.state.state,
-        workerURL: String(this.workerURL),
+        workerURL: String(this.workerURL ?? new URL("./worker.js", import.meta.url)),
         message: event.message || null,
         file: event.filename || null,
         line: event.lineno || null,
@@ -308,7 +311,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if (running) void this.restart().catch((failure) => this.emit("error", failure));
     };
     const offscreen = this.element.transferControlToOffscreen();
-    const boot = (await this.requestCore(
+    const boot = (await this.requestCore<"init">(
       "init",
       {
         protocol: PROTOCOL,
@@ -321,7 +324,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       [offscreen],
       true,
       30000,
-    )) as { protocol: number; recovery: { available: boolean; records: number } };
+    )) as Result<"init">;
     if (this.worker !== worker || this.disposed)
       throw new AltoError("WORKER_UNAVAILABLE", "the Worker start was interrupted");
     if (boot.protocol !== PROTOCOL) throw new AltoError("CONFLICT", "SDK/WASM protocol mismatch");
@@ -330,11 +333,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.resize();
   }
 
-  private onWorkerMessage(data: { t: string; id?: number; ok?: boolean; value?: unknown; error?: { code?: string; message?: string } }) {
+  private onWorkerMessage(data: WorkerMessage) {
     if (data.t === "reply") {
-      const p = this.pending.get(data.id!);
+      const p = this.pending.get(data.id);
       if (!p) return;
-      this.pending.delete(data.id!);
+      this.pending.delete(data.id);
       if (p.timer) clearTimeout(p.timer);
       if (data.ok) p.resolve(data.value);
       else p.reject(fromWorkerError(data.error));
@@ -342,14 +345,14 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       this.document?.apply(data.value);
     } else if (data.t === "storageFailure") {
       if (this.state.state !== "storage-failed") {
-        const error = new AltoError("STORAGE", (data.value as { message: string }).message);
+        const error = new AltoError("STORAGE", data.value.message);
         this.document?.abortTool(error);
         this.setStatus("storage-failed", error);
       }
     } else if (data.t === "frame") {
-      this.diagnostics.emit("frame", data.value as Record<string, unknown>);
+      this.diagnostics.emit("frame", data.value);
     } else if (data.t === "diagnostic") {
-      const value = data.value as Record<string, unknown>;
+      const value = data.value;
       if (value?.panic) this.lastWorkerPanic = String(value.panic);
       this.diagnostics.emit("diagnostic", value);
     } else if (data.t === "gpuLost") {
@@ -358,7 +361,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     } else if (data.t === "gpuRestored") {
       this.diagnostics.emit("gpuRestored", null);
     } else if (data.t === "error") {
-      this.emit("error", fromWorkerError(data.value as { code?: string; message?: string }));
+      this.emit("error", fromWorkerError(data.value));
     }
   }
 
@@ -374,13 +377,23 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.raf = requestAnimationFrame(loop);
   }
 
-  /** @internal */
-  request(t: string, payload: Record<string, unknown> = {}, transfer: Transferable[] = []): Promise<unknown> {
-    return this.requestCore(t, payload, transfer, false);
+  /** @internal A Worker request, typed by `protocol.ts`. Requests without arguments may omit them. */
+  request<K extends RequestName>(
+    t: K,
+    ...rest: Record<string, never> extends Args<K>
+      ? [args?: Args<K>, transfer?: Transferable[]]
+      : [args: Args<K>, transfer?: Transferable[]]
+  ): Promise<Result<K>> {
+    const [args, transfer = []] = rest;
+    return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false) as Promise<Result<K>>;
   }
-  private requestCore(
-    t: string,
-    payload: Record<string, unknown>,
+  /** @internal Any request by name, for the testing entry point. */
+  requestRaw(t: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+    return this.requestCore(t as RequestName, payload as never, [], false);
+  }
+  private requestCore<K extends RequestName>(
+    t: K,
+    payload: Args<K>,
     transfer: Transferable[],
     internal: boolean,
     timeoutMs = 0,
@@ -421,7 +434,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.pending.clear();
   }
   /** @internal */
-  stream(message: Record<string, unknown>, transfer: Transferable[] = []): void {
+  stream(message: StreamMessage, transfer: Transferable[] = []): void {
     if (this.disposed || this.state.state === "failed" || !this.worker) return;
     this.worker.postMessage(message, transfer);
   }
@@ -439,7 +452,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   /** @internal */
   toolHost(doc: DocumentHandle): ToolHost {
     return {
-      request: (t, payload) => this.request(t, payload),
+      request: this.request.bind(this) as EngineCore["request"],
       stream: (m, transfer) => this.stream(m, transfer),
       screenToDocument: (x, y) => this.viewport.screenToDocument(x, y),
       storageError: () => this.storageError(),
@@ -499,13 +512,13 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if (d) entries.set(p, d);
     }
     const meta = frameEntries(entries);
-    const plan = (await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer])) as string[];
+    const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer }, [meta.buffer]);
     for (const p of plan) {
       const d = await provider.getObject(p);
       if (d) entries.set(p, d);
     }
     const all = frameEntries(entries);
-    const state = await this.request("openFolder", { bytes: all.buffer }, [all.buffer]);
+    const state = await this.request("openFolder", { bytes: all.buffer as ArrayBuffer }, [all.buffer]);
     const doc = await this.replaceDocument(state);
     doc.setFolder(provider, await sha256Hex(manifest));
     return doc;
@@ -534,7 +547,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.recoveryWaiting = false;
   };
   private exportEmergency = async (): Promise<Blob> =>
-    new Blob([(await this.request("emergencyExport")) as ArrayBuffer]);
+    new Blob([(await this.request("emergencyExport")) as Uint8Array<ArrayBuffer>]);
   private recoverAfterStorageFailure = async (): Promise<RecoveryReport> => {
     const failure = this.storageError();
     if (!failure) throw new AltoError("CONFLICT", "storage has not failed", { reason: "not-failed" });
@@ -560,28 +573,26 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       bitmap.close();
       const pixels = ctx.getImageData(0, 0, c.width, c.height).data;
       const encoded = await file.arrayBuffer();
-      const asset = (await this.request(
+      const asset: ImportedImage = await this.request(
         "import",
-        { width: c.width, height: c.height, pixels: pixels.buffer, encoded, mime: file.type || "image/png" },
+        { width: c.width, height: c.height, pixels: pixels.buffer as ArrayBuffer, encoded, mime: file.type || "image/png" },
         [pixels.buffer, encoded],
-      )) as ImportedImage;
+      );
       return { ...asset, id: asset.record.id } as unknown as ImageAsset;
     },
     importFont: async (file: Blob, options: { faceIndex?: number } = {}): Promise<FontAsset> => {
       const bytes = await file.arrayBuffer();
-      const font = (await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes])) as {
-        record: { id: string };
-      };
+      const font = await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]);
       return { ...font, id: font.record.id } as unknown as FontAsset;
     },
     releaseImport: (asset: ImageAsset | FontAsset): Promise<boolean> => {
       const record = (asset as unknown as { record: { hash: string } }).record;
-      return this.request("releaseImport", { hash: record.hash }) as Promise<boolean>;
+      return this.request("releaseImport", { hash: record.hash });
     },
   };
   readonly vectors = {
-    parseSvg: (svg: string) => this.request("parseVectorPath", { svg }) as Promise<PathData>,
-    toSvg: (data: PathData) => this.request("vectorPathSvg", { data }) as Promise<string>,
+    parseSvg: (svg: string): Promise<PathData> => this.request("parseVectorPath", { svg }),
+    toSvg: (data: PathData): Promise<string> => this.request("vectorPathSvg", { data }),
   };
 
   retry(): Promise<void> {
@@ -619,7 +630,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       await this.start();
       if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
       if (this.document || this.recoveryWaiting) {
-        const state = await this.requestCore("recover", {}, [], true, 30000);
+        const state = await this.requestCore<"recover">("recover", {}, [], true, 30000);
         if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
         this.recoveryWaiting = false;
         // The same handle carries on; the host's references stay valid.

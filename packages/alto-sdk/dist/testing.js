@@ -1,14 +1,14 @@
 import { coreOf } from "./internal.js";
 export function testing(engine) {
     const core = coreOf(engine);
-    const request = (t, payload = {}) => core.request(t, payload);
+    const request = core.request.bind(core);
     return {
         /** Any Worker request by name. */
-        request,
+        request: (t, payload) => core.requestRaw(t, payload),
         /** Restarts the Worker as a crash would. */
         crash: () => core.restart(),
         destroyGpu: () => request("destroyGpu"),
-        /** The module URL the next Worker start loads. */
+        /** The module URL the next Worker start loads; null for the bundled one. */
         setWorkerURL: (url) => {
             core.workerURL = url;
         },

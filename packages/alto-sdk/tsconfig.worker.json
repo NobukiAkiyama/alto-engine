@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "WebWorker"],
+    "strict": true,
+    "declaration": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "rootDirs": ["src", "dist"],
+    "skipLibCheck": true
+  },
+  "include": ["src/worker.ts", "src/storage-worker.ts", "src/decode-worker.ts", "src/storage-core.ts", "src/storage-session.ts"]
+}

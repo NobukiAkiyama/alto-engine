@@ -681,12 +681,11 @@ export async function runTests(engine, benchmark, log) {
     });
     await test("missing Worker script stops once and retries without corrupting the journal", async () => {
       const hash = (await doc.snapshotHash());
-      const workerURL = new URL("../../packages/alto-sdk/dist/worker.js", import.meta.url);
       testing(engine).setWorkerURL("/missing-alto-engine-worker.js");
       let code = null;
       try { await testing(engine).crash(); }
       catch (error) { code = error.code; }
-      finally { testing(engine).setWorkerURL(workerURL); }
+      finally { testing(engine).setWorkerURL(null); }
       assert(code === "WORKER_UNAVAILABLE", "missing script was not classified: " + code);
       assert(engine.status.state === "failed" && engine.status.error, "Worker failure did not stop the engine");
       assert(engine.status.error.code !== "CORRUPT_DATA", "Worker failure was mislabeled as saved-data corruption");
