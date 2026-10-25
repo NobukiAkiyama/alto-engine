@@ -410,7 +410,7 @@ async function execute(m) {
   // The in-memory runtime may be ahead of the last confirmed journal write.
   // Keep it available for an emergency export, but accept no more edits.
   if (storageFailure && !readableAfterFailure.has(m.t))
-    throw Error("STORAGE: 保存状態を確認できません。現在の内容を退避してから復旧してください");
+    throw Error("STORAGE: the journal cannot confirm writes; export the document, then recover");
   if (!readableAfterFailure.has(m.t)) await waitForRoom();
   switch (m.t) {
     case "init":
@@ -439,6 +439,7 @@ async function execute(m) {
         runtime.transact(
           JSON.stringify({
             intent: m.intent,
+            label: m.label,
             ops: m.ops,
             baseRevision: m.baseRevision,
           }),
@@ -628,9 +629,9 @@ async function execute(m) {
       await io("activate", { generation: recovery.generation });
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
-        s.warnings.push("新しい復旧記録が破損していたため、前の世代を開きました");
+        s.warnings.push({ code: "RECOVERED_OLDER_GENERATION", details: {} });
       if (recovery.truncated)
-        s.warnings.push("最後の不完全な記録を除いて復旧しました");
+        s.warnings.push({ code: "RECOVERED_TRUNCATED", details: {} });
       return s;
     }
     case "validateFrame":
