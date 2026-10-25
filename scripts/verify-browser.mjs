@@ -21,6 +21,7 @@ const functionalOnly = process.argv.includes("--functional");
 const benchmarkOnly = process.argv.includes("--benchmark-only");
 const examplesOnly = process.argv.includes("--examples");
 const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
+const startupOnly = process.argv.includes("--startup-only");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
@@ -341,7 +342,18 @@ try {
       if (i === 119) throw Error("Document did not open");
     }
 
-    for (const [name, body] of suites) {
+    if (startupOnly) {
+      await evaluate(`(async () => {
+        const { unstable } = await import('../../packages/alto-sdk/dist/unstable.js');
+        await unstable(window.altoEngine).settle();
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await unstable(window.altoEngine).settle();
+        return window.altoEngine.document.snapshotHash();
+      })()`, 45000);
+      summary.push({ name: "startup", ok: true, count: 1 });
+      await sampleSystem("startup-settled");
+    }
+    for (const [name, body] of (startupOnly ? [] : suites)) {
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (benchmarkOnly && name !== "benchmark") continue;
@@ -375,7 +387,7 @@ try {
   if (traceStarted) {
     try {
       await browserClient.send("Tracing.end", {}, 10000);
-      for (let i = 0; i < 100 && !traceStream; i++) await sleep(100);
+      for (let i = 0; i < 450 && !traceStream; i++) await sleep(100);
       if (!traceStream) throw Error("Tracing did not return a stream");
       const path = join(reportDir, "chrome-gpu-trace.json");
       await writeFile(path, "");
@@ -387,6 +399,9 @@ try {
       await browserClient.send("IO.close", { handle: traceStream }, 5000);
       diagnostics.trace = { file: "chrome-gpu-trace.json", bufferKiB: 65536 };
     } catch (error) { diagnostics.trace = { error: String(error) }; summary.push({ name: "gpu-trace", ok: false, error: String(error) }); }
+  }
+  if (startupOnly && /SharedImageManager::ProduceSkia:.*non-existent mailbox/.test(stderr)) {
+    summary.push({ name: "unexpected startup surface loss", ok: false, error: "SharedImage mailbox vanished before any fault injection; a later recovery does not make startup clean" });
   }
   await sampleSystem("shutdown");
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");

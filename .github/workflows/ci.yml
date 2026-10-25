@@ -43,6 +43,7 @@ on:
           - webgpu
           - wasm
           - sdk
+          - startup
       lifecycle_memory_mib:
         description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
         default: '0'
@@ -170,6 +171,14 @@ jobs:
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == startup ]]; then
+            status=0
+            # Independent fresh profiles, not retries that turn a failure green.
+            for trial in 1 2 3 4 5; do
+              ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/startup-$trial" node scripts/verify-browser.mjs --startup-only || status=1
+            done
+            exit "$status"
+          fi
           if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == sdk ]]; then
             ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/sdk" node scripts/verify-browser.mjs --functional
             exit
