@@ -9,7 +9,7 @@
 // ALTO_BROWSER_DISABLE_GPU_WATCHDOG=1 is set for a controlled comparison.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
@@ -175,7 +175,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "";
 const recordEvent = ({ method, params }) => {
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
@@ -189,9 +189,11 @@ async function sampleSystem(label) {
     try { sample[method] = (await browserClient.send(method, {}, 5000)).result; }
     catch (error) { sample[method] = { error: String(error) }; }
   diagnostics.system.push(sample);
+  await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
 }
 try {
   await mkdir(reportDir, { recursive: true });
+  await writeFile(join(reportDir, "chrome-stderr.log"), "");
   diagnostics.artifacts = {};
   for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm"])
     diagnostics.artifacts[file] = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
@@ -223,7 +225,11 @@ try {
   diagnostics.args = args;
   chrome = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
   chrome.on("error", (error) => { launchError = error; });
-  chrome.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2 * 1024 * 1024); });
+  chrome.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk).slice(-2 * 1024 * 1024);
+    // Keep the evidence even if a hung test is killed before finally runs.
+    appendFileSync(join(reportDir, "chrome-stderr.log"), chunk);
+  });
   const { version, page } = await browserPage(profile, chrome, () => launchError);
   console.log(version.Browser);
   diagnostics.browser = version;
@@ -335,7 +341,6 @@ try {
 } finally {
   await sampleSystem("shutdown");
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
-  await writeFile(join(reportDir, "chrome-stderr.log"), stderr);
   if (externalReports) await writeFile(join(reportDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
   if (summary.some((suite) => !suite.ok))
     console.error("Chrome stderr (tail):\n" + stderr.slice(-12000));

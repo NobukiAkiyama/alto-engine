@@ -149,6 +149,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   /** Settles once the namespace lock is released, after `releaseLease`. */
   private leaseReleased: Promise<unknown> = Promise.resolve();
   private lastWorkerPanic: string | null = null;
+  private initPhase: string | null = null;
   private recoveryWaiting = false;
   private resizeObserver: ResizeObserver;
   private ratioQuery: MediaQueryList | null = null;
@@ -303,6 +304,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
 
   private async start() {
+    this.initPhase = null;
     // Written out literally so bundlers (Vite, webpack) see the Worker and bundle it.
     const worker = this.workerURL
       ? new Worker(this.workerURL, { type: "module" })
@@ -378,6 +380,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     } else if (data.t === "diagnostic") {
       const value = data.value;
       if (value?.panic) this.lastWorkerPanic = String(value.panic);
+      if (typeof value?.initPhase === "string") this.initPhase = value.initPhase;
       this.diagnostics.emit("diagnostic", value);
     } else if (data.t === "gpuLost") {
       this.document?.abortTool(new AltoError("GPU_LOST", "the GPU device was lost during the stroke"));
@@ -451,7 +454,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       const timer = timeoutMs
         ? setTimeout(() => {
             this.pending.delete(id);
-            reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}`));
+            const stage = t === "init" && this.initPhase ? ` (last stage: ${this.initPhase})` : "";
+            reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}${stage}`));
           }, timeoutMs)
         : undefined;
       this.pending.set(id, { resolve, reject, timer });

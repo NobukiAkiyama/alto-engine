@@ -39,6 +39,7 @@ export class EngineCore extends Emitter {
     /** Settles once the namespace lock is released, after `releaseLease`. */
     leaseReleased = Promise.resolve();
     lastWorkerPanic = null;
+    initPhase = null;
     recoveryWaiting = false;
     resizeObserver;
     ratioQuery = null;
@@ -193,6 +194,7 @@ export class EngineCore extends Emitter {
         });
     }
     async start() {
+        this.initPhase = null;
         // Written out literally so bundlers (Vite, webpack) see the Worker and bundle it.
         const worker = this.workerURL
             ? new Worker(this.workerURL, { type: "module" })
@@ -272,6 +274,8 @@ export class EngineCore extends Emitter {
             const value = data.value;
             if (value?.panic)
                 this.lastWorkerPanic = String(value.panic);
+            if (typeof value?.initPhase === "string")
+                this.initPhase = value.initPhase;
             this.diagnostics.emit("diagnostic", value);
         }
         else if (data.t === "gpuLost") {
@@ -332,7 +336,8 @@ export class EngineCore extends Emitter {
             const timer = timeoutMs
                 ? setTimeout(() => {
                     this.pending.delete(id);
-                    reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}`));
+                    const stage = t === "init" && this.initPhase ? ` (last stage: ${this.initPhase})` : "";
+                    reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}${stage}`));
                 }, timeoutMs)
                 : undefined;
             this.pending.set(id, { resolve, reject, timer });

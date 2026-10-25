@@ -514,23 +514,31 @@ async function execute(m) {
                 throw Error("CONFLICT: protocol mismatch");
             canvas = m.canvas;
             budget = m.budget;
+            postMessage({ t: "diagnostic", value: { initPhase: "wasm-load" } });
             await init();
+            postMessage({ t: "diagnostic", value: { initPhase: "runtime-create" } });
             runtime = await Runtime.create(canvas, budget);
+            postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
             frameFields = runtime.frameFields();
             adapterName = runtime.adapterName();
             startDecoders();
             if (runtime.protocolVersion?.() !== 4)
                 throw Error("CONFLICT: SDK/WASM version mismatch");
             journaling = m.journal !== false;
-            if (!journaling)
+            if (!journaling) {
+                postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
                 return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+            }
+            postMessage({ t: "diagnostic", value: { initPhase: "journal-configure" } });
             await io("configure", { namespace: m.namespace || "default" });
+            postMessage({ t: "diagnostic", value: { initPhase: "journal-inspect" } });
             const recovery = await io("inspect");
             // Later checkpoints skip the objects the store already holds.
             runtime.noteStoredObjects(JSON.stringify(recovery.objects));
             delete recovery.objects;
             const info = recovery;
             recoveryPending = recovery.available;
+            postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
             return { protocol: 4, recovery: info };
         case "discardRecovery":
             if (!recoveryPending || documentEpoch !== 0)
