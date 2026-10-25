@@ -29,7 +29,7 @@ pub struct TextCache {
 pub struct ImportedFont {
     pub record: AssetRecord,
     pub info: FontInfo,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<crate::Warning>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,7 +101,20 @@ impl Engine {
         }
         let byte_len = bytes.len() as u64;
         let hash = self.put_import_blob(bytes);
-        let warnings = info.warnings();
+        // Restricted fonts were refused above.
+        let mut warnings = vec![];
+        if info.embedding == FontEmbedding::PreviewAndPrint {
+            warnings.push(
+                crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                    .with("family", &info.family)
+                    .with("level", "preview_and_print"),
+            );
+        }
+        if !info.subsetting_allowed {
+            warnings.push(
+                crate::Warning::new("FONT_SUBSETTING_FORBIDDEN").with("family", &info.family),
+            );
+        }
         Ok(ImportedFont {
             record: AssetRecord {
                 id: AssetId::new(),
