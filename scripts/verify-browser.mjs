@@ -22,7 +22,6 @@ const benchmarkOnly = process.argv.includes("--benchmark-only");
 const examplesOnly = process.argv.includes("--examples");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
-const disableSkiaGraphite = process.env.ALTO_BROWSER_DISABLE_SKIA_GRAPHITE === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
 const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
 const browserWidth = Number(process.env.ALTO_BROWSER_WIDTH || 0);
@@ -176,7 +175,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, skiaGraphiteDisabled: disableSkiaGraphite, browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "";
 const recordEvent = ({ method, params }) => {
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
@@ -214,7 +213,6 @@ try {
     "--enable-unsafe-webgpu",
     "--enable-logging=stderr",
     ...(disableGpuWatchdog ? ["--disable-gpu-watchdog"] : []),
-    ...(disableSkiaGraphite ? ["--disable-features=SkiaGraphite"] : []),
     ...(process.env.ALTO_BROWSER_GPU === "swiftshader"
       ? ["--use-webgpu-adapter=swiftshader", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader"]
       : platform() === "darwin" ? ["--use-angle=metal"] : []),
