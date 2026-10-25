@@ -2554,48 +2554,31 @@ impl Renderer {
         store: &dyn TileStore,
         key: CacheKey,
     ) -> Result<Vec<u8>> {
-        if !self.cache_map.contains_key(&key) {
-            self.compose(scene, key, store, false)?;
-        }
-        let slot = self
-            .cache_map
-            .get(&key)
-            .ok_or(RenderError::Internal("cache tile".into()))?
-            .slot;
+        self.read_tiles(scene, store, &[key]).await
+    }
+    /// Display tiles, 256×256 RGBA premultiplied each, back to back in `keys` order,
+    /// with one map for all. Each copy is submitted right after its tile is composed:
+    /// composing a later tile may reuse an earlier tile's cache slot, and the queue
+    /// runs the copy before that.
+    pub async fn read_tiles(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        keys: &[CacheKey],
+    ) -> Result<Vec<u8>> {
+        const TILE_BYTES: u64 = 256 * 256 * 4;
         let b = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe"),
-            size: 262144,
+            size: TILE_BYTES * keys.len().max(1) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut e = self.device.create_command_encoder(&Default::default());
-        e.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.cache,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: slot,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &b,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(1024),
-                    rows_per_image: Some(256),
-                },
-            },
-            wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(e.finish()));
-        self.retired.release();
+        for (i, key) in keys.iter().enumerate() {
+            if let Err(e) = self.copy_display_tile(scene, store, *key, &b, i as u64 * TILE_BYTES) {
+                b.destroy();
+                return Err(e);
+            }
+        }
         let (tx, rx) = futures_channel::oneshot::channel();
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
@@ -2607,10 +2590,11 @@ impl Renderer {
             b.destroy();
             return Err(if self.is_lost() {
                 RenderError::GpuLost(format!(
-                    "device lost while reading display tile {key:?}: {e}"
+                    "device lost while reading {} display tiles: {e}",
+                    keys.len()
                 ))
             } else {
-                RenderError::Internal(format!("reading display tile {key:?}: {e}"))
+                RenderError::Internal(format!("reading {} display tiles: {e}", keys.len()))
             });
         }
         let view = b
@@ -2624,6 +2608,52 @@ impl Renderer {
         // until JS collects it. Readbacks are frequent: release it now.
         b.destroy();
         Ok(data)
+    }
+    fn copy_display_tile(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        key: CacheKey,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+    ) -> Result<()> {
+        if !self.cache_map.contains_key(&key) {
+            self.compose(scene, key, store, false)?;
+        }
+        let slot = self
+            .cache_map
+            .get(&key)
+            .ok_or(RenderError::Internal("cache tile".into()))?
+            .slot;
+        let mut e = self.device.create_command_encoder(&Default::default());
+        e.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.cache,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(e.finish()));
+        self.retired.release();
+        Ok(())
     }
 }
 

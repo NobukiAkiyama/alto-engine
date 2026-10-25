@@ -1006,6 +1006,23 @@ impl Runtime {
             .await
             .map_err(error)
     }
+    /// Display tiles at `level`, `coords` = [tx0, ty0, tx1, ty1, …], at most 64, back to
+    /// back with one GPU readback.
+    #[wasm_bindgen(js_name=readTiles)]
+    pub async fn read_tiles(&mut self, level: i32, coords: Vec<i32>) -> Result<Vec<u8>, JsValue> {
+        if !(0..=12).contains(&level)
+            || !coords.len().is_multiple_of(2)
+            || coords.len() > 128
+            || coords.iter().any(|c| c.unsigned_abs() > 1_000_000)
+        {
+            return Err(error("INVALID_ARGUMENT: read tiles"));
+        }
+        let keys: Vec<_> = coords.chunks(2).map(|c| (level, c[0], c[1])).collect();
+        self.renderer
+            .read_tiles(&self.scene, &self.engine, &keys)
+            .await
+            .map_err(error)
+    }
     #[wasm_bindgen(js_name=readTile)]
     pub async fn read_tile(&mut self, tx: i32, ty: i32) -> Result<Vec<u8>, JsValue> {
         self.renderer

@@ -443,18 +443,29 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   delete out.hasProfile;
   return out as FrameStats;
 }
+/** Display tiles read back per GPU round trip. */
+const EXPORT_BATCH = 64;
 /**
- * The document as an image file, from the same display tiles the canvas shows.
- * Tiles are premultiplied; image files hold straight alpha.
+ * The document as an image file, from the same display tiles the canvas shows. A
+ * reduced export reads the pyramid level at or above its scale: each level halves the
+ * tiles to read. Tiles are premultiplied; image files hold straight alpha.
  */
 async function exportImage({ region, scale, type }: Args<"exportImage">) {
-  const { x0, y0, x1, y1 } = region;
+  const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
+  const f = 2 ** level;
+  const x0 = Math.floor(region.x0 / f), y0 = Math.floor(region.y0 / f);
+  const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
   const w = x1 - x0, h = y1 - y0;
   if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
   const pixels = new Uint8ClampedArray(w * h * 4);
+  const tiles: [number, number][] = [];
   for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
-    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) {
-      const tile = await runtime.readTile(tx, ty);
+    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) tiles.push([tx, ty]);
+  for (let at = 0; at < tiles.length; at += EXPORT_BATCH) {
+    const batch = tiles.slice(at, at + EXPORT_BATCH);
+    const bytes = await runtime.readTiles(level, Int32Array.from(batch.flat()));
+    batch.forEach(([tx, ty], i) => {
+      const tile = bytes.subarray(i * 262144, (i + 1) * 262144);
       const left = Math.max(x0, tx * 256), right = Math.min(x1, tx * 256 + 256);
       for (let y = Math.max(y0, ty * 256); y < Math.min(y1, ty * 256 + 256); y++)
         for (let x = left; x < right; x++) {
@@ -463,16 +474,20 @@ async function exportImage({ region, scale, type }: Args<"exportImage">) {
           pixels[d + 3] = a;
           if (a) for (let c = 0; c < 3; c++) pixels[d + c] = Math.round((tile[s + c] * 255) / a);
         }
-    }
+    });
+  }
   const full = new OffscreenCanvas(w, h);
   full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
-  let out = full;
-  if (scale < 1) {
-    out = new OffscreenCanvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
-    const ctx = out.getContext("2d")!;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(full, 0, 0, out.width, out.height);
-  }
+  // The region in level pixels, and the size the caller asked for.
+  const sx = region.x0 / f - x0, sy = region.y0 / f - y0;
+  const sw = (region.x1 - region.x0) / f, sh = (region.y1 - region.y0) / f;
+  const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
+  const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
+  if (sx === 0 && sy === 0 && ow === w && oh === h) return full.convertToBlob({ type });
+  const out = new OffscreenCanvas(ow, oh);
+  const ctx = out.getContext("2d")!;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(full, sx, sy, sw, sh, 0, 0, ow, oh);
   return out.convertToBlob({ type });
 }
 let savedToken = 0;

@@ -93,6 +93,7 @@ export default defineConfig({
 - **文書の操作口（`DocumentHandle`）は、Worker を作り直しても同じオブジェクトのままです。** 入れ替わるのは、`open`、`createDocument`、`recovery.restore` を呼んだときだけです。そのとき `document` イベントが届きます。
 - **表示位置も、作り直しの前後で変わりません。**
 - **使用中のストロークは、作り直しで終わります。** `end()` が `WORKER_CRASHED` で失敗します。
+- **戻る・進むのキャッシュ（bfcache）：** ページがキャッシュに入ると（`pagehide` の `persisted` が真）、記録を持つエンジンは Worker を止め、保存場所の名前の鍵を手放します。そのあいだ、ほかのタブで同じ文書を開けます。ページが戻ると、鍵を取り直し、記録から立て直します（状態は `restarting` から `ready`）。鍵がほかのタブに取られていれば `failed`（`CONFLICT`、`namespace-in-use`）になり、`engine.retry()` で再試行できます。記録を持たないエンジンは、Worker を止めずにページと一緒に止まります。ページを閉じたとき（`persisted` が偽）は、エンジンを終了します。
 
 ## 6. 保存場所の名前（namespace）
 
@@ -168,7 +169,7 @@ try {
   - `downloadTarget()`：ダウンロードにする
   - `blobTarget()`：メモリ上に受け取る
 - **フォルダ形式（`.altoproj`）：** `doc.saveFolder(provider)` と `engine.openFolder(provider)` で扱います。独自の保存先（サーバーなど）は `ObjectStorageProvider` を実装します。
-- **画像：** `doc.exportImage({ type, scale, region })` で、画面に表示されるのと同じ画素を PNG か WebP で書き出します。サムネイルには、`scale` を 1 より小さくします。
+- **画像：** `doc.exportImage({ type, scale, region })` で、画面に表示されるのと同じ画素を PNG か WebP で書き出します。サムネイルには、`scale` を 1 より小さくします。`scale` が 1/2 以下のときは、縮小済みの表示タイル（ピラミッドの段）から読むので、読み戻しが段ごとに 4 分の 1 になります。
 
 ## 11. 表示位置
 

@@ -40,7 +40,23 @@ export class EngineCore extends Emitter {
     resizeObserver;
     ratioQuery = null;
     onRatioChange = () => this.watchPixelRatio();
-    onPageHide = () => this.shutdown();
+    /**
+     * Leaving the page ends the engine. A page kept in the back/forward cache only
+     * pauses: a journaled engine gives up its namespace (another tab may open the
+     * document meanwhile) and restarts from the journal when the page returns. An
+     * engine without a journal keeps its Worker, which the browser freezes with the page.
+     */
+    onPageHide = (event) => {
+        if (!event.persisted)
+            this.shutdown();
+        else if (this.journaled)
+            this.suspend();
+    };
+    onPageShow = (event) => {
+        if (event.persisted && this.suspended)
+            void this.resume().catch((e) => this.emit("error", e));
+    };
+    suspended = false;
     /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
     workerURL;
     constructor(options) {
@@ -73,6 +89,7 @@ export class EngineCore extends Emitter {
         this.resizeObserver.observe(options.container);
         this.watchPixelRatio();
         addEventListener("pagehide", this.onPageHide);
+        addEventListener("pageshow", this.onPageShow);
     }
     /** @internal */
     static async create(options) {
@@ -499,8 +516,14 @@ export class EngineCore extends Emitter {
     retry() {
         if (this.state.state !== "failed")
             return Promise.reject(new AltoError("CONFLICT", "the engine has not failed", { reason: "not-failed" }));
+        // A failed return from the back/forward cache left the namespace to someone else.
+        const run = async () => {
+            if (this.journaled && !this.releaseLease)
+                await this.acquireLease();
+            await this.restart();
+        };
         const previous = this.restartPromise;
-        return previous ? previous.catch(() => { }).then(() => this.restart()) : this.restart();
+        return previous ? previous.catch(() => { }).then(run) : run();
     }
     /** @internal Stops the Worker and starts a new one with the confirmed journal. */
     restart() {
@@ -572,6 +595,35 @@ export class EngineCore extends Emitter {
             throw error;
         }
     }
+    /** The page went into the back/forward cache. */
+    suspend() {
+        if (this.disposed || this.suspended)
+            return;
+        this.suspended = true;
+        cancelAnimationFrame(this.raf);
+        ++this.workerGeneration;
+        this.worker?.terminate();
+        this.worker = null;
+        const paused = new AltoError("WORKER_UNAVAILABLE", "the page was put in the back/forward cache");
+        this.document?.abortTool(paused);
+        this.rejectPending(paused);
+        this.releaseLease?.();
+        this.releaseLease = undefined;
+        this.setStatus("restarting", null);
+    }
+    /** The page came back from the back/forward cache: take the namespace again and restart. */
+    async resume() {
+        this.suspended = false;
+        await this.leaseReleased;
+        try {
+            await this.acquireLease();
+        }
+        catch (error) {
+            this.setStatus("failed", error instanceof AltoError ? error : new AltoError("CONFLICT", String(error)));
+            throw error;
+        }
+        await this.restart();
+    }
     shutdown() {
         if (this.disposed)
             return;
@@ -585,6 +637,7 @@ export class EngineCore extends Emitter {
         this.resizeObserver.disconnect();
         this.ratioQuery?.removeEventListener("change", this.onRatioChange);
         removeEventListener("pagehide", this.onPageHide);
+        removeEventListener("pageshow", this.onPageShow);
         this.document?.abortTool(new AltoError("WORKER_UNAVAILABLE", "the engine was disposed"));
         this.rejectPending(new AltoError("WORKER_UNAVAILABLE", "the engine was disposed"));
         this.element.remove();

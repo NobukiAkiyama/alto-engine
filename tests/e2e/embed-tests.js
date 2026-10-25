@@ -6,6 +6,21 @@ import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
 const near = (a, b, t = 1e-6) => Math.abs(a - b) <= t;
+/** Runs `action` and waits for an engine event that `match` accepts. */
+async function event(engine, name, action, match) {
+  let off;
+  const seen = new Promise((resolve, reject) => {
+    const t = setTimeout(() => (off(), reject(Error("timeout " + name))), 15000);
+    off = engine.on(name, (v) => {
+      if (!match(v)) return;
+      clearTimeout(t);
+      off();
+      resolve();
+    });
+  });
+  await action();
+  await seen;
+}
 const run = Date.now().toString(36);
 let serial = 0;
 const name = (label) => `test-embed/${run}/${label}-${serial++}`;
@@ -356,6 +371,57 @@ export async function runEmbedTests(_playground, log) {
       assert(engine.viewport.get().zoom <= 128 / ratio + 1e-9, "zoom above the renderer's limit: " + engine.viewport.get().zoom);
       engine.viewport.set({ zoom: 1e-6 });
       assert(engine.viewport.get().zoom >= 0.01 / ratio - 1e-12, "zoom below the renderer's limit: " + engine.viewport.get().zoom);
+    });
+    await test("a reduced export reads the matching pyramid level", async () => {
+      const engine = await engineIn(container(400, 300));
+      const doc = await engine.createDocument({ width: 512, height: 256 });
+      await quadrants(engine, doc);
+      const half = await doc.exportImage({ scale: 0.5 });
+      const bitmap = await createImageBitmap(half, { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+      assert(bitmap.width === 256 && bitmap.height === 128, `size ${bitmap.width}×${bitmap.height}`);
+      const c = new OffscreenCanvas(256, 128), ctx = c.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+      const exported = ctx.getImageData(0, 0, 256, 128).data;
+      const tile = await unstable(engine).readTileLevel(1, 0, 0);
+      for (const [x, y] of [[5, 5], [200, 5], [5, 100], [200, 100]]) {
+        const s = (y * 256 + x) * 4, d = (y * 256 + x) * 4, a = tile[s + 3];
+        for (let ch = 0; ch < 3; ch++) {
+          const straight = a ? Math.round((tile[s + ch] * 255) / a) : 0;
+          assert(Math.abs(exported[d + ch] - straight) <= 1, `pixel ${x},${y} channel ${ch}: ${exported[d + ch]} vs ${straight}`);
+        }
+      }
+    });
+    await test("the back/forward cache pauses a journaled engine and restores it", async () => {
+      const namespace = name("bfcache");
+      const engine = await engineIn(container(), { storage: { namespace } });
+      const doc = await engine.createDocument({ width: 128, height: 128 });
+      await doc.transact("layer.add", (tx) => tx.addRaster({ name: "cached" }));
+      await doc.durable();
+      const hash = await doc.snapshotHash();
+      const lockHeld = async () => (await navigator.locks.query()).held.some((l) => l.name === `alto-engine:${namespace}`);
+      dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      assert(engine.status.state === "restarting", "a cached page left the engine " + engine.status.state);
+      let held = true;
+      for (let i = 0; i < 50 && held; i++) held = (await lockHeld()) && (await new Promise((r) => setTimeout(r, 20)), true);
+      assert(!held, "the cached page kept the namespace");
+      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "ready");
+      assert(engine.document === doc && (await doc.snapshotHash()) === hash, "the restored page lost its document");
+      assert(await lockHeld(), "the restored engine runs without its namespace");
+      await doc.transact("layer.add", (tx) => tx.addRaster());
+    });
+    await test("returning from the cache to a namespace taken meanwhile fails, and retry recovers", async () => {
+      const namespace = name("bfcache-taken");
+      const engine = await engineIn(container(), { storage: { namespace } });
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      await doc.durable();
+      dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      await new Promise((r) => setTimeout(r, 50));
+      const other = await engineIn(container(), { storage: { namespace } });
+      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "failed");
+      assert(engine.status.error?.details?.reason === "namespace-in-use", "the failure was " + engine.status.error?.code);
+      await other.dispose();
+      await engine.retry();
+      assert(engine.status.state === "ready" && engine.document === doc, "retry did not restore the document");
     });
     log("ALL " + results.length + " EMBED TESTS PASSED");
   } catch (error) {
