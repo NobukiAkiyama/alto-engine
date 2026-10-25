@@ -20,6 +20,10 @@ on:
         description: Record Canvas and WebGPU calls around the first surface fault
         default: false
         type: boolean
+      resize_barrier:
+        description: Diagnostic only - wait for GPU submissions before applying SDK resize
+        default: false
+        type: boolean
       gpu_trace:
         description: Capture a bounded Chrome GPU command trace for diagnosis
         default: false
@@ -79,6 +83,7 @@ jobs:
     timeout-minutes: 60
     env:
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
       ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
@@ -141,6 +146,7 @@ jobs:
     timeout-minutes: 25
     env:
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
       ALTO_BROWSER_GRAPHITE_BACKEND: ${{ (inputs.graphite_backend == 'swiftshader' || inputs.diagnostic_runner == 'ubuntu-24.04') && 'swiftshader' || 'default' }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}

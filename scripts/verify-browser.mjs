@@ -26,6 +26,7 @@ const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.s
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
 const surfaceRecording = process.env.ALTO_BROWSER_SURFACE_RECORDING === "1";
+const resizeBarrier = process.env.ALTO_BROWSER_RESIZE_BARRIER === "1";
 const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
 const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
 if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
@@ -106,8 +107,14 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      if (surfaceRecording && path === join(root, "packages/alto-sdk/dist/worker.js")) {
-        res.end((await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8")) + "\n" + await readFile(path, "utf8"));
+      if ((surfaceRecording || resizeBarrier) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+        let source = await readFile(path, "utf8");
+        if (resizeBarrier) {
+          const target = "runtime.resize(pendingResize.width, pendingResize.height);";
+          if (source.split(target).length !== 2) throw Error("resize barrier target changed");
+          source = source.replace(target, "await runtime.gpuIdle(); " + target);
+        }
+        res.end((surfaceRecording ? (await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8")) + "\n" : "") + source);
       } else createReadStream(path).on("error", () => res.destroy()).pipe(res);
     } catch {
       res.writeHead(404).end();
@@ -183,7 +190,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, resizeBarrier, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "", traceStream = null, traceStarted = false, unexpectedSurfaceFault = false;
 const recordEvent = ({ method, params }) => {
   if (method === "Tracing.tracingComplete") traceStream = params.stream;

@@ -108,7 +108,9 @@ async function execute(m) {
     let texture = null, acquired = false;
     for (const step of replayEvents) {
       const wait = step.ms - (performance.now() - started);
-      if (wait >= 1) await new Promise((resolve) => setTimeout(resolve, wait));
+      // An acquired surface texture expires at the end of its task. Keep its
+      // recorded acquire+submit atomic even if a timer wakes a little early.
+      if (wait >= 1 && !acquired) await new Promise((resolve) => setTimeout(resolve, wait));
       if (fault) throw Error(fault);
       if (step.op === "resize-width") canvas.width = step.value;
       else if (step.op === "resize-height") canvas.height = step.value;
