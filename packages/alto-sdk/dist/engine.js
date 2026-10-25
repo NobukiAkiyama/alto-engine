@@ -26,6 +26,9 @@ export class EngineCore extends Emitter {
     sequence = 1;
     pending = new Map();
     mutation = Promise.resolve();
+    nextDocumentEpoch = 0;
+    documentEpoch = 0;
+    documentEpochs = new WeakMap();
     raf = 0;
     disposed = false;
     pixelRatio;
@@ -304,7 +307,15 @@ export class EngineCore extends Emitter {
     requestRaw(t, payload = {}) {
         return this.requestCore(t, payload, [], false);
     }
-    requestCore(t, payload, transfer, internal, timeoutMs = 0) {
+    /** @internal Binds a request to this handle, including across a Worker round trip. */
+    requestForDocument(doc, t, ...rest) {
+        const epoch = this.documentEpochs.get(doc);
+        if (doc !== this.document || epoch === undefined)
+            return Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
+        const [args, transfer = []] = rest;
+        return this.requestCore(t, (args ?? {}), transfer, false, 0, { documentEpoch: epoch });
+    }
+    requestCore(t, payload, transfer, internal, timeoutMs = 0, scope = {}) {
         if (this.disposed)
             return Promise.reject(new AltoError("WORKER_UNAVAILABLE", "the engine was disposed"));
         const running = this.state.state === "ready" || this.state.state === "storage-failed";
@@ -327,7 +338,7 @@ export class EngineCore extends Emitter {
             this.pending.set(id, { resolve, reject, timer });
             // Request fields come last so a payload can never replace the reply id.
             try {
-                worker.postMessage({ ...payload, t, id }, transfer);
+                worker.postMessage({ ...payload, ...scope, t, id }, transfer);
             }
             catch (error) {
                 if (timer)
@@ -353,7 +364,7 @@ export class EngineCore extends Emitter {
     }
     /** @internal Runs edits one at a time. */
     mutate(fn) {
-        const p = this.mutation.then(() => {
+        return this.serialize(async () => {
             if (this.state.state === "failed" && this.state.error)
                 throw this.state.error;
             const failure = this.storageError();
@@ -361,14 +372,22 @@ export class EngineCore extends Emitter {
                 throw failure;
             return fn();
         });
+    }
+    /** Document replacement and recovery decisions share the edit order. */
+    serialize(fn) {
+        const p = this.mutation.then(fn);
         this.mutation = p.catch(() => { });
         return p;
     }
     /** @internal */
     toolHost(doc) {
         return {
-            request: this.request.bind(this),
-            stream: (m, transfer) => this.stream(m, transfer),
+            request: ((...args) => this.requestForDocument(doc, ...args)),
+            stream: (m, transfer) => {
+                if (doc !== this.document)
+                    return;
+                this.stream(m.t === "input" ? { ...m, documentEpoch: this.documentEpochs.get(doc) } : m, transfer);
+            },
             screenToDocument: (x, y) => this.viewport.screenToDocument(x, y),
             storageError: () => this.storageError(),
             ended: (session, state) => doc.toolEnded(session, state),
@@ -384,9 +403,11 @@ export class EngineCore extends Emitter {
             height: Math.max(1, Math.round(r.height * this.pixelRatio)),
         });
     }
-    adopt(state, fit) {
+    adopt(state, fit, epoch) {
         this.document?.close();
         this.document = new DocumentHandle(this, state);
+        this.documentEpoch = epoch;
+        this.documentEpochs.set(this.document, epoch);
         this.emit("document", this.document);
         if (fit)
             this.viewport.fit();
@@ -401,48 +422,57 @@ export class EngineCore extends Emitter {
                 reason: "recovery-pending",
             });
     }
-    async replaceDocument(state) {
-        if (this.document)
-            await this.document.endTool().catch(() => { });
-        return this.adopt(state, true);
+    replaceDocument(load) {
+        return this.serialize(async () => {
+            this.refuseWhileRecoveryWaits();
+            const reopening = this.storageError()?.code === "CORRUPT_DATA";
+            const epoch = ++this.nextDocumentEpoch;
+            const state = await load(epoch);
+            const doc = this.adopt(state, true, epoch);
+            if (reopening)
+                this.setStatus("ready", null);
+            return doc;
+        });
+    }
+    async requestReplacement(t, args, epoch, transfer = []) {
+        // Finish the old stroke before the Worker replaces its document, not after.
+        await this.document?.endTool();
+        return this.requestCore(t, args, transfer, false, 0, { nextDocumentEpoch: epoch });
     }
     async createDocument(meta) {
-        this.refuseWhileRecoveryWaits();
-        return this.replaceDocument(await this.request("createDocument", meta));
+        return this.replaceDocument((epoch) => this.requestReplacement("createDocument", meta, epoch));
     }
     async open(source) {
-        this.refuseWhileRecoveryWaits();
-        const blob = source instanceof Blob ? source : await source.read();
-        const bytes = await blob.arrayBuffer();
-        const state = await this.request("open", { bytes }, [bytes]);
-        const reopening = this.storageError()?.code === "CORRUPT_DATA";
-        const doc = await this.replaceDocument(state);
-        if (reopening)
-            this.setStatus("ready", null);
-        return doc;
+        return this.replaceDocument(async (epoch) => {
+            const blob = source instanceof Blob ? source : await source.read();
+            const bytes = await blob.arrayBuffer();
+            return this.requestReplacement("open", { bytes }, epoch, [bytes]);
+        });
     }
     async openFolder(provider) {
-        this.refuseWhileRecoveryWaits();
-        const manifest = await provider.readRef("manifest.json");
-        if (!manifest)
-            throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
-        const entries = new Map([["manifest.json", manifest]]);
-        for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
-            const d = await provider.getObject(p);
-            if (d)
-                entries.set(p, d);
-        }
-        const meta = frameEntries(entries);
-        const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
-        for (const p of plan) {
-            const d = await provider.getObject(p);
-            if (d)
-                entries.set(p, d);
-        }
-        const all = frameEntries(entries);
-        const state = await this.request("openFolder", { bytes: all.buffer }, [all.buffer]);
-        const doc = await this.replaceDocument(state);
-        doc.setFolder(provider, await sha256Hex(manifest));
+        let manifestHash = "";
+        const doc = await this.replaceDocument(async (epoch) => {
+            const manifest = await provider.readRef("manifest.json");
+            if (!manifest)
+                throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
+            manifestHash = await sha256Hex(manifest);
+            const entries = new Map([["manifest.json", manifest]]);
+            for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
+                const d = await provider.getObject(p);
+                if (d)
+                    entries.set(p, d);
+            }
+            const meta = frameEntries(entries);
+            const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
+            for (const p of plan) {
+                const d = await provider.getObject(p);
+                if (d)
+                    entries.set(p, d);
+            }
+            const all = frameEntries(entries);
+            return this.requestReplacement("openFolder", { bytes: all.buffer }, epoch, [all.buffer]);
+        });
+        doc.setFolder(provider, manifestHash);
         return doc;
     }
     recovery = this.makeRecovery();
@@ -458,15 +488,24 @@ export class EngineCore extends Emitter {
             recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
         };
     }
-    restoreRecovery = async () => {
-        const state = await this.request("recover");
+    restoreRecovery = () => this.serialize(async () => {
+        if (!this.journaled)
+            throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
+        this.requireWaitingRecovery();
+        const epoch = ++this.nextDocumentEpoch;
+        const state = await this.requestReplacement("recover", {}, epoch);
         this.recoveryWaiting = false;
-        return this.replaceDocument(state);
-    };
-    discardRecovery = async () => {
+        return this.adopt(state, true, epoch);
+    });
+    discardRecovery = () => this.serialize(async () => {
+        this.requireWaitingRecovery();
         await this.request("discardRecovery");
         this.recoveryWaiting = false;
-    };
+    });
+    requireWaitingRecovery() {
+        if (!this.recoveryWaiting || this.document)
+            throw new AltoError("CONFLICT", "there is no waiting recovery journal", { reason: "no-recovery" });
+    }
     exportEmergency = async () => new Blob([(await this.request("emergencyExport"))]);
     recoverAfterStorageFailure = async () => {
         const failure = this.storageError();
@@ -558,7 +597,8 @@ export class EngineCore extends Emitter {
             if (this.disposed)
                 throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
             if (this.document || this.recoveryWaiting) {
-                const state = await this.requestCore("recover", {}, [], true, 30000);
+                const epoch = this.document ? this.documentEpoch : ++this.nextDocumentEpoch;
+                const state = await this.requestCore("recover", {}, [], true, 30000, { nextDocumentEpoch: epoch });
                 if (this.disposed)
                     throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
                 this.recoveryWaiting = false;
@@ -568,7 +608,7 @@ export class EngineCore extends Emitter {
                     this.viewport.publish();
                 }
                 else
-                    this.adopt(state, true);
+                    this.adopt(state, true, epoch);
             }
             this.setStatus("ready", null);
             this.startLoop();

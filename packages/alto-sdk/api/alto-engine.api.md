@@ -124,7 +124,7 @@ export interface CommitView {
 }
 
 // @public
-export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "revision" | "document-closed";
+export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed";
 
 // @public
 export type ContentDetail = {
@@ -484,7 +484,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "no-recovery";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale";
 }
 
 // @public (undocumented)
