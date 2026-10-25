@@ -103,6 +103,8 @@ fn clock() -> f64 {
 #[derive(Deserialize)]
 struct Request {
     intent: String,
+    #[serde(default)]
+    label: Option<String>,
     ops: Vec<Op>,
     #[serde(rename = "baseRevision")]
     base_revision: u64,
@@ -283,13 +285,17 @@ impl Runtime {
             return Err(error("CONFLICT: finish active tool first"));
         }
         let r: Request = serde_json::from_str(request).map_err(error)?;
+        let intent = alto_doc::Intent {
+            id: r.intent,
+            label: r.label,
+        };
         let edited = self
             .engine
-            .transact(self.doc, &r.intent, r.ops.clone(), r.base_revision)
+            .transact(self.doc, intent.clone(), r.ops.clone(), r.base_revision)
             .map_err(error)?;
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Transact, &r.intent, &r.ops)
+                .journal_record(self.doc, JournalKind::Transact, intent, &r.ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -310,7 +316,7 @@ impl Runtime {
             .unwrap_or_default();
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Undo, "Undo", &ops)
+                .journal_record(self.doc, JournalKind::Undo, "edit.undo", &ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -331,7 +337,7 @@ impl Runtime {
             .unwrap_or_default();
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Redo, "Redo", &ops)
+                .journal_record(self.doc, JournalKind::Redo, "edit.redo", &ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -708,7 +714,7 @@ impl Runtime {
             let rev = self.engine.document(self.doc).map_err(error)?.revision;
             let edited = match self
                 .engine
-                .transact(self.doc, "Brush stroke", ops.clone(), rev)
+                .transact(self.doc, "brush.stroke", ops.clone(), rev)
             {
                 Ok(edited) => edited,
                 Err(e) => {
@@ -719,7 +725,7 @@ impl Runtime {
             };
             self.journal.push(
                 self.engine
-                    .journal_record(self.doc, JournalKind::Transact, "Brush stroke", &ops)
+                    .journal_record(self.doc, JournalKind::Transact, "brush.stroke", &ops)
                     .map_err(error)?,
             );
             edited
@@ -742,7 +748,7 @@ impl Runtime {
         }
         let v = serde_json::from_str(spec).map_err(error)?;
         let ops = self.engine.selection_ops(self.doc, &v).map_err(error)?;
-        self.command("Selection", ops)
+        self.command("selection.set", ops)
     }
     #[wasm_bindgen(js_name=selectionOutline)]
     pub fn selection_outline(&self) -> Result<String, JsValue> {
@@ -772,7 +778,7 @@ impl Runtime {
             _ => return Err(error("INVALID_ARGUMENT: mask source")),
         };
         self.command(
-            "Layer mask",
+            "mask.set",
             vec![
                 Op::SetMask { layer: id, mask },
                 Op::SetProps {
@@ -801,7 +807,7 @@ impl Runtime {
             .engine
             .effect_ops(self.doc, id, effects, use_selection)
             .map_err(error)?;
-        self.command("Non-destructive effects", ops)
+        self.command("effects.set", ops)
     }
     #[wasm_bindgen(js_name=importRgba)]
     pub fn import_rgba(

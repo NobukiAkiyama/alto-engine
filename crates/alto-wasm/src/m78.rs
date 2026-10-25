@@ -171,11 +171,10 @@ impl Runtime {
         let hash: ContentHash = hash
             .parse()
             .map_err(|_| error("INVALID_ARGUMENT: commit hash"))?;
-        let ops = self.engine.restore_version(self.doc, hash).map_err(error)?;
-        let label = format!("版を復元: {}", &hash.hex()[..10]);
+        let (ops, intent) = self.engine.restore_version(self.doc, hash).map_err(error)?;
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Transact, &label, &ops)
+                .journal_record(self.doc, JournalKind::Transact, intent, &ops)
                 .map_err(error)?,
         );
         self.refresh()?;

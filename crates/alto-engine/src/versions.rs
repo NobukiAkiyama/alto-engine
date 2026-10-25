@@ -340,11 +340,12 @@ impl Engine {
     }
 
     /// Restores a version as one undoable transaction. History is not rewritten.
+    /// Returns the ops and the intent, which a journal record of the edit repeats.
     pub fn restore_version(
         &mut self,
         h: DocHandle,
         commit: ContentHash,
-    ) -> Result<Vec<alto_doc::Op>, EngineError> {
+    ) -> Result<(Vec<alto_doc::Op>, alto_doc::Intent), EngineError> {
         let target = self.resolve(h, VersionRef::Commit(commit))?;
         let message = self.versions(h)?.commits[&commit].message.clone();
         let current = self.document(h)?;
@@ -357,8 +358,9 @@ impl Engine {
             .chars()
             .take(40)
             .collect();
-        self.transact(h, format!("版を復元: {label}"), ops.clone(), revision)?;
-        Ok(ops)
+        let intent = alto_doc::Intent::labeled("version.restore", label);
+        self.transact(h, intent.clone(), ops.clone(), revision)?;
+        Ok((ops, intent))
     }
 
     /// Package contents including every committed snapshot and its objects.

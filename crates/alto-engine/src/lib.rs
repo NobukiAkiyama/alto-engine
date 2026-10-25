@@ -147,7 +147,7 @@ impl Engine {
     pub fn transact(
         &mut self,
         handle: DocHandle,
-        intent: impl Into<String>,
+        intent: impl Into<alto_doc::Intent>,
         ops: Vec<Op>,
         base_revision: u64,
     ) -> Result<ChangeSet, EngineError> {
@@ -562,15 +562,17 @@ impl Engine {
         &self,
         h: DocHandle,
         kind: JournalKind,
-        intent: &str,
+        intent: impl Into<alto_doc::Intent>,
         ops: &[Op],
     ) -> Result<Vec<u8>, EngineError> {
+        let intent = intent.into();
         let mut entries = BTreeMap::new();
         let after = self.state_digest(h)?;
         entries.insert(
             "transaction.json".into(),
             serde_json::to_vec(&serde_json::json!({
-                "kind": kind.name(), "intent": intent, "ops": ops, "after": after,
+                "kind": kind.name(), "intent": intent.id, "label": intent.label,
+                "ops": ops, "after": after,
             }))
             .map_err(|e| DocError::Serialization(e.to_string()))?,
         );
@@ -617,7 +619,10 @@ impl Engine {
             }
             _ => {
                 let revision = self.document(h)?.revision;
-                let intent = v["intent"].as_str().unwrap_or("Recovered edit");
+                let intent = alto_doc::Intent {
+                    id: v["intent"].as_str().unwrap_or("recovered.edit").into(),
+                    label: v["label"].as_str().map(Into::into),
+                };
                 self.transact(h, intent, ops, revision)?;
                 JournalKind::Transact
             }
@@ -1296,7 +1301,7 @@ mod package_tests {
         let ops = e.undo_operations(d).unwrap();
         e.undo(d).unwrap();
         records.push(
-            e.journal_record(d, JournalKind::Undo, "Undo", &ops)
+            e.journal_record(d, JournalKind::Undo, "edit.undo", &ops)
                 .unwrap(),
         );
         let (mut fresh, r, replayed) = recover(checkpoint, &records);

@@ -11,6 +11,10 @@ pub const MAX_MESSAGE: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentSummary {
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub undone: bool,
     pub targets: Vec<NodeId>,
     pub count: u32,
 }
@@ -93,17 +97,21 @@ impl Commit {
     }
 }
 
-/// Groups the edit log by intent and targets, keeping first-use order: 「ブラシ ×3」.
+/// Groups the edit log by intent and targets, keeping first-use order: `brush.stroke` ×3.
 pub fn summarize(log: &[IntentLogEntry]) -> Vec<IntentSummary> {
     let mut out: Vec<IntentSummary> = vec![];
     for e in log {
-        match out
-            .iter_mut()
-            .find(|s| s.intent == e.intent && s.targets == e.targets)
-        {
+        match out.iter_mut().find(|s| {
+            s.intent == e.intent
+                && s.label == e.label
+                && s.undone == e.undone
+                && s.targets == e.targets
+        }) {
             Some(s) => s.count += 1,
             None => out.push(IntentSummary {
                 intent: e.intent.clone(),
+                label: e.label.clone(),
+                undone: e.undone,
                 targets: e.targets.clone(),
                 count: 1,
             }),
@@ -668,7 +676,7 @@ pub fn restore_ops(current: &Document, target: &Document) -> Result<Vec<Op>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssetRecord, DocumentMeta, Editor, Op, TileChange};
+    use crate::{AssetRecord, DocumentMeta, Editor, Intent, Op, TileChange};
     use alto_core::TileKey;
     use alto_text::{TextContent, TextStyle, WritingMode};
 
@@ -780,11 +788,11 @@ mod tests {
     fn intent_log_summarises_and_follows_undo() {
         let mut e = editor();
         let root = e.doc.root;
-        let layer = Node::raster("背景");
+        let layer = Node::raster("Background");
         let id = layer.id;
         tx(
             &mut e,
-            "レイヤー追加",
+            "layer.add",
             vec![Op::InsertNode {
                 node: layer,
                 parent: root,
@@ -792,9 +800,9 @@ mod tests {
             }],
         );
         for _ in 0..3 {
-            tx(
-                &mut e,
-                "ブラシ",
+            let rev = e.doc.revision;
+            e.transact(
+                Intent::labeled("app:fade", "Fade"),
                 vec![Op::SetProps {
                     id,
                     patch: PropPatch {
@@ -802,18 +810,28 @@ mod tests {
                         ..Default::default()
                     },
                 }],
-            );
+                rev,
+            )
+            .unwrap();
         }
         e.undo().unwrap();
         let s = summarize(e.intent_log());
         assert_eq!(s.len(), 2);
         assert_eq!(
-            (s[1].intent.as_str(), s[1].count, s[1].targets.clone()),
-            ("ブラシ", 2, vec![id])
+            (
+                s[1].intent.as_str(),
+                s[1].label.as_deref(),
+                s[1].undone,
+                s[1].count,
+                s[1].targets.clone()
+            ),
+            ("app:fade", Some("Fade"), false, 2, vec![id])
         );
         e.take_intent_log();
         e.undo().unwrap();
-        assert_eq!(e.intent_log()[0].intent, "取り消し: ブラシ");
+        let undone = &e.intent_log()[0];
+        assert_eq!((undone.intent.as_str(), undone.undone), ("app:fade", true));
+        assert_eq!(undone.label.as_deref(), Some("Fade"));
     }
 
     #[test]
@@ -1121,7 +1139,9 @@ mod tests {
             snapshot: ContentHash::of(b"s"),
             message: "最初の版".into(),
             intents: vec![IntentSummary {
-                intent: "ブラシ".into(),
+                intent: "brush.stroke".into(),
+                label: Some("ブラシ".into()),
+                undone: false,
                 targets: vec![],
                 count: 3,
             }],
