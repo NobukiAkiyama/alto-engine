@@ -73,7 +73,7 @@ export async function start(canvas, options, report) {
     device.queue.submit([encoder.finish()]);
   }
 
-  // Raise the per-pixel loop until one frame takes longer than ~1.5 vsyncs on this adapter.
+  // Raise the per-pixel loop until one frame takes longer than `targetMs` (default ~1.5 vsyncs).
   const calibration = [];
   if (!options.light) {
     const timed = async () => {
@@ -88,7 +88,7 @@ export async function start(canvas, options, report) {
     for (;;) {
       const ms = Math.min(await timed(), await timed());
       calibration.push({ iterations, ms: Math.round(ms) });
-      if (ms > 25 || iterations >= 8192) break;
+      if (ms > (options.targetMs || 25) || iterations >= 8192) break;
       iterations *= 2;
     }
   }

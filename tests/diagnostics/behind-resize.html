@@ -6,7 +6,7 @@
 <script type="module">
 import { start } from "./behind-resize-render.js";
 
-// options: { thread: "worker" | "main", loop: "raf" | "task", light, inflight, seconds }
+// options: { thread: "worker" | "main", loop: "raf" | "task", light, inflight, targetMs, big, seconds }
 window.runBehindResize = async (options) => {
   const host = document.getElementById("host");
   const canvas = document.getElementById("canvas");
@@ -14,7 +14,9 @@ window.runBehindResize = async (options) => {
   let resize, stop, lostAt = null;
   const onEvent = (event) => { events.push(event); if (event.t === "lost") lostAt = event.atMs; };
   // Calibrate at the real size, not the 300x150 default.
-  canvas.width = 900; canvas.height = 500;
+  const [low, high, tall] = options.big ? [1400, 1800, 1000] : [700, 1100, 500];
+  host.style.width = (low + high) / 2 + "px"; host.style.height = tall + "px";
+  canvas.width = (low + high) / 2; canvas.height = tall;
   if (options.thread === "worker") {
     const worker = new Worker("./behind-resize-worker.js", { type: "module" });
     const offscreen = canvas.transferControlToOffscreen();
@@ -42,14 +44,14 @@ window.runBehindResize = async (options) => {
     resize(Math.max(1, box ? box.inlineSize : Math.round(entry.contentRect.width)),
       Math.max(1, box ? box.blockSize : Math.round(entry.contentRect.height)));
   }).observe(canvas, { box: "device-pixel-content-box" });
-  // Sweep 1100 <-> 700 px wide in 60 px steps every 40 ms, pausing 300 ms at each end.
+  // Sweep between `low` and `high` px wide in 60 px steps every 40 ms, pausing 300 ms at each end.
   const started = performance.now();
-  let width = 900, step = 60;
+  let width = (low + high) / 2, step = 60;
   while (performance.now() - started < options.seconds * 1000 && lostAt === null) {
     width += step;
-    if (width >= 1100 || width <= 700) { step = -step; await new Promise((r) => setTimeout(r, 300)); }
+    if (width >= high || width <= low) { step = -step; await new Promise((r) => setTimeout(r, 300)); }
     host.style.width = width + "px";
-    host.style.height = (width % 120 === 0 ? 500 : 503) + "px";
+    host.style.height = (width % 120 === 0 ? tall : tall + 3) + "px";
     await new Promise((r) => setTimeout(r, 40));
   }
   if (lostAt !== null) await new Promise((r) => setTimeout(r, 500));

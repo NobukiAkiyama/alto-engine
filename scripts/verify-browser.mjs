@@ -319,6 +319,9 @@ try {
       "main-raf": { thread: "main", loop: "raf" },
       "worker-raf-light": { thread: "worker", loop: "raf", light: true },
       "worker-task": { thread: "worker", loop: "task" },
+      // Deeper backlog and a larger backing store, nearer the report's 5K canvas.
+      "worker-raf-deep": { thread: "worker", loop: "raf", targetMs: 80, big: true },
+      "worker-raf-deep-inflight1": { thread: "worker", loop: "raf", targetMs: 80, big: true, inflight: 1 },
     };
     const names = (process.env.ALTO_BEHIND_CONFIGS || Object.keys(configs).join(",")).split(",");
     let hits = null;

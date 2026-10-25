@@ -69,6 +69,10 @@ on:
         description: Run raw WebGPU surface lifetime probes on macOS and Linux
         default: false
         type: boolean
+      behind_configs:
+        description: chrome-repro configurations, comma-separated (empty keeps the default four)
+        default: ''
+        type: string
       gpu_watchdog:
         description: Keep Chrome's GPU watchdog enabled (disable only to investigate a timeout)
         default: true
@@ -296,6 +300,7 @@ jobs:
       ALTO_GPU_LIFECYCLE_MODE: ${{ inputs.lifecycle_mode || 'all' }}
       ALTO_GPU_LIFECYCLE_IMPLEMENTATION: ${{ inputs.lifecycle_implementation || 'webgpu' }}
       ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}
+      ALTO_BEHIND_CONFIGS: ${{ inputs.behind_configs }}
       ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
     steps:
       - uses: actions/checkout@v7
@@ -337,7 +342,7 @@ jobs:
           fi
           if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == chrome-repro ]]; then
             # Plain WebGPU after crbug.com/557281760 (tests/diagnostics/behind-resize.html).
-            ALTO_BEHIND_SECONDS=90 ALTO_BEHIND_CONFIGS=worker-raf,worker-raf-inflight1,main-raf,worker-raf-light \
+            ALTO_BEHIND_SECONDS=90 ALTO_BEHIND_CONFIGS="${ALTO_BEHIND_CONFIGS:-worker-raf,worker-raf-inflight1,main-raf,worker-raf-light}" \
               ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/behind" node scripts/verify-browser.mjs --behind-resize
             exit
           fi
