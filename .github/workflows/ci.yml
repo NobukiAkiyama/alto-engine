@@ -133,12 +133,14 @@ jobs:
             --output "$RUNNER_TEMP/chrome.zip"
           unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome"
           echo "CHROME=$RUNNER_TEMP/chrome/${{ matrix.executable }}" >> "$GITHUB_ENV"
-      - name: Use the installed Chrome sandbox helper on Ubuntu
+      - name: Allow user namespaces for this Chrome executable on Ubuntu
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          test -u /opt/google/chrome/chrome-sandbox
-          echo "CHROME_DEVEL_SANDBOX=/opt/google/chrome/chrome-sandbox" >> "$GITHUB_ENV"
+          # Scope Ubuntu's exception to this ephemeral runner's pinned executable.
+          printf 'abi <abi/4.0>,\nprofile alto-cft "%s" flags=(unconfined) { userns, }\n' \
+            "$RUNNER_TEMP/chrome/chrome-linux64/chrome" | sudo tee /etc/apparmor.d/alto-cft
+          sudo apparmor_parser -r /etc/apparmor.d/alto-cft
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |
