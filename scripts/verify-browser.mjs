@@ -20,6 +20,7 @@ const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
 const benchmarkOnly = process.argv.includes("--benchmark-only");
 const examplesOnly = process.argv.includes("--examples");
+const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
@@ -202,7 +203,7 @@ try {
   const query = new URLSearchParams();
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
-  const pageUrl = `http://127.0.0.1:${address.port}/examples/browser-playground/${query.size ? "?" + query : ""}`;
+  const pageUrl = `http://127.0.0.1:${address.port}/${lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
   const executable = chromeBin();
@@ -239,8 +240,8 @@ try {
   await browserClient.send("Target.setDiscoverTargets", { discover: true }, 5000);
   client = await connect(page.webSocketDebuggerUrl, recordEvent);
   const { send } = client;
-  const evaluate = async (expression) => {
-    const message = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  const evaluate = async (expression, timeoutMs = 600000) => {
+    const message = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
     const details = message.result?.exceptionDetails;
     if (details) throw Error(details.text + " " + (details.exception?.description || ""));
     return message.result?.result?.value;
@@ -257,7 +258,22 @@ try {
       mobile: false,
     });
   }
-  if (examplesOnly) {
+  if (lifecycleOnly) {
+    await send("Page.navigate", { url: pageUrl }, 30000);
+    let ready = false;
+    for (let i = 0; i < 120; i++) {
+      ready = !!(await evaluate("!!window.runGpuLifecycle").catch(() => false));
+      if (ready) break;
+      await sleep(100);
+    }
+    if (!ready) throw Error("Raw WebGPU fixture did not load");
+    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120) };
+    if (!Number.isInteger(options.cycles) || options.cycles < 1 || options.cycles > 2000) throw Error("invalid lifecycle cycles");
+    const result = await evaluate(`window.runGpuLifecycle(${JSON.stringify(options)})`, 180000);
+    await writeFile(join(reportDir, "gpu-lifecycle.json"), JSON.stringify(result, null, 2) + "\n");
+    summary.push({ name: "gpu-lifecycle " + options.mode, ok: result.pass, count: result.cycles ?? result.cyclesCompleted, error: result.error });
+    await sampleSystem("gpu-lifecycle " + options.mode);
+  } else if (examplesOnly) {
     for (const name of ["minimal-embed", "react-embed"]) {
       console.log("RUN example", name);
       const url = `http://127.0.0.1:${address.port}/examples/${name}/dist/index.html`;

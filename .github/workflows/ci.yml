@@ -9,6 +9,10 @@ on:
         description: Chrome for Testing version (exact four-part version)
         default: '156.0.8078.47'
         type: string
+      gpu_lifecycle:
+        description: Run raw WebGPU surface lifetime probes on macOS and Linux
+        default: false
+        type: boolean
       gpu_watchdog:
         description: Keep Chrome's GPU watchdog enabled (disable only to investigate a timeout)
         default: true
@@ -19,6 +23,7 @@ permissions:
 
 jobs:
   check:
+    if: ${{ !inputs.gpu_lifecycle }}
     # The checked-in WASM package is built on arm64 macOS. Keep the exact-byte
     # rebuild check on the same Rust host target as the release build.
     runs-on: macos-15
@@ -77,3 +82,52 @@ jobs:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
+
+  gpu-lifecycle:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            archive: mac-arm64
+            executable: chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
+          - os: ubuntu-24.04
+            archive: linux64
+            executable: chrome-linux64/chrome
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_GPU: swiftshader
+      ALTO_GPU_LIFECYCLE_CYCLES: 120
+      ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/${{ matrix.archive }}/chrome-${{ matrix.archive }}.zip" \
+            --output "$RUNNER_TEMP/chrome.zip"
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome"
+          echo "CHROME=$RUNNER_TEMP/chrome/${{ matrix.executable }}" >> "$GITHUB_ENV"
+      - name: Probe independent surface lifetime conditions
+        shell: bash
+        run: |
+          status=0
+          for mode in stable same-size resize replace-abrupt replace-graceful recover recover-unconfigure; do
+            ALTO_GPU_LIFECYCLE_MODE="$mode" ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/$mode" \
+              node scripts/verify-browser.mjs --gpu-lifecycle || status=1
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-lifecycle-${{ matrix.os }}
+          path: ${{ runner.temp }}/lifecycle
+          if-no-files-found: error
