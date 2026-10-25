@@ -4,9 +4,9 @@
   "milestone": "M8 + embedding API",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4556799,
-  "gzipBytes": 1148953,
-  "wasmSha256": "f2345dce0ebb09a3a64f7fe0979611aed47feecd6431f3253d8646634c8d3229",
+  "wasmBytes": 4558206,
+  "gzipBytes": 1149402,
+  "wasmSha256": "4176fcf681685cce79f77cc74c59b00a947719d1443ac6452cc104473433aa4d",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,

@@ -258,6 +258,8 @@ pub struct Renderer {
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
     pub lost: Arc<AtomicBool>,
+    /// The reason and message the device was lost with, for error reports.
+    lost_detail: Arc<std::sync::Mutex<String>>,
     frame: u64,
     pub stroke: Option<GpuStroke>,
     pub adapter_name: String,
@@ -645,8 +647,12 @@ impl Renderer {
         }
         surface.configure(&device, &config);
         let lost = Arc::new(AtomicBool::new(false));
-        let flag = lost.clone();
-        device.set_device_lost_callback(move |_, _| {
+        let lost_detail = Arc::new(std::sync::Mutex::new(String::new()));
+        let (flag, detail) = (lost.clone(), lost_detail.clone());
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut d) = detail.lock() {
+                *d = format!("{reason:?}: {message}");
+            }
             flag.store(true, Ordering::Relaxed);
         });
         let atlas = texture(
@@ -756,6 +762,7 @@ impl Renderer {
             brush,
             sampler,
             lost,
+            lost_detail,
             frame: 0,
             stroke: None,
             adapter_name: adapter.get_info().name,
@@ -919,6 +926,13 @@ impl Renderer {
     }
     pub fn destroy_device(&self) {
         self.device.destroy();
+    }
+    /// Why the device was lost, as the browser reported it; empty while it is not.
+    pub fn lost_detail(&self) -> String {
+        self.lost_detail
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
@@ -1827,7 +1841,10 @@ impl Renderer {
         budget_ms: f64,
     ) -> Result<FrameReport> {
         if self.is_lost() {
-            return Err(RenderError::GpuLost("device lost".into()));
+            return Err(RenderError::GpuLost(format!(
+                "device lost ({})",
+                self.lost_detail()
+            )));
         }
         let now = self.clock;
         self.frame += 1;
@@ -2479,7 +2496,10 @@ impl Renderer {
             }
             // As in read_tile: say whether the device was lost while the maps waited.
             return Err(if self.is_lost() {
-                RenderError::GpuLost(format!("device lost while reading back a stroke: {e}"))
+                RenderError::GpuLost(format!(
+                    "device lost ({}) while reading back a stroke: {e}",
+                    self.lost_detail()
+                ))
             } else {
                 RenderError::Internal(format!(
                     "reading back a stroke ({} tiles): {e}",
@@ -2590,7 +2610,8 @@ impl Renderer {
             b.destroy();
             return Err(if self.is_lost() {
                 RenderError::GpuLost(format!(
-                    "device lost while reading {} display tiles: {e}",
+                    "device lost ({}) while reading {} display tiles: {e}",
+                    self.lost_detail(),
                     keys.len()
                 ))
             } else {
