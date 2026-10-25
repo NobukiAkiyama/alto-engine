@@ -57,6 +57,7 @@ on:
           - sdk
           - startup
           - resize-stress
+          - chrome-repro
       lifecycle_memory_mib:
         description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
         default: '0'
@@ -333,6 +334,12 @@ jobs:
               ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/startup-$trial" node scripts/verify-browser.mjs --startup-only || status=1
             done
             exit "$status"
+          fi
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == chrome-repro ]]; then
+            # Plain WebGPU after crbug.com/557281760 (tests/diagnostics/behind-resize.html).
+            ALTO_BEHIND_SECONDS=90 ALTO_BEHIND_CONFIGS=worker-raf,worker-raf-inflight1,main-raf,worker-raf-light \
+              ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/behind" node scripts/verify-browser.mjs --behind-resize
+            exit
           fi
           if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == resize-stress ]]; then
             # Real container resizes under GPU load (tests/diagnostics/resize-stress.js).
