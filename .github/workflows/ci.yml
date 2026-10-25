@@ -134,6 +134,9 @@ jobs:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/examples
         run: sh scripts/check-examples.sh
       - name: Verify vector batching against legacy RGBA16F pixels
+        # Keep the no-Canvas comparison observable if the separate surface suites fail.
+        # This does not change the failed status of an earlier step or of this job.
+        if: ${{ !cancelled() }}
         env:
           ALTO_BROWSER_GPU: swiftshader
           ALTO_VECTOR_FRAMES: '1'

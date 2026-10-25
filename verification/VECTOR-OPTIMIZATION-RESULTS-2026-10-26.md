@@ -43,6 +43,14 @@ Chrome 155.0.8059.84、Apple M5 / Metal、512×512、RGBA16F、4x MSAA。独立�
 
 ## 再現
 
+### GitHub CI の失敗も保持する
+
+[最初の CI 実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40215938259)は Rust / WASM / 配布物検査と functional32件を通過した後、M5 の stroke readback 中の `GPU_LOST` で失敗した。Chrome 156.0.8078.47 / SwiftShader。`SharedImageManager::ProduceSkia` の non-existent mailbox、Invalid Texture、`DissociateMailboxForPresent` error4、external Instance reference の消失という既存調査と同じ列が記録された。今回の変更との独立性や Chromium 側の根本原因をこのログだけで断定しない。
+
+この失敗は再試行で上書きせず、[CI の記録](vector-optimization-ci-2026-10-26.json)に保存した。新設した Canvas を使わないベクター画素検査は、先行 suite が失敗しても実行するよう変更した。先行 step の失敗は引き続き job 全体を失敗にする。ローカルの93件成功を、CI 全体の成功と取り違えない。
+
+### ローカルのコマンド
+
 ```sh
 sh scripts/build-m0.sh
 pnpm --dir packages/alto-sdk build
