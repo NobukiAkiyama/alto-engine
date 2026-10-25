@@ -21,7 +21,8 @@ export type ConflictReason =
   | "namespace-in-use"
   | "recovery-pending"
   | "not-failed"
-  | "revision";
+  | "revision"
+  | "document-closed";
 
 /**
  * Values that let a host tell cases of one code apart. Which keys appear depends on

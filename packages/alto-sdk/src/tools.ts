@@ -70,7 +70,13 @@ export class ToolSession {
       erase: tool === "eraser",
       mask: options.target === "mask",
     });
-    this.ready.catch((e) => host.reportError(e));
+    // A stroke that cannot start ends here, and reports once: the frame loop keeps
+    // flushing until the session ends.
+    this.ready.catch((e) => {
+      this.abort(e instanceof AltoError ? e : new AltoError("INTERNAL", String(e)));
+      host.ended(this, null);
+      host.reportError(e);
+    });
   }
   get active(): boolean {
     return !this.done;
@@ -95,8 +101,12 @@ export class ToolSession {
   }
   /** @internal Sends buffered samples; the engine calls it every frame. */
   async flush(): Promise<void> {
-    await this.ready;
-    if (this.aborted) throw this.aborted;
+    if (this.aborted) return;
+    try {
+      await this.ready;
+    } catch {
+      return;
+    }
     const failure = this.host.storageError();
     if (failure) throw failure;
     if (!this.samples.length) return;

@@ -34,6 +34,15 @@ export function toNode(wire) {
 /** @internal Applies Worker states and keeps the current snapshot. */
 export class SnapshotStore {
     current = null;
+    /** Each node's wire form as last applied: a full view reuses nodes whose form is unchanged. */
+    wire = new Map();
+    node(id, wire, previous) {
+        const json = JSON.stringify(wire);
+        if (previous && this.wire.get(id) === json)
+            return previous;
+        this.wire.set(id, json);
+        return toNode(wire);
+    }
     get() {
         if (!this.current)
             throw new Error("no document state yet");
@@ -51,10 +60,10 @@ export class SnapshotStore {
                 throw new Error("patch before a full view");
             for (const id of state.removed ?? [])
                 if (nodes.delete(id))
-                    removed.push(id);
+                    removed.push(id), this.wire.delete(id);
             for (const [id, wire] of Object.entries(state.nodes ?? {})) {
                 (nodes.has(id) ? updated : added).push(id);
-                nodes.set(id, toNode(wire));
+                nodes.set(id, this.node(id, wire, undefined));
             }
             meta = state.meta ?? before.meta;
             root = before.root;
@@ -65,15 +74,17 @@ export class SnapshotStore {
             const doc = state.document;
             const next = new Map();
             for (const [id, wire] of Object.entries(doc.nodes)) {
-                next.set(id, toNode(wire));
-                if (!nodes.has(id))
+                const previous = nodes.get(id);
+                const node = this.node(id, wire, previous);
+                next.set(id, node);
+                if (!previous)
                     added.push(id);
-                else
+                else if (node !== previous)
                     updated.push(id);
             }
             for (const id of nodes.keys())
                 if (!next.has(id))
-                    removed.push(id);
+                    removed.push(id), this.wire.delete(id);
             nodes.clear();
             for (const [id, n] of next)
                 nodes.set(id, n);

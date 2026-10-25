@@ -368,6 +368,7 @@ export class EngineCore extends Emitter {
         });
     }
     adopt(state, fit) {
+        this.document?.close();
         this.document = new DocumentHandle(this, state);
         this.emit("document", this.document);
         if (fit)
@@ -558,6 +559,7 @@ export class EngineCore extends Emitter {
             if (error.code === "CORRUPT_DATA") {
                 // Neither generation opens; nothing is left to restore.
                 this.recoveryWaiting = false;
+                this.document?.close();
                 this.document = null;
                 this.emit("document", null);
                 this.setStatus("storage-failed", error);

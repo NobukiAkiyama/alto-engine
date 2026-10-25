@@ -295,6 +295,54 @@ export async function runEmbedTests(_playground, log) {
       assert(reopened !== doc && engine.document === reopened, "open did not give a new handle");
       assert((await reopened.snapshotHash()) === hash, "reopened content differs");
     });
+    await test("a replaced document handle refuses calls instead of editing the new document", async () => {
+      const engine = await engineIn(container());
+      const old = await engine.createDocument({ width: 64, height: 64 });
+      await old.transact("layer.add", (tx) => tx.addRaster());
+      const fresh = await engine.createDocument({ width: 32, height: 32 });
+      const revision = fresh.getSnapshot().revision;
+      assert(await rejectsWith(old.undo(), "CONFLICT", "document-closed"), "undo on the replaced handle was not refused");
+      assert(await rejectsWith(old.transact("layer.add", (tx) => tx.addRaster()), "CONFLICT", "document-closed"),
+        "transact on the replaced handle was not refused");
+      assert(fresh.getSnapshot().revision === revision, "the replaced handle changed the new document");
+    });
+    await test("saving keeps unchanged nodes the same objects", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      let a, b;
+      await doc.transact("layer.add", (tx) => { a = tx.addRaster({ name: "a" }); b = tx.addRaster({ name: "b" }); });
+      const before = doc.getSnapshot();
+      let change;
+      doc.subscribe((c) => (change = c));
+      await doc.save(blobTarget());
+      const after = doc.getSnapshot();
+      assert(after.nodes.get(a) === before.nodes.get(a) && after.nodes.get(b) === before.nodes.get(b), "save replaced unchanged nodes");
+      assert(change && change.nodes.updated.length === 0 && change.dirty, "the save reported node changes: " + JSON.stringify(change?.nodes));
+    });
+    await test("a stroke that cannot start reports its error once", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      const errors = [];
+      engine.on("error", (e) => errors.push(e));
+      const stroke = doc.tools.begin("brush", { layer: "00000000-0000-7000-8000-000000000000" });
+      stroke.input({ x: 10, y: 10 });
+      await frameWhere(engine, () => true);
+      for (let i = 0; i < 10; i++) await new Promise(requestAnimationFrame);
+      assert(errors.length === 1, `${errors.length} error events for one failed stroke`);
+      let code = null;
+      try { await stroke.end(); } catch (e) { code = e.code; }
+      assert(code && code === errors[0].code, `end() reported ${code}, the error event ${errors[0].code}`);
+      assert(!doc.activeTool, "the failed stroke stayed active");
+    });
+    await test("zoom stays within what the renderer draws", async () => {
+      const engine = await engineIn(container());
+      await engine.createDocument({ width: 64, height: 64 });
+      const ratio = unstable(engine).pixelRatio();
+      engine.viewport.set({ zoom: 10000 });
+      assert(engine.viewport.get().zoom <= 128 / ratio + 1e-9, "zoom above the renderer's limit: " + engine.viewport.get().zoom);
+      engine.viewport.set({ zoom: 1e-6 });
+      assert(engine.viewport.get().zoom >= 0.01 / ratio - 1e-12, "zoom below the renderer's limit: " + engine.viewport.get().zoom);
+    });
     log("ALL " + results.length + " EMBED TESTS PASSED");
   } catch (error) {
     results.push({ name: String(error.stack || error), pass: false });

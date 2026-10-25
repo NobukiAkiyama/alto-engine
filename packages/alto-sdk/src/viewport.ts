@@ -24,12 +24,18 @@ export class ViewportControl {
   get(): Viewport {
     return { center: [...this.view.center], zoom: this.view.zoom, rotation: this.view.rotation };
   }
+  /** The renderer draws device zooms from 0.01 to 128. */
+  private clamp(zoom: number): number {
+    const ratio = this.host.pixelRatio();
+    return Math.min(128 / ratio, Math.max(0.01 / ratio, zoom));
+  }
+  /** Zoom is limited to what the renderer draws: 0.01–128 device pixels per document pixel. */
   set(next: Partial<Viewport>): void {
     if (next.zoom !== undefined && !(next.zoom > 0 && Number.isFinite(next.zoom)))
       throw new RangeError("zoom must be a positive number");
     this.view = {
       center: next.center ? [next.center[0], next.center[1]] : this.view.center,
-      zoom: next.zoom ?? this.view.zoom,
+      zoom: next.zoom === undefined ? this.view.zoom : this.clamp(next.zoom),
       rotation: next.rotation ?? this.view.rotation,
     };
     this.publish();
@@ -37,7 +43,7 @@ export class ViewportControl {
   /** Scales by `factor` keeping the document point under (clientX, clientY) in place. */
   zoomAt(clientX: number, clientY: number, factor: number): void {
     const before = this.screenToDocument(clientX, clientY);
-    this.view.zoom *= factor;
+    this.view.zoom = this.clamp(this.view.zoom * factor);
     const after = this.screenToDocument(clientX, clientY);
     this.view.center = [
       this.view.center[0] + before[0] - after[0],
@@ -62,7 +68,7 @@ export class ViewportControl {
     const pad = options.padding ?? 32;
     const w = Math.max(1, r.width - 2 * pad),
       h = Math.max(1, r.height - 2 * pad);
-    const zoom = r.width > 0 && r.height > 0 ? Math.min(w / size[0], h / size[1]) : 1;
+    const zoom = this.clamp(r.width > 0 && r.height > 0 ? Math.min(w / size[0], h / size[1]) : 1);
     this.view = { center: [size[0] / 2, size[1] / 2], zoom, rotation: 0 };
     this.publish();
   }

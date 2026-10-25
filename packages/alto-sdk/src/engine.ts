@@ -41,6 +41,7 @@ export interface EngineEvents {
   status: EngineStatus;
   /** The open document changed to another one (open, create, restore) or closed. */
   document: DocumentHandle | null;
+  /** The view moved, zoomed or rotated. */
   viewport: Viewport;
   saveState: "saving" | "saved" | "error";
   /** A recovery journal from an earlier session can be restored. */
@@ -70,8 +71,11 @@ export interface RecoveryReport {
 export interface Engine {
   /** The engine's canvas, inside the container. It is replaced when the Worker restarts. */
   readonly element: HTMLCanvasElement;
+  /** What the engine is doing now; the `status` event reports each change. */
   readonly status: EngineStatus;
+  /** The open document. The same handle stays valid across Worker restarts. */
   readonly document: DocumentHandle | null;
+  /** Where the canvas looks; zoom is in CSS pixels. */
   readonly viewport: ViewportControl;
   readonly recovery: {
     /** A journal from an earlier session is waiting. */
@@ -95,7 +99,9 @@ export interface Engine {
     parseSvg(svg: string): Promise<PathData>;
     toSvg(data: PathData): Promise<string>;
   };
+  /** A new empty document of this size in pixels. Refused while a recovery journal waits. */
   createDocument(meta: { width: number; height: number }): Promise<DocumentHandle>;
+  /** Opens a `.alto` archive. Refused while a recovery journal waits. */
   open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
   /** Opens the folder form, reading only objects reachable from the document and its history. */
   openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
@@ -103,6 +109,7 @@ export interface Engine {
   retry(): Promise<void>;
   /** Waits briefly for journal writes, then stops the Worker and removes the canvas. */
   dispose(): Promise<void>;
+  /** Listens for an engine event; returns a function that stops listening. */
   on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
 }
 
@@ -471,6 +478,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
 
   private adopt(state: unknown, fit: boolean): DocumentHandle {
+    this.document?.close();
     this.document = new DocumentHandle(this, state as WireState);
     this.emit("document", this.document);
     if (fit) this.viewport.fit();
@@ -650,6 +658,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if (error.code === "CORRUPT_DATA") {
         // Neither generation opens; nothing is left to restore.
         this.recoveryWaiting = false;
+        this.document?.close();
         this.document = null;
         this.emit("document", null);
         this.setStatus("storage-failed", error);

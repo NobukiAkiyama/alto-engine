@@ -61,12 +61,24 @@ export class DocumentHandle {
     flushTool() {
         return this.tool?.flush();
     }
+    closed = false;
+    /** Requests go through here, so a replaced handle cannot touch the new document. */
+    request = ((...args) => this.closed
+        ? Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }))
+        : this.core.request(...args));
+    /** @internal The engine opened another document; this handle refuses further calls. */
+    close() {
+        this.closed = true;
+        this.listeners.clear();
+    }
     command(type, payload) {
         return this.edit(async () => {
             this.apply(await this.core.request(type, payload));
         });
     }
     async edit(fn) {
+        if (this.closed)
+            throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
         await this.endTool();
         return this.core.mutate(fn);
     }
@@ -80,7 +92,7 @@ export class DocumentHandle {
             const value = build(tx);
             if (value && typeof value.then === "function")
                 throw new AltoError("INVALID_ARGUMENT", "the transact callback must be synchronous");
-            const state = await this.core.request("transact", {
+            const state = await this.request("transact", {
                 ...intentRecord(intent),
                 ops: tx.ops,
                 baseRevision: this.getSnapshot().revision,
@@ -102,20 +114,22 @@ export class DocumentHandle {
      * when applied; this rejects with STORAGE if the journal could not be written.
      */
     durable() {
-        return this.core.request("durable").then(() => { });
+        return this.request("durable").then(() => { });
     }
     /** The hash of the snapshot a save would write. Computed on request, not per edit. */
     snapshotHash() {
-        return this.core.request("snapshotHash", {});
+        return this.request("snapshotHash", {});
     }
     /** A raster layer's full tile map. */
     nodeTiles(id) {
-        return this.core.request("nodeTiles", { node: id });
+        return this.request("nodeTiles", { node: id });
     }
     /** Brush and eraser strokes. */
     tools = {
         /** Starts a stroke. Only one stroke runs at a time. */
         begin: (tool, options) => {
+            if (this.closed)
+                throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
             const failure = this.core.storageError();
             if (failure)
                 throw failure;
@@ -153,13 +167,13 @@ export class DocumentHandle {
             c.tcy = on ? [...rest, { start, end }].sort((a, b) => a.start - b.start) : rest;
             tx.setText(id, c);
         }),
-        info: (id) => this.core.request("textInfo", { node: id }),
+        info: (id) => this.request("textInfo", { node: id }),
         /** UTF-16 offset nearest to a document point. */
-        hitTest: (id, x, y) => this.core.request("textHitTest", { node: id, x, y }),
-        caret: (id, offset) => this.core.request("textCaret", { node: id, offset }),
+        hitTest: (id, x, y) => this.request("textHitTest", { node: id, x, y }),
+        caret: (id, offset) => this.request("textCaret", { node: id, offset }),
         /** Highlight quads in document coordinates. */
-        selectionRects: (id, start, end) => this.core.request("textSelection", { node: id, start, end }),
-        navigate: (id, offset, motion) => this.core.request("textNavigate", { node: id, offset, motion }),
+        selectionRects: (id, start, end) => this.request("textSelection", { node: id, start, end }),
+        navigate: (id, offset, motion) => this.request("textNavigate", { node: id, offset, motion }),
     };
     /** Vector paths, vector masks and clipping paths. */
     vectors = {
@@ -171,7 +185,7 @@ export class DocumentHandle {
     selection = {
         apply: (spec) => this.command("select", { spec }),
         /** The selection's outline as SVG path data in document coordinates. */
-        outline: () => this.core.request("selectionOutline", {}),
+        outline: () => this.request("selectionOutline", {}),
         clear: () => this.command("select", { spec: { kind: "clear" } }),
         invert: () => this.command("select", { spec: { kind: "invert" } }),
         all: () => this.command("select", { spec: { kind: "all" } }),
@@ -191,7 +205,7 @@ export class DocumentHandle {
     versions = {
         /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
         commit: (message, options = {}) => this.edit(async () => {
-            const r = await this.core.request("commit", {
+            const r = await this.request("commit", {
                 message,
                 author: options.author || "",
                 allowEmpty: !!options.allowEmpty,
@@ -200,15 +214,15 @@ export class DocumentHandle {
             this.apply(r.state);
             return r.commit;
         }),
-        log: () => this.core.request("versionLog", {}),
+        log: () => this.request("versionLog", {}),
         /** Semantic, layer-level diff. Use "working" for the current document. */
-        diff: (from, to = "working") => this.core.request("versionDiff", { from, to }),
+        diff: (from, to = "working") => this.request("versionDiff", { from, to }),
         status: () => this.getSnapshot().versions,
         /** Restores a version as one undoable edit; history is kept. */
         restore: (hash) => this.command("restoreVersion", { hash }),
         /** Drops versions that cannot be reached from the head. Returns how many. */
         prune: () => this.edit(async () => {
-            const state = await this.core.request("pruneVersions");
+            const state = await this.request("pruneVersions");
             this.apply(state);
             return state.removed ?? 0;
         }),
@@ -232,7 +246,7 @@ export class DocumentHandle {
         if (region.x1 <= region.x0 || region.y1 <= region.y0)
             throw new AltoError("INVALID_ARGUMENT", "region is empty or outside the document");
         await this.endTool();
-        return this.core.request("exportImage", { region, scale, type: options.type ?? "image/png" });
+        return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
     }
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
     async save(target) {
@@ -240,10 +254,10 @@ export class DocumentHandle {
         this.core.emit("saveState", "saving");
         let token;
         try {
-            const saved = await this.core.request("save");
+            const saved = await this.request("save");
             token = saved.token;
             await target.write(new Blob([saved.bytes]).stream());
-            this.apply(await this.core.request("saved", { token }));
+            this.apply(await this.request("saved", { token }));
             token = undefined;
             this.core.emit("saveState", "saved");
         }
@@ -269,7 +283,7 @@ export class DocumentHandle {
                 throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
             if (base !== undefined && base !== currentHash)
                 throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
-            const saved = await this.core.request("folderEntries");
+            const saved = await this.request("folderEntries");
             token = saved.token;
             const entries = unframeEntries(new Uint8Array(saved.bytes));
             const manifest = entries.get("manifest.json");
@@ -285,7 +299,7 @@ export class DocumentHandle {
             if (!check || check.length !== manifest.length || check.some((b, i) => b !== manifest[i]))
                 throw new AltoError("STORAGE", "manifest.json did not read back as written");
             this.savedFolder = { provider, manifest: await sha256Hex(manifest) };
-            this.apply(await this.core.request("saved", { token }));
+            this.apply(await this.request("saved", { token }));
             token = undefined;
             this.core.emit("saveState", "saved");
             return report;
@@ -303,6 +317,6 @@ export class DocumentHandle {
     /** A cancelled or failed save no longer needs the Worker's copy of the package. */
     releaseSave(token) {
         if (token !== undefined)
-            this.core.request("releaseSave", { token }).catch(() => { });
+            this.request("releaseSave", { token }).catch(() => { });
     }
 }

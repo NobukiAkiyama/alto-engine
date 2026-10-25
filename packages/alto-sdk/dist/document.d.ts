@@ -42,6 +42,9 @@ export declare class DocumentHandle {
     get activeTool(): ToolSession | null;
     /** The folder this document was opened from or last saved to. */
     get folder(): ObjectStorageProvider | null;
+    private closed;
+    /** Requests go through here, so a replaced handle cannot touch the new document. */
+    private request;
     private command;
     private edit;
     /**

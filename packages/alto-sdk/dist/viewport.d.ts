@@ -11,6 +11,9 @@ export declare class ViewportControl {
     private view;
     private version;
     get(): Viewport;
+    /** The renderer draws device zooms from 0.01 to 128. */
+    private clamp;
+    /** Zoom is limited to what the renderer draws: 0.01–128 device pixels per document pixel. */
     set(next: Partial<Viewport>): void;
     /** Scales by `factor` keeping the document point under (clientX, clientY) in place. */
     zoomAt(clientX: number, clientY: number, factor: number): void;

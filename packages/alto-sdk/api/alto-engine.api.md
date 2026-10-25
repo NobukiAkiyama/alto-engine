@@ -124,7 +124,7 @@ export interface CommitView {
 }
 
 // @public
-export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "revision";
+export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "revision" | "document-closed";
 
 // @public
 export type ContentDetail = {
@@ -403,18 +403,14 @@ export interface Engine {
         }): Promise<FontAsset>;
         releaseImport(asset: ImageAsset | FontAsset): Promise<boolean>;
     };
-    // (undocumented)
     createDocument(meta: {
         width: number;
         height: number;
     }): Promise<DocumentHandle>;
     dispose(): Promise<void>;
-    // (undocumented)
     readonly document: DocumentHandle | null;
     readonly element: HTMLCanvasElement;
-    // (undocumented)
     on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
-    // (undocumented)
     open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
     openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
     // (undocumented)
@@ -426,14 +422,12 @@ export interface Engine {
         recoverAfterStorageFailure(): Promise<RecoveryReport>;
     };
     retry(): Promise<void>;
-    // (undocumented)
     readonly status: EngineStatus;
     // (undocumented)
     readonly vectors: {
         parseSvg(svg: string): Promise<PathData>;
         toSvg(data: PathData): Promise<string>;
     };
-    // (undocumented)
     readonly viewport: ViewportControl;
 }
 
@@ -448,7 +442,6 @@ export interface EngineEvents {
     saveState: "saving" | "saved" | "error";
     // (undocumented)
     status: EngineStatus;
-    // (undocumented)
     viewport: Viewport;
 }
 
@@ -1111,7 +1104,6 @@ export class ViewportControl {
     panBy(dxCss: number, dyCss: number): void;
     // (undocumented)
     screenToDocument(clientX: number, clientY: number): [number, number];
-    // (undocumented)
     set(next: Partial<Viewport>): void;
     zoomAt(clientX: number, clientY: number, factor: number): void;
 }

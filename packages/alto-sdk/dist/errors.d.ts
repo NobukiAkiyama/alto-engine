@@ -1,7 +1,7 @@
 /** What kind of failure an `AltoError` reports. Hosts branch on this, not on `message`. */
 export type ErrorCode = "INVALID_ARGUMENT" | "CONFLICT" | "NOT_FOUND" | "CORRUPT_DATA" | "GPU_LOST" | "GPU_UNSUPPORTED" | "STORAGE" | "INTERNAL" | "WORKER_CRASHED" | "WORKER_UNAVAILABLE" | "WORKER_TIMEOUT";
 /** Why a `CONFLICT` happened. */
-export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "revision";
+export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "revision" | "document-closed";
 /**
  * Values that let a host tell cases of one code apart. Which keys appear depends on
  * the code: `reason` for `CONFLICT` and `INVALID_ARGUMENT`, `node` for `NOT_FOUND`.
