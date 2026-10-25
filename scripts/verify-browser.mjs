@@ -1,6 +1,8 @@
 // Run the shipped Playground suites in a fresh headless Chrome profile.
 // --functional omits the hardware-dependent B1-B7 benchmark for CI.
 // ALTO_BROWSER_GPU=swiftshader runs WebGPU on a software adapter in CI.
+// --examples opens the Vite builds of examples/minimal-embed and react-embed instead
+// and drives each through the public API it exposes (build them first).
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -12,6 +14,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
 const benchmarkOnly = process.argv.includes("--benchmark-only");
+const examplesOnly = process.argv.includes("--examples");
 const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
 const browserWidth = Number(process.env.ALTO_BROWSER_WIDTH || 0);
 const browserHeight = Number(process.env.ALTO_BROWSER_HEIGHT || 0);
@@ -35,7 +38,35 @@ const mime = {
   ".otf": "font/otf",
   ".ttf": "font/ttf",
   ".alto": "application/zip",
+  ".css": "text/css; charset=utf-8",
 };
+
+/** Run in each built example. It exposes `window.altoExample` from the SDK it bundled. */
+const exampleCheck = `(async () => {
+  const assert = (ok, m) => { if (!ok) throw Error(m); };
+  const { engine, document: current, layer } = window.altoExample;
+  const doc = current();
+  const before = await doc.snapshotHash();
+  const stroke = doc.tools.begin("brush", { layer: layer(), color: [1, 0, 0, 1], tip: { size: 40 } });
+  for (let i = 0; i < 10; i++) stroke.input({ x: 100 + i * 20, y: 100, pressure: 1 });
+  await stroke.end();
+  const drawn = await doc.snapshotHash();
+  assert(drawn !== before, "the stroke did not change the document");
+  await doc.undo();
+  assert((await doc.snapshotHash()) === before, "undo did not restore the document");
+  await doc.redo();
+  assert((await doc.snapshotHash()) === drawn, "redo did not restore the stroke");
+  const png = await doc.exportImage();
+  const image = await createImageBitmap(png);
+  const { width, height } = doc.getSnapshot().meta;
+  assert(png.type === "image/png" && image.width === width && image.height === height, "PNG export " + image.width + "x" + image.height);
+  let archive;
+  await doc.save({ write: async (stream) => { archive = await new Response(stream).blob(); } });
+  assert(!doc.getSnapshot().dirty, "save left the document dirty");
+  const reopened = await engine.open(archive);
+  assert((await reopened.snapshotHash()) === drawn, "the reopened document differs");
+  return { pass: true, worker: engine.status.state };
+})()`;
 
 function chromeBin() {
   if (process.env.CHROME) return process.env.CHROME;
@@ -179,53 +210,77 @@ try {
       mobile: false,
     });
   }
-  const navigation = await send("Page.navigate", { url: pageUrl });
-  if (navigation.result?.errorText) throw Error(navigation.result.errorText);
-  let ready = false;
-  for (let i = 0; i < 240; i++) {
-    ready = !!(await evaluate("!!window.altoEngine && !!navigator.gpu").catch(() => false));
-    if (ready) break;
-    await sleep(250);
-  }
-  if (!ready) {
-    const error = await evaluate("document.querySelector('#error')?.textContent || ''").catch(() => "");
-    throw Error("Engine did not start: " + error + "\n" + stderr);
-  }
-  const adapter = await evaluate(`(async () => {
-    const info = (await navigator.gpu.requestAdapter())?.info;
-    return info ? { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description } : null;
-  })()`);
-  console.log("WebGPU adapter", JSON.stringify(adapter));
-  await evaluate(`if (!document.querySelector('#recovery').hidden) document.querySelector('#discard').click()`);
-  for (let i = 0; i < 120; i++) {
-    if (await evaluate("!!window.altoEngine.document")) break;
-    await sleep(250);
-    if (i === 119) throw Error("Document did not open");
-  }
+  if (examplesOnly) {
+    for (const name of ["minimal-embed", "react-embed"]) {
+      console.log("RUN example", name);
+      const url = `http://127.0.0.1:${address.port}/examples/${name}/dist/index.html`;
+      const nav = await send("Page.navigate", { url });
+      if (nav.result?.errorText) throw Error(nav.result.errorText);
+      let started = false;
+      for (let i = 0; i < 240 && !started; i++) {
+        started = !!(await evaluate("!!window.altoExample?.document()").catch(() => false));
+        if (!started) await sleep(250);
+      }
+      let error = started ? null : "the example did not start";
+      if (started) {
+        try {
+          await evaluate(exampleCheck);
+        } catch (e) {
+          error = e.message;
+        }
+      }
+      console.log(name, error ? "FAIL " + error : "PASS");
+      summary.push({ name: "example " + name, ok: !error, count: 1, error });
+    }
+  } else {
+    const navigation = await send("Page.navigate", { url: pageUrl });
+    if (navigation.result?.errorText) throw Error(navigation.result.errorText);
+    let ready = false;
+    for (let i = 0; i < 240; i++) {
+      ready = !!(await evaluate("!!window.altoEngine && !!navigator.gpu").catch(() => false));
+      if (ready) break;
+      await sleep(250);
+    }
+    if (!ready) {
+      const error = await evaluate("document.querySelector('#error')?.textContent || ''").catch(() => "");
+      throw Error("Engine did not start: " + error + "\n" + stderr);
+    }
+    const adapter = await evaluate(`(async () => {
+      const info = (await navigator.gpu.requestAdapter())?.info;
+      return info ? { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description } : null;
+    })()`);
+    console.log("WebGPU adapter", JSON.stringify(adapter));
+    await evaluate(`if (!document.querySelector('#recovery').hidden) document.querySelector('#discard').click()`);
+    for (let i = 0; i < 120; i++) {
+      if (await evaluate("!!window.altoEngine.document")) break;
+      await sleep(250);
+      if (i === 119) throw Error("Document did not open");
+    }
 
-  for (const [name, body] of suites) {
-    if (functionalOnly && name === "benchmark") continue;
-    if (benchmarkOnly && name !== "benchmark") continue;
-    console.log("RUN", name);
-    await evaluate("document.querySelector('#test-results').dataset.report = ''");
-    let suiteError = null;
-    try {
-      await evaluate(`(async () => { ${body} })()`);
-    } catch (error) {
-      suiteError = error;
+    for (const [name, body] of suites) {
+      if (functionalOnly && name === "benchmark") continue;
+      if (benchmarkOnly && name !== "benchmark") continue;
+      console.log("RUN", name);
+      await evaluate("document.querySelector('#test-results').dataset.report = ''");
+      let suiteError = null;
+      try {
+        await evaluate(`(async () => { ${body} })()`);
+      } catch (error) {
+        suiteError = error;
+      }
+      const report = await evaluate("document.querySelector('#test-results').dataset.report || ''");
+      if (report) {
+        const file = externalReports ? join(reportDir, `${name}.json`) : join(reportDir, `rebuild-${name}.json`);
+        await writeFile(file, report.endsWith("\n") ? report : report + "\n");
+      }
+      const parsed = report ? JSON.parse(report) : null;
+      const results = parsed?.results || [];
+      const failed = results.filter((result) => result.pass === false);
+      const ok = !suiteError && results.length > 0 && failed.length === 0;
+      console.log(name, "results", results.length, "failed", failed.length);
+      summary.push({ name, ok, count: results.length, error: suiteError?.message });
+      if (!ok) break;
     }
-    const report = await evaluate("document.querySelector('#test-results').dataset.report || ''");
-    if (report) {
-      const file = externalReports ? join(reportDir, `${name}.json`) : join(reportDir, `rebuild-${name}.json`);
-      await writeFile(file, report.endsWith("\n") ? report : report + "\n");
-    }
-    const parsed = report ? JSON.parse(report) : null;
-    const results = parsed?.results || [];
-    const failed = results.filter((result) => result.pass === false);
-    const ok = !suiteError && results.length > 0 && failed.length === 0;
-    console.log(name, "results", results.length, "failed", failed.length);
-    summary.push({ name, ok, count: results.length, error: suiteError?.message });
-    if (!ok) break;
   }
 } catch (error) {
   console.error("Browser verification failed:", error);
