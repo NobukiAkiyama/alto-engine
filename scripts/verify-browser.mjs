@@ -184,7 +184,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 let server, chrome, client, browserClient, profile;
 const summary = [];
 const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, browser: null, executable: null, args: [], events: [], system: [] };
-let stderr = "", traceStream = null, traceStarted = false;
+let stderr = "", traceStream = null, traceStarted = false, unexpectedSurfaceFault = false;
 const recordEvent = ({ method, params }) => {
   if (method === "Tracing.tracingComplete") traceStream = params.stream;
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
@@ -238,6 +238,7 @@ try {
   chrome.on("error", (error) => { launchError = error; });
   chrome.stderr.on("data", (chunk) => {
     stderr = (stderr + chunk).slice(-2 * 1024 * 1024);
+    if (surfaceRecording && stderr.includes('"SURFACE-FAILURE ')) unexpectedSurfaceFault = true;
     // Keep the evidence even if a hung test is killed before finally runs.
     appendFileSync(join(reportDir, "chrome-stderr.log"), chunk);
   });
@@ -406,6 +407,11 @@ try {
   }
   if (startupOnly && /SharedImageManager::ProduceSkia:.*non-existent mailbox/.test(stderr)) {
     summary.push({ name: "unexpected startup surface loss", ok: false, error: "SharedImage mailbox vanished before any fault injection; a later recovery does not make startup clean" });
+  }
+  if (surfaceRecording) {
+    diagnostics.unexpectedSurfaceFault = unexpectedSurfaceFault;
+    summary.push({ name: "surface lifetime recording", ok: !unexpectedSurfaceFault, count: 1,
+      ...(unexpectedSurfaceFault ? { error: "Unexpected GPU validation/loss was recorded; later automatic recovery does not make this run clean. See SURFACE-FAILURE in chrome-stderr.log." } : {}) });
   }
   await sampleSystem("shutdown");
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");

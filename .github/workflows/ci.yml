@@ -41,6 +41,7 @@ on:
           - backlog-replace
           - unused-present
           - unused-replace
+          - recorded-startup
       lifecycle_implementation:
         description: Surface isolation level (raw WebGPU, shipped WASM Runtime, or all SDK browser suites)
         default: webgpu
@@ -144,7 +145,7 @@ jobs:
       ALTO_BROWSER_GRAPHITE_BACKEND: ${{ (inputs.graphite_backend == 'swiftshader' || inputs.diagnostic_runner == 'ubuntu-24.04') && 'swiftshader' || 'default' }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_GPU: swiftshader
-      ALTO_GPU_LIFECYCLE_CYCLES: ${{ inputs.lifecycle_implementation == 'wasm' && '20' || '120' }}
+      ALTO_GPU_LIFECYCLE_CYCLES: ${{ (inputs.lifecycle_implementation == 'wasm' || inputs.lifecycle_mode == 'recorded-startup') && '20' || '120' }}
       ALTO_GPU_LIFECYCLE_MODE: ${{ inputs.lifecycle_mode || 'all' }}
       ALTO_GPU_LIFECYCLE_IMPLEMENTATION: ${{ inputs.lifecycle_implementation || 'webgpu' }}
       ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}

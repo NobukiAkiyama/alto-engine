@@ -8,8 +8,8 @@ function record(event, detail = {}) {
   console.log("LIFECYCLE", JSON.stringify(entry));
 }
 window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, implementation = "webgpu" } = {}) => {
-  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure", "backlog-resize", "backlog-replace", "unused-present", "unused-replace"].includes(mode)) throw Error("unknown mode");
-  if (mode.startsWith("unused-") && implementation !== "webgpu") throw Error("unused surface controls require raw WebGPU");
+  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure", "backlog-resize", "backlog-replace", "unused-present", "unused-replace", "recorded-startup"].includes(mode)) throw Error("unknown mode");
+  if ((mode.startsWith("unused-") || mode === "recorded-startup") && implementation !== "webgpu") throw Error("surface controls require raw WebGPU");
   let worker, canvas, nextId = 0, cycle = 0, generation = 0;
   const pending = new Map();
   const faults = [];
@@ -23,7 +23,7 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
     ++generation;
     const gen = generation;
     canvas = document.createElement("canvas");
-    canvas.width = 800; canvas.height = 600;
+    canvas.width = mode === "recorded-startup" ? 300 : 800; canvas.height = mode === "recorded-startup" ? 150 : 600;
     host.replaceChildren(canvas);
     worker = new Worker(new URL("./gpu-lifecycle-worker.js", import.meta.url), { type: "module" });
     worker.onmessage = ({ data }) => {
@@ -40,7 +40,7 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
     };
     worker.onerror = (e) => faults.push({ message: e.message });
     const offscreen = canvas.transferControlToOffscreen();
-    await request("init", { canvas: offscreen, memoryMiB, implementation, backlog: mode.startsWith("backlog-") }, [offscreen]);
+    await request("init", { canvas: offscreen, memoryMiB, implementation, backlog: mode.startsWith("backlog-"), replay: mode === "recorded-startup" }, [offscreen]);
     record("start", { generation, cycle });
   };
   const stop = async (graceful) => {
@@ -53,6 +53,13 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
   try {
     await start();
     for (cycle = 0; cycle < cycles; cycle++) {
+      if (mode === "recorded-startup") {
+        await request("replay");
+        await frame();
+        await stop(true); await start();
+        if (faults.length) throw Error(JSON.stringify(faults));
+        continue;
+      }
       if (mode.startsWith("unused-")) {
         await request("acquire-unused");
         await frame();

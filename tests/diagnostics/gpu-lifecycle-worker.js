@@ -1,7 +1,7 @@
 // The default probe is raw WebGPU. The optional WASM probe adds only Runtime,
 // keeping the SDK scheduler, OPFS and decode Workers outside the experiment.
 let canvas, context, adapter, device, buffer, memoryMiB = 0, allocations = [];
-let fault = null, runtime = null, loadPipeline = null, loadGroup = null;
+let fault = null, runtime = null, loadPipeline = null, loadGroup = null, replayEvents = null;
 const report = (event, detail = {}) => postMessage({ event, at: Date.now(), ...detail });
 async function newDevice() {
   adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -83,7 +83,11 @@ async function execute(m) {
     context = canvas.getContext("webgpu");
     device = await newDevice();
     allocate();
-    configure();
+    if (m.replay) {
+      replayEvents = (await (await fetch(new URL("./startup-surface-sequence.json", import.meta.url))).json()).events;
+      const probe = new OffscreenCanvas(1, 1).getContext("webgpu");
+      probe.configure({ device, format: "rgba16float" }); probe.unconfigure();
+    } else configure();
     if (m.backlog) {
       const shader = device.createShaderModule({ code: `
         @group(0) @binding(0) var<storage, read_write> values: array<vec4f>;
@@ -99,6 +103,28 @@ async function execute(m) {
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const { vendor, architecture, device: name, description } = adapter.info;
     report("adapter", { vendor, architecture, device: name, description });
+  } else if (m.op === "replay") {
+    const started = performance.now();
+    let texture = null, acquired = false;
+    for (const step of replayEvents) {
+      const wait = step.ms - (performance.now() - started);
+      if (wait >= 1) await new Promise((resolve) => setTimeout(resolve, wait));
+      if (fault) throw Error(fault);
+      if (step.op === "resize-width") canvas.width = step.value;
+      else if (step.op === "resize-height") canvas.height = step.value;
+      else if (step.op === "configure") context.configure({ device, format: "bgra8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT, alphaMode: "opaque" });
+      else if (step.op === "acquire") { texture = context.getCurrentTexture(); acquired = true; }
+      else if (step.op === "submit") {
+        const encoder = device.createCommandEncoder();
+        if (acquired) {
+          const pass = encoder.beginRenderPass({ colorAttachments: [{ view: texture.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 1, 0, 1] }] });
+          pass.end(); acquired = false;
+        }
+        device.queue.submit([encoder.finish()]);
+      }
+    }
+    await device.queue.onSubmittedWorkDone();
+    if (fault) throw Error(fault);
   } else if (m.op === "acquire-unused") {
     // Exercise Chromium's clear-on-present path, which a rendered green frame
     // never reaches. Do not initialize the swapchain texture in this control.

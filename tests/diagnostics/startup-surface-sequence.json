@@ -1,0 +1,310 @@
+{
+  "sourceRun": 40175618230,
+  "description": "First device and canvas, before any test or deliberate loss. RenderAttachment-only surface. Normalized timings from the captured failure; payloads are replaced by green clears/empty submissions in the replay.",
+  "events": [
+    {
+      "ms": 0.0,
+      "op": "configure"
+    },
+    {
+      "ms": 62.3,
+      "op": "acquire"
+    },
+    {
+      "ms": 66.1,
+      "op": "submit"
+    },
+    {
+      "ms": 68.8,
+      "op": "resize-width",
+      "value": 970
+    },
+    {
+      "ms": 68.9,
+      "op": "resize-height",
+      "value": 412
+    },
+    {
+      "ms": 68.9,
+      "op": "resize-width",
+      "value": 970
+    },
+    {
+      "ms": 68.9,
+      "op": "resize-height",
+      "value": 412
+    },
+    {
+      "ms": 68.9,
+      "op": "configure"
+    },
+    {
+      "ms": 76.8,
+      "op": "acquire"
+    },
+    {
+      "ms": 76.9,
+      "op": "submit"
+    },
+    {
+      "ms": 79.7,
+      "op": "submit"
+    },
+    {
+      "ms": 80.4,
+      "op": "acquire"
+    },
+    {
+      "ms": 80.5,
+      "op": "submit"
+    },
+    {
+      "ms": 1949.8,
+      "op": "acquire"
+    },
+    {
+      "ms": 1950.0,
+      "op": "submit"
+    },
+    {
+      "ms": 1963.9,
+      "op": "acquire"
+    },
+    {
+      "ms": 1964.1,
+      "op": "submit"
+    },
+    {
+      "ms": 1967.1,
+      "op": "submit"
+    },
+    {
+      "ms": 1967.7,
+      "op": "acquire"
+    },
+    {
+      "ms": 1967.8,
+      "op": "submit"
+    },
+    {
+      "ms": 1968.5,
+      "op": "submit"
+    },
+    {
+      "ms": 1968.7,
+      "op": "acquire"
+    },
+    {
+      "ms": 1968.8,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.0,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.1,
+      "op": "acquire"
+    },
+    {
+      "ms": 1969.1,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.2,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.3,
+      "op": "acquire"
+    },
+    {
+      "ms": 1969.3,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.4,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.5,
+      "op": "acquire"
+    },
+    {
+      "ms": 1969.5,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.7,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.7,
+      "op": "acquire"
+    },
+    {
+      "ms": 1969.7,
+      "op": "submit"
+    },
+    {
+      "ms": 1969.9,
+      "op": "submit"
+    },
+    {
+      "ms": 1970.4,
+      "op": "acquire"
+    },
+    {
+      "ms": 1970.4,
+      "op": "submit"
+    },
+    {
+      "ms": 1970.6,
+      "op": "submit"
+    },
+    {
+      "ms": 1970.7,
+      "op": "acquire"
+    },
+    {
+      "ms": 1970.7,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.1,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.2,
+      "op": "acquire"
+    },
+    {
+      "ms": 1971.2,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.4,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.4,
+      "op": "acquire"
+    },
+    {
+      "ms": 1971.4,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.6,
+      "op": "submit"
+    },
+    {
+      "ms": 1971.8,
+      "op": "acquire"
+    },
+    {
+      "ms": 1972.2,
+      "op": "submit"
+    },
+    {
+      "ms": 1973.0,
+      "op": "submit"
+    },
+    {
+      "ms": 1973.3,
+      "op": "acquire"
+    },
+    {
+      "ms": 1973.4,
+      "op": "submit"
+    },
+    {
+      "ms": 1976.0,
+      "op": "submit"
+    },
+    {
+      "ms": 1976.2,
+      "op": "submit"
+    },
+    {
+      "ms": 1976.4,
+      "op": "submit"
+    },
+    {
+      "ms": 2093.1,
+      "op": "acquire"
+    },
+    {
+      "ms": 2093.2,
+      "op": "submit"
+    },
+    {
+      "ms": 2093.8,
+      "op": "submit"
+    },
+    {
+      "ms": 2095.4,
+      "op": "resize-width",
+      "value": 970
+    },
+    {
+      "ms": 2095.4,
+      "op": "resize-height",
+      "value": 415
+    },
+    {
+      "ms": 2095.5,
+      "op": "resize-width",
+      "value": 970
+    },
+    {
+      "ms": 2095.5,
+      "op": "resize-height",
+      "value": 415
+    },
+    {
+      "ms": 2095.5,
+      "op": "configure"
+    },
+    {
+      "ms": 2096.0,
+      "op": "acquire"
+    },
+    {
+      "ms": 2096.1,
+      "op": "submit"
+    },
+    {
+      "ms": 2131.1,
+      "op": "acquire"
+    },
+    {
+      "ms": 2131.2,
+      "op": "submit"
+    },
+    {
+      "ms": 2136.6,
+      "op": "acquire"
+    },
+    {
+      "ms": 2136.7,
+      "op": "submit"
+    },
+    {
+      "ms": 2226.4,
+      "op": "acquire"
+    },
+    {
+      "ms": 2226.5,
+      "op": "submit"
+    },
+    {
+      "ms": 2272.1,
+      "op": "acquire"
+    },
+    {
+      "ms": 2272.3,
+      "op": "submit"
+    }
+  ]
+}
