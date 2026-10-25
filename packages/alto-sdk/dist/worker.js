@@ -27,9 +27,11 @@ const readableAfterFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
 ]);
 let storageFailure = null;
+// False when the page started without a recovery journal: nothing is written.
+let journaling = true;
 function freezeStorage(error) {
   if (storageFailure) return;
   storageFailure = structured(error);
@@ -283,6 +285,7 @@ function scheduleAutoCheckpoint() {
   }, wait);
 }
 function enqueue(entry) {
+  if (!journaling) return;
   entry.seq = ++queuedSeq;
   writes.push(entry);
   pendingBytes += entry.bytes.length;
@@ -297,6 +300,7 @@ function queueJournal() {
  * holds. It contains every edit queued so far, so their appends are dropped.
  */
 function queueCheckpoint() {
+  if (!journaling) return;
   journaledBytes = 0;
   journaledRecords = 0;
   const bytes = runtime.checkpointParts();
@@ -384,6 +388,8 @@ function decodeFrame(numbers) {
     decodeWorkerBytes: pool.workers,
     decodeTransitBytes: pool.transit,
     decodePeakBytes: decodePoolPeak,
+    // The drawing buffer, in device pixels.
+    surface: [canvas.width, canvas.height],
   };
   const profile = {};
   frameFields.forEach((name, i) => {
@@ -394,6 +400,38 @@ function decodeFrame(numbers) {
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;
   return out;
+}
+/**
+ * The document as an image file, from the same display tiles the canvas shows.
+ * Tiles are premultiplied; image files hold straight alpha.
+ */
+async function exportImage({ region, scale, type }) {
+  const { x0, y0, x1, y1 } = region;
+  const w = x1 - x0, h = y1 - y0;
+  if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
+  const pixels = new Uint8ClampedArray(w * h * 4);
+  for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
+    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) {
+      const tile = await runtime.readTile(tx, ty);
+      const left = Math.max(x0, tx * 256), right = Math.min(x1, tx * 256 + 256);
+      for (let y = Math.max(y0, ty * 256); y < Math.min(y1, ty * 256 + 256); y++)
+        for (let x = left; x < right; x++) {
+          const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, d = ((y - y0) * w + (x - x0)) * 4;
+          const a = tile[s + 3];
+          pixels[d + 3] = a;
+          if (a) for (let c = 0; c < 3; c++) pixels[d + c] = Math.round((tile[s + c] * 255) / a);
+        }
+    }
+  const full = new OffscreenCanvas(w, h);
+  full.getContext("2d").putImageData(new ImageData(pixels, w, h), 0, 0);
+  let out = full;
+  if (scale < 1) {
+    out = new OffscreenCanvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
+    const ctx = out.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(full, 0, 0, out.width, out.height);
+  }
+  return out.convertToBlob({ type });
 }
 let savedToken = 0;
 // The state each save wrote, until the page confirms or releases it.
@@ -424,11 +462,20 @@ async function execute(m) {
       startDecoders();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
+      journaling = m.journal !== false;
+      if (!journaling) return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+      await io("configure", { namespace: m.namespace || "default" });
       const recovery = await io("inspect");
       // Later checkpoints skip the objects the store already holds.
       runtime.noteStoredObjects(JSON.stringify(recovery.objects));
       delete recovery.objects;
       return { protocol: 4, recovery };
+    case "discardRecovery":
+      if (!journaling) return true;
+      await writesIdle();
+      await io("discard");
+      runtime.forgetStoredObjects();
+      return true;
     case "createDocument": {
       const state = JSON.parse(runtime.createDocument(m.width, m.height));
       queueCheckpoint();
@@ -598,6 +645,7 @@ async function execute(m) {
       return s;
     }
     case "recover": {
+      if (!journaling) throw Error("NOT_FOUND: the engine keeps no recovery journal");
       await writesIdle();
       const candidates = await io("loadCandidates");
       if (!candidates.length) {
@@ -689,6 +737,8 @@ async function execute(m) {
     case "readTileLevel": return await runtime.readTileLevel(m.level,m.x,m.y);
     case "readTile":
       return await runtime.readTile(m.x, m.y);
+    case "exportImage":
+      return exportImage(m);
     case "destroyGpu":
       runtime.destroyGpu();
       return true;

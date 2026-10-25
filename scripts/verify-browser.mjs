@@ -127,6 +127,7 @@ const suites = [
   ["m6", `const { runM6Tests } = await import('../../tests/e2e/m6-tests.js'); await runM6Tests(window.altoEngine, (line) => console.log(line));`],
   ["m7", `const { runM7Tests } = await import('../../tests/e2e/m7-tests.js'); await runM7Tests(window.altoEngine, (line) => console.log(line));`],
   ["m8", `const { runM8Tests } = await import('../../tests/e2e/m8-tests.js'); await runM8Tests(window.altoEngine, (line) => console.log(line));`],
+  ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
 ];
 

@@ -151,6 +151,9 @@ export type ContentDetail = {
 // @public
 export function createEngine(options: EngineOptions): Promise<Engine>;
 
+// @public
+export function deleteRecovery(namespace: string): Promise<void>;
+
 // @public (undocumented)
 export type DiffItem = {
     type: "added";
@@ -251,6 +254,7 @@ export class DocumentHandle {
             useSelection?: boolean;
         }) => Promise<void>;
     };
+    exportImage(options?: ExportImageOptions): Promise<Blob>;
     get folder(): ObjectStorageProvider | null;
     getSnapshot(): DocumentSnapshot;
     readonly masks: {
@@ -417,6 +421,7 @@ export interface Engine {
     readonly recovery: {
         readonly available: boolean;
         restore(): Promise<DocumentHandle>;
+        discard(): Promise<void>;
         exportEmergency(): Promise<Blob>;
         recoverAfterStorageFailure(): Promise<RecoveryReport>;
     };
@@ -636,6 +641,19 @@ export interface IntentSummary {
     targets: NodeId[];
     undone: boolean;
 }
+
+// @public
+export function isSupported(): Promise<{
+    ok: boolean;
+    reason?: "webgpu" | "offscreen-canvas" | "web-locks" | "opfs";
+}>;
+
+// @public
+export function listRecoveryNamespaces(): Promise<{
+    namespace: string;
+    bytes: number;
+    modified: number;
+}[]>;
 
 // @public (undocumented)
 export class MemoryObjectProvider implements ObjectStorageProvider {

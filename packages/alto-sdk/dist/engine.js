@@ -9,7 +9,7 @@ const readableAfterStorageFailure = new Set([
     "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
     "selectionOutline", "textInfo", "textHitTest", "textCaret",
     "textSelection", "textNavigate", "versionLog", "versionDiff",
-    "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
+    "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 /** @internal The engine. Public callers see it through `Engine`. */
@@ -33,6 +33,8 @@ export class EngineCore extends Emitter {
     workerGeneration = 0;
     restartPromise = null;
     releaseLease;
+    /** Settles once the namespace lock is released, after `releaseLease`. */
+    leaseReleased = Promise.resolve();
     lastWorkerPanic = null;
     recoveryWaiting = false;
     resizeObserver;
@@ -153,7 +155,7 @@ export class EngineCore extends Emitter {
             release = resolve;
         });
         await new Promise((resolve, reject) => {
-            void navigator.locks
+            this.leaseReleased = navigator.locks
                 .request(`alto-engine:${this.namespace}`, { ifAvailable: true }, async (lock) => {
                 if (!lock) {
                     reject(new AltoError("CONFLICT", `storage namespace ${this.namespace} is in use by another engine`, {
@@ -166,7 +168,8 @@ export class EngineCore extends Emitter {
                 resolve();
                 await hold;
             })
-                .catch(reject);
+                .catch(reject)
+                .catch(() => { });
         });
     }
     async start() {
@@ -365,15 +368,24 @@ export class EngineCore extends Emitter {
             this.viewport.publish();
         return this.document;
     }
+    /** A waiting journal would be overwritten by the new document's first checkpoint. */
+    refuseWhileRecoveryWaits() {
+        if (this.recoveryWaiting)
+            throw new AltoError("CONFLICT", "a recovery journal is waiting: restore or discard it first", {
+                reason: "recovery-pending",
+            });
+    }
     async replaceDocument(state) {
         if (this.document)
             await this.document.endTool().catch(() => { });
         return this.adopt(state, true);
     }
     async createDocument(meta) {
+        this.refuseWhileRecoveryWaits();
         return this.replaceDocument(await this.request("createDocument", meta));
     }
     async open(source) {
+        this.refuseWhileRecoveryWaits();
         const blob = source instanceof Blob ? source : await source.read();
         const bytes = await blob.arrayBuffer();
         const state = await this.request("open", { bytes }, [bytes]);
@@ -384,6 +396,7 @@ export class EngineCore extends Emitter {
         return doc;
     }
     async openFolder(provider) {
+        this.refuseWhileRecoveryWaits();
         const manifest = await provider.readRef("manifest.json");
         if (!manifest)
             throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
@@ -414,6 +427,7 @@ export class EngineCore extends Emitter {
                 return self.recoveryWaiting;
             },
             restore: () => self.restoreRecovery(),
+            discard: () => self.discardRecovery(),
             exportEmergency: () => self.exportEmergency(),
             recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
         };
@@ -422,6 +436,10 @@ export class EngineCore extends Emitter {
         const state = await this.request("recover");
         this.recoveryWaiting = false;
         return this.replaceDocument(state);
+    };
+    discardRecovery = async () => {
+        await this.request("discardRecovery");
+        this.recoveryWaiting = false;
     };
     exportEmergency = async () => new Blob([(await this.request("emergencyExport"))]);
     recoverAfterStorageFailure = async () => {
@@ -530,6 +548,8 @@ export class EngineCore extends Emitter {
                 ? cause
                 : new AltoError("WORKER_UNAVAILABLE", cause instanceof Error ? cause.message : String(cause));
             if (error.code === "CORRUPT_DATA") {
+                // Neither generation opens; nothing is left to restore.
+                this.recoveryWaiting = false;
                 this.document = null;
                 this.emit("document", null);
                 this.setStatus("storage-failed", error);
@@ -569,6 +589,8 @@ export class EngineCore extends Emitter {
             await Promise.race([settled, new Promise((r) => setTimeout(r, 2000))]);
         }
         this.shutdown();
+        // Another engine may take the namespace as soon as this resolves.
+        await this.leaseReleased;
     }
 }
 /** Starts an engine in `options.container`. */

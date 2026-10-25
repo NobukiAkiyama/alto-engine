@@ -77,6 +77,8 @@ export interface Engine {
     /** A journal from an earlier session is waiting. */
     readonly available: boolean;
     restore(): Promise<DocumentHandle>;
+    /** Deletes the waiting journal, so a new document can start. */
+    discard(): Promise<void>;
     /** The live document as a `.alto` archive, for use when storage has failed. */
     exportEmergency(): Promise<Blob>;
     /** Restarts the Worker and replays the confirmed journal after a storage failure. */
@@ -108,7 +110,7 @@ const readableAfterStorageFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 
@@ -134,6 +136,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private workerGeneration = 0;
   private restartPromise: Promise<void> | null = null;
   private releaseLease?: () => void;
+  /** Settles once the namespace lock is released, after `releaseLease`. */
+  private leaseReleased: Promise<unknown> = Promise.resolve();
   private lastWorkerPanic: string | null = null;
   private recoveryWaiting = false;
   private resizeObserver: ResizeObserver;
@@ -254,7 +258,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       release = resolve;
     });
     await new Promise<void>((resolve, reject) => {
-      void navigator.locks
+      this.leaseReleased = navigator.locks
         .request(`alto-engine:${this.namespace}`, { ifAvailable: true }, async (lock) => {
           if (!lock) {
             reject(
@@ -269,7 +273,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
           resolve();
           await hold;
         })
-        .catch(reject);
+        .catch(reject)
+        .catch(() => {});
     });
   }
 
@@ -459,14 +464,23 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     else this.viewport.publish();
     return this.document;
   }
+  /** A waiting journal would be overwritten by the new document's first checkpoint. */
+  private refuseWhileRecoveryWaits() {
+    if (this.recoveryWaiting)
+      throw new AltoError("CONFLICT", "a recovery journal is waiting: restore or discard it first", {
+        reason: "recovery-pending",
+      });
+  }
   private async replaceDocument(state: unknown): Promise<DocumentHandle> {
     if (this.document) await this.document.endTool().catch(() => {});
     return this.adopt(state, true);
   }
   async createDocument(meta: { width: number; height: number }): Promise<DocumentHandle> {
+    this.refuseWhileRecoveryWaits();
     return this.replaceDocument(await this.request("createDocument", meta));
   }
   async open(source: Blob | ArchiveSource): Promise<DocumentHandle> {
+    this.refuseWhileRecoveryWaits();
     const blob = source instanceof Blob ? source : await source.read();
     const bytes = await blob.arrayBuffer();
     const state = await this.request("open", { bytes }, [bytes]);
@@ -476,6 +490,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     return doc;
   }
   async openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle> {
+    this.refuseWhileRecoveryWaits();
     const manifest = await provider.readRef("manifest.json");
     if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
     const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
@@ -504,6 +519,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         return self.recoveryWaiting;
       },
       restore: () => self.restoreRecovery(),
+      discard: () => self.discardRecovery(),
       exportEmergency: () => self.exportEmergency(),
       recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
     };
@@ -512,6 +528,10 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     const state = await this.request("recover");
     this.recoveryWaiting = false;
     return this.replaceDocument(state);
+  };
+  private discardRecovery = async (): Promise<void> => {
+    await this.request("discardRecovery");
+    this.recoveryWaiting = false;
   };
   private exportEmergency = async (): Promise<Blob> =>
     new Blob([(await this.request("emergencyExport")) as ArrayBuffer]);
@@ -617,6 +637,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
           ? cause
           : new AltoError("WORKER_UNAVAILABLE", cause instanceof Error ? cause.message : String(cause));
       if (error.code === "CORRUPT_DATA") {
+        // Neither generation opens; nothing is left to restore.
+        this.recoveryWaiting = false;
         this.document = null;
         this.emit("document", null);
         this.setStatus("storage-failed", error);
@@ -653,6 +675,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       await Promise.race([settled, new Promise((r) => setTimeout(r, 2000))]);
     }
     this.shutdown();
+    // Another engine may take the namespace as soon as this resolves.
+    await this.leaseReleased;
   }
 }
 

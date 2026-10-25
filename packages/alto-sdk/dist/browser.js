@@ -73,3 +73,16 @@ export async function opfsFolder(name) {
     const root = await navigator.storage.getDirectory();
     return new FileSystemDirectoryProvider(await root.getDirectoryHandle(name, { create: true }));
 }
+/** Whether this browser can run the engine, and if not, what is missing. */
+export async function isSupported() {
+    if (typeof HTMLCanvasElement === "undefined" || !("transferControlToOffscreen" in HTMLCanvasElement.prototype))
+        return { ok: false, reason: "offscreen-canvas" };
+    const gpu = navigator.gpu;
+    if (!gpu || !(await gpu.requestAdapter().catch(() => null)))
+        return { ok: false, reason: "webgpu" };
+    if (!navigator.locks)
+        return { ok: false, reason: "web-locks" };
+    if (!navigator.storage?.getDirectory)
+        return { ok: false, reason: "opfs" };
+    return { ok: true };
+}

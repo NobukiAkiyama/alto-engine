@@ -1,4 +1,6 @@
 export { createEngine } from "./engine.js";
+export { isSupported } from "./browser.js";
+export { deleteRecovery, listRecoveryNamespaces } from "./recovery-store.js";
 export type {
   Engine,
   EngineEvents,

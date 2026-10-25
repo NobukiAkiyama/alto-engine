@@ -8,7 +8,10 @@ const MAGIC = new TextEncoder().encode("ALTOJ001");
 const MAX_RECORD_BYTES = 540 * 1024 * 1024;
 const OBJECT_PATH = /^objects\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
 const PACK_NAME = /^[0-9]+\.pack$/;
-let directory,
+// Each storage namespace has its own folder, so engines with different names never
+// share a journal. The Worker names it before the first request.
+let namespace = "default",
+  directory,
   objectsDirectory,
   packsDirectory,
   active = null,
@@ -197,11 +200,14 @@ async function listObjects() {
   }
   return present;
 }
+/** The folder name of a namespace: its UTF-8 bytes in hex, so any allowed name is a valid name. */
+export function namespaceFolder(name) {
+  return "ns-" + Array.from(encoder.encode(name), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 async function init() {
   if (directory) return;
-  directory = await (
-    await navigator.storage.getDirectory()
-  ).getDirectoryHandle("alto-engine", { create: true });
+  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine", { create: true });
+  directory = await root.getDirectoryHandle(namespaceFolder(namespace), { create: true });
   objectsDirectory = await directory.getDirectoryHandle("objects", { create: true });
   packsDirectory = await directory.getDirectoryHandle("packs", { create: true });
   await scan();
@@ -522,7 +528,37 @@ async function damageCheckpoint(candidate, preserveRecordCrc) {
 }
 
 /** Handles one journal request; shared by the Storage Worker and the inline fallback. */
+/** Deletes this namespace's journals and objects and starts an empty store. */
+async function discard() {
+  await init();
+  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+  await root.removeEntry(namespaceFolder(namespace), { recursive: true });
+  directory = null;
+  active = null;
+  candidates = [];
+  offset = 0;
+  stored = new Map();
+  keptPacks = new Set();
+  keptLoose = new Set();
+  released = false;
+  collected = true;
+  await init();
+}
+
 export async function handle(data) {
+  // The session pings before the Worker names the namespace; opening the store here
+  // would open the default one.
+  if (data.t === "ping") return true;
+  if (data.t === "configure") {
+    if (directory && data.namespace !== namespace) throw Error("CONFLICT: the store is already open for another namespace");
+    namespace = data.namespace;
+    await init();
+    return true;
+  }
+  if (data.t === "discard") {
+    await discard();
+    return true;
+  }
   await init();
   let value;
   if (data.t === "inspect")

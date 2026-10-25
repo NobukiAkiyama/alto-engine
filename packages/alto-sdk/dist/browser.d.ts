@@ -18,3 +18,8 @@ export declare function fileSource(file: Blob | FileSystemFileHandle): ArchiveSo
 export declare function pickFolder(): Promise<ObjectStorageProvider>;
 /** A folder inside the origin private file system. */
 export declare function opfsFolder(name: string): Promise<ObjectStorageProvider>;
+/** Whether this browser can run the engine, and if not, what is missing. */
+export declare function isSupported(): Promise<{
+    ok: boolean;
+    reason?: "webgpu" | "offscreen-canvas" | "web-locks" | "opfs";
+}>;

@@ -127,6 +127,11 @@ export declare class DocumentHandle {
         /** Drops versions that cannot be reached from the head. Returns how many. */
         prune: () => Promise<number>;
     };
+    /**
+     * The document, or a region of it, as a PNG or WebP image: the pixels the canvas
+     * shows, at `scale` (greater than 0, at most 1). Allowed while storage has failed.
+     */
+    exportImage(options?: ExportImageOptions): Promise<Blob>;
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
     save(target: ArchiveTarget): Promise<void>;
     /**

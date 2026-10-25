@@ -221,6 +221,12 @@ impl Runtime {
         }
         Ok(())
     }
+    /// The recovery store was emptied (its journal discarded); the next checkpoint
+    /// writes every object again.
+    #[wasm_bindgen(js_name=forgetStoredObjects)]
+    pub fn forget_stored_objects(&mut self) {
+        self.stored_objects.clear();
+    }
     /// Only called by the journal worker after verifying the checkpoint digest.
     #[wasm_bindgen(js_name=openRecoveryEntries)]
     pub fn open_recovery_entries(

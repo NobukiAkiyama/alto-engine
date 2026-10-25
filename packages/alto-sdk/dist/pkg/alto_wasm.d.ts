@@ -28,6 +28,11 @@ export class Runtime {
     endBrush(): Promise<string>;
     folderEntries(): Uint8Array;
     folderPlan(framed: Uint8Array): string;
+    /**
+     * The recovery store was emptied (its journal discarded); the next checkpoint
+     * writes every object again.
+     */
+    forgetStoredObjects(): void;
     frameFields(): string[];
     gpuIdle(): Promise<void>;
     importFont(bytes: Uint8Array, face_index: number): string;
@@ -159,6 +164,7 @@ export interface InitOutput {
     readonly runtime_endBrush: (a: number) => any;
     readonly runtime_folderEntries: (a: number) => [number, number, number, number];
     readonly runtime_folderPlan: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_forgetStoredObjects: (a: number) => void;
     readonly runtime_frameFields: (a: number) => [number, number];
     readonly runtime_gpuIdle: (a: number) => any;
     readonly runtime_importFont: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -224,8 +230,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__80: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__81: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__82: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

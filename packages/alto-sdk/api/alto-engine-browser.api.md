@@ -31,6 +31,12 @@ export function fileHandleTarget(handle: FileSystemFileHandle): ArchiveTarget;
 export function fileSource(file: Blob | FileSystemFileHandle): ArchiveSource;
 
 // @public
+export function isSupported(): Promise<{
+    ok: boolean;
+    reason?: "webgpu" | "offscreen-canvas" | "web-locks" | "opfs";
+}>;
+
+// @public
 export interface ObjectStorageProvider {
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
