@@ -1,6 +1,7 @@
-// Deliberately independent of Alto, Rust, WASM, OPFS and decode Workers.
+// The default probe is raw WebGPU. The optional WASM probe adds only Runtime,
+// keeping the SDK scheduler, OPFS and decode Workers outside the experiment.
 let canvas, context, adapter, device, buffer, memoryMiB = 0, allocations = [];
-let fault = null, runtime = null;
+let fault = null, runtime = null, loadPipeline = null, loadGroup = null;
 const report = (event, detail = {}) => postMessage({ event, at: Date.now(), ...detail });
 async function newDevice() {
   adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -28,10 +29,15 @@ function configure() {
   context.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(),
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, alphaMode: "opaque" });
 }
-function encode(readback) {
+function encode(readback, load = false) {
   if (fault) throw Error(fault);
   const texture = context.getCurrentTexture();
   const encoder = device.createCommandEncoder();
+  if (load && loadPipeline) {
+    const compute = encoder.beginComputePass({ label: "bounded queue backlog" });
+    compute.setPipeline(loadPipeline); compute.setBindGroup(0, loadGroup);
+    compute.dispatchWorkgroups(256); compute.end();
+  }
   const pass = encoder.beginRenderPass({ label: "raw-present", colorAttachments: [{
     view: texture.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 1, 0, 1],
   }] });
@@ -78,6 +84,18 @@ async function execute(m) {
     device = await newDevice();
     allocate();
     configure();
+    if (m.backlog) {
+      const shader = device.createShaderModule({ code: `
+        @group(0) @binding(0) var<storage, read_write> values: array<vec4f>;
+        @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
+          var value = values[id.x] + vec4f(f32(id.x) * .001);
+          for (var i = 0u; i < 64u; i++) { value = sin(value + vec4f(.01)); }
+          values[id.x] = value;
+        }` });
+      loadPipeline = device.createComputePipeline({ layout: "auto", compute: { module: shader, entryPoint: "main" } });
+      const values = device.createBuffer({ size: 16384 * 16, usage: GPUBufferUsage.STORAGE });
+      loadGroup = device.createBindGroup({ layout: loadPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: values } }] });
+    }
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const { vendor, architecture, device: name, description } = adapter.info;
     report("adapter", { vendor, architecture, device: name, description });
@@ -90,7 +108,8 @@ async function execute(m) {
         configure();
       }
     }
-    encode(true);
+    encode(m.readback !== false, m.load);
+    if (m.readback === false) return { submitted: true };
     await buffer.mapAsync(GPUMapMode.READ);
     const pixel = Array.from(new Uint8Array(buffer.getMappedRange(), 0, 4));
     buffer.unmap();

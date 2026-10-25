@@ -9,6 +9,13 @@ on:
         description: Chrome for Testing version (exact four-part version)
         default: '156.0.8078.47'
         type: string
+      diagnostic_runner:
+        description: Runner for the manual surface investigation (Linux remains experimental)
+        default: macos-15
+        type: choice
+        options:
+          - macos-15
+          - ubuntu-24.04
       gpu_trace:
         description: Capture a bounded Chrome GPU command trace for diagnosis
         default: false
@@ -20,6 +27,14 @@ on:
         options:
           - default
           - swiftshader
+      lifecycle_mode:
+        description: Run all lifetime probes or isolate queued GPU work
+        default: all
+        type: choice
+        options:
+          - all
+          - backlog-resize
+          - backlog-replace
       lifecycle_implementation:
         description: Surface isolation level (raw WebGPU, shipped WASM Runtime, or all SDK browser suites)
         default: webgpu
@@ -113,28 +128,15 @@ jobs:
 
   gpu-lifecycle:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            graphite_backend: default
-            archive: mac-arm64
-            executable: chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
-          - os: ubuntu-24.04
-            # A headless Linux host has no native compositor. Explicit Graphite
-            # SwiftShader supplies the SharedImage backing required for WebGPU.
-            graphite_backend: swiftshader
-            archive: linux64
-            executable: chrome-linux64/chrome
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ inputs.diagnostic_runner || 'macos-15' }}
     timeout-minutes: 25
     env:
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
-      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend == 'swiftshader' && 'swiftshader' || matrix.graphite_backend }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ (inputs.graphite_backend == 'swiftshader' || inputs.diagnostic_runner == 'ubuntu-24.04') && 'swiftshader' || 'default' }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_GPU: swiftshader
       ALTO_GPU_LIFECYCLE_CYCLES: ${{ inputs.lifecycle_implementation == 'wasm' && '20' || '120' }}
+      ALTO_GPU_LIFECYCLE_MODE: ${{ inputs.lifecycle_mode || 'all' }}
       ALTO_GPU_LIFECYCLE_IMPLEMENTATION: ${{ inputs.lifecycle_implementation || 'webgpu' }}
       ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}
       ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
@@ -147,11 +149,16 @@ jobs:
         shell: bash
         run: |
           [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$RUNNER_OS" in
+            Linux) archive=linux64; executable=chrome-linux64/chrome ;;
+            macOS) archive=mac-arm64; executable="chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" ;;
+            *) exit 1 ;;
+          esac
           curl --fail --location --retry 3 \
-            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/${{ matrix.archive }}/chrome-${{ matrix.archive }}.zip" \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$archive/chrome-$archive.zip" \
             --output "$RUNNER_TEMP/chrome.zip"
           unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome"
-          echo "CHROME=$RUNNER_TEMP/chrome/${{ matrix.executable }}" >> "$GITHUB_ENV"
+          echo "CHROME=$RUNNER_TEMP/chrome/$executable" >> "$GITHUB_ENV"
       - name: Allow user namespaces for this Chrome executable on Ubuntu
         if: runner.os == 'Linux'
         shell: bash
@@ -168,7 +175,9 @@ jobs:
             exit
           fi
           status=0
-          for mode in stable same-size resize same-size-burst resize-burst replace-abrupt replace-graceful recover recover-unconfigure; do
+          modes="stable same-size resize same-size-burst resize-burst replace-abrupt replace-graceful recover recover-unconfigure"
+          if [[ "$ALTO_GPU_LIFECYCLE_MODE" != all ]]; then modes="$ALTO_GPU_LIFECYCLE_MODE"; fi
+          for mode in $modes; do
             ALTO_GPU_LIFECYCLE_MODE="$mode" ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/$mode" \
               node scripts/verify-browser.mjs --gpu-lifecycle || status=1
           done
@@ -176,6 +185,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: gpu-lifecycle-${{ matrix.os }}
+          name: gpu-lifecycle-${{ runner.os }}
           path: ${{ runner.temp }}/lifecycle
           if-no-files-found: error

@@ -8,7 +8,7 @@ function record(event, detail = {}) {
   console.log("LIFECYCLE", JSON.stringify(entry));
 }
 window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, implementation = "webgpu" } = {}) => {
-  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure"].includes(mode)) throw Error("unknown mode");
+  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure", "backlog-resize", "backlog-replace"].includes(mode)) throw Error("unknown mode");
   let worker, canvas, nextId = 0, cycle = 0, generation = 0;
   const pending = new Map();
   const faults = [];
@@ -39,7 +39,7 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
     };
     worker.onerror = (e) => faults.push({ message: e.message });
     const offscreen = canvas.transferControlToOffscreen();
-    await request("init", { canvas: offscreen, memoryMiB, implementation }, [offscreen]);
+    await request("init", { canvas: offscreen, memoryMiB, implementation, backlog: mode.startsWith("backlog-") }, [offscreen]);
     record("start", { generation, cycle });
   };
   const stop = async (graceful) => {
@@ -52,19 +52,20 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
   try {
     await start();
     for (cycle = 0; cycle < cycles; cycle++) {
-      if (mode.startsWith("replace") && cycle) {
+      if ((mode.startsWith("replace") || (mode === "backlog-replace" && cycle % 10 === 0)) && cycle) {
         await request("submit");
         await stop(mode === "replace-graceful");
         await start();
       } else if (mode.startsWith("recover") && cycle) {
         await request("recover", { unconfigure: mode === "recover-unconfigure" });
       }
-      const size = mode.startsWith("resize") && cycle % 2 ? [640, 480] : [800, 600];
-      await request("frame", { resize: (mode.startsWith("same-size") || mode.startsWith("resize")) ? size : null, reconfigure: mode.startsWith("resize") });
-      if (!mode.endsWith("-burst")) await frame();
+      const size = (mode.startsWith("resize") || mode === "backlog-resize") && cycle % 2 ? [640, 480] : [800, 600];
+      await request("frame", { resize: (mode.startsWith("same-size") || mode.startsWith("resize") || mode === "backlog-resize") ? size : null, reconfigure: mode.startsWith("resize") || mode === "backlog-resize", readback: !mode.startsWith("backlog-"), load: mode.startsWith("backlog-") });
+      if (!mode.endsWith("-burst") && !mode.startsWith("backlog-")) await frame();
       if (faults.length) throw Error(JSON.stringify(faults));
       if (cycle % 20 === 0) record("progress", { mode, cycle, generation });
     }
+    if (mode.startsWith("backlog-")) await request("frame");
     await stop(true);
     await frame();
     if (faults.length) throw Error(JSON.stringify(faults));

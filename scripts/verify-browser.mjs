@@ -370,7 +370,7 @@ try {
   }
 } catch (error) {
   console.error("Browser verification failed:", error);
-  summary.push({ name: "startup", ok: false, error: String(error) });
+  summary.push({ name: lifecycleOnly ? "gpu-lifecycle harness" : "startup", ok: false, error: String(error) });
 } finally {
   if (traceStarted) {
     try {
@@ -386,7 +386,7 @@ try {
       }
       await browserClient.send("IO.close", { handle: traceStream }, 5000);
       diagnostics.trace = { file: "chrome-gpu-trace.json", bufferKiB: 65536 };
-    } catch (error) { diagnostics.trace = { error: String(error) }; }
+    } catch (error) { diagnostics.trace = { error: String(error) }; summary.push({ name: "gpu-trace", ok: false, error: String(error) }); }
   }
   await sampleSystem("shutdown");
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
