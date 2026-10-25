@@ -39,6 +39,8 @@ on:
           - all
           - backlog-resize
           - backlog-replace
+          - unused-present
+          - unused-replace
       lifecycle_implementation:
         description: Surface isolation level (raw WebGPU, shipped WASM Runtime, or all SDK browser suites)
         default: webgpu

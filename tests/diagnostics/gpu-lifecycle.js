@@ -8,7 +8,8 @@ function record(event, detail = {}) {
   console.log("LIFECYCLE", JSON.stringify(entry));
 }
 window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, implementation = "webgpu" } = {}) => {
-  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure", "backlog-resize", "backlog-replace"].includes(mode)) throw Error("unknown mode");
+  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure", "backlog-resize", "backlog-replace", "unused-present", "unused-replace"].includes(mode)) throw Error("unknown mode");
+  if (mode.startsWith("unused-") && implementation !== "webgpu") throw Error("unused surface controls require raw WebGPU");
   let worker, canvas, nextId = 0, cycle = 0, generation = 0;
   const pending = new Map();
   const faults = [];
@@ -52,6 +53,13 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
   try {
     await start();
     for (cycle = 0; cycle < cycles; cycle++) {
+      if (mode.startsWith("unused-")) {
+        await request("acquire-unused");
+        await frame();
+        if (mode === "unused-replace") { await stop(false); await start(); }
+        if (faults.length) throw Error(JSON.stringify(faults));
+        continue;
+      }
       if ((mode.startsWith("replace") || (mode === "backlog-replace" && cycle % 10 === 0)) && cycle) {
         await request("submit");
         await stop(mode === "replace-graceful");

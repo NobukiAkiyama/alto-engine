@@ -99,6 +99,10 @@ async function execute(m) {
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const { vendor, architecture, device: name, description } = adapter.info;
     report("adapter", { vendor, architecture, device: name, description });
+  } else if (m.op === "acquire-unused") {
+    // Exercise Chromium's clear-on-present path, which a rendered green frame
+    // never reaches. Do not initialize the swapchain texture in this control.
+    context.getCurrentTexture();
   } else if (m.op === "frame") {
     if (m.resize) {
       canvas.width = m.resize[0]; canvas.height = m.resize[1];
