@@ -43,3 +43,36 @@ startup even if automatic GPU recovery subsequently succeeds. Manual CI input
 startups, retaining every result; it does not retry a failed test to obtain a pass.
 The longer 45-second trace drain is diagnostic collection only; the engine's
 initialization and operation timeouts are unchanged.
+
+
+## Capturing the actual SDK surface calls
+
+`ALTO_BROWSER_SURFACE_RECORDING=1` instruments the diagnostic server's response
+for the SDK Worker and the page's early initialization. Shipped files stay intact.
+A ring of 1,024 primitive events records device identity, canvas dimensions,
+configure/unconfigure, acquisitions, submissions and explicit destruction. It
+uses WeakMap identifiers and does not retain native GPU objects. Normal calls do
+not print to the console; the first unexpected validation/loss dumps
+`SURFACE-FAILURE` to `chrome-stderr.log`. Explicitly destroyed devices are excluded
+from that fault dump. Diagnostic verification fails on a dump even when the
+correctness suites later pass after automatic recovery. Recording itself still
+adds overhead; its timing cannot be assumed identical to an uninstrumented run.
+
+`ALTO_BROWSER_RESIZE_BARRIER=1` adds an awaited `runtime.gpuIdle()` before the
+SDK drain applies a pending resize, solely to the served Worker response. The
+server refuses a changed insertion target. This is an investigation control,
+not a product fix or a performance improvement. CI metadata records both options.
+
+Additional raw controls selected through `lifecycle_mode`:
+
+- `unused-present`: acquire without rendering, exercising the browser's clear
+  of an uninitialized surface before presenting.
+- `unused-replace`: do the same and replace the Worker/canvas after every frame.
+- `recorded-startup`: replay the surface call order and relative timings captured
+  in CI 40175618230. It uses the actual 300×150 initial dimensions, 970×412 / 415
+  resizes, the rgba16float capability probe, and RenderAttachment-only BGRA.
+  Green clears and empty submissions replace Alto's command payloads. It keeps
+  acquisition and its submission in one task: yielding in between would expire
+  the texture and create a test-fixture error. CI uses 20 generations, and 192 MiB
+  can be allocated through the existing input. This is a partial replay, not an
+  equivalent reproduction of the complete engine workload.
