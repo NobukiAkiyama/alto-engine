@@ -13,7 +13,9 @@
     const entry = { at: Date.now(), time: performance.now(), realm: location.href, realmId, op, ...fields };
     events.push(entry);
     if (events.length > 1024) events.shift();
-    if (op !== "submit" && op !== "acquire") console.log("SURFACE", JSON.stringify(entry));
+    // Logging every resize changes Worker/GPU scheduling and can hide a race.
+    // Keep normal calls in memory and export them only on the first fault.
+    if (["recorder-ready", "destroy-device", "device-lost"].includes(op)) console.log("SURFACE", JSON.stringify(entry));
   };
   const dump = (cause, device) => {
     if (failedDevices.has(device)) return;
@@ -57,6 +59,10 @@
   });
   method(globalThis.GPUQueue?.prototype, "submit", (original) => function (...args) {
     event("submit", { queue: id(this), index: ++submits });
+    return original.apply(this, args);
+  });
+  method(globalThis.GPUTexture?.prototype, "destroy", (original) => function (...args) {
+    event("destroy-texture", { texture: id(this), width: this.width, height: this.height });
     return original.apply(this, args);
   });
   for (const type of [globalThis.OffscreenCanvas, globalThis.HTMLCanvasElement]) {
