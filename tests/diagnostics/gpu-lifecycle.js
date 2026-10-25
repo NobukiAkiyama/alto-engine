@@ -14,7 +14,7 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, 
   const faults = [];
   const request = (op, data = {}, transfer = []) => new Promise((resolve, reject) => {
     const id = ++nextId;
-    const timer = setTimeout(() => { pending.delete(id); reject(Error(`timeout ${op} at cycle ${cycle}`)); }, 15000);
+    const timer = setTimeout(() => { pending.delete(id); reject(Error(`timeout ${op} at cycle ${cycle}`)); }, op === "init" ? 30000 : 15000);
     pending.set(id, { resolve, reject, timer });
     worker.postMessage({ id, op, ...data }, transfer);
   });

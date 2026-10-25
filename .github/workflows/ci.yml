@@ -113,15 +113,19 @@ jobs:
       matrix:
         include:
           - os: macos-15
+            graphite_backend: default
             archive: mac-arm64
             executable: chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
           - os: ubuntu-24.04
+            # A headless Linux host has no native compositor. Explicit Graphite
+            # SwiftShader supplies the SharedImage backing required for WebGPU.
+            graphite_backend: swiftshader
             archive: linux64
             executable: chrome-linux64/chrome
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
-      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend == 'swiftshader' && 'swiftshader' || matrix.graphite_backend }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_GPU: swiftshader
       ALTO_GPU_LIFECYCLE_CYCLES: 120
