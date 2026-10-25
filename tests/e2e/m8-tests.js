@@ -88,9 +88,9 @@ export async function runM8Tests(engine, log) {
         const v3 = await doc.versions.commit("名前を変更");
         const second = await doc.saveFolder(provider);
         assert(second.skipped >= first.written - 2 && second.written <= 3, `incremental ${JSON.stringify(first)} -> ${JSON.stringify(second)}`);
-        const hash = doc.view.snapshotHash;
+        const hash = (await doc.snapshotHash());
         doc = await engine.openFolder(provider);
-        assert(doc.view.snapshotHash === hash, "folder snapshot");
+        assert((await doc.snapshotHash()) === hash, "folder snapshot");
         assert((await doc.versions.log()).map((c) => c.hash).join() === [v3.hash, v2.hash, v1.hash].join(), "folder log");
         await doc.versions.restore(v1.hash);
         assert(same(pixels1, await engine.unstable.readTile(0, 0)), "folder restore");
@@ -115,6 +115,8 @@ export async function runM8Tests(engine, log) {
       await stroke(doc, bg, 300, 400, [1, 0, 0, 1]);
       const c = await doc.versions.commit("赤い線");
       const after = await engine.unstable.readTile(1, 1);
+      // The commit's checkpoint is written after the reply.
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
       const log = await doc.versions.log();

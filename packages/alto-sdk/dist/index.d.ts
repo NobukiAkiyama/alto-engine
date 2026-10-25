@@ -244,13 +244,17 @@ export interface NodeView {
     kind: {
         kind: string;
         children?: NodeId[];
-        tiles?: {
-            format: string;
-            tiles: Record<string, string>;
-        };
+        /** Raster layers: size only. The map itself comes from `DocumentHandle.nodeTiles`. */
+        tiles?: RasterTilesSummary;
         [key: string]: unknown;
     };
     children: NodeView[];
+}
+export interface RasterTilesSummary {
+    format: string;
+    count: number;
+    /** Union of tile rectangles in layer pixels, `[x0, y0, x1, y1]`; null when empty. */
+    bounds: [number, number, number, number] | null;
 }
 export interface Mirror {
     meta: {
@@ -439,7 +443,8 @@ declare class DocumentView extends Events {
         undo: number;
         redo: number;
     };
-    snapshotHash: string;
+    /** Set by full views (open, save). Null after an edit: use `DocumentHandle.snapshotHash()`. */
+    snapshotHash: string | null;
     stateHash: string;
     versions: VersionStatus;
     dirty: boolean;
@@ -538,6 +543,18 @@ export declare class DocumentHandle {
         begin: (tool: "brush" | "eraser", options: BrushOptions) => ToolSession;
     };
     transact<T>(intent: string, callback: (tx: TransactionBuilder) => T): Promise<T>;
+    /**
+     * Resolves once every edit made so far is in the recovery journal. Edits resolve
+     * when applied; this rejects with STORAGE if the journal could not be written.
+     */
+    durable(): Promise<void>;
+    /** The hash of the snapshot a save would write. Computed on request, not per edit. */
+    snapshotHash(): Promise<string>;
+    /** A raster layer's full tile map (key `tx,ty` to content hash). */
+    nodeTiles(id: NodeId): Promise<{
+        format: string;
+        tiles: Record<string, string>;
+    }>;
     undo(): Promise<void>;
     redo(): Promise<void>;
     command(type: string, payload: any): Promise<void>;
@@ -568,6 +585,8 @@ export declare class DocumentHandle {
         }) => Promise<void>;
     };
     save(target?: ArchiveStorageProvider | any): Promise<any>;
+    /** A cancelled or failed save no longer needs the Worker's copy of the package. */
+    private releaseSave;
 }
 export declare class AltoEngine extends Events {
     canvas: HTMLCanvasElement;
@@ -590,6 +609,7 @@ export declare class AltoEngine extends Events {
     recoveryAvailable: boolean;
     /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
     storageFailure: AltoError | null;
+    private lastWorkerPanic;
     /** A Worker startup or runtime failure. Independent of journal corruption. */
     engineFailure: AltoError | null;
     get lifecycleState(): EnginePhase;
@@ -677,11 +697,19 @@ export declare class AltoEngine extends Events {
         /** Temporarily changes the module URL for Worker load-failure tests. */
         setWorkerURL: (url: URL | string | undefined) => void;
         pendingRequests: () => number;
+        /** Generation, record count and object count of the OPFS recovery store. */
+        recoveryStore: () => Promise<{
+            latestGeneration: number;
+            records: number;
+            objects: number;
+            packs: number;
+        }>;
         corruptJournalTail: () => Promise<any>;
         corruptCheckpoint: () => Promise<any>;
         corruptCheckpointCrc: () => Promise<any>;
         corruptBothCheckpoints: () => Promise<any>;
         legacyCheckpoint: () => Promise<any>;
+        looseCheckpoint: () => Promise<any>;
         /** Fault injection for recovery tests only. */
         injectStorageFault: (position: "beforeAppend" | "afterAppend") => Promise<any>;
         saveBytes: () => Promise<Uint8Array<any>>;

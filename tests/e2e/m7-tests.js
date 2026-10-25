@@ -248,15 +248,16 @@ export async function runM7Tests(engine, log) {
       metrics.zoom = rows;
     });
     await test("ZIP / journal recovery / GPU loss keep fonts, text and pixels", async () => {
-      const hash = doc.view.snapshotHash, before = await engine.unstable.readTile(0, 0);
+      const hash = (await doc.snapshotHash()), before = await engine.unstable.readTile(0, 0);
       doc = await engine.openDocument(new Blob([await engine.unstable.saveBytes()]));
-      assert(doc.view.snapshotHash === hash, "ZIP snapshot");
+      assert((await doc.snapshotHash()) === hash, "ZIP snapshot");
       assert(same(before, await engine.unstable.readTile(0, 0)), "ZIP pixels");
       await doc.text.replace(id, 0, 1, "東");
-      const after = await engine.unstable.readTile(0, 0), saved = doc.view.snapshotHash;
+      const after = await engine.unstable.readTile(0, 0), saved = (await doc.snapshotHash());
+      await doc.durable();
       await engine.unstable.crash();
       doc = engine.document;
-      assert(saved === doc.view.snapshotHash && same(after, await engine.unstable.readTile(0, 0)), "journal");
+      assert(saved === (await doc.snapshotHash()) && same(after, await engine.unstable.readTile(0, 0)), "journal");
       await engine.unstable.destroyGpu();
       await new Promise((resolve, reject) => { const off = engine.on("gpuRestored", () => { off(); resolve(); }); setTimeout(() => reject(Error("GPU recovery timeout")), 15000); });
       assert(same(after, await engine.unstable.readTile(0, 0)), "GPU rebuild");

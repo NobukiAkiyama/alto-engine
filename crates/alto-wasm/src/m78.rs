@@ -1,7 +1,7 @@
 //! M7 text / fonts and M8 versions / folder packages at the WASM boundary.
 use crate::{Runtime, error};
 use alto_core::{ContentHash, NodeId};
-use alto_engine::{Engine, VersionRef};
+use alto_engine::{Engine, JournalKind, VersionRef};
 use serde_json::json;
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
@@ -173,8 +173,11 @@ impl Runtime {
             .map_err(|_| error("INVALID_ARGUMENT: commit hash"))?;
         let ops = self.engine.restore_version(self.doc, hash).map_err(error)?;
         let label = format!("版を復元: {}", &hash.hex()[..10]);
-        self.journal
-            .push(self.engine.journal_record(&label, &ops).map_err(error)?);
+        self.journal.push(
+            self.engine
+                .journal_record(self.doc, JournalKind::Transact, &label, &ops)
+                .map_err(error)?,
+        );
         self.refresh()?;
         self.view()
     }
@@ -193,6 +196,45 @@ impl Runtime {
     pub fn open_folder(&mut self, framed: &[u8]) -> Result<String, JsValue> {
         let mut engine = Engine::new();
         let (doc, warnings) = engine.open_entries(unframe(framed)?).map_err(error)?;
+        self.install(engine, doc, warnings)
+    }
+    /// A recovery checkpoint as framed entries: the package without the objects
+    /// already stored, plus `checkpoint.json` naming every object it references and
+    /// the opaque ones. The returned objects are counted as stored from now on: if
+    /// writing them fails, storage stops accepting writes altogether.
+    #[wasm_bindgen(js_name=checkpointParts)]
+    pub fn checkpoint_parts(&mut self) -> Result<Vec<u8>, JsValue> {
+        let checkpoint = self
+            .engine
+            .recovery_checkpoint(self.doc, &self.stored_objects)
+            .map_err(error)?;
+        self.stored_objects.extend(checkpoint.written);
+        Ok(frame(&checkpoint.entries))
+    }
+    /// Object paths (`objects/ab/<hash>`) the recovery store already holds.
+    #[wasm_bindgen(js_name=noteStoredObjects)]
+    pub fn note_stored_objects(&mut self, paths: &str) -> Result<(), JsValue> {
+        let paths: Vec<String> = serde_json::from_str(paths).map_err(error)?;
+        for p in paths {
+            if let Some(h) = p.rsplit('/').next().and_then(|h| h.parse().ok()) {
+                self.stored_objects.insert(h);
+            }
+        }
+        Ok(())
+    }
+    /// Only called by the journal worker after verifying the checkpoint digest.
+    #[wasm_bindgen(js_name=openRecoveryEntries)]
+    pub fn open_recovery_entries(
+        &mut self,
+        framed: &[u8],
+        opaque: &str,
+    ) -> Result<String, JsValue> {
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_str(opaque).map_err(error)?;
+        let mut engine = Engine::new();
+        let (doc, warnings) = engine
+            .open_recovery_entries(unframe(framed)?, &opaque)
+            .map_err(error)?;
         self.install(engine, doc, warnings)
     }
     /// The canonical .alto bytes for a folder, used as the recovery checkpoint.

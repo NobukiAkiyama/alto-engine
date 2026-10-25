@@ -5,6 +5,7 @@ export class Runtime {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    adapterName(): string;
     beginBrush(layer: string, config: string, color: Float32Array, erase: boolean, mask: boolean): void;
     brushInput(samples: Float32Array): void;
     cancelBrush(): void;
@@ -12,6 +13,13 @@ export class Runtime {
      * The canonical .alto bytes for a folder, used as the recovery checkpoint.
      */
     checkpointBytes(): Uint8Array;
+    /**
+     * A recovery checkpoint as framed entries: the package without the objects
+     * already stored, plus `checkpoint.json` naming every object it references and
+     * the opaque ones. The returned objects are counted as stored from now on: if
+     * writing them fails, storage stops accepting writes altogether.
+     */
+    checkpointParts(): Uint8Array;
     commit(message: string, created_at: number, author: string, allow_empty: boolean): string;
     cpuBrushReference(config: string, color: Float32Array, samples: Float32Array): Uint8Array;
     createDocument(w: number, h: number): string;
@@ -20,12 +28,25 @@ export class Runtime {
     endBrush(): Promise<string>;
     folderEntries(): Uint8Array;
     folderPlan(framed: Uint8Array): string;
+    frameFields(): string[];
     gpuIdle(): Promise<void>;
     importFont(bytes: Uint8Array, face_index: number): string;
     importRgba(w: number, h: number, pixels: Uint8Array, encoded: Uint8Array, mime: string): string;
     markSaved(hash: string): string;
+    /**
+     * A raster layer's full tile map; views carry only its size and bounds.
+     */
+    nodeTiles(id: string): string;
+    /**
+     * Object paths (`objects/ab/<hash>`) the recovery store already holds.
+     */
+    noteStoredObjects(paths: string): void;
     openFolder(framed: Uint8Array): string;
     openPackage(bytes: Uint8Array): string;
+    /**
+     * Only called by the journal worker after verifying the checkpoint digest.
+     */
+    openRecoveryEntries(framed: Uint8Array, opaque: string): string;
     /**
      * Only called by the journal worker after verifying the checkpoint digest.
      */
@@ -33,6 +54,11 @@ export class Runtime {
     parseVectorPath(svg: string): string;
     prefetchStep(): string;
     protocolVersion(): number;
+    /**
+     * Decode results: u32 count, then per tile a 32-byte hash, status (0 ok,
+     * 1 ok and content checked, 2 damaged), u32 length and the pixels.
+     */
+    provideDecoded(framed: Uint8Array): void;
     pruneVersions(): string;
     readTileLevel(level: number, tx: number, ty: number): Promise<Uint8Array>;
     readTile(tx: number, ty: number): Promise<Uint8Array>;
@@ -40,13 +66,22 @@ export class Runtime {
     recoveryOpaque(): string;
     redo(): string;
     releaseImport(hash: string): boolean;
-    replayRecord(bytes: Uint8Array): string;
+    /**
+     * Replays `[u32 little-endian length][record]...` and redraws once at the end.
+     */
+    replayRecords(framed: Uint8Array): string;
     resetRenderCache(cpu: boolean): void;
     resize(w: number, h: number): void;
     restoreVersion(hash: string): string;
     savePackage(): Uint8Array;
     select(spec: string): string;
     selectionOutline(): string;
+    /**
+     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+     * nests the field; `profile.*` is present only when `hasProfile` is 1.
+     * Whether resumable jobs leave input decoding to the Worker's decode pool.
+     */
+    setDecodeWorkers(enabled: boolean): void;
     setEffects(layer: string, effects: string, use_selection: boolean): string;
     /**
      * Small text through the glyph atlas (default) or always through the vector path.
@@ -55,13 +90,26 @@ export class Runtime {
     setMask(layer: string, source: string): string;
     setProfiling(enabled: boolean): void;
     setVisibleTileJobs(enabled: boolean): void;
+    /**
+     * The hash of the snapshot bytes a save would write. Edits do not compute it.
+     */
+    snapshotHash(): string;
+    /**
+     * Up to `max` decode requests: u32 count, then per tile a 32-byte hash, pixel
+     * format tag (1 R8, 4 RGBA8), check flag, u32 length and the LZ4 bytes.
+     */
+    takeDecodeRequests(max: number): Uint8Array;
     takeJournal(): Uint8Array;
     textCaret(id: string, offset: number): string;
     textHitTest(id: string, x: number, y: number): number;
     textInfo(id: string): string;
     textNavigate(id: string, offset: number, motion: string): number;
     textSelection(id: string, start: number, end: number): string;
-    tick(budget_ms: number): string;
+    /**
+     * One frame's report as numbers in `FRAME_FIELDS` order. A frame is reported
+     * every few milliseconds; building and parsing JSON for it was pure overhead.
+     */
+    tick(budget_ms: number): Float64Array;
     transact(request: string): string;
     undo(): string;
     /**
@@ -97,10 +145,12 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_runtime_free: (a: number, b: number) => void;
     readonly __wbg_spike_free: (a: number, b: number) => void;
+    readonly runtime_adapterName: (a: number) => [number, number];
     readonly runtime_beginBrush: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly runtime_brushInput: (a: number, b: number, c: number) => [number, number];
     readonly runtime_cancelBrush: (a: number) => void;
     readonly runtime_checkpointBytes: (a: number) => [number, number, number, number];
+    readonly runtime_checkpointParts: (a: number) => [number, number, number, number];
     readonly runtime_commit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_cpuBrushReference: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_create: (a: any, b: number) => any;
@@ -109,16 +159,21 @@ export interface InitOutput {
     readonly runtime_endBrush: (a: number) => any;
     readonly runtime_folderEntries: (a: number) => [number, number, number, number];
     readonly runtime_folderPlan: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_frameFields: (a: number) => [number, number];
     readonly runtime_gpuIdle: (a: number) => any;
     readonly runtime_importFont: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_importRgba: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_nodeTiles: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_noteStoredObjects: (a: number, b: number, c: number) => [number, number];
     readonly runtime_openFolder: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_openRecoveryEntries: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_prefetchStep: (a: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
+    readonly runtime_provideDecoded: (a: number, b: number, c: number) => [number, number];
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
     readonly runtime_readTile: (a: number, b: number, c: number) => any;
     readonly runtime_readTileLevel: (a: number, b: number, c: number, d: number) => any;
@@ -126,18 +181,21 @@ export interface InitOutput {
     readonly runtime_recoveryOpaque: (a: number) => [number, number, number, number];
     readonly runtime_redo: (a: number) => [number, number, number, number];
     readonly runtime_releaseImport: (a: number, b: number, c: number) => [number, number, number];
-    readonly runtime_replayRecord: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_replayRecords: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_resetRenderCache: (a: number, b: number) => void;
     readonly runtime_resize: (a: number, b: number, c: number) => void;
     readonly runtime_restoreVersion: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_savePackage: (a: number) => [number, number, number, number];
     readonly runtime_select: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_selectionOutline: (a: number) => [number, number, number, number];
+    readonly runtime_setDecodeWorkers: (a: number, b: number) => void;
     readonly runtime_setEffects: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly runtime_setGlyphAtlas: (a: number, b: number) => void;
     readonly runtime_setMask: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_setProfiling: (a: number, b: number) => void;
     readonly runtime_setVisibleTileJobs: (a: number, b: number) => void;
+    readonly runtime_snapshotHash: (a: number) => [number, number, number, number];
+    readonly runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_textHitTest: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -166,8 +224,8 @@ export interface InitOutput {
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined___js_sys_fa6008ce7617d4a5___Function_fn_wasm_bindgen_4c6a9881086b567___JsValue_____wasm_bindgen_4c6a9881086b567___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__70: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__71: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__80: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wasm_bindgen_4c6a9881086b567___sys__JsNullable_wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_4c6a9881086b567___JsError___true__81: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_4c6a9881086b567___convert__closures_____invoke___wgpu_f2aa5dc9c5719dad___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
@@ -177,6 +235,7 @@ export interface InitOutput {
     readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

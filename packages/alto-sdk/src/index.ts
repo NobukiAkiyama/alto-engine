@@ -110,10 +110,17 @@ export interface NodeView {
   kind: {
     kind: string;
     children?: NodeId[];
-    tiles?: { format: string; tiles: Record<string, string> };
+    /** Raster layers: size only. The map itself comes from `DocumentHandle.nodeTiles`. */
+    tiles?: RasterTilesSummary;
     [key: string]: unknown;
   };
   children: NodeView[];
+}
+export interface RasterTilesSummary {
+  format: string;
+  count: number;
+  /** Union of tile rectangles in layer pixels, `[x0, y0, x1, y1]`; null when empty. */
+  bounds: [number, number, number, number] | null;
 }
 export interface Mirror {
   meta: {
@@ -354,7 +361,7 @@ const readableAfterStorageFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
 ]);
 function nodeId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -541,7 +548,8 @@ export class TransactionBuilder {
 class DocumentView extends Events {
   private mirror!: Mirror;
   history = { undo: 0, redo: 0 };
-  snapshotHash = "";
+  /** Set by full views (open, save). Null after an edit: use `DocumentHandle.snapshotHash()`. */
+  snapshotHash: string | null = null;
   stateHash = "";
   versions: VersionStatus = { head: null, commits: 0, changed: false, changes: 0, pending_intents: 0 };
   dirty = false;
@@ -768,6 +776,7 @@ export class DocumentHandle {
   async saveFolder(provider: ObjectStorageProvider, options: { overwrite?: boolean } = {}) {
     if (this.activeTool) await this.activeTool.end();
     this.engine.emit("saveState", "saving");
+    let token: number | undefined;
     try {
       const current = await provider.readRef("manifest.json");
       const currentHash = current ? await sha256Hex(current) : "";
@@ -777,6 +786,7 @@ export class DocumentHandle {
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "フォルダの manifest.json が他で変更されています");
       const saved = await this.engine.request("folderEntries");
+      token = saved.token;
       const entries = unframeEntries(new Uint8Array(saved.bytes));
       const manifest = entries.get("manifest.json");
       if (!manifest) throw new AltoError("INTERNAL", "manifest missing");
@@ -789,9 +799,11 @@ export class DocumentHandle {
         throw new AltoError("STORAGE", "manifest の検証に失敗しました");
       this.folder = { provider, manifest: await sha256Hex(manifest) };
       this.apply(await this.engine.request("saved", { token: saved.token }));
+      token = undefined;
       this.engine.emit("saveState", "saved");
       return report;
     } catch (e) {
+      this.releaseSave(token);
       this.engine.emit("saveState", "error");
       throw e;
     }
@@ -830,6 +842,21 @@ export class DocumentHandle {
       this.apply(state);
       return value;
     });
+  }
+  /**
+   * Resolves once every edit made so far is in the recovery journal. Edits resolve
+   * when applied; this rejects with STORAGE if the journal could not be written.
+   */
+  durable(): Promise<void> {
+    return this.engine.request("durable");
+  }
+  /** The hash of the snapshot a save would write. Computed on request, not per edit. */
+  snapshotHash(): Promise<string> {
+    return this.engine.request("snapshotHash");
+  }
+  /** A raster layer's full tile map (key `tx,ty` to content hash). */
+  nodeTiles(id: NodeId): Promise<{ format: string; tiles: Record<string, string> }> {
+    return this.engine.request("nodeTiles", { node: id });
   }
   async undo() {
     if (this.activeTool) await this.activeTool.end();
@@ -888,8 +915,10 @@ export class DocumentHandle {
   async save(target?: ArchiveStorageProvider | any) {
     if (this.activeTool) await this.activeTool.end();
     this.engine.emit("saveState", "saving");
+    let token: number | undefined;
     try {
       const saved = await this.engine.request("save");
+      token = saved.token;
       const data = new Uint8Array(saved.bytes);
       if (!target)
         target = await this.engine.storage.pickSaveFile({
@@ -908,12 +937,19 @@ export class DocumentHandle {
         }
       }
       this.apply(await this.engine.request("saved", { token: saved.token }));
+      token = undefined;
       this.engine.emit("saveState", "saved");
       return target;
     } catch (e) {
+      this.releaseSave(token);
       this.engine.emit("saveState", "error");
       throw e;
     }
+  }
+  /** A cancelled or failed save no longer needs the Worker's copy of the package. */
+  private releaseSave(token: number | undefined) {
+    if (token !== undefined)
+      this.engine.request("releaseSave", { token }).catch(() => {});
   }
 }
 export class AltoEngine extends Events {
@@ -940,6 +976,7 @@ export class AltoEngine extends Events {
   recoveryAvailable = false;
   /** Set when the working journal can no longer confirm writes. Edits stay frozen until recovery. */
   storageFailure: AltoError | null = null;
+  private lastWorkerPanic: string | null = null;
   /** A Worker startup or runtime failure. Independent of journal corruption. */
   engineFailure: AltoError | null = null;
   get lifecycleState(): EnginePhase { return this.phase; }
@@ -1032,6 +1069,10 @@ export class AltoEngine extends Events {
             this.emit("storageFailure", this.storageFailure);
           }
         } else if (data.t === "frame") this.emit("frame", data.value);
+        else if (data.t === "diagnostic" && data.value?.panic) {
+          this.lastWorkerPanic = data.value.panic;
+          this.emit("diagnostic", data.value);
+        }
         else if (data.t === "gpuLost") {
           if (this.document) this.document.activeTool = null;
           this.emit("gpuLost", null);
@@ -1040,7 +1081,10 @@ export class AltoEngine extends Events {
     };
     this.worker.onerror = (event) => {
       if (generation !== this.workerGeneration || this.disposed) return;
-      const detail = event.message || event.error?.message || "";
+      // The Worker reports a Rust panic just before its error reaches here.
+      const panic = this.lastWorkerPanic;
+      this.lastWorkerPanic = null;
+      const detail = (event.message || event.error?.message || "") + (panic ? " (panic: " + panic + ")" : "");
       const e = new AltoError(
         this.phase === "running" ? "WORKER_CRASHED" : "WORKER_UNAVAILABLE",
         detail || (this.phase === "running" ? "Workerが停止しました" : "Workerを読み込めませんでした"),
@@ -1372,11 +1416,15 @@ export class AltoEngine extends Events {
     /** Temporarily changes the module URL for Worker load-failure tests. */
     setWorkerURL: (url: URL | string | undefined) => { this.options.workerURL = url; },
     pendingRequests: () => this.pending.size,
+    /** Generation, record count and object count of the OPFS recovery store. */
+    recoveryStore: (): Promise<{ latestGeneration: number; records: number; objects: number; packs: number }> =>
+      this.request("recoveryStore"),
     corruptJournalTail: () => this.request("corruptJournalTail"),
     corruptCheckpoint: () => this.request("corruptCheckpoint"),
     corruptCheckpointCrc: () => this.request("corruptCheckpointCrc"),
     corruptBothCheckpoints: () => this.request("corruptBothCheckpoints"),
     legacyCheckpoint: () => this.request("legacyCheckpoint"),
+    looseCheckpoint: () => this.request("looseCheckpoint"),
     /** Fault injection for recovery tests only. */
     injectStorageFault: (position: "beforeAppend" | "afterAppend") =>
       this.request("injectStorageFault", { position }),

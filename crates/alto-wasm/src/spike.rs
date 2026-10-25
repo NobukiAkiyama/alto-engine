@@ -509,8 +509,8 @@ impl Spike {
         let data = match self.current_tile_hash(tile_key(index))? {
             Some(hash) => self
                 .engine
-                .tile(&hash)
-                .ok_or_else(|| js_error("Tile content missing"))?
+                .require_tile(&hash)
+                .map_err(js_error)?
                 .pixels
                 .to_vec(),
             None => vec![0; (TILE * TILE * 4) as usize],

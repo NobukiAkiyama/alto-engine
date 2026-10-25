@@ -10,13 +10,22 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use wgpu::util::DeviceExt;
 
 mod m5;
 pub mod vector;
 
-type Result<T> = std::result::Result<T, String>;
+pub use crate::RenderError;
+type Result<T> = std::result::Result<T, RenderError>;
 type CacheKey = (i32, i32, i32);
+/// CPU time one resumable job slice may use before yielding to the Worker.
+const JOB_SLICE_MS: f64 = 1.8;
+/// Passes over a job's inputs before it is reported as blocked by atlas pressure.
+const MAX_JOB_RETRIES: u32 = 8;
+/// One reusable 512x512 RGBA texture for pyramid downsampling.
+const SCRATCH_BYTES: u64 = 512 * 512 * 4;
+const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
+/// Jobs that need at most this many inputs decode them inline even with a pool.
+const INLINE_DECODE_MAX: usize = 8;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Command {
@@ -112,7 +121,8 @@ pub struct PrefetchStatus {
     pub cancelled: u32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrefetchStep {
+/// Result of advancing one resumable tile job (visible or prefetch) by one slice.
+pub enum JobStep {
     Idle,
     Progress,
     Ready,
@@ -154,6 +164,30 @@ struct TileJob {
     planned: bool,
     retries: u32,
 }
+/// Inputs decoded on other threads. The renderer asks; the host decodes them and
+/// hands the pixels back, and they go straight into the atlas.
+#[derive(Default)]
+struct Decoder {
+    queued: std::collections::VecDeque<ContentHash>,
+    in_flight: HashMap<ContentHash, Arc<alto_raster::StoredTile>>,
+    failed: Option<ContentHash>,
+    decoded: u64,
+}
+impl Decoder {
+    fn request(&mut self, hash: ContentHash, object: Arc<alto_raster::StoredTile>) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.in_flight.entry(hash) {
+            e.insert(object);
+            self.queued.push_back(hash);
+        }
+    }
+}
+#[derive(Default, Clone, Copy)]
+struct UploadCost {
+    get_ms: f64,
+    convert_ms: f64,
+    write_ms: f64,
+    bytes: u64,
+}
 struct AtlasSlot {
     hash: ContentHash,
     used: u64,
@@ -170,6 +204,18 @@ pub struct StrokeTile {
     pub before: Option<ContentHash>,
     selection: Option<wgpu::Texture>,
 }
+impl StrokeTile {
+    /// Dropping GPU objects does nothing on WebGPU; a finished stroke frees its
+    /// textures now instead of whenever JS collects them.
+    fn destroy(self) {
+        self.output.destroy();
+        self.base.destroy();
+        self.coverage.destroy();
+        if let Some(selection) = self.selection {
+            selection.destroy();
+        }
+    }
+}
 pub struct GpuStroke {
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
@@ -179,6 +225,10 @@ pub struct GpuStroke {
     pub erase: bool,
     pub epoch: u64,
     pub mask: bool,
+    /// Layer to document transform, so damage is tracked in display coordinates.
+    pub world: [f64; 6],
+    /// Document pixels this stroke has shown so far.
+    pub damage: Option<Rect>,
 }
 
 pub struct Renderer {
@@ -199,7 +249,6 @@ pub struct Renderer {
     last_view: Option<Viewport>,
     last_pending: u32,
     prefetch_stats: PrefetchStatus,
-    prefetching: bool,
     prefetch_job: Option<TileJob>,
     visible_job: Option<TileJob>,
     visible_tile_jobs: bool,
@@ -218,7 +267,11 @@ pub struct Renderer {
     /// Small text through the glyph atlas (true) or always through the vector path.
     glyph_atlas: bool,
     profiling: bool,
-    profile_now: fn() -> f64,
+    /// Some while the host decodes job inputs on other threads.
+    decoder: Option<Decoder>,
+    pub(crate) retired: Retired,
+    /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
+    clock: fn() -> f64,
     profile: RenderProfile,
 }
 fn rgba_pixels(tile: &TileData) -> std::borrow::Cow<'_, [u8]> {
@@ -255,23 +308,69 @@ fn array_view(t: &wgpu::Texture) -> wgpu::TextureView {
         ..Default::default()
     })
 }
+/// GPU objects to destroy once the commands using them are submitted. On WebGPU,
+/// dropping a wgpu object does nothing: the JS object, and the memory behind it, lives
+/// until JS collects it. Short-lived buffers and replaced textures are destroyed here
+/// instead; WebGPU defers the actual release until submitted work no longer uses them.
+#[derive(Default)]
+pub(crate) struct Retired {
+    buffers: Vec<wgpu::Buffer>,
+    textures: Vec<wgpu::Texture>,
+}
+impl Retired {
+    pub(crate) fn buffer(&mut self, b: &wgpu::Buffer) {
+        self.buffers.push(b.clone());
+    }
+    pub(crate) fn texture(&mut self, t: wgpu::Texture) {
+        self.textures.push(t);
+    }
+    pub(crate) fn take(&mut self, other: &mut Retired) {
+        self.buffers.append(&mut other.buffers);
+        self.textures.append(&mut other.textures);
+    }
+    /// Only after the submit that used them.
+    pub(crate) fn release(&mut self) {
+        for b in self.buffers.drain(..) {
+            b.destroy();
+        }
+        for t in self.textures.drain(..) {
+            t.destroy();
+        }
+    }
+}
+/// A buffer filled through the queue. Not mapped at creation: on WebGPU a mapped
+/// buffer needs shared memory that lives until JS collects the GPUBuffer (dropping
+/// it in Rust does nothing there), and creating one per composed tile ran the
+/// renderer out of mappings on slow machines ("size (144) is too large").
 fn buffer<T: Pod>(
     d: &wgpu::Device,
+    q: &wgpu::Queue,
     label: &str,
     data: &[T],
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
     // WGSL runtime arrays still require space for one element when their logical length is zero.
     let zero = T::zeroed();
-    d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let bytes: &[u8] = if data.is_empty() {
+        bytemuck::bytes_of(&zero)
+    } else {
+        bytemuck::cast_slice(data)
+    };
+    let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+    let b = d.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        contents: if data.is_empty() {
-            bytemuck::bytes_of(&zero)
-        } else {
-            bytemuck::cast_slice(data)
-        },
-        usage,
-    })
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if bytes.len() as u64 == size {
+        q.write_buffer(&b, 0, bytes);
+    } else {
+        let mut padded = bytes.to_vec();
+        padded.resize(size as usize, 0);
+        q.write_buffer(&b, 0, &padded);
+    }
+    b
 }
 fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
     let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -290,35 +389,28 @@ fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
 fn mode(m: RenderBlend) -> f32 {
     m as u32 as f32
 }
-pub fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
-    [
-        a[0] * b[0] + a[2] * b[1],
-        a[1] * b[0] + a[3] * b[1],
-        a[0] * b[2] + a[2] * b[3],
-        a[1] * b[2] + a[3] * b[3],
-        a[0] * b[4] + a[2] * b[5] + a[4],
-        a[1] * b[4] + a[3] * b[5] + a[5],
-    ]
+// The renderer keeps raw matrices in its hot loops; the math is `Affine2`'s.
+pub(crate) fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
+    alto_core::Affine2(a).concat(alto_core::Affine2(b)).0
 }
-pub fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
-    let det = m[0] * m[3] - m[1] * m[2];
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
+pub(crate) fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
+    alto_core::Affine2(m).inverse().map(|m| m.0)
+}
+pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
+    alto_core::Affine2(m).apply(p)
+}
+/// Bounding box of `[x0, y0, x1, y1]` mapped through `m`, as (min, max).
+fn bounds_through(m: [f64; 6], r: [f64; 4]) -> ([f64; 2], [f64; 2]) {
+    let corners = [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]].map(|p| point(m, p));
+    let mut min = [f64::INFINITY; 2];
+    let mut max = [f64::NEG_INFINITY; 2];
+    for p in corners {
+        for axis in 0..2 {
+            min[axis] = min[axis].min(p[axis]);
+            max[axis] = max[axis].max(p[axis]);
+        }
     }
-    Some([
-        m[3] / det,
-        -m[1] / det,
-        -m[2] / det,
-        m[0] / det,
-        (m[2] * m[5] - m[3] * m[4]) / det,
-        (m[1] * m[4] - m[0] * m[5]) / det,
-    ])
-}
-pub fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
-    [
-        m[0] * p[0] + m[2] * p[1] + m[4],
-        m[1] * p[0] + m[3] * p[1] + m[5],
-    ]
+    (min, max)
 }
 impl TileJob {
     fn new(scene: &RenderScene, key: CacheKey) -> Self {
@@ -370,7 +462,10 @@ impl TileJob {
                 info: [2, 0, 0, 0],
             }),
             PlanTask::Node { idx, world, depth } => {
-                let n = scene.nodes.get(idx).ok_or("INTERNAL: scene node")?;
+                let n = scene
+                    .nodes
+                    .get(idx)
+                    .ok_or(RenderError::Internal("scene node".into()))?;
                 if !n.visible || n.opacity <= 0.0 {
                     return Ok(());
                 }
@@ -380,9 +475,9 @@ impl TileJob {
                         let isolate =
                             *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
                         if isolate && depth >= MAX_ISOLATED_GROUPS {
-                            return Err(format!(
-                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
-                            ));
+                            return Err(RenderError::InvalidArgument(format!(
+                                "group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            )));
                         }
                         if isolate {
                             self.commands.push(Command {
@@ -405,33 +500,11 @@ impl TileJob {
                                 let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                     continue;
                                 };
-                                let corners = [
-                                    [self.region[0], self.region[1]],
-                                    [self.region[2], self.region[1]],
-                                    [self.region[0], self.region[3]],
-                                    [self.region[2], self.region[3]],
-                                ]
-                                .map(|p| point(inv, p));
-                                let x0 =
-                                    (corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min)
-                                        / 256.0)
-                                        .floor() as i32;
-                                let y0 =
-                                    (corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)
-                                        / 256.0)
-                                        .floor() as i32;
-                                let x1 = (corners
-                                    .iter()
-                                    .map(|p| p[0])
-                                    .fold(f64::NEG_INFINITY, f64::max)
-                                    / 256.0)
-                                    .ceil() as i32;
-                                let y1 = (corners
-                                    .iter()
-                                    .map(|p| p[1])
-                                    .fold(f64::NEG_INFINITY, f64::max)
-                                    / 256.0)
-                                    .ceil() as i32;
+                                let (min, max) = bounds_through(inv, self.region);
+                                let x0 = (min[0] / 256.0).floor() as i32;
+                                let y0 = (min[1] / 256.0).floor() as i32;
+                                let x1 = (max[0] / 256.0).ceil() as i32;
+                                let y1 = (max[1] / 256.0).ceil() as i32;
                                 let mut opaque = x1 > x0
                                     && y1 > y0
                                     && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
@@ -462,27 +535,7 @@ impl TileJob {
                         let Some(inv) = inverse(world) else {
                             return Ok(());
                         };
-                        let corners = [
-                            [self.region[0], self.region[1]],
-                            [self.region[2], self.region[1]],
-                            [self.region[0], self.region[3]],
-                            [self.region[2], self.region[3]],
-                        ]
-                        .map(|p| point(inv, p));
-                        let min = [
-                            corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
-                            corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
-                        ];
-                        let max = [
-                            corners
-                                .iter()
-                                .map(|p| p[0])
-                                .fold(f64::NEG_INFINITY, f64::max),
-                            corners
-                                .iter()
-                                .map(|p| p[1])
-                                .fold(f64::NEG_INFINITY, f64::max),
-                        ];
+                        let (min, max) = bounds_through(inv, self.region);
                         let x0 = (min[0] / 256.0).floor() as i32;
                         let x1 = (max[0] / 256.0).ceil() as i32;
                         let next = tiles.partition_point(|t| t.key.tx < x0);
@@ -511,7 +564,7 @@ impl TileJob {
             } => {
                 let n = &scene.nodes[idx];
                 let RContent::Tiles(tiles) = &n.content else {
-                    return Err("INTERNAL: tile plan changed".into());
+                    return Err(RenderError::Internal("tile plan changed".into()));
                 };
                 if next == end {
                     self.commands.push(Command {
@@ -562,7 +615,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| format!("GPU_UNSUPPORTED: {e}"))?;
+            .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
         let slots = adapter
             .limits()
             .max_texture_array_layers
@@ -578,10 +631,10 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| RenderError::Internal(e.to_string()))?;
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or("GPU_UNSUPPORTED: no surface format")?;
+            .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
         if let Some(f) = surface
             .get_capabilities(&adapter)
             .formats
@@ -694,7 +747,6 @@ impl Renderer {
             last_view: None,
             last_pending: 0,
             prefetch_stats: PrefetchStatus::default(),
-            prefetching: false,
             prefetch_job: None,
             visible_job: None,
             visible_tile_jobs: true,
@@ -712,7 +764,9 @@ impl Renderer {
             vector: None,
             glyph_atlas: true,
             profiling: false,
-            profile_now: || 0.0,
+            decoder: None,
+            retired: Retired::default(),
+            clock: || 0.0,
             profile: RenderProfile::default(),
         })
     }
@@ -741,6 +795,120 @@ impl Renderer {
     pub fn set_profiling(&mut self, enabled: bool) {
         self.profiling = enabled;
     }
+    /// Resumable jobs ask the host to decode their inputs instead of decoding inline.
+    /// Turning it off forgets outstanding requests; inline decoding takes them over.
+    pub fn set_parallel_decode(&mut self, enabled: bool) {
+        if enabled != self.decoder.is_some() {
+            self.decoder = enabled.then(Decoder::default);
+        }
+    }
+    /// Up to `max` inputs to decode, with their compressed bytes and whether the
+    /// content address must be checked. A damaged object fails its job.
+    pub fn take_decode_requests(
+        &mut self,
+        max: usize,
+    ) -> Vec<(ContentHash, Arc<alto_raster::StoredTile>)> {
+        let Some(d) = self.decoder.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while out.len() < max
+            && let Some(hash) = d.queued.pop_front()
+        {
+            if let Some(object) = d.in_flight.get(&hash) {
+                out.push((hash, object.clone()));
+            }
+        }
+        out
+    }
+    /// Pixels the host decoded for a request. `checked`: it verified the content
+    /// address. Answers to requests no job is waiting for any more are dropped.
+    pub fn provide_decoded(
+        &mut self,
+        hash: ContentHash,
+        pixels: &[u8],
+        checked: bool,
+    ) -> Result<()> {
+        let Some(d) = self.decoder.as_mut() else {
+            return Ok(());
+        };
+        let Some(object) = d.in_flight.remove(&hash) else {
+            return Ok(());
+        };
+        if checked {
+            object.mark_verified();
+        }
+        d.decoded += 1;
+        if self.atlas_map.contains_key(&hash) {
+            return Ok(());
+        }
+        let expected = 256 * 256 * object.format.bytes_per_pixel();
+        if pixels.len() != expected {
+            d.failed = Some(hash);
+            return Ok(());
+        }
+        // Inputs the waiting jobs already have must stay until those jobs compose.
+        let pinned: HashSet<u32> = [&self.visible_job, &self.prefetch_job]
+            .into_iter()
+            .flatten()
+            .flat_map(|j| j.unique.iter())
+            .filter_map(|h| self.atlas_map.get(h).copied())
+            .collect();
+        let slot = self.free_atlas_slot(&pinned)?;
+        let rgba: std::borrow::Cow<'_, [u8]> = if object.format == alto_core::PixelFormat::R8 {
+            std::borrow::Cow::Owned(pixels.iter().flat_map(|v| [*v, *v, *v, 255]).collect())
+        } else {
+            std::borrow::Cow::Borrowed(pixels)
+        };
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(256),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        if self.profiling {
+            self.profile.uploads += 1;
+            self.profile.upload_bytes += TILE_RGBA_BYTES;
+        }
+        self.atlas_slots[slot] = Some(AtlasSlot {
+            hash,
+            used: self.frame,
+        });
+        self.atlas_map.insert(hash, slot as u32);
+        Ok(())
+    }
+    /// The host could not decode a request, or the result failed its check.
+    pub fn decode_failed(&mut self, hash: ContentHash) {
+        if let Some(d) = self.decoder.as_mut() {
+            d.in_flight.remove(&hash);
+            d.failed = Some(hash);
+        }
+    }
+    /// Inputs decoded on other threads so far.
+    pub fn decoded_elsewhere(&self) -> u64 {
+        self.decoder.as_ref().map_or(0, |d| d.decoded)
+    }
+    /// The time source for frame budgets and profiles. Set once after construction.
+    pub fn set_clock(&mut self, clock: fn() -> f64) {
+        self.clock = clock;
+    }
     /// Switches small text between the glyph atlas and the vector path; display tiles
     /// are rebuilt.
     pub fn set_glyph_atlas(&mut self, enabled: bool) {
@@ -768,12 +936,22 @@ impl Renderer {
         self.atlas_map.clear();
         self.atlas_slots.iter_mut().for_each(|slot| *slot = None);
     }
-    pub fn invalidate(&mut self, bounds: Option<Rect>) {
+    fn reset_jobs(&mut self) {
+        // Requests not yet handed out belong to the jobs being dropped. Those in
+        // flight are kept: their pixels are still worth placing when they arrive.
+        if let Some(d) = self.decoder.as_mut() {
+            for hash in d.queued.drain(..) {
+                d.in_flight.remove(&hash);
+            }
+        }
         self.cancel_prefetch();
         self.visible_job = None;
         self.last_view = None;
         self.last_pending = 0;
         self.visible_keys.clear();
+    }
+    pub fn invalidate(&mut self, bounds: Option<Rect>) {
+        self.reset_jobs();
         if bounds.is_none() {
             self.prefetch_stats = PrefetchStatus::default();
         }
@@ -811,39 +989,10 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         previews: &HashMap<ContentHash, wgpu::Texture>,
     ) -> Result<u32> {
-        if let Some(&slot) = self.atlas_map.get(&hash) {
-            if self.profiling {
-                self.profile.atlas_hits += 1;
-            }
-            self.atlas_slots[slot as usize]
-                .as_mut()
-                .ok_or("INTERNAL: atlas slot")?
-                .used = self.frame;
-            pinned.insert(slot);
-            return Ok(slot);
-        }
-        let get_start = if self.profiling || self.prefetching {
-            (self.profile_now)()
-        } else {
-            0.0
-        };
-        let pixels = if previews.contains_key(&hash) {
-            None
-        } else {
-            store.get_checked(&hash)?
-        };
-        if self.profiling || self.prefetching {
-            let elapsed = (self.profile_now)() - get_start;
-            if self.profiling {
-                self.profile.get_ms += elapsed;
-            }
-            if self.prefetching {
-                self.prefetch_stats.max_get_ms = self.prefetch_stats.max_get_ms.max(elapsed);
-            }
-        }
-        if pixels.is_none() && !previews.contains_key(&hash) {
-            return Ok(u32::MAX);
-        }
+        Ok(self.upload_timed(hash, store, pinned, encoder, previews)?.0)
+    }
+    /// The empty or least recently used atlas slot outside `pinned`, emptied.
+    fn free_atlas_slot(&mut self, pinned: &HashSet<u32>) -> Result<usize> {
         let slot = self
             .atlas_slots
             .iter()
@@ -856,13 +1005,60 @@ impl Renderer {
                     .min_by_key(|(_, s)| s.as_ref().map_or(0, |s| s.used))
                     .map(|(i, _)| i)
             })
-            .ok_or("GPU budget too small for one display tile")?;
+            .ok_or(RenderError::Budget(
+                "GPU budget too small for one display tile".into(),
+            ))?;
         if let Some(old) = self.atlas_slots[slot].take() {
             if self.profiling {
                 self.profile.atlas_evictions += 1;
             }
             self.atlas_map.remove(&old.hash);
         }
+        Ok(slot)
+    }
+    /// Places one source tile in the atlas. `u32::MAX` means the store has no such tile.
+    fn upload_timed(
+        &mut self,
+        hash: ContentHash,
+        store: &dyn TileStore,
+        pinned: &mut HashSet<u32>,
+        encoder: &mut wgpu::CommandEncoder,
+        previews: &HashMap<ContentHash, wgpu::Texture>,
+    ) -> Result<(u32, UploadCost)> {
+        let mut cost = UploadCost::default();
+        if let Some(&slot) = self.atlas_map.get(&hash) {
+            if self.profiling {
+                self.profile.atlas_hits += 1;
+            }
+            self.atlas_slots[slot as usize]
+                .as_mut()
+                .ok_or(RenderError::Internal("atlas slot".into()))?
+                .used = self.frame;
+            pinned.insert(slot);
+            return Ok((slot, cost));
+        }
+        let now = self.clock;
+        let t = now();
+        let pixels = if previews.contains_key(&hash) {
+            None
+        } else {
+            alto_raster::load(store, &hash)?
+        };
+        cost.get_ms = now() - t;
+        if pixels.is_none() && !previews.contains_key(&hash) {
+            return Ok((u32::MAX, cost));
+        }
+        let slot = self.free_atlas_slot(pinned)?;
+        let origin = wgpu::Origin3d {
+            x: 0,
+            y: 0,
+            z: slot as u32,
+        };
+        let extent = wgpu::Extent3d {
+            width: 256,
+            height: 256,
+            depth_or_array_layers: 1,
+        };
         if let Some(preview) = previews.get(&hash) {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -874,46 +1070,21 @@ impl Renderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.atlas,
                     mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: slot as u32,
-                    },
+                    origin,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::Extent3d {
-                    width: 256,
-                    height: 256,
-                    depth_or_array_layers: 1,
-                },
+                extent,
             );
         } else if let Some(tile) = pixels {
-            let convert_start = if self.prefetching {
-                (self.profile_now)()
-            } else {
-                0.0
-            };
+            let t = now();
             let rgba = rgba_pixels(&tile);
-            if self.prefetching {
-                self.prefetch_stats.max_convert_ms = self
-                    .prefetch_stats
-                    .max_convert_ms
-                    .max((self.profile_now)() - convert_start);
-            }
-            let write_start = if self.profiling || self.prefetching {
-                (self.profile_now)()
-            } else {
-                0.0
-            };
+            cost.convert_ms = now() - t;
+            let t = now();
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.atlas,
                     mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: slot as u32,
-                    },
+                    origin,
                     aspect: wgpu::TextureAspect::All,
                 },
                 &rgba,
@@ -922,31 +1093,16 @@ impl Renderer {
                     bytes_per_row: Some(1024),
                     rows_per_image: Some(256),
                 },
-                wgpu::Extent3d {
-                    width: 256,
-                    height: 256,
-                    depth_or_array_layers: 1,
-                },
+                extent,
             );
-            if self.profiling || self.prefetching {
-                let elapsed = (self.profile_now)() - write_start;
-                if self.profiling {
-                    self.profile.write_ms += elapsed;
-                }
-                if self.prefetching {
-                    self.prefetch_stats.max_write_ms =
-                        self.prefetch_stats.max_write_ms.max(elapsed);
-                }
-            }
-            if self.profiling {
-                self.profile.upload_bytes += (256 * 256 * 4) as u64;
-            }
-            if self.prefetching {
-                self.prefetch_stats.upload_bytes += (256 * 256 * 4) as u64;
-            }
+            cost.write_ms = now() - t;
+            cost.bytes = TILE_RGBA_BYTES;
         }
         if self.profiling {
             self.profile.uploads += 1;
+            self.profile.get_ms += cost.get_ms;
+            self.profile.write_ms += cost.write_ms;
+            self.profile.upload_bytes += cost.bytes;
         }
         self.atlas_slots[slot] = Some(AtlasSlot {
             hash,
@@ -954,7 +1110,7 @@ impl Renderer {
         });
         self.atlas_map.insert(hash, slot as u32);
         pinned.insert(slot as u32);
-        Ok(slot as u32)
+        Ok((slot as u32, cost))
     }
     fn commands(
         &mut self,
@@ -1011,7 +1167,11 @@ impl Renderer {
             pinned: &mut HashSet<u32>,
             previews: &HashMap<ContentHash, wgpu::Texture>,
         ) -> Result<()> {
-            let n = b.scene.nodes.get(idx).ok_or("INTERNAL: scene node")?;
+            let n = b
+                .scene
+                .nodes
+                .get(idx)
+                .ok_or(RenderError::Internal("scene node".into()))?;
             if !n.visible || n.opacity <= 0.0 {
                 return Ok(());
             }
@@ -1021,9 +1181,9 @@ impl Renderer {
                     let isolate = *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
                     if isolate {
                         if depth >= MAX_ISOLATED_GROUPS {
-                            return Err(format!(
-                                "INVALID_ARGUMENT: group nesting exceeds {MAX_ISOLATED_GROUPS}"
-                            ));
+                            return Err(RenderError::InvalidArgument(format!(
+                                "group nesting exceeds {MAX_ISOLATED_GROUPS}"
+                            )));
                         }
                         commands.push(Command {
                             inv0: [0.0; 4],
@@ -1200,13 +1360,15 @@ impl Renderer {
                 return if prefetch {
                     Ok(None)
                 } else {
-                    Err("GPU budget: no evictable display tile".into())
+                    Err(RenderError::Budget(
+                        "GPU budget: no evictable display tile".into(),
+                    ))
                 };
             };
             let c = self
                 .cache_map
                 .remove(&old)
-                .ok_or("INTERNAL: cache missing")?;
+                .ok_or(RenderError::Internal("cache missing".into()))?;
             // A resumable caller may defer submission or cancel. Keep the
             // reverse map consistent even before a replacement is published.
             self.cache_slots[c.slot as usize] = None;
@@ -1224,15 +1386,7 @@ impl Renderer {
         let Some(slot) = self.cache_slot(key, prefetch)? else {
             return Ok(false);
         };
-        if scene.nodes.iter().any(|n| {
-            n.features.vector_mask.is_some()
-                || n.features.clip_path.is_some()
-                || matches!(n.content, RContent::Mesh(_) | RContent::Text(_))
-                || n.features.mask.is_some()
-                || n.features.clip
-                || !n.features.effects.is_empty()
-                || matches!(n.content, RContent::Adjustment(_))
-        }) {
+        if !crate::damage::plain_scene(scene) {
             self.compose_m5(scene, key, slot as u32, store)?;
             self.cache_slots[slot] = Some(key);
             self.cache_map.insert(
@@ -1245,8 +1399,14 @@ impl Renderer {
             );
             return Ok(true);
         }
-        self.m5 = None;
-        self.vector = None;
+        // A plain scene needs neither; their GPU objects are destroyed, not dropped.
+        if let Some(m5) = self.m5.take() {
+            m5.retire(&mut self.retired);
+        }
+        if let Some(vector) = self.vector.take() {
+            vector.retire(&mut self.retired);
+        }
+        self.retired.release();
         if self.downsample_cached(scene, key, slot as u32)? {
             if self.profiling {
                 self.profile.pyramid_hits += 1;
@@ -1267,14 +1427,10 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compose tile"),
             });
-        let commands_start = if self.profiling {
-            (self.profile_now)()
-        } else {
-            0.0
-        };
+        let commands_start = (self.clock)();
         let (commands, entries) = self.commands(scene, key, store, &mut encoder)?;
         if self.profiling {
-            self.profile.commands_ms += (self.profile_now)() - commands_start;
+            self.profile.commands_ms += (self.clock)() - commands_start;
         }
         self.submit_composite(scene, key, slot, commands, entries, encoder, prefetch)
     }
@@ -1291,19 +1447,24 @@ impl Renderer {
     ) -> Result<bool> {
         let cb = buffer(
             &self.device,
+            &self.queue,
             "scene commands",
             &commands,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&cb);
         let tb = buffer(
             &self.device,
+            &self.queue,
             "sparse tile index",
             &entries,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&tb);
         let scale = 2f32.powi(key.0);
         let ub = buffer(
             &self.device,
+            &self.queue,
             "tile config",
             &[Config {
                 origin_scale: [
@@ -1321,6 +1482,7 @@ impl Renderer {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
+        self.retired.buffer(&ub);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
             layout: &self.composite.get_bind_group_layout(0),
@@ -1357,6 +1519,7 @@ impl Renderer {
             pass.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         self.cache_slots[slot] = Some(key);
         self.cache_map.insert(
             key,
@@ -1369,20 +1532,7 @@ impl Renderer {
         Ok(true)
     }
     fn resumable_scene(&self, scene: &RenderScene) -> bool {
-        if self.stroke.is_some()
-            || scene.nodes.iter().any(|n| {
-                n.features.vector_mask.is_some()
-                    || n.features.clip_path.is_some()
-                    || matches!(n.content, RContent::Mesh(_) | RContent::Text(_))
-                    || n.features.mask.is_some()
-                    || n.features.clip
-                    || !n.features.effects.is_empty()
-                    || matches!(n.content, RContent::Adjustment(_))
-            })
-        {
-            return false;
-        }
-        true
+        self.stroke.is_none() && crate::damage::plain_scene(scene)
     }
     fn prefetch_keys(&self, scene: &RenderScene, view: Viewport) -> Vec<CacheKey> {
         if !self.resumable_scene(scene) {
@@ -1465,10 +1615,10 @@ impl Renderer {
         scene: &RenderScene,
         store: &dyn TileStore,
         view: Viewport,
-        now: fn() -> f64,
-    ) -> Result<PrefetchStep> {
+    ) -> Result<JobStep> {
+        let now = self.clock;
         if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
-            return Ok(PrefetchStep::Idle);
+            return Ok(JobStep::Idle);
         }
         let keys = self.prefetch_keys(scene, view);
         if self
@@ -1483,19 +1633,19 @@ impl Renderer {
                 .into_iter()
                 .find(|key| !self.cache_map.contains_key(key))
             else {
-                return Ok(PrefetchStep::Idle);
+                return Ok(JobStep::Idle);
             };
             self.prefetch_job = Some(TileJob::new(scene, key));
         }
-        let mut job = self.prefetch_job.take().ok_or("INTERNAL: prefetch job")?;
-        self.profile_now = now;
-        self.prefetching = true;
+        let mut job = self
+            .prefetch_job
+            .take()
+            .ok_or(RenderError::Internal("prefetch job".into()))?;
         let start = now();
-        let result = self.advance_tile_job(&mut job, scene, store, now, true);
+        let result = self.advance_tile_job(&mut job, scene, store, true);
         let elapsed = now() - start;
-        self.prefetching = false;
         if result.is_ok() {
-            if result.as_ref().is_ok_and(|s| *s == PrefetchStep::Ready) {
+            if result.as_ref().is_ok_and(|s| *s == JobStep::Ready) {
                 self.prefetch_stats.composed += 1;
             } else {
                 self.prefetch_job = Some(job);
@@ -1510,14 +1660,17 @@ impl Renderer {
         job: &mut TileJob,
         scene: &RenderScene,
         store: &dyn TileStore,
-        now: fn() -> f64,
         prefetch: bool,
-    ) -> Result<PrefetchStep> {
+    ) -> Result<JobStep> {
+        let now = self.clock;
+        if let Some(hash) = self.decoder.as_mut().and_then(|d| d.failed.take()) {
+            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
+        }
         if !job.planned {
             let start = now();
             loop {
                 job.plan_one(scene, store)?;
-                if job.planned || now() - start >= 1.8 {
+                if job.planned || now() - start >= JOB_SLICE_MS {
                     break;
                 }
             }
@@ -1532,12 +1685,37 @@ impl Renderer {
                     self.prefetch_stats.max_plan_ms.max(now() - start);
             }
             if job.unique.len() > self.atlas_slots.len() {
-                return Ok(PrefetchStep::Blocked);
+                return Ok(JobStep::Blocked);
             }
-            return Ok(PrefetchStep::Progress);
+            return Ok(JobStep::Progress);
         }
         if job.unique.len() > self.atlas_slots.len() {
-            return Ok(PrefetchStep::Blocked);
+            return Ok(JobStep::Blocked);
+        }
+        // A few inputs decode faster here than a round trip to the pool takes;
+        // that is the common case after a small edit.
+        let to_decode = job.unique[job.cursor.min(job.unique.len())..]
+            .iter()
+            .filter(|h| !job.missing.contains(h) && !self.atlas_map.contains_key(h))
+            .count();
+        if to_decode > INLINE_DECODE_MAX
+            && let Some(decoder) = self.decoder.as_mut()
+            && job.cursor < job.unique.len()
+        {
+            // Ask for every input the atlas lacks; they arrive between slices.
+            while job.cursor < job.unique.len() {
+                let hash = job.unique[job.cursor];
+                if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
+                    match store.object(&hash) {
+                        Some(object) => decoder.request(hash, object),
+                        None => {
+                            job.missing.insert(hash);
+                        }
+                    }
+                }
+                job.cursor += 1;
+            }
+            return Ok(JobStep::Progress);
         }
         if job.cursor < job.unique.len() {
             let start = now();
@@ -1559,11 +1737,15 @@ impl Renderer {
                 let hash = job.unique[job.cursor];
                 if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
                     let input_start = now();
-                    let slot =
-                        self.upload(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
+                    let (slot, cost) =
+                        self.upload_timed(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
                     if prefetch {
-                        self.prefetch_stats.max_input_ms =
-                            self.prefetch_stats.max_input_ms.max(now() - input_start);
+                        let s = &mut self.prefetch_stats;
+                        s.max_input_ms = s.max_input_ms.max(now() - input_start);
+                        s.max_get_ms = s.max_get_ms.max(cost.get_ms);
+                        s.max_convert_ms = s.max_convert_ms.max(cost.convert_ms);
+                        s.max_write_ms = s.max_write_ms.max(cost.write_ms);
+                        s.upload_bytes += cost.bytes;
                     }
                     if slot == u32::MAX {
                         job.missing.insert(hash);
@@ -1572,30 +1754,40 @@ impl Renderer {
                     }
                 }
                 job.cursor += 1;
-                if now() - start >= 1.8 {
+                if now() - start >= JOB_SLICE_MS {
                     break;
                 }
             }
             if uploaded {
                 self.queue.submit(Some(encoder.finish()));
+                self.retired.release();
             }
-            return Ok(PrefetchStep::Progress);
+            return Ok(JobStep::Progress);
         }
         if let Some(i) = job
             .unique
             .iter()
             .position(|h| !job.missing.contains(h) && !self.atlas_map.contains_key(h))
         {
+            let waiting = self.decoder.as_ref().is_some_and(|d| {
+                job.unique[i..]
+                    .iter()
+                    .any(|h| !self.atlas_map.contains_key(h) && d.in_flight.contains_key(h))
+            });
+            if waiting {
+                return Ok(JobStep::Progress);
+            }
+            // Evicted after it arrived, or never requested: go round again.
             job.cursor = i;
             job.retries += 1;
-            return Ok(if job.retries > 8 {
-                PrefetchStep::Blocked
+            return Ok(if job.retries > MAX_JOB_RETRIES {
+                JobStep::Blocked
             } else {
-                PrefetchStep::Progress
+                JobStep::Progress
             });
         }
         let Some(slot) = self.cache_slot(job.key, prefetch)? else {
-            return Ok(PrefetchStep::Blocked);
+            return Ok(JobStep::Blocked);
         };
         let entries = job
             .sources
@@ -1625,7 +1817,7 @@ impl Renderer {
             self.prefetch_stats.max_submit_ms =
                 self.prefetch_stats.max_submit_ms.max(now() - submit_start);
         }
-        Ok(PrefetchStep::Ready)
+        Ok(JobStep::Ready)
     }
     pub fn render(
         &mut self,
@@ -1633,13 +1825,12 @@ impl Renderer {
         store: &dyn TileStore,
         view: Viewport,
         budget_ms: f64,
-        now: fn() -> f64,
     ) -> Result<FrameReport> {
         if self.is_lost() {
-            return Err("GPU_LOST".into());
+            return Err(RenderError::GpuLost("device lost".into()));
         }
+        let now = self.clock;
         self.frame += 1;
-        self.profile_now = now;
         self.profile = RenderProfile::default();
         let start = now();
         let zoom = view.zoom.max(0.01);
@@ -1688,7 +1879,9 @@ impl Renderer {
             }
         }
         if required.len() > 256 {
-            return Err("GPU budget: viewport needs more than 256 display tiles".into());
+            return Err(RenderError::Budget(
+                "GPU budget: viewport needs more than 256 display tiles".into(),
+            ));
         }
         self.visible_keys = required.iter().copied().collect();
         for key in &required {
@@ -1726,7 +1919,7 @@ impl Renderer {
                 if self.visible_job.is_none() {
                     let slot = self
                         .cache_slot(*key, false)?
-                        .ok_or("GPU budget: visible tile")?;
+                        .ok_or(RenderError::Budget("GPU budget: visible tile".into()))?;
                     if self.downsample_cached(scene, *key, slot as u32)? {
                         self.cache_slots[slot] = Some(*key);
                         self.cache_map.insert(
@@ -1745,13 +1938,18 @@ impl Renderer {
                     }
                     self.visible_job = Some(TileJob::new(scene, *key));
                 }
-                let mut job = self.visible_job.take().ok_or("INTERNAL: visible job")?;
-                match self.advance_tile_job(&mut job, scene, store, now, false)? {
-                    PrefetchStep::Ready => {
+                let mut job = self
+                    .visible_job
+                    .take()
+                    .ok_or(RenderError::Internal("visible job".into()))?;
+                match self.advance_tile_job(&mut job, scene, store, false)? {
+                    JobStep::Ready => {
                         composed += 1;
                     }
-                    PrefetchStep::Blocked => {
-                        return Err("GPU budget too small for one display tile".into());
+                    JobStep::Blocked => {
+                        return Err(RenderError::Budget(
+                            "GPU budget too small for one display tile".into(),
+                        ));
                     }
                     _ => {
                         self.visible_job = Some(job);
@@ -1812,6 +2010,7 @@ impl Renderer {
             .collect();
         let ub = buffer(
             &self.device,
+            &self.queue,
             "viewport",
             &[ViewUniform {
                 center_zoom: [
@@ -1830,12 +2029,15 @@ impl Renderer {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
+        self.retired.buffer(&ub);
         let tb = buffer(
             &self.device,
+            &self.queue,
             "visible tiles",
             &tiles,
             wgpu::BufferUsages::STORAGE,
         );
+        self.retired.buffer(&tb);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present"),
             layout: &self.present.get_bind_group_layout(0),
@@ -1868,7 +2070,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(FrameReport::default());
             }
-            _ => return Err("GPU_LOST: surface".into()),
+            _ => return Err(RenderError::GpuLost("surface".into())),
         };
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1896,6 +2098,7 @@ impl Renderer {
             pass.draw(0..6, 0..tiles.len() as u32);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         self.queue.present(frame);
         self.frame_report(composed, pending)
     }
@@ -1907,7 +2110,7 @@ impl Renderer {
             gpu_bytes: self.vector_bytes()
                 + self.m5.as_ref().map_or(0, |m| m.bytes())
                 + (self.atlas_slots.len() as u64 + 256) * 262144
-                + 1048576 // One reusable 512x512 RGBA downsample scratch texture.
+                + SCRATCH_BYTES
                 + self.stroke.as_ref().map_or(0, |s| {
                     s.tiles
                         .values()
@@ -1916,6 +2119,7 @@ impl Renderer {
                 }),
         })
     }
+    #[allow(clippy::too_many_arguments)] // One value per brush setting; the Worker passes them positionally.
     pub fn begin_stroke(
         &mut self,
         layer: NodeId,
@@ -1924,9 +2128,10 @@ impl Renderer {
         opacity: f32,
         erase: bool,
         mask: bool,
+        world: [f64; 6],
     ) -> Result<()> {
         if self.stroke.is_some() {
-            return Err("CONFLICT: stroke already active".into());
+            return Err(RenderError::Conflict("stroke already active".into()));
         }
         self.stroke = Some(GpuStroke {
             layer,
@@ -1937,6 +2142,8 @@ impl Renderer {
             erase,
             epoch: 0,
             mask,
+            world,
+            damage: None,
         });
         Ok(())
     }
@@ -1950,7 +2157,10 @@ impl Renderer {
         if dabs.is_empty() {
             return Ok(None);
         }
-        let mut stroke = self.stroke.take().ok_or("CONFLICT: no stroke")?;
+        let mut stroke = self
+            .stroke
+            .take()
+            .ok_or(RenderError::Conflict("no stroke".into()))?;
         let mut affected: BTreeMap<TileKey, Vec<GpuDab>> = BTreeMap::new();
         let mut bounds = Rect {
             x0: f64::INFINITY,
@@ -1987,11 +2197,14 @@ impl Renderer {
         let tile_bytes = 786432 + if selection.is_some() { 262144 } else { 0 };
         let frame = self.m5.as_ref().map_or(0, |m| m.bytes())
             + (stroke.tiles.len() + new_tiles) as u64 * tile_bytes;
-        let fixed =
-            (self.atlas_slots.len() as u64 + 256) * 262144 + 1048576 + self.vector_fixed_bytes();
+        let fixed = (self.atlas_slots.len() as u64 + 256) * 262144
+            + SCRATCH_BYTES
+            + self.vector_fixed_bytes();
         let Some(allowance) = crate::cache_allowance(self.budget_bytes, frame, fixed) else {
             self.stroke = Some(stroke);
-            return Err("INVALID_ARGUMENT: stroke exceeds GPU memory budget".into());
+            return Err(RenderError::InvalidArgument(
+                "stroke exceeds GPU memory budget".into(),
+            ));
         };
         if self.vector_mesh_bytes() > allowance
             && let Some(vector) = self.vector.as_mut()
@@ -2006,7 +2219,7 @@ impl Renderer {
         let mut selection_tiles = HashMap::new();
         if let Some((m, _, _)) = selection {
             for (key, hash) in &m.tiles {
-                if let Some(tile) = store.get_checked(hash)? {
+                if let Some(tile) = alto_raster::load(store, hash)? {
                     selection_tiles.insert(*key, tile);
                 }
             }
@@ -2032,7 +2245,10 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
                 let before = tiles.get(&key).copied();
-                let previous = before.map(|h| store.get_checked(&h)).transpose()?.flatten();
+                let previous = before
+                    .map(|h| alto_raster::load(store, &h))
+                    .transpose()?
+                    .flatten();
                 let data = previous.unwrap_or_else(|| {
                     Arc::new(TileData {
                         format: if stroke.mask {
@@ -2119,10 +2335,21 @@ impl Renderer {
                     selection: selected,
                 });
             }
-            let tile = stroke.tiles.get(&key).ok_or("INTERNAL: stroke tile")?;
-            let db = buffer(&self.device, "dabs", &dabs, wgpu::BufferUsages::STORAGE);
+            let tile = stroke
+                .tiles
+                .get(&key)
+                .ok_or(RenderError::Internal("stroke tile".into()))?;
+            let db = buffer(
+                &self.device,
+                &self.queue,
+                "dabs",
+                &dabs,
+                wgpu::BufferUsages::STORAGE,
+            );
+            self.retired.buffer(&db);
             let ub = buffer(
                 &self.device,
+                &self.queue,
                 "brush config",
                 &[BrushUniform {
                     color: stroke.color,
@@ -2137,6 +2364,7 @@ impl Renderer {
                 }],
                 wgpu::BufferUsages::UNIFORM,
             );
+            self.retired.buffer(&ub);
             let base = tile.base.create_view(&Default::default());
             let output = tile.output.create_view(&Default::default());
             let selected = tile
@@ -2180,14 +2408,25 @@ impl Renderer {
             pass.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         stroke.epoch += 1;
+        let damage = crate::damage::layer_rect_damage(stroke.world, bounds);
+        stroke.damage = Some(
+            stroke
+                .damage
+                .map_or(damage, |d| crate::damage::union(d, damage)),
+        );
         self.stroke = Some(stroke);
-        self.invalidate(Some(bounds));
-        Ok(Some(bounds))
+        self.invalidate(Some(damage));
+        Ok(Some(damage))
     }
     pub async fn finish_stroke(&mut self) -> Result<Vec<(TileKey, Option<ContentHash>, TileData)>> {
-        let stroke = self.stroke.take().ok_or("CONFLICT: no stroke")?;
+        let stroke = self
+            .stroke
+            .take()
+            .ok_or(RenderError::Conflict("no stroke".into()))?;
         let mut buffers = Vec::new();
+        let mut finished = Vec::new();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for (key, tile) in stroke.tiles {
             let b = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2213,8 +2452,10 @@ impl Renderer {
                 },
             );
             buffers.push((key, tile.before, b));
+            finished.push(tile);
         }
         self.queue.submit(Some(encoder.finish()));
+        self.retired.release();
         let mut waits = Vec::new();
         for (_, _, b) in &buffers {
             let (tx, rx) = futures_channel::oneshot::channel();
@@ -2223,14 +2464,35 @@ impl Renderer {
             });
             waits.push(rx);
         }
+        let mut failed = None;
         for w in waits {
-            w.await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = w.await.map_err(|e| RenderError::Internal(e.to_string()))? {
+                failed.get_or_insert(e);
+            }
+        }
+        if let Some(e) = failed {
+            for (_, _, b) in &buffers {
+                b.destroy();
+            }
+            for tile in finished {
+                tile.destroy();
+            }
+            // As in read_tile: say whether the device was lost while the maps waited.
+            return Err(if self.is_lost() {
+                RenderError::GpuLost(format!("device lost while reading back a stroke: {e}"))
+            } else {
+                RenderError::Internal(format!(
+                    "reading back a stroke ({} tiles): {e}",
+                    buffers.len()
+                ))
+            });
         }
         let mut out = Vec::new();
         for (k, before, b) in buffers {
-            let mapped = b.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+            let mapped = b
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| RenderError::Internal(e.to_string()))?;
             let data = TileData::new(
                 if stroke.mask {
                     alto_core::PixelFormat::R8
@@ -2243,17 +2505,46 @@ impl Renderer {
                     mapped.to_vec()
                 },
             )
-            .map_err(|_| "CORRUPT_DATA: readback")?;
+            .map_err(|_| RenderError::CorruptData("readback".into()))?;
             drop(mapped);
             b.unmap();
+            b.destroy();
             out.push((k, before, data));
         }
-        self.invalidate(None);
+        // Every readback has completed, so nothing still reads these textures.
+        for tile in finished {
+            tile.destroy();
+        }
+        // Tiles outside the stroke were composed from the same pixels with or without it.
+        if let Some(damage) = stroke.damage {
+            self.invalidate(Some(damage));
+        }
         Ok(out)
     }
     pub fn cancel_stroke(&mut self) {
-        self.stroke = None;
-        self.invalidate(None);
+        let Some(stroke) = self.stroke.take() else {
+            return;
+        };
+        for tile in stroke.tiles.into_values() {
+            tile.destroy();
+        }
+        if let Some(damage) = stroke.damage {
+            self.invalidate(Some(damage));
+        }
+    }
+    /// Discards the display tiles an edit can change. Jobs always restart: they index
+    /// the previous scene.
+    pub fn invalidate_damage(&mut self, damage: &crate::damage::Damage) {
+        use crate::damage::Damage;
+        match damage {
+            Damage::None => self.reset_jobs(),
+            Damage::Rects(rects) => {
+                for r in rects {
+                    self.invalidate(Some(*r));
+                }
+            }
+            Damage::All => self.invalidate(None),
+        }
     }
 }
 impl Renderer {
@@ -2266,7 +2557,11 @@ impl Renderer {
         if !self.cache_map.contains_key(&key) {
             self.compose(scene, key, store, false)?;
         }
-        let slot = self.cache_map.get(&key).ok_or("INTERNAL: cache tile")?.slot;
+        let slot = self
+            .cache_map
+            .get(&key)
+            .ok_or(RenderError::Internal("cache tile".into()))?
+            .slot;
         let b = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe"),
             size: 262144,
@@ -2300,17 +2595,34 @@ impl Renderer {
             },
         );
         self.queue.submit(Some(e.finish()));
+        self.retired.release();
         let (tx, rx) = futures_channel::oneshot::channel();
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        rx.await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        let view = b.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+        let mapped = rx.await.map_err(|e| RenderError::Internal(e.to_string()))?;
+        // A map fails when the device is lost while it waits; say so, so the caller
+        // can tell device loss from a renderer bug.
+        if let Err(e) = mapped {
+            b.destroy();
+            return Err(if self.is_lost() {
+                RenderError::GpuLost(format!(
+                    "device lost while reading display tile {key:?}: {e}"
+                ))
+            } else {
+                RenderError::Internal(format!("reading display tile {key:?}: {e}"))
+            });
+        }
+        let view = b
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| RenderError::Internal(e.to_string()))?;
         let data = view.to_vec();
         drop(view);
         b.unmap();
+        // Dropping a buffer does nothing on WebGPU; its mapping memory would stay
+        // until JS collects it. Readbacks are frequent: release it now.
+        b.destroy();
         Ok(data)
     }
 }
@@ -2386,6 +2698,7 @@ impl Renderer {
         let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
             &self.device,
+            &self.queue,
             "pyramid slot",
             &[[slot, 0, 0, 0]],
             wgpu::BufferUsages::UNIFORM,
@@ -2415,6 +2728,8 @@ impl Renderer {
             p.dispatch_workgroups(16, 16, 1);
         }
         self.queue.submit(Some(e.finish()));
+        // This takes &self; the uniform is its own and the submit above was its use.
+        ub.destroy();
         Ok(true)
     }
 }

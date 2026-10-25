@@ -55,11 +55,11 @@ export async function runM6Tests(engine,log){
    const stats=await engine.unstable.vectorStats();assert(stats.entries>1,'level-band mesh cache absent');metrics.meshCache=stats;
  });
  await test('vector masks / feather / raster mask intersection / canonical raster unchanged',async()=>{
-   doc=await engine.createDocument({width:512,height:512});const canvas=new OffscreenCanvas(512,512),c=canvas.getContext('2d');c.fillStyle='blue';c.fillRect(0,0,512,512);const asset=await engine.assets.importImage(await canvas.convertToBlob());await doc.transact('raster',tx=>layer=tx.addRasterFromAsset(asset));const original=JSON.stringify(doc.view.node(layer).kind.tiles);
+   doc=await engine.createDocument({width:512,height:512});const canvas=new OffscreenCanvas(512,512),c=canvas.getContext('2d');c.fillStyle='blue';c.fillRect(0,0,512,512);const asset=await engine.assets.importImage(await canvas.convertToBlob());await doc.transact('raster',tx=>layer=tx.addRasterFromAsset(asset));const original=JSON.stringify(await doc.nodeTiles(layer));
    const path=await engine.vectors.parseSvg('M128 64 H384 V448 H128 Z');await doc.vectors.setMask(layer,{path,feather:0});assert((await at(engine,200,200))[3]===255,'vector mask interior');assert((await at(engine,64,200))[3]===0,'vector mask exterior');
    await doc.vectors.setMask(layer,{path,feather:12});const edge=await at(engine,128,250);assert(edge[3]>80&&edge[3]<190,'feather missing');assert((await at(engine,120,250))[3]>0,'feather halo missing');
    await doc.selection.apply({kind:'rectangle',x:0,y:0,width:256,height:512});await doc.masks.fromSelection(layer);await doc.selection.clear();assert((await at(engine,300,200))[3]===0,'raster mask intersection');assert((await at(engine,200,200))[3]===255,'mask intersection inside');
-   assert(original===JSON.stringify(doc.view.node(layer).kind.tiles),'vector mask modified source');await doc.vectors.setMask(layer,{path,enabled:false});assert((await at(engine,64,200))[3]===255,'mask disable');await doc.undo();assert((await at(engine,64,200))[3]===0,'mask Undo');
+   assert(original===JSON.stringify(await doc.nodeTiles(layer)),'vector mask modified source');await doc.vectors.setMask(layer,{path,enabled:false});assert((await at(engine,64,200))[3]===255,'mask disable');await doc.undo();assert((await at(engine,64,200))[3]===0,'mask Undo');
  });
  await test('clipping paths on groups / adjustments / vector-mask intersection',async()=>{
    doc=await engine.createDocument({width:512,height:512});const p=await styled(engine,'M0 0 H512 V512 H0 Z',{fill:[1,0,0,1]});let group,adjust;
@@ -86,18 +86,18 @@ export async function runM6Tests(engine,log){
  });
  await test('mesh cache reuse / invalid vector edits reject atomically',async()=>{
    doc=await engine.createDocument({width:512,height:512});const p=await styled(engine,'M100 100 Q256 0 400 100 V400 H100 Z');await doc.transact('path',tx=>layer=tx.addVector([p]));await engine.unstable.readTile(0,0);const a=await engine.unstable.vectorStats();await doc.transact('opacity',tx=>tx.setProps(layer,{opacity:.8}));await engine.unstable.readTile(0,0);const b=await engine.unstable.vectorStats();assert(b.hits>a.hits,'mesh was not reused');assert(b.misses===a.misses,'opacity retessellated');
-   const snapshot=doc.view.snapshotHash,revision=doc.view.revision;
+   const snapshot=(await doc.snapshotHash()),revision=doc.view.revision;
    for(const bad of [[],[{op:'line',x:2,y:3}],[{op:'move',x:1e20,y:0}],Array(4097).fill({op:'move',x:0,y:0})]){
      if(!bad.length)continue;let failed=false;try{await doc.vectors.set(layer,[{...p,data:{commands:bad}}]);}catch{failed=true;}assert(failed,'invalid path accepted');
    }
    let failed=false;try{await doc.vectors.set(layer,[{...p,stroke:{color:[1,0,0,1],width:-1}}]);}catch{failed=true;}assert(failed,'negative stroke');
-   failed=false;try{await doc.vectors.setMask(layer,{path:p.data,feather:100});}catch{failed=true;}assert(failed,'invalid feather');assert(snapshot===doc.view.snapshotHash&&revision===doc.view.revision,'failed edits changed document');await frame(engine);
+   failed=false;try{await doc.vectors.setMask(layer,{path:p.data,feather:100});}catch{failed=true;}assert(failed,'invalid feather');assert(snapshot===(await doc.snapshotHash())&&revision===doc.view.revision,'failed edits changed document');await frame(engine);
  });
  await test('M6 ZIP / GPU loss / journal recovery retain paths, masks, clips and pixels',async()=>{
    const p=doc.view.node(layer).kind.paths[0];await doc.vectors.setMask(layer,{path:p.data,feather:4});await doc.vectors.setClipPath(layer,{path:await engine.vectors.parseSvg('M0 0 H350 V512 H0 Z')});
-   const hash=doc.view.snapshotHash,before=await engine.unstable.readTile(0,0),bytes=await engine.unstable.saveBytes();doc=await engine.openDocument(new Blob([bytes]));assert(hash===doc.view.snapshotHash,'ZIP snapshot hash');assert(same(before,await engine.unstable.readTile(0,0)),'ZIP pixels');
+   const hash=(await doc.snapshotHash()),before=await engine.unstable.readTile(0,0),bytes=await engine.unstable.saveBytes();doc=await engine.openDocument(new Blob([bytes]));assert(hash===(await doc.snapshotHash()),'ZIP snapshot hash');assert(same(before,await engine.unstable.readTile(0,0)),'ZIP pixels');
    await engine.unstable.destroyGpu();await new Promise((resolve,reject)=>{const off=engine.on('gpuRestored',()=>{off();resolve();});setTimeout(()=>reject(Error('GPU recovery timeout')),15000);});assert(same(before,await engine.unstable.readTile(0,0)),'GPU rebuild');
-   await doc.transact('journal vector',tx=>tx.setVector(layer,[{...p,fill:[0,1,0,1]}]));const after=await engine.unstable.readTile(0,0),savedHash=doc.view.snapshotHash;await engine.unstable.crash();doc=engine.document;assert(savedHash===doc.view.snapshotHash,'journal snapshot');assert(same(after,await engine.unstable.readTile(0,0)),'journal pixels');await frame(engine);
+   await doc.transact('journal vector',tx=>tx.setVector(layer,[{...p,fill:[0,1,0,1]}]));const after=await engine.unstable.readTile(0,0),savedHash=(await doc.snapshotHash());await doc.durable();await engine.unstable.crash();doc=engine.document;assert(savedHash===(await doc.snapshotHash()),'journal snapshot');assert(same(after,await engine.unstable.readTile(0,0)),'journal pixels');await frame(engine);
  });
  }catch(error){results.push({name:String(error.stack||error),pass:false});log('FAIL '+error);throw error;}
  finally{const report={date:new Date().toISOString(),milestone:'M6',userAgent:navigator.userAgent,crossOriginIsolated,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},results,metrics};document.querySelector('#test-results').dataset.report=JSON.stringify(report);}

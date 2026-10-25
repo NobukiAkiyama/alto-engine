@@ -5,6 +5,7 @@ for (const f of [
   "storage-worker.js",
   "storage-core.js",
   "storage-session.js",
+  "decode-worker.js",
 ])
   await copyFile("src/" + f, "dist/" + f);
 await cp("../../examples/browser-playground/pkg", "dist/pkg", {

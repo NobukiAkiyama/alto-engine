@@ -6,6 +6,8 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 [コールド表示の実装・測定結果](verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
+[エンジン再設計（差分描画・エラー一本化）](docs/design/2026-10-24-engine-redesign.md)。編集後は、変更した範囲の表示タイルだけを作り直します。
+
 ## まず起動する
 
 ビルド済みWASMとSDKを同梱しています。Python 3があれば、RustやNode.jsを導入せずに試せます。
@@ -28,7 +30,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 - 「保存 .alto」で保存。「開く」で復元。File System Access API対応環境ではファイルへ書き込み、それ以外ではダウンロードします。
 - 異常終了後、同じオリジンで開き直すと「編集を復旧」が表示されます。OPFSの記録はブラウザのサイトデータに保存されます。
 
-「検証と計測」から機能テスト23件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+「検証と計測」から機能テスト30件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
 
 ## M7の使い方（テキスト・縦組み）
 
@@ -214,8 +216,10 @@ await doc.undo();
 | `crates/alto-text` | フォント、rustybuzzシェーピング、横組み/縦組みの組版、グリフ→パス、選択 |
 | `crates/alto-doc` | Scene Graph、原子的Transaction、可逆Op、Undo/Redo、スナップショット、コミット・意味的差分 |
 | `crates/alto-store` | 内容アドレス付きオブジェクト、`.alto` ZIPとフォルダ形式、破損検出 |
+| `crates/alto-scene` | 描画シーンの型、描画計画、編集による表示の変更範囲（GPU に依存しない） |
 | `crates/alto-gpu` | wgpu、GPU合成・ブラシ、表示タイルキャッシュ、復旧 |
-| `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合 |
+| `crates/alto-decode` | 展開専用の Worker が読み込む小さなWASM（LZ4 と内容ハッシュの検証だけ） |
+| `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
 | `packages/alto-sdk` | TypeScript SDK v0.4、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
@@ -251,7 +255,7 @@ await doc.redo();
 await doc.save(); // ブラウザの保存先選択またはダウンロード
 ```
 
-Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。`doc.view.node(id)` は凍結した読み取り専用の値です。独自保存先は `ArchiveStorageProvider` の `readArchive` / `writeArchive` を実装できます。型定義は `packages/alto-sdk/dist/index.d.ts` を参照してください。`unstable` APIは検証用です。
+Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。Promiseはメモリ上の文書に適用された時点で解決し、復旧用ジャーナルへの書き込みは描画と別に進みます。書き込みの完了は `await doc.durable()` で待てます（書き込みに失敗すると `STORAGE` で失敗します）。`doc.view.node(id)` は凍結した読み取り専用の値です。ラスターレイヤーの `kind.tiles` はタイル数と範囲（`{format, count, bounds}`）だけで、タイル一覧は `await doc.nodeTiles(id)` で取得します。`doc.view.snapshotHash` は文書を開いたときや保存したときにだけ入り、編集の後は `null` です。保存されるスナップショットのハッシュは `await doc.snapshotHash()` で取得します。独自保存先は `ArchiveStorageProvider` の `readArchive` / `writeArchive` を実装できます。型定義は `packages/alto-sdk/dist/index.d.ts` を参照してください。`unstable` APIは検証用です。
 
 `viewport.zoom` は物理ピクセル/文書ピクセルです。画面上の倍率を指定する場合は `engine.viewport.setCssZoom(1)`、読み取る場合は `engine.viewport.getCssZoom()` を使います。実効DPRは `engine.effectiveDpr`（最大2）で確認できます。Workerが停止した場合、`engine.lifecycleState` と `engine.engineFailure` を確認し、`engine.retryWorker()` で確定済みの作業記録から復旧できます。`recovering` 中は編集を停止し、`recovered` の通知後に `engine.document` を取得し直してください。保存障害は従来どおり別の `storageFailure` で通知されます。
 

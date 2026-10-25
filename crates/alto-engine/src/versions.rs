@@ -16,6 +16,25 @@ pub struct VersionStore {
     pub(crate) head: Option<ContentHash>,
     /// Tiles and blobs referenced by committed snapshots (GC roots).
     pub(crate) retained: BTreeSet<ContentHash>,
+    /// The head commit's document, parsed once. Version status diffs against it
+    /// after every edit; parsing the snapshot each time cost ten times the diff.
+    head_doc: Option<(ContentHash, std::sync::Arc<Document>)>,
+}
+impl VersionStore {
+    fn set_head(&mut self, head: Option<ContentHash>) {
+        self.head = head;
+        self.head_doc = head.and_then(|c| {
+            let commit = self.commits.get(&c)?;
+            let doc = Document::from_snapshot_bytes(self.snapshots.get(&commit.snapshot)?).ok()?;
+            Some((c, std::sync::Arc::new(doc)))
+        });
+    }
+}
+
+pub struct RecoveryCheckpoint {
+    pub entries: BTreeMap<String, Vec<u8>>,
+    /// Objects whose bytes `entries` carries.
+    pub written: Vec<ContentHash>,
 }
 
 /// Which side of a diff: a commit or the working document.
@@ -158,7 +177,7 @@ impl Engine {
                 .and_then(|c| store.commits.get(&c))
                 .is_some_and(|c| c.snapshot == sh)
         {
-            return Err(invalid("INVALID_ARGUMENT: 前の版から変更がありません"));
+            return Err(invalid("前の版から変更がありません"));
         }
         let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
         let commit = Commit {
@@ -169,14 +188,12 @@ impl Engine {
             created_at,
             author,
         };
-        commit
-            .validate()
-            .map_err(|e| invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        commit.validate().map_err(|e| invalid(e.to_string()))?;
         let bytes = commit.bytes();
         let hash = ContentHash::of(&bytes);
         let store = self.versions.entry(h).or_default();
         store.insert(hash, commit, bytes, snapshot)?;
-        store.head = Some(hash);
+        store.set_head(Some(hash));
         if let Some(editor) = self.documents.get_mut(&h) {
             editor.take_intent_log();
         }
@@ -290,11 +307,14 @@ impl Engine {
 
     pub fn version_status(&self, h: DocHandle) -> Result<VersionStatus, EngineError> {
         let store = self.versions(h)?;
-        let changes = match store.head {
-            Some(c) => self
+        let changes = match (store.head, &store.head_doc) {
+            (Some(c), Some((cached, doc))) if *cached == c => {
+                alto_doc::diff(doc, self.document(h)?).len()
+            }
+            (Some(c), _) => self
                 .diff_versions(h, VersionRef::Commit(c), VersionRef::Working)?
                 .len(),
-            None => usize::from(self.document(h)?.nodes.len() > 1),
+            (None, _) => usize::from(self.document(h)?.nodes.len() > 1),
         };
         Ok(VersionStatus {
             head: store.head,
@@ -328,8 +348,7 @@ impl Engine {
         let target = self.resolve(h, VersionRef::Commit(commit))?;
         let message = self.versions(h)?.commits[&commit].message.clone();
         let current = self.document(h)?;
-        let ops = alto_doc::restore_ops(current, &target)
-            .map_err(|e| invalid(format!("INVALID_ARGUMENT: {e}")))?;
+        let ops = alto_doc::restore_ops(current, &target).map_err(|e| invalid(e.to_string()))?;
         let revision = current.revision;
         let label: String = message
             .lines()
@@ -344,33 +363,72 @@ impl Engine {
 
     /// Package contents including every committed snapshot and its objects.
     pub fn package_parts(&self, h: DocHandle) -> Result<PackageParts, EngineError> {
+        Ok(self
+            .package_parts_except(h, &BTreeSet::new(), BTreeSet::new())?
+            .0)
+    }
+
+    /// Package parts without the bytes of objects in `stored`, plus every object the
+    /// package references. A recovery checkpoint writes only the objects it lacks.
+    pub fn package_parts_except(
+        &self,
+        h: DocHandle,
+        stored: &BTreeSet<ContentHash>,
+        extra: BTreeSet<ContentHash>,
+    ) -> Result<(PackageParts, BTreeSet<ContentHash>), EngineError> {
         let doc = self.document(h)?;
         let store = self.versions(h)?;
-        let mut hashes = doc_hashes(doc);
+        let mut hashes = extra;
+        hashes.extend(doc_hashes(doc));
         hashes.extend(store.retained.iter().copied());
         let mut objects = BTreeMap::new();
-        for hash in hashes {
-            match self.encoded(hash) {
-                Some(bytes) => {
-                    objects.insert(hash, bytes);
-                }
-                None => {
-                    if let Some(error) = self.take_fault_error() {
-                        return Err(alto_store::StoreError::Corrupt(error).into());
-                    }
-                    return Err(EngineError::MissingTile(hash));
-                }
-            }
+        for &hash in hashes.difference(stored) {
+            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+            objects.insert(hash, bytes);
         }
-        if let Some(error) = self.take_fault_error() {
-            return Err(alto_store::StoreError::Corrupt(error).into());
-        }
-        Ok(PackageParts {
+        let parts = PackageParts {
             snapshot: doc.snapshot_bytes()?,
             objects,
             snapshots: store.snapshots.clone(),
             commits: store.commit_bytes.clone(),
             head: store.head,
+        };
+        Ok((parts, hashes))
+    }
+
+    /// A recovery checkpoint as package entries without the objects in `stored`,
+    /// plus `checkpoint.json` naming every object path it references and the
+    /// opaque objects.
+    pub fn recovery_checkpoint(
+        &self,
+        h: DocHandle,
+        stored: &BTreeSet<ContentHash>,
+    ) -> Result<RecoveryCheckpoint, EngineError> {
+        // The undo history travels with a recovery checkpoint, and so do the objects
+        // only it references. A saved .alto file has neither.
+        let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
+        let history = editor.history();
+        let mut history_objects = BTreeSet::new();
+        for tx in history.undo.iter().chain(&history.redo) {
+            crate::tx_hashes(tx, &mut history_objects);
+        }
+        let (parts, refs) = self.package_parts_except(h, stored, history_objects)?;
+        let mut entries = alto_store::package_entries(&parts)?;
+        entries.insert(
+            "history.json".into(),
+            serde_json::to_vec(&history).map_err(|e| DocError::Serialization(e.to_string()))?,
+        );
+        let meta = serde_json::json!({
+            "objects": refs.iter().map(alto_store::object_path).collect::<Vec<_>>(),
+            "opaque": self.recovery_opaque_hashes(h)?,
+        });
+        entries.insert(
+            "checkpoint.json".into(),
+            serde_json::to_vec(&meta).map_err(|e| DocError::Serialization(e.to_string()))?,
+        );
+        Ok(RecoveryCheckpoint {
+            entries,
+            written: parts.objects.into_keys().collect(),
         })
     }
 
@@ -417,10 +475,11 @@ impl Engine {
                 commits.insert(*hash, bytes.clone());
             }
         }
-        let objects = hashes
-            .into_iter()
-            .filter_map(|hash| self.encoded(hash).map(|b| (hash, b)))
-            .collect();
+        let mut objects = BTreeMap::new();
+        for hash in hashes {
+            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+            objects.insert(hash, bytes);
+        }
         Ok(alto_store::encode_parts(&PackageParts {
             snapshot: current,
             objects,
@@ -448,7 +507,7 @@ impl Engine {
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false)
+        self.open_decoded_package(p, false, None)
     }
 
     /// Journal-only fast path. The caller must verify the entire checkpoint's
@@ -458,15 +517,32 @@ impl Engine {
         bytes: &[u8],
         opaque: &std::collections::BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
-        let entries = alto_store::read_entries(bytes)?;
+        self.open_recovery_entries(alto_store::read_entries(bytes)?, opaque)
+    }
+
+    /// Journal-only: entries of a checkpoint whose metadata digest the caller verified.
+    /// Objects are named by their hash and checked against it on first use.
+    pub fn open_recovery_entries(
+        &mut self,
+        mut entries: BTreeMap<String, Vec<u8>>,
+        opaque: &std::collections::BTreeSet<ContentHash>,
+    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+        let history = match entries.remove("history.json") {
+            Some(bytes) => Some(
+                serde_json::from_slice::<alto_doc::History>(&bytes)
+                    .map_err(|e| alto_store::StoreError::Corrupt(format!("history: {e}")))?,
+            ),
+            None => None,
+        };
         let p = alto_store::decode_recovery_entries(entries, opaque)?;
-        self.open_decoded_package(p, true)
+        self.open_decoded_package(p, true, history)
     }
 
     fn open_decoded_package(
         &mut self,
         p: alto_store::Package,
         deferred_verify: bool,
+        history: Option<alto_doc::History>,
     ) -> Result<(DocHandle, Vec<String>), EngineError> {
         let (handle, mut warnings) = self.install_package(
             p.objects,
@@ -504,7 +580,8 @@ impl Engine {
                 None => warnings.push(format!("snapshot missing for commit {hash}")),
             }
         }
-        store.head = p.head.filter(|h| store.commits.contains_key(h));
+        let head = p.head.filter(|h| store.commits.contains_key(h));
+        store.set_head(head);
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
                 warnings.push(format!("missing object {hash} in version history"));
@@ -512,6 +589,12 @@ impl Engine {
         }
         warnings.dedup();
         self.versions.insert(handle, store);
+        // Before maintain(): the objects only the history references are kept for it.
+        if let Some(history) = history
+            && let Some(editor) = self.documents.get_mut(&handle)
+        {
+            editor.restore_history(history);
+        }
         self.backed = true;
         self.maintain();
         Ok((handle, warnings))

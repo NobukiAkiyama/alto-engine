@@ -118,6 +118,13 @@ impl Affine2 {
     pub fn is_finite(&self) -> bool {
         self.0.iter().all(|v| v.is_finite())
     }
+    pub fn apply(self, p: [f64; 2]) -> [f64; 2] {
+        let m = self.0;
+        [
+            m[0] * p[0] + m[2] * p[1] + m[4],
+            m[1] * p[0] + m[3] * p[1] + m[5],
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

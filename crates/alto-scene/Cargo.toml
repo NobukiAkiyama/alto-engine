@@ -1,0 +1,8 @@
+[package]
+name = "alto-scene"
+version = "0.4.0"
+edition = "2024"
+
+[dependencies]
+alto-core = { path = "../alto-core" }
+alto-vector = { path = "../alto-vector" }

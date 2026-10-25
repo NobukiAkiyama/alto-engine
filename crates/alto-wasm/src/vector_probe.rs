@@ -150,6 +150,7 @@ pub async fn compare_vector_backends() -> Result<String, JsValue> {
         let mut encoder = device.create_command_encoder(&Default::default());
         lyon.render(
             &device,
+            &queue,
             &mut encoder,
             &lyon_target,
             &paths,
