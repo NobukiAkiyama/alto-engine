@@ -3020,6 +3020,26 @@
         "error": null
       }
     ],
-    "missingMailboxInCorrectnessStderr": true
+    "missingMailboxInCorrectnessStderr": true,
+    "faultLines": [
+      "[6717:19874:1025/071611.937962:INFO:CONSOLE:1] \"RUN two damaged journals freeze editing until an external file opens\", source:  (1)",
+      "[6730:20070:1025/071613.528093:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.533422:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.533575:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.533712:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.533904:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.534476:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.535043:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.535259:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.535844:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.535985:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.536103:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.536254:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.536391:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.",
+      "[6730:20070:1025/071613.536396:ERROR:gpu/command_buffer/service/webgpu_decoder_impl.cc:1951] Error: 4 for Command kDissociateMailboxForPresent",
+      "[6717:19874:1025/071613.704352:INFO:CONSOLE:0] \"A valid external Instance reference no longer exists.\", source: http://127.0.0.1:49256/examples/browser-playground/ (0)",
+      "[6717:19874:1025/071613.735675:INFO:CONSOLE:1] \"PASS two damaged journals freeze editing until an external file opens 1797.7 ms\", source:  (1)",
+      "[6717:19874:1025/071613.735748:INFO:CONSOLE:1] \"ALL 32 TESTS PASSED\", source:  (1)"
+    ]
   }
 }
