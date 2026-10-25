@@ -24,6 +24,7 @@ const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
+const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
 const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
 if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
 const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
@@ -179,8 +180,9 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 let server, chrome, client, browserClient, profile;
 const summary = [];
 const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, browser: null, executable: null, args: [], events: [], system: [] };
-let stderr = "";
+let stderr = "", traceStream = null, traceStarted = false;
 const recordEvent = ({ method, params }) => {
+  if (method === "Tracing.tracingComplete") traceStream = params.stream;
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
   diagnostics.events.push({ at: new Date().toISOString(), method, params });
   if (diagnostics.events.length > 500) diagnostics.events.shift();
@@ -215,7 +217,8 @@ try {
     "--headless=new",
     "--enable-unsafe-webgpu",
     "--enable-logging=stderr",
-    ...(graphiteBackend === "swiftshader" ? ["--enable-skia-graphite", "--skia-graphite-dawn-backend=swiftshader"] : []),
+    ...(graphiteBackend === "swiftshader" ? ["--enable-skia-graphite", "--skia-graphite-dawn-backend=swiftshader",
+      ...(platform() === "linux" ? ["--enable-gpu", "--use-angle=swiftshader"] : [])] : []),
     ...(disableGpuWatchdog ? ["--disable-gpu-watchdog"] : []),
     ...(process.env.ALTO_BROWSER_GPU === "swiftshader"
       ? ["--use-webgpu-adapter=swiftshader", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader"]
@@ -253,6 +256,13 @@ try {
   await send("Runtime.enable");
   await send("Log.enable");
   await sampleSystem("startup");
+  if (gpuTrace) {
+    await browserClient.send("Tracing.start", { transferMode: "ReturnAsStream", traceConfig: {
+      recordMode: "recordContinuously", traceBufferSizeInKb: 65536,
+      includedCategories: ["gpu", "cc", "blink", "disabled-by-default-gpu.dawn", "disabled-by-default-gpu.service"],
+    } }, 10000);
+    traceStarted = true;
+  }
   if (graphiteBackend === "swiftshader" && diagnostics.system[0]?.["SystemInfo.getInfo"]?.gpu?.auxAttributes?.skiaBackendType !== "GraphiteDawnVulkan")
     throw Error("The requested Graphite SwiftShader comparison is not active");
   if (browserDpr || browserWidth) {
@@ -362,6 +372,22 @@ try {
   console.error("Browser verification failed:", error);
   summary.push({ name: "startup", ok: false, error: String(error) });
 } finally {
+  if (traceStarted) {
+    try {
+      await browserClient.send("Tracing.end", {}, 10000);
+      for (let i = 0; i < 100 && !traceStream; i++) await sleep(100);
+      if (!traceStream) throw Error("Tracing did not return a stream");
+      const path = join(reportDir, "chrome-gpu-trace.json");
+      await writeFile(path, "");
+      for (;;) {
+        const { result } = await browserClient.send("IO.read", { handle: traceStream, size: 1024 * 1024 }, 10000);
+        appendFileSync(path, result.base64Encoded ? Buffer.from(result.data, "base64") : result.data);
+        if (result.eof) break;
+      }
+      await browserClient.send("IO.close", { handle: traceStream }, 5000);
+      diagnostics.trace = { file: "chrome-gpu-trace.json", bufferKiB: 65536 };
+    } catch (error) { diagnostics.trace = { error: String(error) }; }
+  }
   await sampleSystem("shutdown");
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
   if (externalReports) await writeFile(join(reportDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
