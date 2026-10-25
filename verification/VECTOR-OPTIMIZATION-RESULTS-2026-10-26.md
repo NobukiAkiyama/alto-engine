@@ -2,6 +2,8 @@
 
 2026-10-26 JST。対象は `35be75a` と既存の SDK 修正を含む作業ツリー。これはベクター描画の P1 / P2a の検証であり、Canvas の間欠的な GPU 喪失を解決したという報告ではない。
 
+後続の [密集ベクター MRT8 の結果](DENSE-VECTOR-RESULTS-2026-10-26.md)を追加した。以下の数値・CI は先行する disjoint batching の記録であり、後続実装の数値で上書きしない。
+
 ## 実装
 
 - 通常の Paths の描画を既定で Batched にした。lyon、4x MSAA、R8 coverage、premultiplied RGBA16F、shader の座標計算は維持する。
@@ -28,6 +30,8 @@ Chrome 155.0.8059.84、Apple M5 / Metal、512×512、RGBA16F、4x MSAA。独立�
 
 同条件の管理対象 GPU 資源は1,521,920 bytesから1,587,456 bytesへ増加した。追加の arena は65,536 bytes。重なる1,000パスでは arena は524,288 bytes、最大16ページの範囲に収まる。これは管理下の buffer / texture の量であり、ブラウザ全体や driver の総使用量ではない。
 
+密集条件では5種類の同じ形状を反復配置し、メッシュキャッシュ済みの描画費用を測った。1,000種類の異なる形状のコールド準備性能を示す値ではない。
+
 生データ、全100サンプル、初回描画、初期化、CPU encode、p95、WASM hash は [Metal の記録](vector-optimization-metal-2026-10-26.json)に保存した。初回値は方式の順序や shader / pipeline の状態に影響されるため、warm の倍率をそのままコールド表示の改善率にはしない。変形など他の5条件は性能採用の100フレーム対象ではなく、画素検査用である。
 
 ## 正しさ・配布の確認
@@ -48,6 +52,10 @@ Chrome 155.0.8059.84、Apple M5 / Metal、512×512、RGBA16F、4x MSAA。独立�
 [最初の CI 実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40215938259)は Rust / WASM / 配布物検査と functional32件を通過した後、M5 の stroke readback 中の `GPU_LOST` で失敗した。Chrome 156.0.8078.47 / SwiftShader。`SharedImageManager::ProduceSkia` の non-existent mailbox、Invalid Texture、`DissociateMailboxForPresent` error4、external Instance reference の消失という既存調査と同じ列が記録された。今回の変更との独立性や Chromium 側の根本原因をこのログだけで断定しない。
 
 この失敗は再試行で上書きせず、[CI の記録](vector-optimization-ci-2026-10-26.json)に保存した。新設した Canvas を使わないベクター画素検査は、先行 suite が失敗しても実行するよう変更した。先行 step の失敗は引き続き job 全体を失敗にする。ローカルの93件成功を、CI 全体の成功と取り違えない。
+
+[更新後の CI 実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40216325393)は、commit `16e4ce0994ec8fb17546afc7d68236c3b4c489d5` で全ての必須 step を成功した。Rust / WASM / 配布物検査、通常回帰93件、埋め込み2例、追加の8画素条件＋3寿命・予算条件を含む。Chrome 156.0.8078.47 / SwiftShader。配布 WASM hash はローカルと同じ `3455925b...20e2dec`。比較用 WASM は CI 上でソースから再ビルドされ、実行した hash は `af746acf...b04389` と記録した。比較ビルドは通常配布の exact-byte 再現ビルドと異なりビルダーのパスを含み、ローカル測定用の hash とは区別する。
+
+この成功を、先に再現した間欠的な GPU 喪失の修正完了とはしない。両実行の結果を保持する。今回の Rust、検証用ソース、配布 WASM が CI を通った作業ツリーと一致することも最終照合した。
 
 ### ローカルのコマンド
 

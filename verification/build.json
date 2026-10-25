@@ -4,15 +4,15 @@
   "milestone": "M8 + embedding API",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4580315,
-  "gzipBytes": 1157282,
-  "wasmSha256": "3455925b0e967e94d286d193b2dc47b6c1252110befa0fffff2128c0d20e2dec",
+  "wasmBytes": 4603311,
+  "gzipBytes": 1164303,
+  "wasmSha256": "b3a7df524b5e136e420f0af47baf3a89c4e6c9cc2a690d25dce508e07da45314",
   "comparisonWasm": {
-    "bytes": 6310241,
-    "gzipBytes": 1562671,
-    "sha256": "5f15ea38425114fe22a2642aa41191115bb2cb79cfdef8ad2c6fca3053bf9881"
+    "bytes": 6346465,
+    "gzipBytes": 1574204,
+    "sha256": "9728b2423ca0d36414068e603fc0bb49546c65b853d2c85ee3eb402d06bc60d0"
   },
-  "nativeTests": 122,
+  "nativeTests": 123,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
@@ -20,11 +20,11 @@
   "browserFunctionalTests": 32,
   "browserM7Tests": 9,
   "browserM8Tests": 6,
-  "browserM6RegressionTests": 10,
+  "browserM6RegressionTests": 11,
   "browserM5RegressionTests": 8,
   "browserM4RegressionTests": 11,
   "browserBenchmarks": 13,
-  "comparisonWasmNote": "Rebuilt on 2026-10-26 with the optional vello-probe feature. Includes Legacy/Pooled/Batched RGBA16F verification; vello is not linked into the production package.",
+  "comparisonWasmNote": "Rebuilt on 2026-10-26. Optional Legacy/Pooled/Disjoint/Dense/Batched RGBA16F verification, including MRT8 lifetimes. Vello is not linked into the production package.",
   "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4.",
-  "vectorOptimizationNote": "Uniform arena and conservative disjoint-path batching. See VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md; independent Canvas/device loss investigation remains open."
+  "vectorOptimizationNote": "Disjoint batching plus ordered MRT8 coverage for dense vector calls, under the existing GPU budget. See DENSE-VECTOR-RESULTS-2026-10-26.md. Canvas loss remains an independent investigation."
 }

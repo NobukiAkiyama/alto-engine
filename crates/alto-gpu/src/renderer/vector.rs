@@ -7,11 +7,14 @@ use crate::glyph_atlas::{
 use alto_vector::{LyonRasterizer, StyledPath, TextRun, VectorRasterizer};
 mod arena;
 mod batch;
+mod dense;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VectorMode {
     Legacy,
     Pooled,
+    Disjoint,
+    Dense,
     Batched,
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,6 +33,7 @@ pub struct Counters {
     pub groups: u64,
     pub comparisons: u64,
     pub barriers: u64,
+    pub dense_groups: u64,
 }
 struct PreparedDraw {
     key: (ContentHash, i32),
@@ -86,7 +90,46 @@ struct Coverage {
     w: u32,
     h: u32,
 }
+impl Coverage {
+    fn new(device: &wgpu::Device, w: u32, h: u32) -> Self {
+        let make = |samples, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("R8 vector coverage"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let multi = make(4, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let resolved = make(
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        Self {
+            multi_view: multi.create_view(&Default::default()),
+            resolved_view: resolved.create_view(&Default::default()),
+            multi,
+            resolved,
+            w,
+            h,
+        }
+    }
+}
+fn dense_candidate(paths: usize, groups: usize) -> bool {
+    // Only pay for eight coverage images when almost every path is an overlap barrier.
+    paths >= 8 && groups >= paths - paths / 5
+}
 pub struct VectorResources {
+    format: wgpu::TextureFormat,
+    dense: Option<dense::Dense>,
     geometry: wgpu::RenderPipeline,
     pooled_geometry: wgpu::RenderPipeline,
     pooled_paint: wgpu::RenderPipeline,
@@ -308,6 +351,8 @@ impl VectorResources {
             cache: None,
         });
         Self {
+            format,
+            dense: None,
             geometry: g,
             pooled_geometry,
             pooled_paint,
@@ -328,6 +373,9 @@ impl VectorResources {
             misses: 0,
         }
     }
+    pub fn supports_dense(device: &wgpu::Device) -> bool {
+        dense::Dense::supported(device)
+    }
     pub fn set_mode(&mut self, mode: VectorMode) {
         self.mode = mode;
     }
@@ -337,6 +385,9 @@ impl VectorResources {
     /// Called only after submitting every command encoded with this resource set.
     pub fn after_submit(&mut self) {
         self.uniforms.reset();
+        if let Some(dense) = &mut self.dense {
+            dense.uniforms.reset();
+        }
         self.retired.release();
     }
     /// Standalone probes call this after submitting all work, before dropping resources.
@@ -346,7 +397,7 @@ impl VectorResources {
         retired.release();
     }
     pub fn arena_bytes(&self) -> u64 {
-        self.uniforms.bytes()
+        self.uniforms.bytes() + self.dense.as_ref().map_or(0, |d| d.uniforms.bytes())
     }
     #[allow(clippy::too_many_arguments)]
     pub fn render_legacy(
@@ -382,6 +433,9 @@ impl VectorResources {
     pub(crate) fn retire(mut self, retired: &mut super::Retired) {
         self.discard_meshes();
         std::mem::take(&mut self.uniforms).retire(retired);
+        if let Some(dense) = self.dense.take() {
+            dense.retire(retired);
+        }
         retired.take(&mut self.retired);
         if let Some(c) = self.coverage.take() {
             retired.texture(c.multi);
@@ -394,6 +448,7 @@ impl VectorResources {
     pub fn bytes(&self) -> u64 {
         self.mesh_bytes()
             + self.uniforms.bytes()
+            + self.dense.as_ref().map_or(0, |d| d.bytes())
             + self
                 .coverage
                 .as_ref()
@@ -613,12 +668,21 @@ impl VectorResources {
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
-        let fixed_bytes = coverage_bytes
+        // Optional scratch must not make an otherwise renderable call exceed its budget.
+        let regular_fixed = coverage_bytes
             + self.uniforms.bytes()
             + self.atlas.as_ref().map_or(0, |a| {
                 let (w, h) = a.alloc.size();
                 w as u64 * h as u64
             });
+        if self.dense.is_some()
+            && regular_fixed + self.mesh_bytes() + self.dense.as_ref().map_or(0, |d| d.bytes())
+                > budget
+            && let Some(dense) = self.dense.take()
+        {
+            dense.retire(&mut self.retired);
+        }
+        let fixed_bytes = regular_fixed + self.dense.as_ref().map_or(0, |d| d.bytes());
         let mesh_limit = 32 * 1024 * 1024u64;
         // Frobenius norm bounds the maximum singular value, including shear and nonuniform scale.
         let transform_scale =
@@ -755,36 +819,11 @@ impl VectorResources {
                 self.retired.texture(old.multi);
                 self.retired.texture(old.resolved);
             }
-            let make = |samples, usage| {
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("R8 vector coverage"),
-                    size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: samples,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R8Unorm,
-                    usage,
-                    view_formats: &[],
-                })
-            };
             self.uniforms.invalidate_paint();
-            let multi = make(4, wgpu::TextureUsages::RENDER_ATTACHMENT);
-            let resolved = make(
-                1,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
-            self.coverage = Some(Coverage {
-                multi_view: multi.create_view(&Default::default()),
-                resolved_view: resolved.create_view(&Default::default()),
-                multi,
-                resolved,
-                w,
-                h,
-            });
+            if let Some(dense) = &mut self.dense {
+                dense.uniforms.invalidate_paint();
+            }
+            self.coverage = Some(Coverage::new(device, w, h));
         }
         let coverage = self
             .coverage
@@ -1059,26 +1098,50 @@ impl VectorResources {
                 let (w, h) = a.alloc.size();
                 w as u64 * h as u64
             });
-        let values: Vec<_> = draws.iter().map(|d| d.uniform).collect();
-        let Some(start) = self.uniforms.upload(
-            device,
-            queue,
-            &self.geometry_layout,
-            &self.paint_layout,
-            &coverage.resolved_view,
-            &values,
-            budget.saturating_sub(fixed),
-            &mut self.counters,
-        ) else {
-            return Ok(false);
-        };
-        let plan = if self.mode == VectorMode::Batched {
+        let plan = if matches!(self.mode, VectorMode::Batched | VectorMode::Disjoint) {
             batch::plan(&rects)
         } else {
             batch::Plan {
                 groups: (0..paths.len()).map(|i| i..i + 1).collect(),
                 ..Default::default()
             }
+        };
+        let use_dense = self.mode == VectorMode::Dense
+            || (self.mode == VectorMode::Batched
+                && dense_candidate(paths.len(), plan.groups.len()));
+        if use_dense && !draws.is_empty() && dense::Dense::supported(device) {
+            let dense = self
+                .dense
+                .get_or_insert_with(|| dense::Dense::new(device, self.format));
+            if dense.render(
+                device,
+                queue,
+                encoder,
+                target,
+                coverage,
+                &self.meshes,
+                &draws,
+                budget.saturating_sub(fixed + self.uniforms.bytes()),
+                &mut self.counters,
+                &mut self.retired,
+            ) {
+                self.counters.comparisons += plan.comparisons;
+                self.counters.barriers += plan.barriers;
+                return Ok(true);
+            }
+        }
+        let values: Vec<_> = draws.iter().map(|d| d.uniform).collect();
+        let Some(start) = self.uniforms.upload(
+            device,
+            queue,
+            &self.geometry_layout,
+            &self.paint_layout,
+            &[&coverage.resolved_view],
+            &values,
+            budget.saturating_sub(fixed + self.dense.as_ref().map_or(0, |d| d.bytes())),
+            &mut self.counters,
+        ) else {
+            return Ok(false);
         };
         self.counters.groups += plan.groups.len() as u64;
         self.counters.comparisons += plan.comparisons;
@@ -1168,5 +1231,19 @@ impl Renderer {
     }
     pub(super) fn vector_fixed_bytes(&self) -> u64 {
         self.vector_bytes().saturating_sub(self.vector_mesh_bytes())
+    }
+}
+
+#[cfg(test)]
+mod dense_selection_tests {
+    use super::dense_candidate;
+    #[test]
+    fn dense_selection_leaves_sparse_and_small_calls_on_the_disjoint_path() {
+        assert!(!dense_candidate(100, 1));
+        assert!(!dense_candidate(7, 7));
+        assert!(!dense_candidate(100, 79));
+        assert!(dense_candidate(8, 8));
+        assert!(dense_candidate(11, 11));
+        assert!(dense_candidate(100, 80));
     }
 }

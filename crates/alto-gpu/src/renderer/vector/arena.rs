@@ -1,4 +1,5 @@
 use super::{Counters, Uniform};
+use std::marker::PhantomData;
 
 const SLOTS: usize = 256;
 const MAX_PAGES: usize = 16;
@@ -8,13 +9,23 @@ pub(super) struct Page {
     pub geometry: wgpu::BindGroup,
     pub paint: Option<wgpu::BindGroup>,
 }
-#[derive(Default)]
-pub(super) struct Arena {
+pub(super) struct Arena<T = Uniform> {
     pub pages: Vec<Page>,
     pub used: usize,
     stride: usize,
+    marker: PhantomData<T>,
 }
-impl Arena {
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Self {
+            pages: Vec::new(),
+            used: 0,
+            stride: 0,
+            marker: PhantomData,
+        }
+    }
+}
+impl<T: bytemuck::Pod> Arena<T> {
     pub fn bytes(&self) -> u64 {
         (self.pages.len() * SLOTS * self.stride) as u64
     }
@@ -34,6 +45,19 @@ impl Arena {
     pub fn offset(&self, index: usize) -> (usize, u32) {
         (index / SLOTS, ((index % SLOTS) * self.stride) as u32)
     }
+    pub fn required_bytes(&self, device: &wgpu::Device, count: usize) -> Option<u64> {
+        let stride = Self::stride(device);
+        let needed = self.used.checked_add(count)?.div_ceil(SLOTS);
+        if needed > MAX_PAGES || (SLOTS * stride) as u64 > device.limits().max_buffer_size {
+            return None;
+        }
+        Some((needed.max(self.pages.len()) * SLOTS * stride) as u64)
+    }
+    fn stride(device: &wgpu::Device) -> usize {
+        (std::mem::size_of::<T>() as u32)
+            .div_ceil(device.limits().min_uniform_buffer_offset_alignment) as usize
+            * device.limits().min_uniform_buffer_offset_alignment as usize
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn upload(
         &mut self,
@@ -41,23 +65,17 @@ impl Arena {
         queue: &wgpu::Queue,
         geometry_layout: &wgpu::BindGroupLayout,
         paint_layout: &wgpu::BindGroupLayout,
-        resolved: &wgpu::TextureView,
-        values: &[Uniform],
+        resolved: &[&wgpu::TextureView],
+        values: &[T],
         budget: u64,
         counters: &mut Counters,
     ) -> Option<usize> {
-        let stride = (std::mem::size_of::<Uniform>() as u32)
-            .div_ceil(device.limits().min_uniform_buffer_offset_alignment)
-            as usize
-            * device.limits().min_uniform_buffer_offset_alignment as usize;
-        let end = self.used.checked_add(values.len())?;
-        let needed = end.div_ceil(SLOTS);
-        if needed > MAX_PAGES
-            || (needed.max(self.pages.len()) * SLOTS * stride) as u64 > budget
-            || (SLOTS * stride) as u64 > device.limits().max_buffer_size
-        {
+        if self.required_bytes(device, values.len())? > budget {
             return None;
         }
+        let stride = Self::stride(device);
+        let end = self.used.checked_add(values.len())?;
+        let needed = end.div_ceil(SLOTS);
         self.stride = stride;
         while self.pages.len() < needed {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -74,7 +92,7 @@ impl Arena {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &buffer,
                         offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<Uniform>() as u64),
+                        size: wgpu::BufferSize::new(std::mem::size_of::<T>() as u64),
                     }),
                 }],
             });
@@ -100,23 +118,27 @@ impl Arena {
             queue.write_buffer(&p.buffer, offset as u64, &bytes);
             counters.upload_bytes += bytes.len() as u64;
             if p.paint.is_none() {
+                let mut entries = vec![wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &p.buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<T>() as u64),
+                    }),
+                }];
+                entries.extend(
+                    resolved
+                        .iter()
+                        .enumerate()
+                        .map(|(i, view)| wgpu::BindGroupEntry {
+                            binding: i as u32 + 1,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        }),
+                );
                 p.paint = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("vector arena paint"),
                     layout: paint_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &p.buffer,
-                                offset: 0,
-                                size: wgpu::BufferSize::new(std::mem::size_of::<Uniform>() as u64),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(resolved),
-                        },
-                    ],
+                    entries: &entries,
                 }));
                 counters.bind_groups += 1;
             }

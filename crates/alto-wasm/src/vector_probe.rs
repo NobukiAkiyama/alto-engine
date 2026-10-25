@@ -318,7 +318,7 @@ impl alto_vector::VectorRasterizer for VelloPreparation {
 }
 
 fn metrics(c: alto_gpu::renderer::vector::Counters) -> serde_json::Value {
-    serde_json::json!({"renderPasses":c.passes,"coveragePasses":c.coverage,"paintPasses":c.paint,"geometryDraws":c.geometry_draws,"paintDraws":c.paint_draws,"uniformBuffersCreated":c.uniform_buffers,"bindGroupsCreated":c.bind_groups,"uploadBytes":c.upload_bytes,"clearPixels":c.clear_pixels,"resolvePixels":c.resolve_pixels,"paths":c.paths,"groups":c.groups,"comparisons":c.comparisons,"barriers":c.barriers})
+    serde_json::json!({"renderPasses":c.passes,"coveragePasses":c.coverage,"paintPasses":c.paint,"geometryDraws":c.geometry_draws,"paintDraws":c.paint_draws,"uniformBuffersCreated":c.uniform_buffers,"bindGroupsCreated":c.bind_groups,"uploadBytes":c.upload_bytes,"clearPixels":c.clear_pixels,"resolvePixels":c.resolve_pixels,"paths":c.paths,"groups":c.groups,"comparisons":c.comparisons,"barriers":c.barriers,"denseGroups":c.dense_groups})
 }
 fn grid_paths() -> Vec<StyledPath> {
     (0..100)
@@ -554,15 +554,55 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
         [1., 0., 0., 1., -1e5, 0.],
         [0., 0., 1., 512., 512.],
     ));
+    let mut order_paths = vec![];
+    for i in 0..33 {
+        let mut p = base[i % base.len()].clone();
+        p.data = PathData::from_svg("M80 90Q430 0 410 360L100 430Z").map_err(error)?;
+        p.fill = Some([
+            ((i * 37) % 100) as f32 / 100.,
+            ((i * 11) % 100) as f32 / 100.,
+            0.7,
+            [0., 0.0001, 0.03, 0.5, 1.][i % 5],
+        ]);
+        p.stroke.as_mut().unwrap().color = [0.9, 0.1, 0.3, 0.2];
+        if i == 0 {
+            p.stroke = None;
+        }
+        order_paths.push(p);
+    }
+    cases.push((
+        "dense-color-order-partial-group",
+        order_paths.clone(),
+        [1., 0., 0., 1., 0., 0.],
+        [0., 0., 1., 512., 512.],
+    ));
+    cases.push((
+        "dense-transform-ROI",
+        order_paths,
+        [0.8, 0.2, -0.35, 0.9, 100., -40.],
+        [-24., -16., 0.7, 512., 512.],
+    ));
     let mut results = vec![];
     let mut pass = true;
     for (case_index, (name, paths, world, roi)) in cases.iter().enumerate() {
         let mut reference = None;
         let mut modes = serde_json::Map::new();
         let order = if (case_index % 2 == 0) != reverse {
-            [VectorMode::Legacy, VectorMode::Pooled, VectorMode::Batched]
+            [
+                VectorMode::Legacy,
+                VectorMode::Pooled,
+                VectorMode::Disjoint,
+                VectorMode::Dense,
+                VectorMode::Batched,
+            ]
         } else {
-            [VectorMode::Batched, VectorMode::Pooled, VectorMode::Legacy]
+            [
+                VectorMode::Batched,
+                VectorMode::Dense,
+                VectorMode::Disjoint,
+                VectorMode::Pooled,
+                VectorMode::Legacy,
+            ]
         };
         let mut images = vec![];
         for mode in order {
@@ -599,6 +639,16 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
             pass &= modes["Pooled"]["counters"]["renderPasses"] == 401;
             pass &= modes["Batched"]["counters"]["renderPasses"] == 5;
             pass &= modes["Batched"]["counters"]["uniformBuffersCreated"] == 0;
+        }
+        if VectorResources::supports_dense(&device)
+            && ["overlap-100", "overlap-1000"].contains(name)
+        {
+            let expected = if *name == "overlap-100" { 51 } else { 501 };
+            pass &= modes["Batched"]["counters"]["renderPasses"] == expected;
+            pass &= modes["Batched"]["counters"]["denseGroups"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0;
         }
         let reference = reference.unwrap();
         let mut differences = serde_json::Map::new();
@@ -725,9 +775,130 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
         && r.take_counters().passes == 401;
     pass &= fallback;
     r.destroy_after_submit();
-    let result = serde_json::json!({"pass":pass,"adapter":format!("{:?}",adapter.get_info()),"format":"rgba16float","warmupFrames":3,"measuredFrames":frames,"cases":results,"multipleCallsBeforeSubmit":{"pass":multi,"counters":multi_stats},"queuedSubmissions":{"pass":queued},"arenaBudgetFallback":{"pass":fallback},"reverseOrder":reverse,"notes":["CPU encode and queue completion are measured separately; not GPU timestamps.","Readback and validation scope collection are outside frame timings.","Vello is not used in the production RGBA16F path."]});
+    let dense_lifetimes = check_dense_lifetimes(
+        &device,
+        &queue,
+        &a,
+        &b,
+        &cases
+            .iter()
+            .find(|c| c.0 == "dense-color-order-partial-group")
+            .unwrap()
+            .1,
+    )
+    .await?;
+    pass &= dense_lifetimes["pass"] == true;
+    let result = serde_json::json!({"implementation":"MRT8","denseSupported":VectorResources::supports_dense(&device),"denseLifetimes":dense_lifetimes,"pass":pass,"adapter":format!("{:?}",adapter.get_info()),"format":"rgba16float","warmupFrames":3,"measuredFrames":frames,"cases":results,"multipleCallsBeforeSubmit":{"pass":multi,"counters":multi_stats},"queuedSubmissions":{"pass":queued},"arenaBudgetFallback":{"pass":fallback},"reverseOrder":reverse,"notes":["CPU encode and queue completion are measured separately; not GPU timestamps.","Readback and validation scope collection are outside frame timings.","Vello is not used in the production RGBA16F path."]});
     a.destroy();
     b.destroy();
     device.destroy();
     Ok(result.to_string())
+}
+
+// Includes coverage replacement while earlier commands are still unsubmitted.
+async fn check_dense_lifetimes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    a: &wgpu::Texture,
+    b: &wgpu::Texture,
+    paths: &[StyledPath],
+) -> Result<serde_json::Value, JsValue> {
+    let paths: Vec<_> = (0..3).flat_map(|_| paths.iter().cloned()).collect();
+    let refs: Vec<_> = paths.iter().collect();
+    let rois = [[0., 0., 1., 512., 512.], [-24., -16., 0.7, 256., 384.]];
+    let world = [0.8, 0.2, -0.35, 0.9, 100., -40.];
+    let mut expected = vec![];
+    for (i, target) in [a, b].iter().enumerate() {
+        let mut r = VectorResources::new(device, wgpu::TextureFormat::Rgba16Float);
+        r.set_mode(alto_gpu::renderer::vector::VectorMode::Legacy);
+        let mut e = device.create_command_encoder(&Default::default());
+        r.render(
+            device,
+            queue,
+            &mut e,
+            target,
+            &refs,
+            world,
+            rois[i],
+            1,
+            128 * 1024 * 1024,
+        )
+        .map_err(error)?;
+        queue.submit(Some(e.finish()));
+        r.after_submit();
+        expected.push(pixels(device, queue, target).await?);
+        r.destroy_after_submit();
+    }
+    let mut r = VectorResources::new(device, wgpu::TextureFormat::Rgba16Float);
+    let mut e = device.create_command_encoder(&Default::default());
+    for (i, target) in [a, b].iter().enumerate() {
+        r.render(
+            device,
+            queue,
+            &mut e,
+            target,
+            &refs,
+            world,
+            rois[i],
+            1,
+            128 * 1024 * 1024,
+        )
+        .map_err(error)?;
+    }
+    queue.submit(Some(e.finish()));
+    r.after_submit();
+    let same_encoder = pixels(device, queue, a).await? == expected[0]
+        && pixels(device, queue, b).await? == expected[1];
+    for (i, target) in [a, b].iter().enumerate() {
+        let mut e = device.create_command_encoder(&Default::default());
+        r.render(
+            device,
+            queue,
+            &mut e,
+            target,
+            &refs,
+            world,
+            rois[i],
+            2 + i as u64,
+            128 * 1024 * 1024,
+        )
+        .map_err(error)?;
+        queue.submit(Some(e.finish()));
+        r.after_submit();
+    }
+    let queued = pixels(device, queue, a).await? == expected[0]
+        && pixels(device, queue, b).await? == expected[1];
+    let before = r.bytes();
+    for i in 0..4 {
+        let mut e = device.create_command_encoder(&Default::default());
+        r.render(
+            device,
+            queue,
+            &mut e,
+            b,
+            &refs,
+            world,
+            rois[1],
+            10 + i,
+            128 * 1024 * 1024,
+        )
+        .map_err(error)?;
+        queue.submit(Some(e.finish()));
+        r.after_submit();
+    }
+    let stable = before == r.bytes() && pixels(device, queue, b).await? == expected[1];
+    let budget = r.mesh_bytes() + 256 * 384 * 5 + r.arena_bytes().max(65536);
+    r.take_counters();
+    let mut e = device.create_command_encoder(&Default::default());
+    r.render(device, queue, &mut e, b, &refs, world, rois[1], 20, budget)
+        .map_err(error)?;
+    queue.submit(Some(e.finish()));
+    r.after_submit();
+    let c = r.take_counters();
+    let pressure = r.bytes() <= budget
+        && c.dense_groups == 0
+        && pixels(device, queue, b).await? == expected[1];
+    let result = serde_json::json!({"pass":same_encoder && queued && stable && pressure,"sameEncoderResize":same_encoder,"queuedResize":queued,"warmBytesStable":stable,"cachedScratchEviction":pressure,"warmBytes":before,"pressureBytes":r.bytes(),"pressureBudget":budget,"pressureCounters":metrics(c)});
+    r.destroy_after_submit();
+    Ok(result)
 }

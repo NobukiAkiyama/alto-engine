@@ -185,6 +185,7 @@ const suites = [
   ["m8", `const { runM8Tests } = await import('../../tests/e2e/m8-tests.js'); await runM8Tests(window.altoEngine, (line) => console.log(line));`],
   ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
+  ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
 if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
   throw Error("Unknown --suite: " + selectedSuites.join(","));
@@ -384,6 +385,7 @@ try {
       await sampleSystem("startup-settled");
     }
     for (const [name, body] of (startupOnly ? [] : suites)) {
+      if (name === "dense-benchmark" && !selectedSuites?.includes(name)) continue;
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (benchmarkOnly && name !== "benchmark") continue;
