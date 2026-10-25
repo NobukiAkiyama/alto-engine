@@ -25,6 +25,7 @@ const startupOnly = process.argv.includes("--startup-only");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
+const surfaceRecording = process.env.ALTO_BROWSER_SURFACE_RECORDING === "1";
 const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
 const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
 if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
@@ -105,7 +106,9 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      createReadStream(path).on("error", () => res.destroy()).pipe(res);
+      if (surfaceRecording && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+        res.end((await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8")) + "\n" + await readFile(path, "utf8"));
+      } else createReadStream(path).on("error", () => res.destroy()).pipe(res);
     } catch {
       res.writeHead(404).end();
     }
@@ -180,7 +183,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "", traceStream = null, traceStarted = false;
 const recordEvent = ({ method, params }) => {
   if (method === "Tracing.tracingComplete") traceStream = params.stream;
@@ -254,6 +257,7 @@ try {
     return message.result?.result?.value;
   };
   await send("Page.enable");
+  if (surfaceRecording) await send("Page.addScriptToEvaluateOnNewDocument", { source: await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8") });
   await send("Runtime.enable");
   await send("Log.enable");
   await sampleSystem("startup");
