@@ -124,7 +124,7 @@ pub struct Runtime {
     journal: Vec<Vec<u8>>,
     saved: ContentHash,
     budget: u32,
-    warnings: Vec<String>,
+    warnings: Vec<alto_engine::Warning>,
     /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
     /// The store deletes objects only at startup, so this set only grows.
     stored_objects: std::collections::BTreeSet<ContentHash>,
@@ -921,10 +921,8 @@ impl Runtime {
                 == alto_engine::Replayed::Diverged
             {
                 // Later records build on a state this replay did not reach.
-                self.warnings.push(
-                    "復旧記録の再生が記録時の状態と一致しなかったため、その手前までを復旧しました"
-                        .into(),
-                );
+                self.warnings
+                    .push(alto_engine::Warning::new("RECOVERY_DIVERGED"));
                 break;
             }
             rest = next;
@@ -1021,7 +1019,7 @@ impl Runtime {
         &mut self,
         engine: Engine,
         doc: DocHandle,
-        warnings: Vec<String>,
+        warnings: Vec<alto_engine::Warning>,
     ) -> Result<String, JsValue> {
         self.renderer.cancel_stroke();
         self.engine = engine;

@@ -94,7 +94,7 @@ impl Engine {
             alto_text::inspect(&bytes, face_index).map_err(|e| DocError::Invalid(e.to_string()))?;
         if info.embedding == FontEmbedding::Restricted {
             return Err(DocError::Invalid(format!(
-                "INVALID_ARGUMENT: フォント「{}」はライセンス（OS/2 fsType）で埋め込みが禁止されています",
+                "INVALID_ARGUMENT: the licence of font {} (OS/2 fsType) forbids embedding it",
                 info.family
             ))
             .into());
@@ -289,7 +289,7 @@ impl Engine {
     }
 
     /// Licence warnings for fonts used by the document.
-    pub fn font_warnings(&self, h: DocHandle) -> Result<Vec<String>, EngineError> {
+    pub fn font_warnings(&self, h: DocHandle) -> Result<Vec<crate::Warning>, EngineError> {
         let doc = self.document(h)?;
         let mut out = vec![];
         for a in doc.assets.values() {
@@ -298,16 +298,20 @@ impl Engine {
             } = &a.kind
             {
                 match embedding {
-                    alto_text::FontEmbedding::Restricted => out.push(format!(
-                        "フォント「{family}」は埋め込みが禁止されています（OS/2 fsType）"
-                    )),
-                    alto_text::FontEmbedding::PreviewAndPrint => out.push(format!(
-                        "フォント「{family}」は閲覧・印刷用の埋め込みのみ許可されています"
-                    )),
+                    alto_text::FontEmbedding::Restricted => out.push(
+                        crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                            .with("family", family)
+                            .with("level", "restricted"),
+                    ),
+                    alto_text::FontEmbedding::PreviewAndPrint => out.push(
+                        crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                            .with("family", family)
+                            .with("level", "preview_and_print"),
+                    ),
                     _ => {}
                 }
                 if !self.blobs.contains_key(&a.hash) {
-                    out.push(format!("フォント「{family}」のデータがありません"));
+                    out.push(crate::Warning::new("FONT_MISSING").with("family", family));
                 }
             }
         }

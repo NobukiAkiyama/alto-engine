@@ -5,7 +5,7 @@
 //! layer by layer for terminals and `git diff` (textconv). Native only.
 #![cfg(not(target_arch = "wasm32"))]
 use alto_core::ContentHash;
-use alto_doc::{Commit, DiffItem, Document, NodeKind};
+use alto_doc::{Commit, DiffItem, Document, NodeKind, version::ContentDetail};
 use alto_store::{Package, folder};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -211,7 +211,7 @@ pub fn render_diff(a: &Document, b: &Document, items: &[DiffItem]) -> Vec<String
             DiffItem::ContentChanged {
                 name, kind, detail, ..
             } => {
-                format!("~ 内容    [{kind}] {name}: {detail}")
+                format!("~ 内容    [{kind}] {name}: {}", describe(detail))
             }
             DiffItem::AssetChanged { id, change, kind } => {
                 let what = match change.as_str() {
@@ -237,6 +237,46 @@ pub fn diff_text(a: &Document, b: &Document) -> String {
     s
 }
 
+/// The engine reports what changed as data; this command line words it.
+fn describe(detail: &ContentDetail) -> String {
+    match detail {
+        ContentDetail::Vector { paths, commands } => format!(
+            "パス {}本/{}命令 → {}本/{}命令",
+            paths[0], commands[0], paths[1], commands[1]
+        ),
+        ContentDetail::Text {
+            text,
+            style,
+            writing_mode,
+            frame,
+            tate_chu_yoko,
+        } => {
+            let mut parts = vec![];
+            if let Some([from, to]) = text {
+                parts.push(format!("「{from}」→「{to}」"));
+            }
+            if *style {
+                parts.push("書式".into());
+            }
+            match writing_mode {
+                Some(alto_text::WritingMode::VerticalRl) => parts.push("縦組みへ".into()),
+                Some(alto_text::WritingMode::HorizontalTb) => parts.push("横組みへ".into()),
+                None => {}
+            }
+            if *frame {
+                parts.push("枠・揃え".into());
+            }
+            if *tate_chu_yoko {
+                parts.push("縦中横".into());
+            }
+            parts.join("、")
+        }
+        ContentDetail::Adjustment => "調整値".into(),
+        ContentDetail::Unsupported => "未対応ノードの内容".into(),
+        ContentDetail::KindChanged { from, to } => format!("{from} → {to}"),
+    }
+}
+
 fn intent_lines(doc: &Document, c: &Commit) -> Vec<String> {
     c.intents
         .iter()
@@ -251,10 +291,16 @@ fn intent_lines(doc: &Document, c: &Commit) -> Vec<String> {
             } else {
                 String::new()
             };
-            if targets.is_empty() {
-                format!("- {}{count}", i.intent)
+            let name = i.label.as_deref().unwrap_or(&i.intent);
+            let name = if i.undone {
+                format!("取り消し: {name}")
             } else {
-                format!("- {}{count}（{}）", i.intent, targets.join("、"))
+                name.to_string()
+            };
+            if targets.is_empty() {
+                format!("- {name}{count}")
+            } else {
+                format!("- {name}{count}（{}）", targets.join("、"))
             }
         })
         .collect()

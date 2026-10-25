@@ -120,6 +120,32 @@ pub fn summarize(log: &[IntentLogEntry]) -> Vec<IntentSummary> {
     out
 }
 
+/// What changed inside a node, as data the host turns into its own wording.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContentDetail {
+    /// Path and command counts, before and after.
+    Vector {
+        paths: [usize; 2],
+        commands: [usize; 2],
+    },
+    /// `text` holds excerpts (24 characters at most), before and after, when the text changed.
+    Text {
+        text: Option<[String; 2]>,
+        style: bool,
+        writing_mode: Option<alto_text::WritingMode>,
+        frame: bool,
+        tate_chu_yoko: bool,
+    },
+    Adjustment,
+    Unsupported,
+    /// The node became a different kind of node.
+    KindChanged {
+        from: String,
+        to: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DiffItem {
@@ -160,7 +186,7 @@ pub enum DiffItem {
         id: NodeId,
         name: String,
         kind: String,
-        detail: String,
+        detail: ContentDetail,
     },
     AssetChanged {
         id: AssetId,
@@ -318,43 +344,27 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
             let cmds = |p: &[alto_vector::StyledPath]| {
                 p.iter().map(|p| p.data.commands.len()).sum::<usize>()
             };
-            format!(
-                "パス {}本/{}命令 → {}本/{}命令",
-                x.len(),
-                cmds(x),
-                y.len(),
-                cmds(y)
-            )
+            ContentDetail::Vector {
+                paths: [x.len(), y.len()],
+                commands: [cmds(x), cmds(y)],
+            }
         }
         (NodeKind::Text { content: x }, NodeKind::Text { content: y }) if x != y => {
-            let mut parts = vec![];
-            if x.text != y.text {
-                parts.push(format!("「{}」→「{}」", excerpt(&x.text), excerpt(&y.text)));
+            ContentDetail::Text {
+                text: (x.text != y.text).then(|| [excerpt(&x.text), excerpt(&y.text)]),
+                style: x.style != y.style || x.spans != y.spans,
+                writing_mode: (x.writing_mode != y.writing_mode).then_some(y.writing_mode),
+                frame: x.frame != y.frame || x.align != y.align,
+                tate_chu_yoko: x.tcy != y.tcy || x.auto_tcy != y.auto_tcy,
             }
-            if x.style != y.style || x.spans != y.spans {
-                parts.push("書式".into());
-            }
-            if x.writing_mode != y.writing_mode {
-                parts.push(match y.writing_mode {
-                    alto_text::WritingMode::VerticalRl => "縦組みへ".into(),
-                    alto_text::WritingMode::HorizontalTb => "横組みへ".into(),
-                });
-            }
-            if x.frame != y.frame || x.align != y.align {
-                parts.push("枠・揃え".into());
-            }
-            if x.tcy != y.tcy || x.auto_tcy != y.auto_tcy {
-                parts.push("縦中横".into());
-            }
-            parts.join("、")
         }
         (NodeKind::Adjustment { adjustment: x }, NodeKind::Adjustment { adjustment: y })
             if x != y =>
         {
-            "調整値".into()
+            ContentDetail::Adjustment
         }
         (NodeKind::Unsupported { raw: x }, NodeKind::Unsupported { raw: y }) if x != y => {
-            "未対応ノードの内容".into()
+            ContentDetail::Unsupported
         }
         _ => return None,
     };
@@ -492,7 +502,10 @@ pub fn diff(a: &Document, b: &Document) -> Vec<DiffItem> {
                 id,
                 name: n.name.clone(),
                 kind: n.kind_name().into(),
-                detail: format!("{} → {}", old.kind_name(), n.kind_name()),
+                detail: ContentDetail::KindChanged {
+                    from: old.kind_name().into(),
+                    to: n.kind_name().into(),
+                },
             });
         } else if let (NodeKind::Raster { tiles: x }, NodeKind::Raster { tiles: y }) =
             (&old.kind, &n.kind)
@@ -995,7 +1008,18 @@ mod tests {
         };
         let d = diff(&before, &mid);
         assert!(
-            matches!(&d[0], DiffItem::ContentChanged { detail, .. } if detail.contains("「吾輩は猫である」→「吾輩は犬である」") && detail.contains("縦組みへ")),
+            matches!(
+                &d[0],
+                DiffItem::ContentChanged {
+                    detail: ContentDetail::Text {
+                        text: Some([from, to]),
+                        writing_mode: Some(WritingMode::VerticalRl),
+                        style: false,
+                        ..
+                    },
+                    ..
+                } if from == "吾輩は猫である" && to == "吾輩は犬である"
+            ),
             "{d:?}"
         );
         assert!(diff(&e.doc, &e.doc).is_empty());
