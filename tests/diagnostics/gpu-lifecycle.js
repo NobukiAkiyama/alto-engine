@@ -7,7 +7,7 @@ function record(event, detail = {}) {
   if (trace.length > 2000) trace.shift();
   console.log("LIFECYCLE", JSON.stringify(entry));
 }
-window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0 } = {}) => {
+window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0, implementation = "webgpu" } = {}) => {
   if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure"].includes(mode)) throw Error("unknown mode");
   let worker, canvas, nextId = 0, cycle = 0, generation = 0;
   const pending = new Map();
@@ -39,7 +39,7 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0 }
     };
     worker.onerror = (e) => faults.push({ message: e.message });
     const offscreen = canvas.transferControlToOffscreen();
-    await request("init", { canvas: offscreen, memoryMiB }, [offscreen]);
+    await request("init", { canvas: offscreen, memoryMiB, implementation }, [offscreen]);
     record("start", { generation, cycle });
   };
   const stop = async (graceful) => {
@@ -68,10 +68,10 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120, memoryMiB = 0 }
     await stop(true);
     await frame();
     if (faults.length) throw Error(JSON.stringify(faults));
-    return { mode, memoryMiB, pass: true, cycles, generations: generation, ms: performance.now() - started, faults, trace };
+    return { mode, memoryMiB, implementation, pass: true, cycles, generations: generation, ms: performance.now() - started, faults, trace };
   } catch (error) {
     record("failed", { mode, cycle, generation, message: String(error) });
-    return { mode, memoryMiB, pass: false, cyclesCompleted: cycle, generations: generation, error: String(error), faults, trace };
+    return { mode, memoryMiB, implementation, pass: false, cyclesCompleted: cycle, generations: generation, error: String(error), faults, trace };
   } finally {
     worker?.terminate(); canvas?.remove();
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Error("probe stopped")); }

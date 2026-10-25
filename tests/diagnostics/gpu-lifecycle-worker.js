@@ -1,11 +1,11 @@
 // Deliberately independent of Alto, Rust, WASM, OPFS and decode Workers.
 let canvas, context, adapter, device, buffer, memoryMiB = 0, allocations = [];
-let fault = null;
+let fault = null, runtime = null;
 const report = (event, detail = {}) => postMessage({ event, at: Date.now(), ...detail });
 async function newDevice() {
   adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw Error("no WebGPU adapter");
-  const next = await adapter.requestDevice({ requiredLimits: { maxTextureArrayLayers: 512 } });
+  const next = await adapter.requestDevice();
   const state = { expected: false };
   next.addEventListener("uncapturederror", ({ error }) => {
     fault = String(error.message);
@@ -19,7 +19,7 @@ async function newDevice() {
   return next;
 }
 function allocate() {
-  allocations = memoryMiB ? [512, 256].map((depthOrArrayLayers) => device.createTexture({
+  allocations = memoryMiB ? [256, 256, 256].map((depthOrArrayLayers) => device.createTexture({
     label: "Alto-sized texture allocation", size: [256, 256, depthOrArrayLayers], format: "rgba8unorm",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING,
   })) : [];
@@ -40,6 +40,37 @@ function encode(readback) {
   device.queue.submit([encoder.finish()]);
 }
 async function execute(m) {
+  if (m.op === "init" && m.implementation === "wasm") {
+    canvas = m.canvas;
+    report("init-phase", { phase: "module-import" });
+    const { default: init, Runtime } = await import("../../packages/alto-sdk/dist/pkg/alto_wasm.js");
+    report("init-phase", { phase: "wasm-load" });
+    await init();
+    report("init-phase", { phase: "runtime-create" });
+    runtime = await Runtime.create(canvas, 512);
+    const info = (await navigator.gpu.requestAdapter({ powerPreference: "high-performance" }))?.info;
+    report("adapter", { architecture: info?.architecture || "", description: info?.description || "", runtimeName: runtime.adapterName() });
+    return;
+  }
+  if (runtime) {
+    if (m.op === "frame") {
+      if (m.resize) runtime.resize(...m.resize);
+      await runtime.validateFrame();
+      const bytes = await runtime.readTile(0, 0);
+      if (bytes.length !== 256 * 256 * 4 || bytes.some((b) => b !== 0)) throw Error("empty runtime content pixel differs");
+    } else if (m.op === "submit") runtime.tick(8);
+    else if (m.op === "recover") {
+      runtime.destroyGpu();
+      if (m.unconfigure) canvas.getContext("webgpu").unconfigure();
+      await runtime.recoverGpu();
+    } else if (m.op === "stop") {
+      await runtime.gpuIdle();
+      canvas.getContext("webgpu").unconfigure();
+      runtime.destroyGpu();
+      runtime.free(); runtime = null;
+    } else throw Error("unknown runtime op " + m.op);
+    return;
+  }
   if (m.op === "init") {
     canvas = m.canvas;
     memoryMiB = m.memoryMiB;

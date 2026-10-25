@@ -16,6 +16,14 @@ on:
         options:
           - default
           - swiftshader
+      lifecycle_implementation:
+        description: Surface isolation level (raw WebGPU, shipped WASM Runtime, or all SDK browser suites)
+        default: webgpu
+        type: choice
+        options:
+          - webgpu
+          - wasm
+          - sdk
       lifecycle_memory_mib:
         description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
         default: '0'
@@ -117,6 +125,7 @@ jobs:
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_GPU: swiftshader
       ALTO_GPU_LIFECYCLE_CYCLES: 120
+      ALTO_GPU_LIFECYCLE_IMPLEMENTATION: ${{ inputs.lifecycle_implementation || 'webgpu' }}
       ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}
       ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
     steps:
@@ -144,6 +153,10 @@ jobs:
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == sdk ]]; then
+            ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/sdk" node scripts/verify-browser.mjs --functional
+            exit
+          fi
           status=0
           for mode in stable same-size resize same-size-burst resize-burst replace-abrupt replace-graceful recover recover-unconfigure; do
             ALTO_GPU_LIFECYCLE_MODE="$mode" ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/$mode" \

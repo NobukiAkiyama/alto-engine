@@ -272,7 +272,8 @@ try {
       await sleep(100);
     }
     if (!ready) throw Error("Raw WebGPU fixture did not load");
-    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120), memoryMiB: Number(process.env.ALTO_GPU_LIFECYCLE_MEMORY_MIB || 0) };
+    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120), memoryMiB: Number(process.env.ALTO_GPU_LIFECYCLE_MEMORY_MIB || 0), implementation: process.env.ALTO_GPU_LIFECYCLE_IMPLEMENTATION || "webgpu" };
+    if (!["webgpu", "wasm"].includes(options.implementation)) throw Error("invalid lifecycle implementation");
     if (![0, 192].includes(options.memoryMiB)) throw Error("invalid lifecycle memory size");
     if (!Number.isInteger(options.cycles) || options.cycles < 1 || options.cycles > 2000) throw Error("invalid lifecycle cycles");
     const result = await evaluate(`window.runGpuLifecycle(${JSON.stringify(options)})`, 180000);
