@@ -56,6 +56,7 @@ on:
           - wasm
           - sdk
           - startup
+          - resize-stress
       lifecycle_memory_mib:
         description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
         default: '0'
@@ -332,6 +333,11 @@ jobs:
               ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/startup-$trial" node scripts/verify-browser.mjs --startup-only || status=1
             done
             exit "$status"
+          fi
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == resize-stress ]]; then
+            # Real container resizes under GPU load (tests/diagnostics/resize-stress.js).
+            ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/sdk" node scripts/verify-browser.mjs --suite=resize-stress
+            exit
           fi
           if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == sdk ]]; then
             ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/sdk" node scripts/verify-browser.mjs --functional

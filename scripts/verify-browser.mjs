@@ -185,6 +185,8 @@ const suites = [
   ["m8", `const { runM8Tests } = await import('../../tests/e2e/m8-tests.js'); await runM8Tests(window.altoEngine, (line) => console.log(line));`],
   ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
   ["parity", `const { runParityTests } = await import('../../tests/e2e/parity-tests.js'); await runParityTests(window.altoEngine, (line) => console.log(line));`],
+  // Diagnostic only, run with --suite=resize-stress.
+  ["resize-stress", `const { runResizeStress } = await import('../../tests/diagnostics/resize-stress.js'); await runResizeStress(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
@@ -389,6 +391,7 @@ try {
       if (name === "dense-benchmark" && !selectedSuites?.includes(name)) continue;
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
+      if (name === "resize-stress" && !selectedSuites?.includes(name)) continue;
       if (benchmarkOnly && name !== "benchmark") continue;
       // Embed tests dispatch window pagehide/pageshow. That suspends the Playground
       // engine too, and its restart can still be in flight when the suite returns.
