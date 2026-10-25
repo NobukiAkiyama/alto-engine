@@ -94,6 +94,7 @@ export class DocumentHandle {
   /** @internal */
   apply(state: unknown): void {
     const change = this.store.apply(state as WireState);
+    if (!change) return;
     for (const listener of [...this.listeners]) listener(change);
   }
   /** @internal The Worker went away; any stroke in progress ends with `error`. */

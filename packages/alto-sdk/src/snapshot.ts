@@ -120,8 +120,12 @@ export class SnapshotStore {
     if (!this.current) throw new Error("no document state yet");
     return this.current;
   }
-  apply(state: WireState): DocumentChange {
+  /** Null when `state` is a patch this store already holds: the Worker sends each edit's
+   * state twice, as a notice and as the reply. */
+  apply(state: WireState): DocumentChange | null {
     const before = this.current;
+    if (state.patch && before && state.revision === before.revision && state.stateHash === before.stateHash)
+      return null;
     const nodes = new Map(before?.nodes);
     const added: NodeId[] = [];
     const updated: NodeId[] = [];

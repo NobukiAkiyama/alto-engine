@@ -334,6 +334,20 @@ export async function runEmbedTests(_playground, log) {
       assert(code && code === errors[0].code, `end() reported ${code}, the error event ${errors[0].code}`);
       assert(!doc.activeTool, "the failed stroke stayed active");
     });
+    await test("each edit notifies subscribers once", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      const changes = [];
+      doc.subscribe((c) => changes.push(c));
+      let layer;
+      await doc.transact("layer.add", (tx) => (layer = tx.addRaster()));
+      await doc.undo();
+      await doc.redo();
+      const stroke = doc.tools.begin("brush", { layer, color: [1, 0, 0, 1] });
+      stroke.input({ x: 10, y: 10 });
+      await stroke.end();
+      assert(changes.length === 4, `${changes.length} notifications for 4 edits`);
+    });
     await test("zoom stays within what the renderer draws", async () => {
       const engine = await engineIn(container());
       await engine.createDocument({ width: 64, height: 64 });

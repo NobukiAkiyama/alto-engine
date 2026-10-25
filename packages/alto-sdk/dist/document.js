@@ -44,6 +44,8 @@ export class DocumentHandle {
     /** @internal */
     apply(state) {
         const change = this.store.apply(state);
+        if (!change)
+            return;
         for (const listener of [...this.listeners])
             listener(change);
     }
