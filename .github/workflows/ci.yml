@@ -16,6 +16,13 @@ on:
         options:
           - default
           - swiftshader
+      lifecycle_memory_mib:
+        description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '192'
       gpu_lifecycle:
         description: Run raw WebGPU surface lifetime probes on macOS and Linux
         default: false
@@ -110,6 +117,7 @@ jobs:
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_GPU: swiftshader
       ALTO_GPU_LIFECYCLE_CYCLES: 120
+      ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}
       ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
     steps:
       - uses: actions/checkout@v7
@@ -125,6 +133,12 @@ jobs:
             --output "$RUNNER_TEMP/chrome.zip"
           unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome"
           echo "CHROME=$RUNNER_TEMP/chrome/${{ matrix.executable }}" >> "$GITHUB_ENV"
+      - name: Use the installed Chrome sandbox helper on Ubuntu
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test -u /opt/google/chrome/chrome-sandbox
+          echo "CHROME_DEVEL_SANDBOX=/opt/google/chrome/chrome-sandbox" >> "$GITHUB_ENV"
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |

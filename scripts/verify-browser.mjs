@@ -118,7 +118,7 @@ async function startServer() {
 async function browserPage(profile, proc, chromeError) {
   for (let i = 0; i < 160; i++) {
     if (chromeError()) throw Error("Chrome failed to start: " + chromeError());
-    if (proc.exitCode !== null) throw Error("Chrome exited with " + proc.exitCode);
+    if (proc.exitCode !== null || proc.signalCode !== null) throw Error("Chrome exited with " + (proc.signalCode ?? proc.exitCode));
     try {
       const port = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
       const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
@@ -272,7 +272,8 @@ try {
       await sleep(100);
     }
     if (!ready) throw Error("Raw WebGPU fixture did not load");
-    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120) };
+    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120), memoryMiB: Number(process.env.ALTO_GPU_LIFECYCLE_MEMORY_MIB || 0) };
+    if (![0, 192].includes(options.memoryMiB)) throw Error("invalid lifecycle memory size");
     if (!Number.isInteger(options.cycles) || options.cycles < 1 || options.cycles > 2000) throw Error("invalid lifecycle cycles");
     const result = await evaluate(`window.runGpuLifecycle(${JSON.stringify(options)})`, 180000);
     await writeFile(join(reportDir, "gpu-lifecycle.json"), JSON.stringify(result, null, 2) + "\n");

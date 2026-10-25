@@ -1,11 +1,11 @@
 // Deliberately independent of Alto, Rust, WASM, OPFS and decode Workers.
-let canvas, context, adapter, device, buffer;
+let canvas, context, adapter, device, buffer, memoryMiB = 0, allocations = [];
 let fault = null;
 const report = (event, detail = {}) => postMessage({ event, at: Date.now(), ...detail });
 async function newDevice() {
   adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw Error("no WebGPU adapter");
-  const next = await adapter.requestDevice();
+  const next = await adapter.requestDevice({ requiredLimits: { maxTextureArrayLayers: 512 } });
   const state = { expected: false };
   next.addEventListener("uncapturederror", ({ error }) => {
     fault = String(error.message);
@@ -17,6 +17,12 @@ async function newDevice() {
   });
   next.expectedState = state;
   return next;
+}
+function allocate() {
+  allocations = memoryMiB ? [512, 256].map((depthOrArrayLayers) => device.createTexture({
+    label: "Alto-sized texture allocation", size: [256, 256, depthOrArrayLayers], format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING,
+  })) : [];
 }
 function configure() {
   context.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(),
@@ -36,8 +42,10 @@ function encode(readback) {
 async function execute(m) {
   if (m.op === "init") {
     canvas = m.canvas;
+    memoryMiB = m.memoryMiB;
     context = canvas.getContext("webgpu");
     device = await newDevice();
+    allocate();
     configure();
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const { vendor, architecture, device: name, description } = adapter.info;
@@ -63,9 +71,11 @@ async function execute(m) {
   } else if (m.op === "recover") {
     device.expectedState.expected = true;
     device.destroy();
+    for (const texture of allocations) texture.destroy();
     buffer.destroy();
     if (m.unconfigure) context.unconfigure();
     device = await newDevice();
+    allocate();
     configure();
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   } else if (m.op === "stop") {
