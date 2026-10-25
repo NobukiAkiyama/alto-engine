@@ -161,6 +161,31 @@ export async function runEmbedTests(_playground, log) {
       const f = await frameWhere(engine, (f) => f.surface[0] === Math.round(420 * ratio));
       assert(f.surface[1] === Math.round(260 * ratio), "surface height " + f.surface);
     });
+    await test("a container whose size flickers does not resize the canvas every frame", async () => {
+      // A Worker-owned canvas resized while the GPU is busy can lose the device in Chrome;
+      // a layout that flips a few pixels each frame must not reach the GPU each frame.
+      const el = container(300, 200);
+      const engine = await engineIn(el);
+      await engine.createDocument({ width: 256, height: 256 });
+      const ratio = unstable(engine).pixelRatio();
+      await frameWhere(engine, (f) => f.surface[1] === Math.round(200 * ratio));
+      let last = null,
+        changes = 0;
+      const off = unstable(engine).onFrame((f) => {
+        const size = f.surface.join("x");
+        if (last !== null && size !== last) changes++;
+        last = size;
+      });
+      for (let i = 0; i < 60; i++) {
+        el.style.height = i % 2 ? "200px" : "203px";
+        await new Promise(requestAnimationFrame);
+      }
+      el.style.height = "260px";
+      const settled = await frameWhere(engine, (f) => f.surface[1] === Math.round(260 * ratio));
+      off();
+      void settled;
+      assert(changes <= 2, `the canvas changed size ${changes} times while its container flickered`);
+    });
     await test("an engine starts in a hidden container and draws once it is shown", async () => {
       const el = container(280, 180);
       el.style.display = "none";

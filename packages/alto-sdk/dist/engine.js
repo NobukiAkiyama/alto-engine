@@ -85,7 +85,7 @@ export class EngineCore extends Emitter {
             }),
             changed: (v) => this.emit("viewport", v),
         });
-        this.resizeObserver = new ResizeObserver(() => this.resize());
+        this.resizeObserver = new ResizeObserver(() => this.scheduleResize());
         this.resizeObserver.observe(options.container);
         this.watchPixelRatio();
         addEventListener("pagehide", this.onPageHide);
@@ -237,6 +237,8 @@ export class EngineCore extends Emitter {
         this.recoveryWaiting = !!boot.recovery.available;
         if (this.recoveryWaiting)
             this.emit("recoveryAvailable", { records: boot.recovery.records });
+        // A new Worker knows no size yet.
+        this.sentSize = "";
         this.resize();
     }
     onWorkerMessage(data) {
@@ -375,14 +377,32 @@ export class EngineCore extends Emitter {
             reportError: (e) => this.emit("error", e instanceof AltoError ? e : new AltoError("INTERNAL", String(e))),
         };
     }
+    resizeTimer = null;
+    /** The canvas size last sent to this Worker, as "w×h"; empty for a new Worker. */
+    sentSize = "";
+    /**
+     * Resizing a Worker-owned canvas reconfigures its surface, and doing that while the
+     * GPU is busy can lose the device in Chrome. A layout that shifts a few pixels each
+     * frame would do it each frame, so the container's size is applied once it has held
+     * for 100 ms.
+     */
+    scheduleResize() {
+        if (this.resizeTimer !== null)
+            clearTimeout(this.resizeTimer);
+        this.resizeTimer = setTimeout(() => {
+            this.resizeTimer = null;
+            this.resize();
+        }, 100);
+    }
     resize() {
         const r = this.options.container.getBoundingClientRect();
         // A hidden container is 0×0; render 1×1 until it is shown.
-        this.stream({
-            t: "resize",
-            width: Math.max(1, Math.round(r.width * this.pixelRatio)),
-            height: Math.max(1, Math.round(r.height * this.pixelRatio)),
-        });
+        const width = Math.max(1, Math.round(r.width * this.pixelRatio));
+        const height = Math.max(1, Math.round(r.height * this.pixelRatio));
+        if (`${width}x${height}` === this.sentSize)
+            return;
+        this.sentSize = `${width}x${height}`;
+        this.stream({ t: "resize", width, height });
     }
     adopt(state, fit) {
         this.document?.close();
@@ -635,6 +655,8 @@ export class EngineCore extends Emitter {
         this.releaseLease?.();
         this.releaseLease = undefined;
         this.resizeObserver.disconnect();
+        if (this.resizeTimer !== null)
+            clearTimeout(this.resizeTimer);
         this.ratioQuery?.removeEventListener("change", this.onRatioChange);
         removeEventListener("pagehide", this.onPageHide);
         removeEventListener("pageshow", this.onPageShow);

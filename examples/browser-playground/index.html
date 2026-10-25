@@ -132,10 +132,17 @@
       background: #263c4f;
     }
     #recovery-result.warning { background: #57471a; }
+    /* A fixed height: the text changes every frame, and a taller line (Japanese
+       glyphs) would move the editor below it each time. */
     #status {
+      box-sizing: border-box;
+      height: 32px;
       padding: 7px 16px;
+      line-height: 18px;
       color: #9fc4ff;
-      min-height: 32px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     #test-results {
       white-space: pre-wrap;
