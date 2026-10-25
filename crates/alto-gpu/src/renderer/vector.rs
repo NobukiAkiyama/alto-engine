@@ -5,6 +5,39 @@ use crate::glyph_atlas::{
     ATLAS_MAX_EM_PX, ATLAS_SIDE, AtlasStats, GlyphAtlas, max_scale, place, rasterize,
 };
 use alto_vector::{LyonRasterizer, StyledPath, TextRun, VectorRasterizer};
+mod arena;
+mod batch;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorMode {
+    Legacy,
+    Pooled,
+    Batched,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counters {
+    pub passes: u64,
+    pub coverage: u64,
+    pub paint: u64,
+    pub geometry_draws: u64,
+    pub paint_draws: u64,
+    pub uniform_buffers: u64,
+    pub bind_groups: u64,
+    pub upload_bytes: u64,
+    pub clear_pixels: u64,
+    pub resolve_pixels: u64,
+    pub paths: u64,
+    pub groups: u64,
+    pub comparisons: u64,
+    pub barriers: u64,
+}
+struct PreparedDraw {
+    key: (ContentHash, i32),
+    batch: usize,
+    rect: batch::Rect,
+    uniform: Uniform,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GlyphInstance {
@@ -48,11 +81,20 @@ impl CachedMesh {
 struct Coverage {
     multi: wgpu::Texture,
     resolved: wgpu::Texture,
+    multi_view: wgpu::TextureView,
+    resolved_view: wgpu::TextureView,
     w: u32,
     h: u32,
 }
 pub struct VectorResources {
     geometry: wgpu::RenderPipeline,
+    pooled_geometry: wgpu::RenderPipeline,
+    pooled_paint: wgpu::RenderPipeline,
+    geometry_layout: wgpu::BindGroupLayout,
+    paint_layout: wgpu::BindGroupLayout,
+    uniforms: arena::Arena,
+    mode: VectorMode,
+    counters: Counters,
     paint: wgpu::RenderPipeline,
     meshes: HashMap<(ContentHash, i32), CachedMesh>,
     coverage: Option<Coverage>,
@@ -135,6 +177,103 @@ impl VectorResources {
             multiview_mask: None,
             cache: None,
         });
+        let uniform_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniform>() as u64),
+            },
+            count: None,
+        };
+        let geometry_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vector dynamic geometry"),
+            entries: &[uniform_entry],
+        });
+        let paint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vector dynamic paint"),
+            entries: &[
+                uniform_entry,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let geometry_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vector dynamic geometry"),
+            bind_group_layouts: &[Some(&geometry_layout)],
+            immediate_size: 0,
+        });
+        let paint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vector dynamic paint"),
+            bind_group_layouts: &[Some(&paint_layout)],
+            immediate_size: 0,
+        });
+        let pooled_geometry = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("4x MSAA R8 vector coverage"),
+            layout: Some(&geometry_pl),
+            vertex: wgpu::VertexState {
+                module: &geometry,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0=>Float32x2],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &geometry,
+                entry_point: Some("coverage"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 4,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        let pooled_paint = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vector coverage paint"),
+            layout: Some(&paint_pl),
+            vertex: wgpu::VertexState {
+                module: &paint,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &paint,
+                entry_point: Some("paint"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let glyph = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glyph atlas"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/glyph-atlas.wgsl").into()),
@@ -170,6 +309,13 @@ impl VectorResources {
         });
         Self {
             geometry: g,
+            pooled_geometry,
+            pooled_paint,
+            geometry_layout,
+            paint_layout,
+            uniforms: arena::Arena::default(),
+            mode: VectorMode::Batched,
+            counters: Counters::default(),
             paint: p,
             meshes: HashMap::new(),
             coverage: None,
@@ -181,6 +327,47 @@ impl VectorResources {
             retired: super::Retired::default(),
             misses: 0,
         }
+    }
+    pub fn set_mode(&mut self, mode: VectorMode) {
+        self.mode = mode;
+    }
+    pub fn take_counters(&mut self) -> Counters {
+        std::mem::take(&mut self.counters)
+    }
+    /// Called only after submitting every command encoded with this resource set.
+    pub fn after_submit(&mut self) {
+        self.uniforms.reset();
+        self.retired.release();
+    }
+    /// Standalone probes call this after submitting all work, before dropping resources.
+    pub fn destroy_after_submit(self) {
+        let mut retired = super::Retired::default();
+        self.retire(&mut retired);
+        retired.release();
+    }
+    pub fn arena_bytes(&self) -> u64 {
+        self.uniforms.bytes()
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_legacy(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        paths: &[&StyledPath],
+        world: [f64; 6],
+        roi: [f64; 5],
+        frame: u64,
+        budget: u64,
+    ) -> Result<()> {
+        let mode = self.mode;
+        self.mode = VectorMode::Legacy;
+        let result = self.render(
+            device, queue, encoder, target, paths, world, roi, frame, budget,
+        );
+        self.mode = mode;
+        result
     }
     pub fn mesh_bytes(&self) -> u64 {
         self.meshes.values().map(|m| m.bytes).sum()
@@ -194,6 +381,7 @@ impl VectorResources {
     /// Hands every GPU object to `retired`, for when these resources are discarded.
     pub(crate) fn retire(mut self, retired: &mut super::Retired) {
         self.discard_meshes();
+        std::mem::take(&mut self.uniforms).retire(retired);
         retired.take(&mut self.retired);
         if let Some(c) = self.coverage.take() {
             retired.texture(c.multi);
@@ -205,6 +393,7 @@ impl VectorResources {
     }
     pub fn bytes(&self) -> u64 {
         self.mesh_bytes()
+            + self.uniforms.bytes()
             + self
                 .coverage
                 .as_ref()
@@ -351,7 +540,7 @@ impl VectorResources {
         self.glyph_stats.atlas_glyphs += instances.len() as u64;
         self.glyph_stats.fallback_glyphs += fallback.len() as u64;
         vector.extend(fallback.iter());
-        self.render(
+        self.render_legacy(
             device, queue, encoder, target, &vector, world, roi, frame, budget,
         )?;
         let Some(atlas) = self.atlas.as_ref().filter(|_| !instances.is_empty()) else {
@@ -424,6 +613,12 @@ impl VectorResources {
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
+        let fixed_bytes = coverage_bytes
+            + self.uniforms.bytes()
+            + self.atlas.as_ref().map_or(0, |a| {
+                let (w, h) = a.alloc.size();
+                w as u64 * h as u64
+            });
         let mesh_limit = 32 * 1024 * 1024u64;
         // Frobenius norm bounds the maximum singular value, including shear and nonuniform scale.
         let transform_scale =
@@ -470,13 +665,13 @@ impl VectorResources {
                 .prepare(std::slice::from_ref(*p), tolerance)
                 .map_err(|e| RenderError::Internal(e.to_string()))?;
             let bytes = meshes.iter().map(|m| m.bytes() as u64).sum::<u64>();
-            if bytes > mesh_limit || bytes + coverage_bytes > budget {
+            if bytes > mesh_limit || bytes + fixed_bytes > budget {
                 return Err(RenderError::InvalidArgument(
                     "vector mesh exceeds GPU budget".into(),
                 ));
             }
             while self.meshes.values().map(|m| m.bytes).sum::<u64>() + bytes
-                > mesh_limit.min(budget - coverage_bytes)
+                > mesh_limit.min(budget - fixed_bytes)
             {
                 let old = self
                     .meshes
@@ -541,7 +736,7 @@ impl VectorResources {
             self.misses += 1;
             keys.push(key);
         }
-        while self.meshes.values().map(|m| m.bytes).sum::<u64>() + coverage_bytes > budget {
+        while self.meshes.values().map(|m| m.bytes).sum::<u64>() + fixed_bytes > budget {
             let old = self
                 .meshes
                 .iter()
@@ -576,12 +771,17 @@ impl VectorResources {
                     view_formats: &[],
                 })
             };
+            self.uniforms.invalidate_paint();
+            let multi = make(4, wgpu::TextureUsages::RENDER_ATTACHMENT);
+            let resolved = make(
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            );
             self.coverage = Some(Coverage {
-                multi: make(4, wgpu::TextureUsages::RENDER_ATTACHMENT),
-                resolved: make(
-                    1,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                ),
+                multi_view: multi.create_view(&Default::default()),
+                resolved_view: resolved.create_view(&Default::default()),
+                multi,
+                resolved,
                 w,
                 h,
             });
@@ -590,8 +790,8 @@ impl VectorResources {
             .coverage
             .as_ref()
             .ok_or(RenderError::Internal("vector coverage".into()))?;
-        let multi = coverage.multi.create_view(&Default::default());
-        let resolved = coverage.resolved.create_view(&Default::default());
+        let multi = coverage.multi_view.clone();
+        let resolved = coverage.resolved_view.clone();
         let target = target.create_view(&Default::default());
         {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -607,6 +807,13 @@ impl VectorResources {
                 })],
                 ..Default::default()
             });
+        }
+        self.counters.passes += 1;
+        self.counters.paths += keys.len() as u64;
+        if self.mode != VectorMode::Legacy
+            && self.render_pooled(device, queue, encoder, &target, &keys, world, roi, budget)?
+        {
+            return Ok(());
         }
         for key in keys {
             for b in &self.meshes[&key].batches {
@@ -654,6 +861,16 @@ impl VectorResources {
                 if x1 <= x0 || y1 <= y0 {
                     continue;
                 }
+                self.counters.passes += 2;
+                self.counters.coverage += 1;
+                self.counters.paint += 1;
+                self.counters.geometry_draws += 1;
+                self.counters.paint_draws += 1;
+                self.counters.uniform_buffers += 1;
+                self.counters.bind_groups += 2;
+                self.counters.upload_bytes += std::mem::size_of::<Uniform>() as u64;
+                self.counters.clear_pixels += w as u64 * h as u64;
+                self.counters.resolve_pixels += w as u64 * h as u64;
                 let uniform = buffer(
                     device,
                     queue,
@@ -741,6 +958,205 @@ impl VectorResources {
             }
         }
         Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_pooled(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        keys: &[(ContentHash, i32)],
+        world: [f64; 6],
+        roi: [f64; 5],
+        budget: u64,
+    ) -> Result<bool> {
+        let [x, y, scale, w, h] = roi;
+        let mut draws = Vec::new();
+        let mut paths = Vec::new();
+        let mut rects = Vec::new();
+        for &key in keys {
+            let start = draws.len();
+            let mut rect: Option<batch::Rect> = None;
+            for (index, b) in self.meshes[&key].batches.iter().enumerate() {
+                let origin = point(world, b.origin);
+                let corners = [
+                    [b.bounds[0], b.bounds[1]],
+                    [b.bounds[2], b.bounds[1]],
+                    [b.bounds[0], b.bounds[3]],
+                    [b.bounds[2], b.bounds[3]],
+                ]
+                .map(|p| {
+                    point(
+                        world,
+                        [p[0] as f64 + b.origin[0], p[1] as f64 + b.origin[1]],
+                    )
+                });
+                if corners.iter().flatten().any(|v| !v.is_finite()) {
+                    return Ok(false);
+                }
+                let x0 = (((corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min) - x)
+                    / scale)
+                    .floor()
+                    - 1.0)
+                    .clamp(0.0, w) as u32;
+                let y0 = (((corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min) - y)
+                    / scale)
+                    .floor()
+                    - 1.0)
+                    .clamp(0.0, h) as u32;
+                let x1 = (((corners
+                    .iter()
+                    .map(|p| p[0])
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    - x)
+                    / scale)
+                    .ceil()
+                    + 1.0)
+                    .clamp(0.0, w) as u32;
+                let y1 = (((corners
+                    .iter()
+                    .map(|p| p[1])
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    - y)
+                    / scale)
+                    .ceil()
+                    + 1.0)
+                    .clamp(0.0, h) as u32;
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let r = batch::Rect([x0, y0, x1, y1]);
+                rect = Some(rect.map_or(r, |a| a.union(r)));
+                draws.push(PreparedDraw {
+                    key,
+                    batch: index,
+                    rect: r,
+                    uniform: Uniform {
+                        matrix: [
+                            (world[0] / scale) as f32,
+                            (world[1] / scale) as f32,
+                            (world[2] / scale) as f32,
+                            (world[3] / scale) as f32,
+                        ],
+                        offset_size: [
+                            ((origin[0] - x) / scale) as f32,
+                            ((origin[1] - y) / scale) as f32,
+                            w as f32,
+                            h as f32,
+                        ],
+                        color: b.color,
+                    },
+                });
+            }
+            paths.push(start..draws.len());
+            rects.push(rect);
+        }
+        let coverage = self.coverage.as_ref().unwrap();
+        let fixed = self.mesh_bytes()
+            + w as u64 * h as u64 * 5
+            + self.atlas.as_ref().map_or(0, |a| {
+                let (w, h) = a.alloc.size();
+                w as u64 * h as u64
+            });
+        let values: Vec<_> = draws.iter().map(|d| d.uniform).collect();
+        let Some(start) = self.uniforms.upload(
+            device,
+            queue,
+            &self.geometry_layout,
+            &self.paint_layout,
+            &coverage.resolved_view,
+            &values,
+            budget.saturating_sub(fixed),
+            &mut self.counters,
+        ) else {
+            return Ok(false);
+        };
+        let plan = if self.mode == VectorMode::Batched {
+            batch::plan(&rects)
+        } else {
+            batch::Plan {
+                groups: (0..paths.len()).map(|i| i..i + 1).collect(),
+                ..Default::default()
+            }
+        };
+        self.counters.groups += plan.groups.len() as u64;
+        self.counters.comparisons += plan.comparisons;
+        self.counters.barriers += plan.barriers;
+        for group in plan.groups {
+            let phases = group.clone().map(|i| paths[i].len()).max().unwrap_or(0);
+            for phase in 0..phases {
+                let indices: Vec<_> = group
+                    .clone()
+                    .filter_map(|i| {
+                        let r = &paths[i];
+                        (phase < r.len()).then_some(r.start + phase)
+                    })
+                    .collect();
+                self.counters.passes += 2;
+                self.counters.coverage += 1;
+                self.counters.paint += 1;
+                self.counters.clear_pixels += w as u64 * h as u64;
+                self.counters.resolve_pixels += w as u64 * h as u64;
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("batched vector coverage"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &coverage.multi_view,
+                            resolve_target: Some(&coverage.resolved_view),
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&self.pooled_geometry);
+                    for &i in &indices {
+                        let d = &draws[i];
+                        let b = &self.meshes[&d.key].batches[d.batch];
+                        let [x0, y0, x1, y1] = d.rect.0;
+                        let (page, offset) = self.uniforms.offset(start + i);
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        pass.set_bind_group(0, &self.uniforms.pages[page].geometry, &[offset]);
+                        pass.set_vertex_buffer(0, b.vertices.slice(..));
+                        pass.set_index_buffer(b.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..b.count, 0, 0..1);
+                        self.counters.geometry_draws += 1;
+                    }
+                }
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("batched vector paint"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&self.pooled_paint);
+                    for &i in &indices {
+                        let [x0, y0, x1, y1] = draws[i].rect.0;
+                        let (page, offset) = self.uniforms.offset(start + i);
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        pass.set_bind_group(
+                            0,
+                            self.uniforms.pages[page].paint.as_ref().unwrap(),
+                            &[offset],
+                        );
+                        pass.draw(0..3, 0..1);
+                        self.counters.paint_draws += 1;
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 }
 impl Renderer {

@@ -1,18 +1,18 @@
 {
-  "date": "2026-10-24",
+  "date": "2026-10-26",
   "version": "0.4.0",
   "milestone": "M8 + embedding API",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4558398,
-  "gzipBytes": 1149427,
-  "wasmSha256": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d",
+  "wasmBytes": 4580315,
+  "gzipBytes": 1157282,
+  "wasmSha256": "3455925b0e967e94d286d193b2dc47b6c1252110befa0fffff2128c0d20e2dec",
   "comparisonWasm": {
-    "bytes": 4223713,
-    "gzipBytes": 984224,
-    "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
+    "bytes": 6310241,
+    "gzipBytes": 1562671,
+    "sha256": "5f15ea38425114fe22a2642aa41191115bb2cb79cfdef8ad2c6fca3053bf9881"
   },
-  "nativeTests": 118,
+  "nativeTests": 122,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
@@ -24,6 +24,7 @@
   "browserM5RegressionTests": 8,
   "browserM4RegressionTests": 11,
   "browserBenchmarks": 13,
-  "comparisonWasmNote": "comparisonWasm is the M6 vello comparison build and was not rebuilt on 2026-10-21",
-  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4."
+  "comparisonWasmNote": "Rebuilt on 2026-10-26 with the optional vello-probe feature. Includes Legacy/Pooled/Batched RGBA16F verification; vello is not linked into the production package.",
+  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4.",
+  "vectorOptimizationNote": "Uniform arena and conservative disjoint-path batching. See VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md; independent Canvas/device loss investigation remains open."
 }

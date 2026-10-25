@@ -133,6 +133,14 @@ jobs:
           ALTO_BROWSER_GPU: swiftshader
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/examples
         run: sh scripts/check-examples.sh
+      - name: Verify vector batching against legacy RGBA16F pixels
+        env:
+          ALTO_BROWSER_GPU: swiftshader
+          ALTO_VECTOR_FRAMES: '1'
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/vector
+        run: |
+          sh scripts/build-vector-comparison.sh
+          node scripts/verify-browser.mjs --vector-optimization
       - uses: actions/upload-artifact@v7
         if: always()
         with:

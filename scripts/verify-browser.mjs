@@ -20,6 +20,7 @@ const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
 const benchmarkOnly = process.argv.includes("--benchmark-only");
 const examplesOnly = process.argv.includes("--examples");
+const vectorOnly = process.argv.includes("--vector-optimization");
 const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const startupOnly = process.argv.includes("--startup-only");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
@@ -211,14 +212,14 @@ try {
   await mkdir(reportDir, { recursive: true });
   await writeFile(join(reportDir, "chrome-stderr.log"), "");
   diagnostics.artifacts = {};
-  for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm"])
+  for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm", ...(vectorOnly ? ["examples/vector-comparison/pkg/alto_wasm_bg.wasm"] : [])])
     diagnostics.artifacts[file] = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
   server = await startServer();
   const address = server.address();
   const query = new URLSearchParams();
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
-  const pageUrl = `http://127.0.0.1:${address.port}/${lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
+  const pageUrl = `http://127.0.0.1:${address.port}/${vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
   const executable = chromeBin();
@@ -286,7 +287,24 @@ try {
       mobile: false,
     });
   }
-  if (lifecycleOnly) {
+  if (vectorOnly) {
+    await send("Page.navigate", { url: pageUrl });
+    let ready = false;
+    for (let i = 0; i < 120 && !ready; i++) {
+      ready = !!(await evaluate("!!window.runVectorOptimization").catch(() => false));
+      if (!ready) await sleep(100);
+    }
+    if (!ready) throw Error("Vector optimization fixture did not load");
+    const frames = Number(process.env.ALTO_VECTOR_FRAMES || 100);
+    if (!Number.isInteger(frames) || frames < 1 || frames > 200) throw Error("Invalid vector frame count");
+    const result = await evaluate(`window.runVectorOptimization(${frames}, ${process.env.ALTO_VECTOR_REVERSE === "1"})`, 600000);
+    result.browser = version.Browser;
+    result.artifacts = diagnostics.artifacts;
+    result.recordedAt = new Date().toISOString();
+    await writeFile(join(reportDir, "vector-optimization.json"), JSON.stringify(result, null, 2) + "\n");
+    summary.push({ name: "vector optimization", ok: result.pass === true, count: result.cases?.length, error: result.error });
+    await sampleSystem("vector-optimization");
+  } else if (lifecycleOnly) {
     await send("Page.navigate", { url: pageUrl }, 30000);
     let ready = false;
     for (let i = 0; i < 120; i++) {
@@ -394,7 +412,7 @@ try {
   }
 } catch (error) {
   console.error("Browser verification failed:", error);
-  summary.push({ name: lifecycleOnly ? "gpu-lifecycle harness" : "startup", ok: false, error: String(error) });
+  summary.push({ name: vectorOnly ? "vector optimization harness" : lifecycleOnly ? "gpu-lifecycle harness" : "startup", ok: false, error: String(error) });
 } finally {
   if (traceStarted) {
     try {
