@@ -84,3 +84,5 @@ Ubuntu の AppArmor による Chrome 起動制限は、当該 CI の実行ファ
 ## 手元の整合性確認
 
 追加した JavaScript 3 ファイルの構文検査、SHA256SUMS の 365 項目、配布 WASM 2 箇所のビルドメタデータ、空白差分検査は成功した。WASM の SHA-256 は引き続き `15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d`。これらは診断コードと成果物の整合性の確認であり、間欠障害の解消の判定ではない。
+
+調査コード `5b2faab` の [通常 CI 40171935959](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40171935959) も成功した。`scripts/check.sh`、ブラウザ 93 件、Vite サンプル 2 本が成功し、この実行の correctness stderr に missing mailbox はなかった。間欠障害を再現した別実行と併記し、この一度の成功を修正完了とは扱わない。

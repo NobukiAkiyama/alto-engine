@@ -2968,5 +2968,58 @@
       "[2116:2116:1025/063153.348653:INFO:CONSOLE:8] \"LIFECYCLE {\"at\":1792909913347,\"event\":\"lost\",\"reason\":\"destroyed\",\"message\":\"Device was destroyed.\",\"expected\":false,\"generation\":1,\"cycle\":0}\", source: http://127.0.0.1:35353/tests/diagnostics/gpu-lifecycle.js (8)",
       "[2116:2116:1025/063153.348719:INFO:CONSOLE:8] \"LIFECYCLE {\"at\":1792909913348,\"event\":\"failure\",\"message\":\"AbortError: Failed to execute 'mapAsync' on 'GPUBuffer': A valid external Instance reference no longer exists.\",\"generation\":1,\"cycle\":0}\", source: http://127.0.0.1:35353/tests/diagnostics/gpu-lifecycle.js (8)"
     ]
+  },
+  "finalOrdinaryCi": {
+    "run": 40171935959,
+    "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40171935959",
+    "commit": "5b2faab",
+    "conclusion": "success",
+    "browserSuites": [
+      {
+        "name": "functional",
+        "ok": true,
+        "count": 32
+      },
+      {
+        "name": "m5",
+        "ok": true,
+        "count": 8
+      },
+      {
+        "name": "m6",
+        "ok": true,
+        "count": 10
+      },
+      {
+        "name": "m7",
+        "ok": true,
+        "count": 9
+      },
+      {
+        "name": "m8",
+        "ok": true,
+        "count": 6
+      },
+      {
+        "name": "embed",
+        "ok": true,
+        "count": 28
+      }
+    ],
+    "examples": [
+      {
+        "name": "example minimal-embed",
+        "ok": true,
+        "count": 1,
+        "error": null
+      },
+      {
+        "name": "example react-embed",
+        "ok": true,
+        "count": 1,
+        "error": null
+      }
+    ],
+    "missingMailboxInCorrectnessStderr": true
   }
 }
