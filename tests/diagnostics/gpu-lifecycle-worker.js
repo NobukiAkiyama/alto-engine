@@ -3,6 +3,8 @@ let canvas, context, adapter, device, buffer;
 let fault = null;
 const report = (event, detail = {}) => postMessage({ event, at: Date.now(), ...detail });
 async function newDevice() {
+  adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!adapter) throw Error("no WebGPU adapter");
   const next = await adapter.requestDevice();
   const state = { expected: false };
   next.addEventListener("uncapturederror", ({ error }) => {
@@ -35,8 +37,6 @@ async function execute(m) {
   if (m.op === "init") {
     canvas = m.canvas;
     context = canvas.getContext("webgpu");
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (!adapter) throw Error("no WebGPU adapter");
     device = await newDevice();
     configure();
     buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

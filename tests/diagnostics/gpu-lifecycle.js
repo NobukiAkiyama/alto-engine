@@ -8,7 +8,7 @@ function record(event, detail = {}) {
   console.log("LIFECYCLE", JSON.stringify(entry));
 }
 window.runGpuLifecycle = async ({ mode = "stable", cycles = 120 } = {}) => {
-  if (!["stable", "same-size", "resize", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure"].includes(mode)) throw Error("unknown mode");
+  if (!["stable", "same-size", "resize", "same-size-burst", "resize-burst", "replace-abrupt", "replace-graceful", "recover", "recover-unconfigure"].includes(mode)) throw Error("unknown mode");
   let worker, canvas, nextId = 0, cycle = 0, generation = 0;
   const pending = new Map();
   const faults = [];
@@ -59,9 +59,9 @@ window.runGpuLifecycle = async ({ mode = "stable", cycles = 120 } = {}) => {
       } else if (mode.startsWith("recover") && cycle) {
         await request("recover", { unconfigure: mode === "recover-unconfigure" });
       }
-      const size = mode === "resize" && cycle % 2 ? [640, 480] : [800, 600];
-      await request("frame", { resize: ["same-size", "resize"].includes(mode) ? size : null, reconfigure: mode === "resize" });
-      await frame();
+      const size = mode.startsWith("resize") && cycle % 2 ? [640, 480] : [800, 600];
+      await request("frame", { resize: (mode.startsWith("same-size") || mode.startsWith("resize")) ? size : null, reconfigure: mode.startsWith("resize") });
+      if (!mode.endsWith("-burst")) await frame();
       if (faults.length) throw Error(JSON.stringify(faults));
       if (cycle % 20 === 0) record("progress", { mode, cycle, generation });
     }

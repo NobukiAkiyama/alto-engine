@@ -24,6 +24,8 @@ const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
+const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
+if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
 const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
 const browserWidth = Number(process.env.ALTO_BROWSER_WIDTH || 0);
 const browserHeight = Number(process.env.ALTO_BROWSER_HEIGHT || 0);
@@ -176,7 +178,7 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "";
 const recordEvent = ({ method, params }) => {
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
@@ -213,6 +215,7 @@ try {
     "--headless=new",
     "--enable-unsafe-webgpu",
     "--enable-logging=stderr",
+    ...(graphiteBackend === "swiftshader" ? ["--enable-skia-graphite", "--skia-graphite-dawn-backend=swiftshader"] : []),
     ...(disableGpuWatchdog ? ["--disable-gpu-watchdog"] : []),
     ...(process.env.ALTO_BROWSER_GPU === "swiftshader"
       ? ["--use-webgpu-adapter=swiftshader", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader"]
@@ -250,6 +253,8 @@ try {
   await send("Runtime.enable");
   await send("Log.enable");
   await sampleSystem("startup");
+  if (graphiteBackend === "swiftshader" && diagnostics.system[0]?.["SystemInfo.getInfo"]?.gpu?.auxAttributes?.skiaBackendType !== "GraphiteDawnVulkan")
+    throw Error("The requested Graphite SwiftShader comparison is not active");
   if (browserDpr || browserWidth) {
     await send("Emulation.setDeviceMetricsOverride", {
       width: browserWidth || 1280,
