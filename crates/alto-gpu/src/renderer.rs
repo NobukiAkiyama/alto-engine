@@ -257,6 +257,11 @@ pub struct Renderer {
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
+    /// Kept for the device's lifetime. On WebGPU these hold the `GPU` and `GPUAdapter`
+    /// objects; CI lost the device with "A valid external Instance reference no longer
+    /// exists" while only the device was referenced.
+    _instance: wgpu::Instance,
+    _adapter: wgpu::Adapter,
     pub lost: Arc<AtomicBool>,
     /// The reason and message the device was lost with, for error reports.
     lost_detail: Arc<std::sync::Mutex<String>>,
@@ -761,6 +766,8 @@ impl Renderer {
             present,
             brush,
             sampler,
+            _instance: instance.clone(),
+            _adapter: adapter.clone(),
             lost,
             lost_detail,
             frame: 0,
