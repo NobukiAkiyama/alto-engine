@@ -13,6 +13,10 @@ on:
         description: Keep Chrome's GPU watchdog enabled (disable only to investigate a timeout)
         default: true
         type: boolean
+      skia_graphite:
+        description: Use Chrome's Skia Graphite display compositor (independent of Alto's WebGPU renderer)
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -26,6 +30,7 @@ jobs:
     env:
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
+      ALTO_BROWSER_DISABLE_SKIA_GRAPHITE: ${{ github.event_name == 'workflow_dispatch' && inputs.skia_graphite == false && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
