@@ -188,6 +188,27 @@ export async function runEmbedTests(_playground, log) {
       // 100 ms debounce, which lets a size through mid-flicker; that is allowed.
       assert(changes <= 10, `the canvas changed size ${changes} times while its container flickered`);
     });
+    await test("a frame held back for the GPU is presented once the GPU catches up", async () => {
+      // The renderer presents at most one frame ahead of the GPU. Whatever it holds back
+      // must still reach the screen: the last frame shows the last view, not a stale one.
+      const el = container(300, 200);
+      const engine = await engineIn(el);
+      const doc = await engine.createDocument({ width: 512, height: 256 });
+      await quadrants(engine, doc);
+      let held = 0, newest = -1, last = null;
+      const off = unstable(engine).onFrame((f) => {
+        if (f.presentDeferred) held++;
+        newest = Math.max(newest, f.viewVersion ?? -1);
+        last = f;
+      });
+      for (let i = 0; i < 40; i++) engine.viewport.panBy(i % 2 ? 7 : -5, 1);
+      await frameWhere(engine, (f) => f.viewVersion === newest && f.pending === 0 && !f.presentDeferred);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      off();
+      log(`  ${held} frames held back for the GPU`);
+      assert(!last.presentDeferred && last.viewVersion === newest,
+        `the last frame was ${last.presentDeferred ? "held back" : "presented"} at view ${last.viewVersion} of ${newest}`);
+    });
     await test("an engine starts in a hidden container and draws once it is shown", async () => {
       const el = container(280, 180);
       el.style.display = "none";

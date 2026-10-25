@@ -88,6 +88,9 @@ pub struct FrameReport {
     pub pending: u32,
     pub gpu_bytes: u64,
     pub profile: Option<RenderProfile>,
+    /// The frame was not presented because the previous one is still on the GPU;
+    /// render again once it finishes.
+    pub deferred: bool,
 }
 #[derive(Default, Clone, Copy, Debug)]
 pub struct RenderProfile {
@@ -248,6 +251,12 @@ pub struct Renderer {
     visible_keys: HashSet<CacheKey>,
     last_view: Option<Viewport>,
     last_pending: u32,
+    /// Set from the last present until its GPU work completes. At most one frame is
+    /// presented ahead of the GPU: Chrome loses the device when a worker canvas is
+    /// resized while presented frames pile up (crbug.com/557281760).
+    present_in_flight: Arc<AtomicBool>,
+    /// A frame was held back by `present_in_flight` and is still owed.
+    present_deferred: bool,
     prefetch_stats: PrefetchStatus,
     prefetch_job: Option<TileJob>,
     visible_job: Option<TileJob>,
@@ -757,6 +766,8 @@ impl Renderer {
             visible_keys: HashSet::new(),
             last_view: None,
             last_pending: 0,
+            present_in_flight: Arc::new(AtomicBool::new(false)),
+            present_deferred: false,
             prefetch_stats: PrefetchStatus::default(),
             prefetch_job: None,
             visible_job: None,
@@ -2003,9 +2014,19 @@ impl Renderer {
         self.last_pending = pending;
         // Preparing inputs does not change any displayed pixel. Avoid submitting
         // an identical present pass on every resumable slice.
-        if composed == 0 && pending > 0 && unchanged {
+        if composed == 0 && pending > 0 && unchanged && !self.present_deferred {
             return self.frame_report(composed, pending);
         }
+        // Runs completion callbacks on native backends; WebGPU runs them from the event loop.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.present_in_flight.load(Ordering::Acquire) {
+            self.present_deferred = true;
+            return Ok(FrameReport {
+                deferred: true,
+                ..self.frame_report(composed, pending)?
+            });
+        }
+        self.present_deferred = false;
         let mut visible = Vec::new();
         if pending > 0 {
             for (&key, entry) in &self.cache_map {
@@ -2124,6 +2145,10 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.retired.release();
         self.queue.present(frame);
+        self.present_in_flight.store(true, Ordering::Release);
+        let in_flight = self.present_in_flight.clone();
+        self.queue
+            .on_submitted_work_done(move || in_flight.store(false, Ordering::Release));
         self.frame_report(composed, pending)
     }
     fn frame_report(&self, composed: u32, pending: u32) -> Result<FrameReport> {
@@ -2131,6 +2156,7 @@ impl Renderer {
             composed,
             pending,
             profile: self.profiling.then_some(self.profile),
+            deferred: false,
             gpu_bytes: self.vector_bytes()
                 + self.m5.as_ref().map_or(0, |m| m.bytes())
                 + (self.atlas_slots.len() as u64 + 256) * 262144

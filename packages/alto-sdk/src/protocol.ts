@@ -45,7 +45,11 @@ export interface ImportedFontRecord {
   warnings: { code: string; details: Record<string, string> }[];
 }
 export type FrameStats = Record<string, unknown> & {
+  /** Display tiles composited this frame. */
+  composed: number;
   pending: number;
+  /** 1 when this frame was held back until the previous one finishes on the GPU. */
+  presentDeferred: number;
   surface: [number, number];
   viewVersion?: number;
   profile: Record<string, number> | null;

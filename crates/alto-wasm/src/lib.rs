@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-const FRAME_FIELDS: [&str; 32] = [
+const FRAME_FIELDS: [&str; 33] = [
     "composed",
     "pending",
     "gpuBytes",
@@ -43,6 +43,7 @@ const FRAME_FIELDS: [&str; 32] = [
     "profile.steps",
     "profile.uniqueInputs",
     "profile.atlasEvictions",
+    "presentDeferred",
 ];
 /// Release builds abort on panic, which reaches JS only as "RuntimeError: unreachable".
 /// Keep the message and location where the Worker's error handler can report them.
@@ -421,6 +422,7 @@ impl Runtime {
             q.unique_inputs as f64,
             q.atlas_evictions as f64,
         ]);
+        out.push(f64::from(u8::from(r.deferred)));
         debug_assert_eq!(out.len(), FRAME_FIELDS.len());
         Ok(out)
     }
@@ -1118,6 +1120,20 @@ impl Runtime {
             return Err(error(format!("INTERNAL: GPU validation: {validation}")));
         }
         Ok(())
+    }
+    /// Resolves once the GPU work submitted so far completes, or when the device can
+    /// no longer report it. Unlike `gpuIdle` it holds no borrow of the Runtime while
+    /// it waits, so the Worker may give up waiting and call `tick` again.
+    #[wasm_bindgen(js_name=submittedWorkDone)]
+    pub fn submitted_work_done(&self) -> js_sys::Promise {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        self.renderer.queue.on_submitted_work_done(move || {
+            let _ = tx.send(());
+        });
+        wasm_bindgen_futures::future_to_promise(async move {
+            let _ = rx.await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
     #[wasm_bindgen(js_name=gpuIdle)]
     pub async fn gpu_idle(&self) -> Result<(), JsValue> {

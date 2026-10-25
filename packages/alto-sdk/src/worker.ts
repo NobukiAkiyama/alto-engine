@@ -10,6 +10,16 @@ const yieldTask = () => new Promise<void>((resolve) => {
 });
 import init, { Runtime } from "./pkg/alto_wasm.js";
 import { createStorageSession } from "./storage-session.js";
+/**
+ * Waits for the frame in flight on the GPU, when a frame was held back for it. The
+ * timer bounds the wait: a lost device may never settle its queue, and the next
+ * tick reports the loss. `gpuIdle` would keep the Runtime borrowed past the timer,
+ * and the next tick would fail with "recursive use of an object".
+ */
+const presentSettled = () => Promise.race([
+  runtime.submittedWorkDone(),
+  new Promise<void>((resolve) => setTimeout(resolve, 50)),
+]);
 declare const self: DedicatedWorkerGlobalScope & { altoPanic?: string };
 type Timer = ReturnType<typeof setTimeout>;
 interface Decoder {
@@ -834,7 +844,8 @@ async function execute(m: Queued): Promise<unknown> {
         pumpDecodes();
         if (frame.profile) profiles.push(frame.profile);
         if (frame.pending) await yieldTask();
-      } while (frame.pending);
+        else if (frame.presentDeferred) await presentSettled();
+      } while (frame.pending || frame.presentDeferred);
       await runtime.gpuIdle();
       diagnosticProfiles = null;
       frameSettled = true;
@@ -889,11 +900,14 @@ async function drain() {
             const value = { ...decodeFrame(runtime.tick(8)), viewVersion };
             pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
-            frameSettled = value.pending === 0;
-            if (value.pending) wantTick = true;
+            frameSettled = value.pending === 0 && !value.presentDeferred;
+            if (!frameSettled) wantTick = true;
             if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });
-            if (value.pending) await yieldTask();
+            // A held-back frame with nothing new composed waits for the GPU instead of
+            // spinning: on a software adapter, spinning takes the GPU's CPU time.
+            if (value.presentDeferred && !value.composed) await presentSettled();
+            else if (value.pending) await yieldTask();
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
               postMessage({ t: "gpuLost" });
