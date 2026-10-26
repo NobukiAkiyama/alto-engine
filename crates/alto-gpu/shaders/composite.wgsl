@@ -1,4 +1,4 @@
-struct Command { inv0: vec4f, inv1: vec4f, info: vec4u };
+struct Command { inv0: vec4f, inv1: vec4f, info: vec4u, trans: vec4u };
 struct Tile { xy: vec2i, slot: u32, pad: u32 };
 struct Config { origin_scale: vec4f, info: vec4u };
 struct Wide { lo: u32, hi: u32 };
@@ -9,14 +9,10 @@ struct Wide { lo: u32, hi: u32 };
 @group(0) @binding(4) var<uniform> config: Config;
 
 // Render version 2 integer 4-tap. See crates/alto-gpu/src/sample.rs.
-// Q16 matrix * Q8 position is Q24. Round half away from zero into Q8
+// Q16 matrix * Q8 position is Q24. Translation is i64 Q16 in `trans`
+// (lo, hi, lo, hi), shifted to Q24. Round half away from zero into Q8
 // (add or subtract 2^15, arithmetic >> 16). The low 8 bits are the weights.
 // Channel bytes use round half up: (acc + 32768) >> 16.
-fn wide_from_i32(v: i32) -> Wide {
-  let lo = bitcast<u32>(v);
-  let hi = select(0u, 0xffffffffu, v < 0);
-  return Wide(lo, hi);
-}
 fn wide_neg(a: Wide) -> Wide {
   let lo = ~a.lo + 1u;
   let carry = select(0u, 1u, lo == 0u);
@@ -58,8 +54,8 @@ fn wide_round_shr16(a: Wide) -> i32 {
   if neg { adj = wide_sub(a, half); } else { adj = wide_add(a, half); }
   return bitcast<i32>((adj.lo >> 16u) | (adj.hi << 16u));
 }
-fn coord_q8(m0: i32, m1: i32, t: i32, px: i32, py: i32) -> i32 {
-  let sum = wide_add(wide_add(wide_mul_i32(m0, px), wide_mul_i32(m1, py)), wide_shl8(wide_from_i32(t)));
+fn coord_q8(m0: i32, m1: i32, t: Wide, px: i32, py: i32) -> i32 {
+  let sum = wide_add(wide_add(wide_mul_i32(m0, px), wide_mul_i32(m1, py)), wide_shl8(t));
   return wide_round_shr16(sum);
 }
 fn sample_texel(c: Command, q: vec2f) -> vec4f {
@@ -127,8 +123,8 @@ fn fetch_integer(c: Command, ix: vec2i) -> vec4f {
   let px = i32(config.origin_scale.x) * 256 + (ix.x * 256 + 128) * scale;
   let py = i32(config.origin_scale.y) * 256 + (ix.y * 256 + 128) * scale;
   let m = bitcast<vec4<i32>>(c.inv0);
-  let tx = bitcast<i32>(c.inv1.x);
-  let ty = bitcast<i32>(c.inv1.y);
+  let tx = Wide(c.trans.x, c.trans.y);
+  let ty = Wide(c.trans.z, c.trans.w);
   let qx = coord_q8(m.x, m.z, tx, px, py);
   let qy = coord_q8(m.y, m.w, ty, px, py);
   let x = qx >> 8;

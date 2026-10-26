@@ -179,6 +179,8 @@ export function parityCases() {
   const s = Math.sin(angle);
   // Q16 rounding absorbs an ulp between Math.cos and f64::cos, so rotation is locked.
   base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512 });
+  // Inverse translation is -40000px, which does not fit in i32 Q16.
+  base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
   return cases;
 }
 
@@ -244,13 +246,23 @@ function fetchFloat(tiles, inv, p) {
     return add(mul(ab, sub(f(1), fy)), mul(de, fy));
   });
 }
+const F64_EXACT_INT = 9007199254740992;
 function quantizeQ16(v) {
-  if (!Number.isFinite(v)) return 0;
+  if (!Number.isFinite(v)) return null;
   const scaled = v * 65536;
-  const rounded = scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5);
-  if (rounded >= 2147483647) return 2147483647;
-  if (rounded <= -2147483647) return -2147483647;
-  return rounded;
+  if (!Number.isFinite(scaled) || Math.abs(scaled) >= F64_EXACT_INT) return null;
+  return scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5);
+}
+function quantizeInverse(inv) {
+  const m = inv.slice(0, 4).map(quantizeQ16);
+  if (m.some((v) => v === null)) return null;
+  for (const v of m) {
+    if (v > 2147483647 || v < -2147483647) return null;
+  }
+  const tx = quantizeQ16(inv[4]);
+  const ty = quantizeQ16(inv[5]);
+  if (tx === null || ty === null) return null;
+  return { m, tx, ty };
 }
 function pixelQ8(origin, index, scale) {
   return origin * 256 + (index * 256 + 128) * scale;
@@ -259,10 +271,10 @@ function roundShr16(v) {
   const adjusted = v >= 0 ? v + 32768 : v - 32768;
   return Math.floor(adjusted / 65536);
 }
-function sourceQ8(inv, px, py) {
+function sourceQ8(q, px, py) {
   return [
-    roundShr16(inv[0] * px + inv[2] * py + inv[4] * 256),
-    roundShr16(inv[1] * px + inv[3] * py + inv[5] * 256),
+    roundShr16(q.m[0] * px + q.m[2] * py + q.tx * 256),
+    roundShr16(q.m[1] * px + q.m[3] * py + q.ty * 256),
   ];
 }
 function floorFracQ8(q) {
@@ -283,11 +295,10 @@ function bilinearByte(a, b, d, e, fx, fy) {
   const de = d * (256 - fx) + e * fx;
   return (ab * (256 - fy) + de * fy + 32768) >> 16;
 }
-function fetchInteger(tiles, inv, originPx, scale, x, y) {
-  const q16 = inv.map(quantizeQ16);
-  const q = sourceQ8(q16, pixelQ8(originPx[0], x, scale), pixelQ8(originPx[1], y, scale));
-  const [ix, fx] = floorFracQ8(q[0]);
-  const [iy, fy] = floorFracQ8(q[1]);
+function fetchInteger(tiles, q, originPx, scale, x, y) {
+  const pos = sourceQ8(q, pixelQ8(originPx[0], x, scale), pixelQ8(originPx[1], y, scale));
+  const [ix, fx] = floorFracQ8(pos[0]);
+  const [iy, fy] = floorFracQ8(pos[1]);
   const a = sampleU8(tiles, ix, iy);
   const b = sampleU8(tiles, ix + 1, iy);
   const d = sampleU8(tiles, ix, iy + 1);
@@ -300,8 +311,9 @@ function axisUnit(inv) {
 }
 function fetch(tiles, inv, p, originPx, scale, x, y, version) {
   const inv32 = inv.map(f);
-  if (version < RENDER_VERSION || axisUnit(inv32)) return fetchFloat(tiles, inv32, p);
-  return fetchInteger(tiles, inv, originPx, scale, x, y);
+  const q = quantizeInverse(inv);
+  if (version < RENDER_VERSION || axisUnit(inv32) || !q) return fetchFloat(tiles, inv32, p);
+  return fetchInteger(tiles, q, originPx, scale, x, y);
 }
 function popSrc(accum, opacity) {
   const rgb = accum[3] > 0

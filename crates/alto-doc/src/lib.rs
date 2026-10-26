@@ -41,7 +41,9 @@ impl DocumentMeta {
             height,
             color: ColorSpace::Srgb,
             depth: BitDepth::U8,
-            format_version: 1,
+            // Render version 2 is file format 3. The live value matches the
+            // snapshot so a journal digest survives save and replay.
+            format_version: 3,
             render_version: alto_core::RENDER_VERSION,
         }
     }
@@ -51,7 +53,7 @@ impl DocumentMeta {
                 "Canvas dimensions must be positive".into(),
             ));
         }
-        if self.format_version != 1 && self.format_version != 2 {
+        if self.format_version != 1 && self.format_version != 2 && self.format_version != 3 {
             return Err(DocError::Invalid("Unsupported document format".into()));
         }
         if self.render_version != alto_core::RENDER_VERSION_F32
@@ -1399,7 +1401,16 @@ impl Document {
             node.props.effects.iter().any(extended_effect)
                 || matches!(&node.kind, NodeKind::Adjustment { adjustment } if extended_effect(adjustment))
         });
-        meta.format_version = if extended { 2 } else { 1 };
+        // Render version 2 changes pixels. Writing it as format 3 makes a build
+        // that only accepts 1 and 2 refuse the file, instead of skipping the
+        // unknown `render_version` field and compositing the f32 path.
+        meta.format_version = if meta.render_version >= alto_core::RENDER_VERSION {
+            3
+        } else if extended {
+            2
+        } else {
+            1
+        };
         let snapshot = Snapshot {
             meta,
             root: self.root,
@@ -2620,6 +2631,50 @@ mod compatibility_tests {
         assert!(
             serde_json::from_value::<NodeKind>(serde_json::json!({"kind":"raster","tiles":null}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn render_version_two_is_format_three_and_version_one_bytes_do_not_change() {
+        let fresh = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let bytes = fresh.snapshot_bytes().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["meta"]["format_version"], 3);
+        assert_eq!(value["meta"]["render_version"], 2);
+        let format = value["meta"]["format_version"].as_u64().unwrap();
+        assert!(
+            format != 1 && format != 2,
+            "a build that only accepts format 1 and 2 refuses this file"
+        );
+        let loaded = Document::from_snapshot_bytes(&bytes).unwrap();
+        assert_eq!(loaded.meta.format_version, 3);
+        assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION);
+        assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
+
+        let mut legacy = DocumentMeta::srgb_u8(8, 8);
+        legacy.render_version = alto_core::RENDER_VERSION_F32;
+        legacy.format_version = 1;
+        let v1 = Document::new(legacy).unwrap();
+        let v1_bytes = v1.snapshot_bytes().unwrap();
+        let v1_text = String::from_utf8(v1_bytes.clone()).unwrap();
+        assert!(!v1_text.contains("render_version"));
+        let v1_value: serde_json::Value = serde_json::from_slice(&v1_bytes).unwrap();
+        assert_eq!(v1_value["meta"]["format_version"], 1);
+        assert_eq!(
+            Document::from_snapshot_bytes(&v1_bytes)
+                .unwrap()
+                .snapshot_bytes()
+                .unwrap(),
+            v1_bytes
+        );
+
+        let mut rejected = value;
+        rejected["meta"]["format_version"] = serde_json::json!(4);
+        let err =
+            Document::from_snapshot_bytes(&serde_json::to_vec(&rejected).unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported document format"),
+            "{err}"
         );
     }
 }

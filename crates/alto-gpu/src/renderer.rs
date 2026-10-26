@@ -37,6 +37,8 @@ struct Command {
     inv0: [f32; 4],
     inv1: [f32; 4],
     info: [u32; 4],
+    /// Little-endian i64 Q16 translation (`tx` lo/hi, `ty` lo/hi). Zero on the f32 path.
+    trans: [u32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -529,6 +531,7 @@ impl TileJob {
                 inv0: [0.0; 4],
                 inv1: [0.0, 0.0, opacity, mode(blend)],
                 info: [2, 0, 0, 0],
+                trans: [0; 4],
             }),
             PlanTask::Node { idx, world, depth } => {
                 let n = scene
@@ -553,6 +556,7 @@ impl TileJob {
                                 inv0: [0.0; 4],
                                 inv1: [0.0; 4],
                                 info: [1, 0, 0, 0],
+                                trans: [0; 4],
                             });
                             self.stack.push(PlanTask::Close {
                                 opacity: n.opacity,
@@ -651,6 +655,7 @@ impl TileJob {
                             self.sources.len() as u32 - start,
                             packed.sample_mode,
                         ],
+                        trans: packed.trans,
                     });
                 } else {
                     let t = &tiles[next];
@@ -1306,6 +1311,7 @@ impl Renderer {
                             inv0: [0.0; 4],
                             inv1: [0.0; 4],
                             info: [1, 0, 0, 0],
+                            trans: [0; 4],
                         });
                     }
                     let mut start = 0;
@@ -1381,6 +1387,7 @@ impl Renderer {
                             inv0: [0.0; 4],
                             inv1: [0.0, 0.0, n.opacity, mode(n.blend)],
                             info: [2, 0, 0, 0],
+                            trans: [0; 4],
                         });
                     }
                 }
@@ -1438,6 +1445,7 @@ impl Renderer {
                             mode(n.blend),
                         ],
                         info: [0, start, entries.len() as u32 - start, packed.sample_mode],
+                        trans: packed.trans,
                     });
                 }
                 _ => {}

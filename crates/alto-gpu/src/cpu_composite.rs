@@ -14,7 +14,9 @@
 
 use crate::blend_ref::blend;
 use crate::damage::plain_scene;
-use crate::sample::{axis_unit, bilinear_byte, floor_frac_q8, pixel_q8, quantize_q16, source_q8};
+use crate::sample::{
+    IntegerInverse, axis_unit, bilinear_byte, floor_frac_q8, integer_inverse, pixel_q8, source_q8,
+};
 use crate::shader_with_blend;
 use alto_core::{Affine2, ContentHash, IRect, NodeId, RENDER_VERSION, RENDER_VERSION_F32};
 use alto_scene::{
@@ -450,6 +452,24 @@ fn cases() -> Vec<Case> {
             [c, s, -s, c, 32.0, 24.0],
         )],
     });
+    // Scale 0.1 and a 4000px move invert to a -40000px translation. That Q16
+    // value does not fit in i32; the integer path keeps it in i64.
+    out.push(Case {
+        name: "large-translation".into(),
+        w: 4096,
+        h: 256,
+        level: 0,
+        tx: 15,
+        ty: 0,
+        lock: true,
+        nodes: vec![raster(
+            ramp(256, 256),
+            0,
+            1.0,
+            true,
+            [0.1, 0.0, 0.0, 0.1, 4000.0, 0.0],
+        )],
+    });
     out
 }
 
@@ -616,15 +636,14 @@ fn sample_u8(tiles: &[Tile], x: i32, y: i32) -> [u8; 4] {
 
 fn fetch_integer(
     tiles: &[Tile],
-    inv: [f64; 6],
+    inv: &IntegerInverse,
     origin_px: [i32; 2],
     scale: i32,
     x: i32,
     y: i32,
 ) -> [f32; 4] {
-    let q16 = inv.map(quantize_q16);
     let q = source_q8(
-        q16,
+        inv,
         pixel_q8(origin_px[0], x, scale),
         pixel_q8(origin_px[1], y, scale),
     );
@@ -654,9 +673,11 @@ struct Frame {
 fn fetch(tiles: &[Tile], inv: [f64; 6], p: [f32; 2], x: i32, y: i32, frame: &Frame) -> [f32; 4] {
     let inv_f32 = inv.map(|v| v as f32);
     if frame.version < RENDER_VERSION || axis_unit(inv_f32) {
-        fetch_f32(tiles, inv_f32, p)
-    } else {
-        fetch_integer(tiles, inv, frame.origin_px, frame.scale_i, x, y)
+        return fetch_f32(tiles, inv_f32, p);
+    }
+    match integer_inverse(inv) {
+        Some(q) => fetch_integer(tiles, &q, frame.origin_px, frame.scale_i, x, y),
+        None => fetch_f32(tiles, inv_f32, p),
     }
 }
 
@@ -897,6 +918,7 @@ struct GpuCommand {
     inv0: [f32; 4],
     inv1: [f32; 4],
     info: [u32; 4],
+    trans: [u32; 4],
 }
 
 #[repr(C)]
@@ -979,11 +1001,13 @@ impl Gpu {
                     inv0: [0.0; 4],
                     inv1: [0.0; 4],
                     info: [1, 0, 0, 0],
+                    trans: [0; 4],
                 }),
                 Op::Pop { opacity, mode } => commands.push(GpuCommand {
                     inv0: [0.0; 4],
                     inv1: [0.0, 0.0, *opacity, *mode as f32],
                     info: [2, 0, 0, 0],
+                    trans: [0; 4],
                 }),
                 Op::Draw {
                     inv,
@@ -1011,6 +1035,7 @@ impl Gpu {
                             *mode as f32,
                         ],
                         info: [0, start, entries.len() as u32 - start, packed.sample_mode],
+                        trans: packed.trans,
                     });
                 }
             }
@@ -1245,9 +1270,13 @@ fn level1_samples_pixel_centers() {
 
 #[test]
 fn integer_filter_recovers_a_texel_and_rounds_half_up() {
-    assert_eq!(quantize_q16(0.5), 32_768);
-    assert_eq!(quantize_q16(-0.5), -32_768);
-    assert_eq!(quantize_q16(1.0), 65_536);
+    use crate::sample::{quantize_coeff, quantize_translation};
+    assert_eq!(quantize_coeff(0.5), Some(32_768));
+    assert_eq!(quantize_coeff(-0.5), Some(-32_768));
+    assert_eq!(quantize_coeff(1.0), Some(65_536));
+    assert_eq!(quantize_translation(-40_000.0), Some(-40_000 * 65_536));
+    assert!(quantize_coeff(-40_000.0).is_none());
+    assert!(quantize_translation(1.0e16).is_none());
     assert_eq!(bilinear_byte(7, 9, 7, 9, 0, 0), 7);
     assert_eq!(bilinear_byte(0, 1, 0, 1, 128, 0), 1);
     assert_eq!(floor_frac_q8(-1), (-1, 255));
@@ -1256,6 +1285,32 @@ fn integer_filter_recovers_a_texel_and_rounds_half_up() {
         let restored = (decoded * 255.0).round_ties_even() as u8;
         assert_eq!(restored, byte, "unorm byte {byte} did not round-trip");
     }
+}
+
+/// A 0.1× layer moved 4000px inverts to a -40000px translation. That Q16 value
+/// does not fit in `i32`. The integer path keeps it, and the sampled ramp texel
+/// is the one at source (5, 5). A translation that is not an exact `f64` integer
+/// leaves the integer path instead of being clamped.
+#[test]
+fn large_translation_is_exact_on_the_integer_path() {
+    use crate::sample::{SAMPLE_F32, SAMPLE_INTEGER, pack_inverse};
+    let forward = [0.1, 0.0, 0.0, 0.1, 4000.0, 0.0];
+    let inv = Affine2(forward).inverse().unwrap().0;
+    assert!(
+        (inv[4] + 40_000.0).abs() < 1e-6,
+        "inverse translation {inv:?}"
+    );
+    let packed = pack_inverse(inv, RENDER_VERSION);
+    assert_eq!(packed.sample_mode, SAMPLE_INTEGER);
+    let q = integer_inverse(inv).unwrap();
+    assert_eq!(q.tx, -40_000 * 65_536);
+    let case = cases()
+        .into_iter()
+        .find(|c| c.name == "large-translation")
+        .unwrap();
+    assert_eq!(pixel(&render(&case), 160, 0), [5, 5, 40, 255]);
+    let overflow = pack_inverse([0.1, 0.0, 0.0, 0.1, 1.0e16, 0.0], RENDER_VERSION);
+    assert_eq!(overflow.sample_mode, SAMPLE_F32);
 }
 
 /// Documents saved on current main have no `render_version`. They load as version 1
@@ -1267,6 +1322,7 @@ fn integer_filter_recovers_a_texel_and_rounds_half_up() {
 fn pre_bump_documents_match_the_recorded_main_hashes() {
     let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
     meta.render_version = RENDER_VERSION_F32;
+    meta.format_version = 1;
     let doc = alto_doc::Document::new(meta).unwrap();
     let bytes = doc.snapshot_bytes().unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
@@ -1281,13 +1337,20 @@ fn pre_bump_documents_match_the_recorded_main_hashes() {
         bytes,
         "opening and saving a pre-bump document keeps its snapshot bytes"
     );
+    assert!(
+        text.contains("\"format_version\": 1"),
+        "a version 1 document keeps format 1"
+    );
     let fresh = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
     assert_eq!(fresh.meta.render_version, RENDER_VERSION);
+    let fresh_text = String::from_utf8(fresh.snapshot_bytes().unwrap()).unwrap();
+    assert!(fresh_text.contains("\"render_version\": 2"));
     assert!(
-        String::from_utf8(fresh.snapshot_bytes().unwrap())
-            .unwrap()
-            .contains("\"render_version\": 2")
+        fresh_text.contains("\"format_version\": 3"),
+        "render version 2 is a new file format so a pre-#10 build refuses it"
     );
+    assert!(!fresh_text.contains("\"format_version\": 1"));
+    assert!(!fresh_text.contains("\"format_version\": 2"));
 
     let recorded = std::fs::read_to_string(render_v1_path()).unwrap();
     let expected = parse_reference(&recorded);

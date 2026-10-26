@@ -11,6 +11,7 @@ alto-raster = { path = "../alto-raster" }
 alto-scene = { path = "../alto-scene" }
 bytemuck = { version = "1", features = ["derive"] }
 futures-channel = "0.3"
+log = "0.4"
 
 # Native tests run composite.wgsl on a real adapter. wasm32 keeps the browser backend only,
 # so a Linux rebuild of the shipped package does not pick up Metal, Vulkan, or DX12.

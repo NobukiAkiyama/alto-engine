@@ -9,9 +9,14 @@
 //! Render version 2 packs the f64 inverse as Q16 and filters with integer weights.
 //! The shader bitcasts those bits back; it does not evaluate the coordinate in f32.
 //!
-//! * Matrix coefficients and translation are Q16 (`value * 65536`), rounded half
-//!   away from zero, then clamped to `i32::MIN + 1 ..= i32::MAX` so a negation in
-//!   the shader cannot overflow.
+//! * Matrix coefficients are Q16 (`value * 65536`), rounded half away from zero.
+//!   They must fit in `i32::MIN + 1 ..= i32::MAX`: the shader negates a coefficient,
+//!   and `i32::MIN` has no positive counterpart.
+//! * Translation is Q16 in a 64-bit two's complement (`Wide` in the shader), with
+//!   the same rounding. A translation that does not fit in `i32` is still exact.
+//!   A value that is not an exact integer in `f64` (`|value * 65536| >= 2^53`), or
+//!   a coefficient outside the `i32` range, does not take this path: the draw falls
+//!   back to the f32 fetch and a warning is logged. Nothing is clamped.
 //! * A pixel center is Q8 and exact, because the origin and the level scale are
 //!   integers: `p = origin * 256 + (i * 256 + 128) * scale`.
 //! * `Q16 * Q8` is Q24. Translation is shifted from Q16 to Q24 (`<< 8`). The sum
@@ -49,71 +54,123 @@ pub fn axis_unit(inv: [f32; 6]) -> bool {
     axis && unit
 }
 
-/// Q16, round half away from zero.
-pub fn quantize_q16(v: f64) -> i32 {
-    if !v.is_finite() {
-        return 0;
-    }
-    let scaled = v * 65536.0;
-    let rounded = if scaled >= 0.0 {
+/// Integers with magnitude below this are exact in `f64`.
+const F64_EXACT_INT: f64 = (1u64 << 53) as f64;
+
+fn round_half_away(scaled: f64) -> f64 {
+    if scaled >= 0.0 {
         (scaled + 0.5).floor()
     } else {
         (scaled - 0.5).ceil()
-    };
-    let max = i32::MAX as f64;
-    let min = (i32::MIN + 1) as f64;
-    if rounded >= max {
-        i32::MAX
-    } else if rounded <= min {
-        i32::MIN + 1
-    } else {
-        rounded as i32
     }
+}
+
+/// Rounded Q16, or `None` when `v` is not finite or `v * 65536` is not an exact `f64` integer.
+fn quantize_q16(v: f64) -> Option<f64> {
+    if !v.is_finite() {
+        return None;
+    }
+    let scaled = v * 65536.0;
+    if !scaled.is_finite() || scaled.abs() >= F64_EXACT_INT {
+        return None;
+    }
+    Some(round_half_away(scaled))
+}
+
+/// Q16 coefficient. `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
+pub fn quantize_coeff(v: f64) -> Option<i32> {
+    let rounded = quantize_q16(v)?;
+    if rounded > i32::MAX as f64 || rounded < (i32::MIN + 1) as f64 {
+        None
+    } else {
+        Some(rounded as i32)
+    }
+}
+
+/// Q16 translation as `i64`. `None` when the rounded value is not exact in `f64`.
+/// `|q| < 2^53` implies the Q24 shift (`<< 8`) fits in `i64`.
+pub fn quantize_translation(v: f64) -> Option<i64> {
+    Some(quantize_q16(v)? as i64)
+}
+
+/// Coefficients in `m` (`m00, m10, m01, m11`) and translation, all Q16.
+pub struct IntegerInverse {
+    pub m: [i32; 4],
+    pub tx: i64,
+    pub ty: i64,
+}
+
+pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
+    Some(IntegerInverse {
+        m: [
+            quantize_coeff(inv[0])?,
+            quantize_coeff(inv[1])?,
+            quantize_coeff(inv[2])?,
+            quantize_coeff(inv[3])?,
+        ],
+        tx: quantize_translation(inv[4])?,
+        ty: quantize_translation(inv[5])?,
+    })
+}
+
+/// Little-endian `i64` bits: `tx` low, `tx` high, `ty` low, `ty` high.
+pub fn pack_wide(tx: i64, ty: i64) -> [u32; 4] {
+    let tx = tx as u64;
+    let ty = ty as u64;
+    [tx as u32, (tx >> 32) as u32, ty as u32, (ty >> 32) as u32]
 }
 
 pub struct PackedInverse {
     pub inv0: [f32; 4],
+    /// f32 translation on the legacy path. Zero when `sample_mode` is integer.
     pub translation: [f32; 2],
+    /// `i64` Q16 translation bits. Zero on the f32 path.
+    pub trans: [u32; 4],
     pub sample_mode: u32,
 }
 
-/// Float inverse for nearest and for render version 1. Q16 bitcast for a
-/// version 2 sample that is not an axis-aligned unit scale.
+/// Float inverse for nearest and for render version 1. Q16 for a version 2 sample
+/// that is not an axis-aligned unit scale and that fits the integer format.
+/// A sample that does not fit uses the f32 path; it is never clamped.
 pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
     let f32_inv = inv.map(|v| v as f32);
-    if render_version >= RENDER_VERSION && !axis_unit(f32_inv) {
-        let q = inv.map(quantize_q16);
-        PackedInverse {
-            inv0: [
-                f32::from_bits(q[0].cast_unsigned()),
-                f32::from_bits(q[1].cast_unsigned()),
-                f32::from_bits(q[2].cast_unsigned()),
-                f32::from_bits(q[3].cast_unsigned()),
-            ],
-            translation: [
-                f32::from_bits(q[4].cast_unsigned()),
-                f32::from_bits(q[5].cast_unsigned()),
-            ],
-            sample_mode: SAMPLE_INTEGER,
-        }
-    } else {
-        PackedInverse {
-            inv0: [f32_inv[0], f32_inv[1], f32_inv[2], f32_inv[3]],
-            translation: [f32_inv[4], f32_inv[5]],
-            sample_mode: SAMPLE_F32,
-        }
+    let float = PackedInverse {
+        inv0: [f32_inv[0], f32_inv[1], f32_inv[2], f32_inv[3]],
+        translation: [f32_inv[4], f32_inv[5]],
+        trans: [0; 4],
+        sample_mode: SAMPLE_F32,
+    };
+    if render_version < RENDER_VERSION || axis_unit(f32_inv) {
+        return float;
+    }
+    let Some(q) = integer_inverse(inv) else {
+        log::warn!(
+            "compositor inverse does not fit the integer sampler (translation {}, {}); using the f32 path",
+            inv[4],
+            inv[5]
+        );
+        return float;
+    };
+    PackedInverse {
+        inv0: [
+            f32::from_bits(q.m[0].cast_unsigned()),
+            f32::from_bits(q.m[1].cast_unsigned()),
+            f32::from_bits(q.m[2].cast_unsigned()),
+            f32::from_bits(q.m[3].cast_unsigned()),
+        ],
+        translation: [0.0, 0.0],
+        trans: pack_wide(q.tx, q.ty),
+        sample_mode: SAMPLE_INTEGER,
     }
 }
 
 /// Q8 source coordinate. `px` and `py` are Q8 pixel centers.
 #[cfg(test)]
-pub fn source_q8(inv_q16: [i32; 6], px: i32, py: i32) -> [i32; 2] {
-    let x = i64::from(inv_q16[0]) * i64::from(px)
-        + i64::from(inv_q16[2]) * i64::from(py)
-        + (i64::from(inv_q16[4]) << 8);
-    let y = i64::from(inv_q16[1]) * i64::from(px)
-        + i64::from(inv_q16[3]) * i64::from(py)
-        + (i64::from(inv_q16[5]) << 8);
+pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> [i32; 2] {
+    let x =
+        i64::from(inv.m[0]) * i64::from(px) + i64::from(inv.m[2]) * i64::from(py) + (inv.tx << 8);
+    let y =
+        i64::from(inv.m[1]) * i64::from(px) + i64::from(inv.m[3]) * i64::from(py) + (inv.ty << 8);
     [round_shr16(x) as i32, round_shr16(y) as i32]
 }
 
