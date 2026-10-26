@@ -2322,6 +2322,11 @@ impl Renderer {
     }
     /// Called after submit or after discarding an encoder; never while a consumer is unsubmitted.
     fn release_retired(&mut self) {
+        // Mesh pressure can retire vector resources even when this tile never
+        // renders a vector node. Account for them before after_submit clears them.
+        if let Some(vector) = &mut self.vector {
+            self.retired.take(&mut vector.retired);
+        }
         let bytes = self.retired.bytes();
         self.retired.release();
         self.ledger.submitted(&self.queue, bytes);
