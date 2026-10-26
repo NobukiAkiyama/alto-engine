@@ -45,11 +45,8 @@ jobs:
           sh scripts/build-wasm-pkg.sh "$RUNNER_TEMP/wasm-release"
           sh scripts/verify-wasm-sums.sh release "$RUNNER_TEMP/wasm-release"
           sh scripts/build-vector-comparison.sh "$RUNNER_TEMP/wasm-vector"
-          # The hash pinned before path remapping does not match a fresh build.
-          # update-wasm-sums.sh sets enforce_vector=1 once it records the new bytes.
-          if [ "$(sed -n 's/^enforce_vector=//p' wasm/RELEASE | head -n 1)" = 1 ]; then
-            sh scripts/verify-wasm-sums.sh vector-comparison "$RUNNER_TEMP/wasm-vector"
-          fi
+          # enforce_vector=1 was required above, so the comparison package is always checked.
+          sh scripts/verify-wasm-sums.sh vector-comparison "$RUNNER_TEMP/wasm-vector"
           mkdir -p "$RUNNER_TEMP/wasm-assets"
           cp "$RUNNER_TEMP/wasm-release/alto_wasm_bg.wasm" "$RUNNER_TEMP/wasm-assets/alto_wasm_bg.wasm"
           cp "$RUNNER_TEMP/wasm-release/alto_decode_bg.wasm" "$RUNNER_TEMP/wasm-assets/alto_decode_bg.wasm"
@@ -70,11 +67,11 @@ jobs:
 
           The release package (alto_wasm_bg.wasm, alto_decode_bg.wasm) matches wasm/SHA256SUMS in this commit. Those binaries are not stored in git.
 
-          vector-comparison-alto_wasm_bg.wasm is the vello-probe build. fetch-wasm.sh installs an asset only when its SHA-256 matches wasm/SHA256SUMS.
+          vector-comparison-alto_wasm_bg.wasm is the vello-probe build. fetch-wasm.sh reads this release's SHA256SUMS asset and downloads a WASM body only when that file matches wasm/SHA256SUMS.
 
           sh scripts/fetch-wasm.sh ${tag}
 
-          With no argument, fetch-wasm.sh picks the newest release whose assets match wasm/SHA256SUMS."
+          With no argument, fetch-wasm.sh picks the newest release whose SHA256SUMS asset matches."
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber "$RUNNER_TEMP/wasm-assets"/*
           else
