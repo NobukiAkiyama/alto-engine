@@ -170,7 +170,10 @@ export function parityCases() {
   const angle = 0.3;
   const c = Math.cos(angle);
   const s = Math.sin(angle);
-  base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512, lock: false, rounding: true });
+  // SwiftShader matches this JS matrix bit-exactly. Native Metal and lavapipe still
+  // miss the Rust reference by at most 1/255, so only the Rust xfail keeps rotation.
+  // The hash file omits it because Math.cos can differ from f64::cos by an ulp.
+  base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512, lock: false });
   return cases;
 }
 

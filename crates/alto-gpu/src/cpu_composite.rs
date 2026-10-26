@@ -41,12 +41,15 @@ const BLENDS: [&str; 17] = [
     "add",
 ];
 
-/// Bilinear samples and rotations are not bit-exact. Lavapipe (Mesa 25.2.8) disagrees
-/// with this f32 reference by at most one 8-bit channel: `scale-bilinear` 4906 pixels,
-/// first pixel 15,0 gpu [8, 0, 25, 255] cpu [8, 0, 24, 255]; `rotation` 5 pixels, first
-/// pixel 43,156 gpu [50, 123, 177, 255] cpu [50, 123, 178, 255]. The mix is
-/// `a*(1-t)+b*t`, and GPU compilers may contract it. A device that matches exactly
-/// should drop the case from this list. A delta above 1/255 is a real miss.
+/// Bilinear samples and rotations are not bit-exact on every native device. Lavapipe
+/// (Mesa 25.2.8) disagrees with this f32 reference by at most one 8-bit channel:
+/// `scale-bilinear` 4906 pixels, first pixel 15,0 gpu [8, 0, 25, 255] cpu
+/// [8, 0, 24, 255]; `rotation` 5 pixels, first pixel 43,156 gpu [50, 123, 177, 255]
+/// cpu [50, 123, 178, 255]. The mix is `a*(1-t)+b*t`, and GPU compilers may contract
+/// it. macOS Metal also misses both by at most 1/255 (`cargo test` on CI passed only
+/// with this list). SwiftShader matches the JS reference for rotation bit-exactly, so
+/// the browser suite requires that match and xfails only `scale-bilinear`. A device
+/// that matches a listed case exactly should drop it. A delta above 1/255 is a real miss.
 const ROUNDING_XFAIL: &[&str] = &["scale-bilinear", "rotation"];
 
 #[derive(Clone)]
