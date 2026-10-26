@@ -18,6 +18,13 @@ if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen $bindgen_v
 fi
 pkg_out=$(mktemp -d)
 sh scripts/build-wasm-pkg.sh "$pkg_out"
+# CI sets this so a host mismatch can be downloaded and committed. The checked-in
+# package is the arm64 macOS rebuild, which this Linux checkout cannot reproduce.
+if [ -n "${ALTO_WASM_REBUILD_DIR:-}" ]; then
+  rm -rf "$ALTO_WASM_REBUILD_DIR"
+  mkdir -p "$ALTO_WASM_REBUILD_DIR"
+  cp -a "$pkg_out"/. "$ALTO_WASM_REBUILD_DIR"/
+fi
 pkg_status=0
 for dest in examples/browser-playground/pkg packages/alto-sdk/dist/pkg; do
   if ! diff -rq "$pkg_out" "$dest"; then
