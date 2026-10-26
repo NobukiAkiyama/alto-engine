@@ -60,8 +60,8 @@ export async function runM5Tests(engine, log) {
   const results = [];
   async function test(name, fn) {
     const start = performance.now();
-    await fn();
-    results.push({ name, pass: true, ms: performance.now() - start });
+    const details=await fn();
+    results.push({ name, pass: true, ms: performance.now() - start, ...details });
     log("PASS " + name);
   }
   let doc, layer;
@@ -344,6 +344,38 @@ export async function runM5Tests(engine, log) {
       );
       await testing(engine).request("validateFrame");
       assert((await at(engine, 215, 250))[3] > 0, "serial blur stack");
+    });
+    await test("pooled blur reuses large buckets without stale halo pixels", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      const big = await image(engine, 256, 256, c => { c.fillStyle="white"; c.fillRect(0,0,256,256); });
+      const small = await image(engine, 256, 256, c => { c.fillStyle="white"; c.fillRect(105,109,37,31); });
+      let large;
+      await doc.transact("pool inputs", tx => {
+        large = tx.addRasterFromAsset(big); layer = tx.addRasterFromAsset(small);
+        tx.setProps(layer,{visible:false});
+      });
+      await doc.effects.set(large,[{ type:"gaussian_blur", radius:20 }]);
+      await unstable(engine).readTile(0,0);
+      await doc.transact("small input", tx => { tx.setProps(large,{visible:false}); tx.setProps(layer,{visible:true}); });
+      for (const radius of [8,9,8]) {
+        await doc.effects.set(layer,[{ type:"gaussian_blur", radius }]);
+        await testing(engine).request("validateFrame");
+        const tile = await unstable(engine).readTile(0,0);
+        for (let y=0;y<256;y++) for (let x=0;x<256;x++) {
+          const alpha=Math.round(intervalBlur(x,105,142,radius)*intervalBlur(y,109,140,radius)*255);
+          assert(close(pixel(tile,x,y),[alpha,alpha,alpha,alpha]), `reused halo ${radius}:${x},${y}: ${pixel(tile,x,y)} != ${alpha}`);
+        }
+      }
+      const frame = await unstable(engine).settle();
+      assert(frame.gpu.effectsReuses > 0,"no physical bucket reuse occurred");
+      assert(frame.gpu.effects < 16*1024*1024,"effect pool grew with every node");
+      const plain=await unstable(engine).readTile(0,0);
+      await doc.effects.set(layer,[{type:"gaussian_blur",radius:8}, ...Array.from({length:31},()=>({type:"color_adjust",brightness:0,contrast:1,saturation:1}))]);
+      const chain=await unstable(engine).readTile(0,0);
+      assert(same(plain,chain),"32 effects changed identity pixels");
+      const chainFrame=await unstable(engine).settle();
+      assert(chainFrame.gpu.effects <= frame.gpu.effects+2*1048576,"pool grew with 32 serial effects");
+      return { gpu: frame.gpu, chainGpu: chainFrame.gpu };
     });
     await test("effect captures selection and group blur receives a halo", async () => {
       doc = await engine.createDocument({ width: 512, height: 512 });

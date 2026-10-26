@@ -78,6 +78,17 @@ const readableAfterFailure = new Set<string>([
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
 let journaling = true;
+// A document epoch belongs to its SDK handle, not to this Worker's lifetime.
+let documentEpoch = 0;
+let recoveryPending = false;
+function checkDocument(epoch: number | undefined) {
+  if (epoch !== undefined && epoch !== documentEpoch)
+    throw Error("CONFLICT: document-closed: the request belongs to a replaced document");
+}
+function adoptDocument(epoch: number | undefined) {
+  documentEpoch = epoch ?? documentEpoch + 1;
+  recoveryPending = false;
+}
 function freezeStorage(error: unknown) {
   if (storageFailure) return;
   storageFailure = structured(error);
@@ -433,9 +444,11 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   const pool = decodePoolBytes();
   // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
   const prefetch: Record<string, number> = {};
+  const gpu: Record<string, number> = {};
   const out: Record<string, unknown> & { profile: Record<string, number> | null; hasProfile?: number } = {
     adapter: adapterName,
     prefetch,
+    gpu,
     profile: null,
     decodeWorkerBytes: pool.workers,
     decodeTransitBytes: pool.transit,
@@ -447,7 +460,7 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   frameFields.forEach((name, i) => {
     const [group, key] = name.split(".");
     if (key === undefined) out[group] = numbers[i];
-    else (group === "profile" ? profile : prefetch)[key] = numbers[i];
+    else (group === "profile" ? profile : group === "gpu" ? gpu : prefetch)[key] = numbers[i];
   });
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;
@@ -512,6 +525,10 @@ function rememberSave(entry: { hash: string; revision: number }) {
   return token;
 }
 async function execute(m: Queued): Promise<unknown> {
+  // Check when executed: the request may have waited behind a document replacement.
+  checkDocument(m.documentEpoch);
+  if (recoveryPending && (m.t === "createDocument" || m.t === "open" || m.t === "openFolder"))
+    throw Error("CONFLICT: recovery-pending: restore or discard the waiting journal first");
   // The in-memory runtime may be ahead of the last confirmed journal write.
   // Keep it available for an emergency export, but accept no more edits.
   if (storageFailure && !readableAfterFailure.has(m.t))
@@ -522,30 +539,43 @@ async function execute(m: Queued): Promise<unknown> {
       if (m.protocol !== 4) throw Error("CONFLICT: protocol mismatch");
       canvas = m.canvas;
       budget = m.budget;
+      postMessage({ t: "diagnostic", value: { initPhase: "wasm-load" } });
       await init();
+      postMessage({ t: "diagnostic", value: { initPhase: "runtime-create" } });
       runtime = await Runtime.create(canvas, budget);
+      postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
       frameFields = runtime.frameFields();
       adapterName = runtime.adapterName();
       startDecoders();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
       journaling = m.journal !== false;
-      if (!journaling) return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+      if (!journaling) {
+        postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
+        return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+      }
+      postMessage({ t: "diagnostic", value: { initPhase: "journal-configure" } });
       await io("configure", { namespace: m.namespace || "default" });
+      postMessage({ t: "diagnostic", value: { initPhase: "journal-inspect" } });
       const recovery = await io<StoreState>("inspect");
       // Later checkpoints skip the objects the store already holds.
       runtime.noteStoredObjects(JSON.stringify(recovery.objects));
       delete recovery.objects;
       const info: RecoveryInfo = recovery;
+      recoveryPending = recovery.available;
+      postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
       return { protocol: 4, recovery: info };
     case "discardRecovery":
-      if (!journaling) return true;
+      if (!recoveryPending || documentEpoch !== 0)
+        throw Error("CONFLICT: no-recovery: there is no waiting recovery journal");
       await writesIdle();
       await io("discard");
       runtime.forgetStoredObjects();
+      recoveryPending = false;
       return true;
     case "createDocument": {
       const state = JSON.parse(runtime.createDocument(m.width, m.height));
+      adoptDocument(m.nextDocumentEpoch);
       queueCheckpoint();
       return state;
     }
@@ -646,6 +676,7 @@ async function execute(m: Queued): Promise<unknown> {
       return JSON.parse(runtime.folderPlan(new Uint8Array(m.bytes)));
     case "openFolder": {
       const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
+      adoptDocument(m.nextDocumentEpoch);
       queueCheckpoint();
       return s;
     }
@@ -709,15 +740,20 @@ async function execute(m: Queued): Promise<unknown> {
       return saves.delete(m.token);
     case "open": {
       const s = JSON.parse(runtime.openPackage(new Uint8Array(m.bytes)));
+      adoptDocument(m.nextDocumentEpoch);
       queueCheckpoint();
       return s;
     }
     case "recover": {
       if (!journaling) throw Error("NOT_FOUND: the engine keeps no recovery journal");
+      // An automatic restart may restore a checkpoint with no edits after it;
+      // inspect().available is false for that store, but the checkpoint is valid.
+      if (documentEpoch !== 0) throw Error("CONFLICT: no-recovery: a document is already open");
       await writesIdle();
       const candidates = await io<Candidate[]>("loadCandidates");
       if (!candidates.length) {
         const state = await io<StoreState>("inspect");
+        recoveryPending = false;
         throw Error(state.latestGeneration
           ? "CORRUPT_DATA: no usable recovery generation"
           : "NOT_FOUND: recovery journal");
@@ -741,13 +777,17 @@ async function execute(m: Queued): Promise<unknown> {
           lastError = error;
         }
       }
-      if (!recovery) throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
+      if (!recovery) {
+        recoveryPending = false;
+        throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
+      }
       await io("activate", { generation: recovery.generation });
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
         s.warnings.push({ code: "RECOVERED_OLDER_GENERATION", details: {} });
       if (recovery.truncated)
         s.warnings.push({ code: "RECOVERED_TRUNCATED", details: {} });
+      adoptDocument(m.nextDocumentEpoch);
       return s;
     }
     case "validateFrame":
@@ -928,8 +968,14 @@ async function drain() {
   }
 }
 
-self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage | { t: "durable"; id: number }>) => {
+self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage>) => {
   if (m.t === "durable") {
+    try {
+      checkDocument(m.documentEpoch);
+    } catch (error) {
+      postMessage({ t: "reply", id: m.id, ok: false, error: structured(error) });
+      return;
+    }
     // Answered beside the queue: waiting for OPFS must not hold back edits or frames.
     durable().then(
       () => postMessage({ t: "reply", id: m.id, ok: true, value: true }),

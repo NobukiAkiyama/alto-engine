@@ -91,6 +91,7 @@ export default defineConfig({
 | `disposed` | 終了した | — |
 
 - **文書の操作口（`DocumentHandle`）は、Worker を作り直しても同じオブジェクトのままです。** 入れ替わるのは、`open`、`createDocument`、`recovery.restore` を呼んだときだけです。そのとき `document` イベントが届きます。
+- **文書の切り替えと編集は、同じキューで順番に処理します。** 切り替えより後に予約された旧文書への編集は、`CONFLICT`（`reason: "document-closed"`）で失敗します。Worker も文書の世代を確認するため、旧文書の要求が新文書を読み書きすることはありません。切り替え前に開始したストロークは、旧文書で確定してから切り替えます。
 - **表示位置も、作り直しの前後で変わりません。**
 - **使用中のストロークは、作り直しで終わります。** `end()` が `WORKER_CRASHED` で失敗します。
 - **戻る・進むのキャッシュ（bfcache）：** ページがキャッシュに入ると（`pagehide` の `persisted` が真）、記録を持つエンジンは Worker を止め、保存場所の名前の鍵を手放します。そのあいだ、ほかのタブで同じ文書を開けます。ページが戻ると、鍵を取り直し、記録から立て直します（状態は `restarting` から `ready`）。鍵がほかのタブに取られていれば `failed`（`CONFLICT`、`namespace-in-use`）になり、`engine.retry()` で再試行できます。記録を持たないエンジンは、Worker を止めずにページと一緒に止まります。ページを閉じたとき（`persisted` が偽）は、エンジンを終了します。
@@ -113,6 +114,8 @@ if (engine.recovery.available) {
 ```
 
 **記録が残っているあいだは、`createDocument`、`open`、`openFolder` は `CONFLICT`（`reason: "recovery-pending"`）で失敗します。** 新しい文書が、保存していない編集の記録を黙って上書きしないためです。先に `restore` か `discard` を呼んでください。
+
+`recovery.restore()` と `recovery.discard()` は復旧待ちの場合だけ使えます（記録を持たないエンジンの `restore()` は `NOT_FOUND`）。文書を開いているときや、復旧待ちの記録がないときは `CONFLICT`（`reason: "no-recovery"`）です。両者を同時に呼んだ場合も順番に処理するため、復元した文書の記録を、後から届いた破棄要求が消すことはありません。
 
 ### 編集の確定と、記録への書き込み
 

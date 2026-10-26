@@ -93,6 +93,7 @@ export class DocumentHandle {
 
   /** @internal */
   apply(state: unknown): void {
+    if (this.closed) return;
     const change = this.store.apply(state as WireState);
     if (!change) return;
     for (const listener of [...this.listeners]) listener(change);
@@ -118,10 +119,11 @@ export class DocumentHandle {
       ? Promise.reject(
           new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }),
         )
-      : this.core.request(...args)) as EngineCore["request"];
+      : this.core.requestForDocument(this, ...args)) as EngineCore["request"];
   /** @internal The engine opened another document; this handle refuses further calls. */
   close(): void {
     this.closed = true;
+    this.abortTool(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     this.listeners.clear();
   }
   private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion">(
@@ -129,14 +131,18 @@ export class DocumentHandle {
     payload: Args<K>,
   ): Promise<void> {
     return this.edit(async () => {
-      this.apply(await (this.core.request as (t: K, a: Args<K>) => Promise<unknown>)(type, payload));
+      this.apply(await (this.request as (t: K, a: Args<K>) => Promise<unknown>)(type, payload));
     });
   }
   private async edit<T>(fn: () => Promise<T>): Promise<T> {
     if (this.closed)
       throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
-    await this.endTool();
-    return this.core.mutate(fn);
+    return this.core.mutate(async () => {
+      if (this.closed)
+        throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
+      await this.endTool();
+      return fn();
+    });
   }
 
   /**

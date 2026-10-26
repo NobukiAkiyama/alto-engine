@@ -1,0 +1,1997 @@
+{
+  "adapter": "AdapterInfo { name: \"\", vendor: 0, device: 0, device_type: Cpu, device_pci_bus_id: \"\", driver: \"\", driver_info: \"\", backend: BrowserWebGpu, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: None, limit_bucket: None }",
+  "arenaBudgetFallback": {
+    "pass": true
+  },
+  "cases": [
+    {
+      "case": "disjoint-100",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 314,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 1,
+            "paintDraws": 200,
+            "paintPasses": 2,
+            "paths": 100,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 2,
+          "firstGpuCompleteMs": 13.5,
+          "managedGpuBytes": 1587456,
+          "medianEncodeMs": 0.3999999761581421,
+          "medianGpuCompleteMs": 8.300000011920929,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 8.300000011920929,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            8.300000011920929
+          ],
+          "setupMs": 0
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 25,
+            "denseGroups": 25,
+            "geometryDraws": 200,
+            "groups": 0,
+            "paintDraws": 200,
+            "paintPasses": 25,
+            "paths": 100,
+            "renderPasses": 51,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 2.5,
+          "firstGpuCompleteMs": 269.39999997615814,
+          "managedGpuBytes": 10762496,
+          "medianEncodeMs": 0.6000000238418579,
+          "medianGpuCompleteMs": 89.90000003576279,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 89.90000003576279,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            89.90000003576279
+          ],
+          "setupMs": 0
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 314,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 1,
+            "paintDraws": 200,
+            "paintPasses": 2,
+            "paths": 100,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 2.300000011920929,
+          "firstGpuCompleteMs": 16.099999964237213,
+          "managedGpuBytes": 1587456,
+          "medianEncodeMs": 0.5,
+          "medianGpuCompleteMs": 8.300000011920929,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 8.300000011920929,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            8.300000011920929
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 400,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 200,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 0,
+            "paintDraws": 200,
+            "paintPasses": 200,
+            "paths": 100,
+            "renderPasses": 401,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 200,
+            "uploadBytes": 9600
+          },
+          "firstEncodeMs": 7,
+          "firstGpuCompleteMs": 213.4000000357628,
+          "managedGpuBytes": 1521920,
+          "medianEncodeMs": 1.7000000476837158,
+          "medianGpuCompleteMs": 97.30000001192093,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 97.30000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            97.30000001192093
+          ],
+          "setupMs": 0.5999999642372131
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 200,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 100,
+            "paintDraws": 200,
+            "paintPasses": 200,
+            "paths": 100,
+            "renderPasses": 401,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 3.199999988079071,
+          "firstGpuCompleteMs": 154,
+          "managedGpuBytes": 1587456,
+          "medianEncodeMs": 1.100000023841858,
+          "medianGpuCompleteMs": 97,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 97,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            97
+          ],
+          "setupMs": 0.10000002384185791
+        }
+      }
+    },
+    {
+      "case": "overlap-100",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 99,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 99,
+            "coveragePasses": 25,
+            "denseGroups": 25,
+            "geometryDraws": 200,
+            "groups": 0,
+            "paintDraws": 200,
+            "paintPasses": 25,
+            "paths": 100,
+            "renderPasses": 51,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 1,
+          "firstGpuCompleteMs": 146.30000001192093,
+          "managedGpuBytes": 10563356,
+          "medianEncodeMs": 0.699999988079071,
+          "medianGpuCompleteMs": 160.39999997615814,
+          "meshCounts": [
+            395,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 160.39999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            160.39999997615814
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 25,
+            "denseGroups": 25,
+            "geometryDraws": 200,
+            "groups": 0,
+            "paintDraws": 200,
+            "paintPasses": 25,
+            "paths": 100,
+            "renderPasses": 51,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 0.800000011920929,
+          "firstGpuCompleteMs": 145.19999998807907,
+          "managedGpuBytes": 10563356,
+          "medianEncodeMs": 0.5999999642372131,
+          "medianGpuCompleteMs": 151.39999997615814,
+          "meshCounts": [
+            395,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 151.39999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            151.39999997615814
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 99,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 99,
+            "coveragePasses": 200,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 100,
+            "paintDraws": 200,
+            "paintPasses": 200,
+            "paths": 100,
+            "renderPasses": 401,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 1.300000011920929,
+          "firstGpuCompleteMs": 156.30000001192093,
+          "managedGpuBytes": 1388316,
+          "medianEncodeMs": 1,
+          "medianGpuCompleteMs": 178.19999998807907,
+          "meshCounts": [
+            395,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 178.19999998807907,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            178.19999998807907
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 400,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 200,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 0,
+            "paintDraws": 200,
+            "paintPasses": 200,
+            "paths": 100,
+            "renderPasses": 401,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 200,
+            "uploadBytes": 9600
+          },
+          "firstEncodeMs": 1.5,
+          "firstGpuCompleteMs": 196.80000001192093,
+          "managedGpuBytes": 1322780,
+          "medianEncodeMs": 1.2999999523162842,
+          "medianGpuCompleteMs": 146.89999997615814,
+          "meshCounts": [
+            395,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 146.89999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            146.89999997615814
+          ],
+          "setupMs": 0.09999996423721313
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 52428800,
+            "comparisons": 0,
+            "coveragePasses": 200,
+            "denseGroups": 0,
+            "geometryDraws": 200,
+            "groups": 100,
+            "paintDraws": 200,
+            "paintPasses": 200,
+            "paths": 100,
+            "renderPasses": 401,
+            "resolvePixels": 52428800,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 51200
+          },
+          "firstEncodeMs": 1,
+          "firstGpuCompleteMs": 172.60000002384186,
+          "managedGpuBytes": 1388316,
+          "medianEncodeMs": 0.8999999761581421,
+          "medianGpuCompleteMs": 148.80000001192093,
+          "meshCounts": [
+            395,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 148.80000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            148.80000001192093
+          ],
+          "setupMs": 0.10000002384185791
+        }
+      }
+    },
+    {
+      "case": "rotate-shear-ROI",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 53,
+            "bindGroupsCreated": 0,
+            "clearPixels": 33554432,
+            "comparisons": 53,
+            "coveragePasses": 16,
+            "denseGroups": 16,
+            "geometryDraws": 124,
+            "groups": 0,
+            "paintDraws": 124,
+            "paintPasses": 16,
+            "paths": 65,
+            "renderPasses": 33,
+            "resolvePixels": 33554432,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 31744
+          },
+          "firstEncodeMs": 1.2000000476837158,
+          "firstGpuCompleteMs": 63,
+          "managedGpuBytes": 10688576,
+          "medianEncodeMs": 0.3999999761581421,
+          "medianGpuCompleteMs": 57.80000001192093,
+          "meshCounts": [
+            195,
+            65,
+            65
+          ],
+          "p95GpuCompleteMs": 57.80000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            57.80000001192093
+          ],
+          "setupMs": 0.09999996423721313
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 33554432,
+            "comparisons": 0,
+            "coveragePasses": 16,
+            "denseGroups": 16,
+            "geometryDraws": 124,
+            "groups": 0,
+            "paintDraws": 124,
+            "paintPasses": 16,
+            "paths": 65,
+            "renderPasses": 33,
+            "resolvePixels": 33554432,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 31744
+          },
+          "firstEncodeMs": 1.300000011920929,
+          "firstGpuCompleteMs": 61.89999997615814,
+          "managedGpuBytes": 10688576,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 57.700000047683716,
+          "meshCounts": [
+            195,
+            65,
+            65
+          ],
+          "p95GpuCompleteMs": 57.700000047683716,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            57.700000047683716
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 53,
+            "bindGroupsCreated": 0,
+            "clearPixels": 28311552,
+            "comparisons": 53,
+            "coveragePasses": 108,
+            "denseGroups": 0,
+            "geometryDraws": 124,
+            "groups": 54,
+            "paintDraws": 124,
+            "paintPasses": 108,
+            "paths": 65,
+            "renderPasses": 217,
+            "resolvePixels": 28311552,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 31744
+          },
+          "firstEncodeMs": 1.5,
+          "firstGpuCompleteMs": 58.39999997615814,
+          "managedGpuBytes": 1513536,
+          "medianEncodeMs": 0.3999999761581421,
+          "medianGpuCompleteMs": 52.89999997615814,
+          "meshCounts": [
+            195,
+            65,
+            65
+          ],
+          "p95GpuCompleteMs": 52.89999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            52.89999997615814
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 248,
+            "clearPixels": 32505856,
+            "comparisons": 0,
+            "coveragePasses": 124,
+            "denseGroups": 0,
+            "geometryDraws": 124,
+            "groups": 0,
+            "paintDraws": 124,
+            "paintPasses": 124,
+            "paths": 65,
+            "renderPasses": 249,
+            "resolvePixels": 32505856,
+            "uniformBuffersCreated": 124,
+            "uploadBytes": 5952
+          },
+          "firstEncodeMs": 1.9000000357627869,
+          "firstGpuCompleteMs": 113.40000003576279,
+          "managedGpuBytes": 1448000,
+          "medianEncodeMs": 0.8999999761581421,
+          "medianGpuCompleteMs": 61.69999998807907,
+          "meshCounts": [
+            195,
+            65,
+            65
+          ],
+          "p95GpuCompleteMs": 61.69999998807907,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            61.69999998807907
+          ],
+          "setupMs": 0
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 32505856,
+            "comparisons": 0,
+            "coveragePasses": 124,
+            "denseGroups": 0,
+            "geometryDraws": 124,
+            "groups": 65,
+            "paintDraws": 124,
+            "paintPasses": 124,
+            "paths": 65,
+            "renderPasses": 249,
+            "resolvePixels": 32505856,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 31744
+          },
+          "firstEncodeMs": 1.4000000357627869,
+          "firstGpuCompleteMs": 64.90000003576279,
+          "managedGpuBytes": 1513536,
+          "medianEncodeMs": 0.5,
+          "medianGpuCompleteMs": 60.60000002384186,
+          "meshCounts": [
+            195,
+            65,
+            65
+          ],
+          "p95GpuCompleteMs": 60.60000002384186,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            60.60000002384186
+          ],
+          "setupMs": 0.19999998807907104
+        }
+      }
+    },
+    {
+      "case": "overlap-1000",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 524288,
+          "counters": {
+            "barriers": 999,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288000,
+            "comparisons": 999,
+            "coveragePasses": 250,
+            "denseGroups": 250,
+            "geometryDraws": 2000,
+            "groups": 0,
+            "paintDraws": 2000,
+            "paintPasses": 250,
+            "paths": 1000,
+            "renderPasses": 501,
+            "resolvePixels": 524288000,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 512000
+          },
+          "firstEncodeMs": 6,
+          "firstGpuCompleteMs": 1330.7999999523163,
+          "managedGpuBytes": 11022108,
+          "medianEncodeMs": 5.5,
+          "medianGpuCompleteMs": 1329.3999999761581,
+          "meshCounts": [
+            3995,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 1329.3999999761581,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            1329.3999999761581
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Dense": {
+          "arenaBytes": 524288,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288000,
+            "comparisons": 0,
+            "coveragePasses": 250,
+            "denseGroups": 250,
+            "geometryDraws": 2000,
+            "groups": 0,
+            "paintDraws": 2000,
+            "paintPasses": 250,
+            "paths": 1000,
+            "renderPasses": 501,
+            "resolvePixels": 524288000,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 512000
+          },
+          "firstEncodeMs": 4.199999988079071,
+          "firstGpuCompleteMs": 1353.3999999761581,
+          "managedGpuBytes": 11022108,
+          "medianEncodeMs": 4.100000023841858,
+          "medianGpuCompleteMs": 1331.1000000238419,
+          "meshCounts": [
+            3995,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 1331.1000000238419,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            1331.1000000238419
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Disjoint": {
+          "arenaBytes": 524288,
+          "counters": {
+            "barriers": 999,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288000,
+            "comparisons": 999,
+            "coveragePasses": 2000,
+            "denseGroups": 0,
+            "geometryDraws": 2000,
+            "groups": 1000,
+            "paintDraws": 2000,
+            "paintPasses": 2000,
+            "paths": 1000,
+            "renderPasses": 4001,
+            "resolvePixels": 524288000,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 512000
+          },
+          "firstEncodeMs": 8.899999976158142,
+          "firstGpuCompleteMs": 1475,
+          "managedGpuBytes": 1847068,
+          "medianEncodeMs": 9.199999988079071,
+          "medianGpuCompleteMs": 1486.300000011921,
+          "meshCounts": [
+            3995,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 1486.300000011921,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            1486.300000011921
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 4000,
+            "clearPixels": 524288000,
+            "comparisons": 0,
+            "coveragePasses": 2000,
+            "denseGroups": 0,
+            "geometryDraws": 2000,
+            "groups": 0,
+            "paintDraws": 2000,
+            "paintPasses": 2000,
+            "paths": 1000,
+            "renderPasses": 4001,
+            "resolvePixels": 524288000,
+            "uniformBuffersCreated": 2000,
+            "uploadBytes": 96000
+          },
+          "firstEncodeMs": 13.099999964237213,
+          "firstGpuCompleteMs": 1553.8999999761581,
+          "managedGpuBytes": 1322780,
+          "medianEncodeMs": 13.100000023841858,
+          "medianGpuCompleteMs": 1522.9000000357628,
+          "meshCounts": [
+            3995,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 1522.9000000357628,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            1522.9000000357628
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Pooled": {
+          "arenaBytes": 524288,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288000,
+            "comparisons": 0,
+            "coveragePasses": 2000,
+            "denseGroups": 0,
+            "geometryDraws": 2000,
+            "groups": 1000,
+            "paintDraws": 2000,
+            "paintPasses": 2000,
+            "paths": 1000,
+            "renderPasses": 4001,
+            "resolvePixels": 524288000,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 512000
+          },
+          "firstEncodeMs": 7.299999952316284,
+          "firstGpuCompleteMs": 1491.699999988079,
+          "managedGpuBytes": 1847068,
+          "medianEncodeMs": 7.199999988079071,
+          "medianGpuCompleteMs": 1495.5,
+          "meshCounts": [
+            3995,
+            5,
+            5
+          ],
+          "p95GpuCompleteMs": 1495.5,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            1495.5
+          ],
+          "setupMs": 0
+        }
+      }
+    },
+    {
+      "case": "reflection-zoom",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 32,
+            "bindGroupsCreated": 0,
+            "clearPixels": 20971520,
+            "comparisons": 32,
+            "coveragePasses": 10,
+            "denseGroups": 10,
+            "geometryDraws": 76,
+            "groups": 0,
+            "paintDraws": 76,
+            "paintPasses": 10,
+            "paths": 38,
+            "renderPasses": 21,
+            "resolvePixels": 20971520,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 19456
+          },
+          "firstEncodeMs": 0.9000000357627869,
+          "firstGpuCompleteMs": 43.90000003576279,
+          "managedGpuBytes": 10660432,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 38.60000002384186,
+          "meshCounts": [
+            114,
+            38,
+            38
+          ],
+          "p95GpuCompleteMs": 38.60000002384186,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            38.60000002384186
+          ],
+          "setupMs": 0
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 20971520,
+            "comparisons": 0,
+            "coveragePasses": 10,
+            "denseGroups": 10,
+            "geometryDraws": 76,
+            "groups": 0,
+            "paintDraws": 76,
+            "paintPasses": 10,
+            "paths": 38,
+            "renderPasses": 21,
+            "resolvePixels": 20971520,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 19456
+          },
+          "firstEncodeMs": 1,
+          "firstGpuCompleteMs": 220.4000000357628,
+          "managedGpuBytes": 10660432,
+          "medianEncodeMs": 0.40000003576278687,
+          "medianGpuCompleteMs": 38.30000001192093,
+          "meshCounts": [
+            114,
+            38,
+            38
+          ],
+          "p95GpuCompleteMs": 38.30000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            38.30000001192093
+          ],
+          "setupMs": 0
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 32,
+            "bindGroupsCreated": 0,
+            "clearPixels": 17301504,
+            "comparisons": 32,
+            "coveragePasses": 66,
+            "denseGroups": 0,
+            "geometryDraws": 76,
+            "groups": 33,
+            "paintDraws": 76,
+            "paintPasses": 66,
+            "paths": 38,
+            "renderPasses": 133,
+            "resolvePixels": 17301504,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 19456
+          },
+          "firstEncodeMs": 1,
+          "firstGpuCompleteMs": 42.69999998807907,
+          "managedGpuBytes": 1485392,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 37.39999997615814,
+          "meshCounts": [
+            114,
+            38,
+            38
+          ],
+          "p95GpuCompleteMs": 37.39999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            37.39999997615814
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 152,
+            "clearPixels": 19922944,
+            "comparisons": 0,
+            "coveragePasses": 76,
+            "denseGroups": 0,
+            "geometryDraws": 76,
+            "groups": 0,
+            "paintDraws": 76,
+            "paintPasses": 76,
+            "paths": 38,
+            "renderPasses": 153,
+            "resolvePixels": 19922944,
+            "uniformBuffersCreated": 76,
+            "uploadBytes": 3648
+          },
+          "firstEncodeMs": 1.300000011920929,
+          "firstGpuCompleteMs": 106.10000002384186,
+          "managedGpuBytes": 1419856,
+          "medianEncodeMs": 0.5999999642372131,
+          "medianGpuCompleteMs": 44.09999996423721,
+          "meshCounts": [
+            114,
+            38,
+            38
+          ],
+          "p95GpuCompleteMs": 44.09999996423721,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            44.09999996423721
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 19922944,
+            "comparisons": 0,
+            "coveragePasses": 76,
+            "denseGroups": 0,
+            "geometryDraws": 76,
+            "groups": 38,
+            "paintDraws": 76,
+            "paintPasses": 76,
+            "paths": 38,
+            "renderPasses": 153,
+            "resolvePixels": 19922944,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 19456
+          },
+          "firstEncodeMs": 1,
+          "firstGpuCompleteMs": 48.09999996423721,
+          "managedGpuBytes": 1485392,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 42.5,
+          "meshCounts": [
+            114,
+            38,
+            38
+          ],
+          "p95GpuCompleteMs": 42.5,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            42.5
+          ],
+          "setupMs": 0.10000002384185791
+        }
+      }
+    },
+    {
+      "case": "stroke-only-and-caps",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 314,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 150,
+            "groups": 1,
+            "paintDraws": 150,
+            "paintPasses": 2,
+            "paths": 100,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 38400
+          },
+          "firstEncodeMs": 1.2999999523162842,
+          "firstGpuCompleteMs": 11.099999964237213,
+          "managedGpuBytes": 1548656,
+          "medianEncodeMs": 0.2999999523162842,
+          "medianGpuCompleteMs": 6.899999976158142,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 6.899999976158142,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            6.899999976158142
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 39845888,
+            "comparisons": 0,
+            "coveragePasses": 19,
+            "denseGroups": 19,
+            "geometryDraws": 150,
+            "groups": 0,
+            "paintDraws": 150,
+            "paintPasses": 19,
+            "paths": 100,
+            "renderPasses": 39,
+            "resolvePixels": 39845888,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 38400
+          },
+          "firstEncodeMs": 1.300000011920929,
+          "firstGpuCompleteMs": 75.10000002384186,
+          "managedGpuBytes": 10723696,
+          "medianEncodeMs": 0.40000003576278687,
+          "medianGpuCompleteMs": 69.30000001192093,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 69.30000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            69.30000001192093
+          ],
+          "setupMs": 0
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 314,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 150,
+            "groups": 1,
+            "paintDraws": 150,
+            "paintPasses": 2,
+            "paths": 100,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 38400
+          },
+          "firstEncodeMs": 1.199999988079071,
+          "firstGpuCompleteMs": 10.699999988079071,
+          "managedGpuBytes": 1548656,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 6.800000011920929,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 6.800000011920929,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            6.800000011920929
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 300,
+            "clearPixels": 39321600,
+            "comparisons": 0,
+            "coveragePasses": 150,
+            "denseGroups": 0,
+            "geometryDraws": 150,
+            "groups": 0,
+            "paintDraws": 150,
+            "paintPasses": 150,
+            "paths": 100,
+            "renderPasses": 301,
+            "resolvePixels": 39321600,
+            "uniformBuffersCreated": 150,
+            "uploadBytes": 7200
+          },
+          "firstEncodeMs": 1.899999976158142,
+          "firstGpuCompleteMs": 126,
+          "managedGpuBytes": 1483120,
+          "medianEncodeMs": 1,
+          "medianGpuCompleteMs": 77,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 77,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            77
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 39321600,
+            "comparisons": 0,
+            "coveragePasses": 150,
+            "denseGroups": 0,
+            "geometryDraws": 150,
+            "groups": 100,
+            "paintDraws": 150,
+            "paintPasses": 150,
+            "paths": 100,
+            "renderPasses": 301,
+            "resolvePixels": 39321600,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 38400
+          },
+          "firstEncodeMs": 1.5,
+          "firstGpuCompleteMs": 77.89999997615814,
+          "managedGpuBytes": 1548656,
+          "medianEncodeMs": 0.6000000238418579,
+          "medianGpuCompleteMs": 76.10000002384186,
+          "meshCounts": [
+            300,
+            100,
+            100
+          ],
+          "p95GpuCompleteMs": 76.10000002384186,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            76.10000002384186
+          ],
+          "setupMs": 0.10000002384185791
+        }
+      }
+    },
+    {
+      "case": "holes-touch-self-overlap",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 1,
+            "bindGroupsCreated": 0,
+            "clearPixels": 1048576,
+            "comparisons": 2,
+            "coveragePasses": 4,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 2,
+            "paintDraws": 8,
+            "paintPasses": 4,
+            "paths": 4,
+            "renderPasses": 9,
+            "resolvePixels": 1048576,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.20000004768371582,
+          "firstGpuCompleteMs": 6.900000035762787,
+          "managedGpuBytes": 1382424,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 3.899999976158142,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 3.899999976158142,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            3.899999976158142
+          ],
+          "setupMs": 0
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 1,
+            "denseGroups": 1,
+            "geometryDraws": 8,
+            "groups": 0,
+            "paintDraws": 8,
+            "paintPasses": 1,
+            "paths": 4,
+            "renderPasses": 3,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.2999999523162842,
+          "firstGpuCompleteMs": 8.099999964237213,
+          "managedGpuBytes": 10557464,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 5.199999988079071,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 5.199999988079071,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            5.199999988079071
+          ],
+          "setupMs": 0
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 1,
+            "bindGroupsCreated": 0,
+            "clearPixels": 1048576,
+            "comparisons": 2,
+            "coveragePasses": 4,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 2,
+            "paintDraws": 8,
+            "paintPasses": 4,
+            "paths": 4,
+            "renderPasses": 9,
+            "resolvePixels": 1048576,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.10000002384185791,
+          "firstGpuCompleteMs": 6.699999988079071,
+          "managedGpuBytes": 1382424,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 4,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 4,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            4
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 16,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 0,
+            "paintDraws": 8,
+            "paintPasses": 8,
+            "paths": 4,
+            "renderPasses": 17,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 8,
+            "uploadBytes": 384
+          },
+          "firstEncodeMs": 0.30000001192092896,
+          "firstGpuCompleteMs": 56,
+          "managedGpuBytes": 1316888,
+          "medianEncodeMs": 0.09999996423721313,
+          "medianGpuCompleteMs": 5.299999952316284,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 5.299999952316284,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            5.299999952316284
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 4,
+            "paintDraws": 8,
+            "paintPasses": 8,
+            "paths": 4,
+            "renderPasses": 17,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.10000002384185791,
+          "firstGpuCompleteMs": 8.5,
+          "managedGpuBytes": 1382424,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 5.300000011920929,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 5.300000011920929,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            5.300000011920929
+          ],
+          "setupMs": 0.09999996423721313
+        }
+      }
+    },
+    {
+      "case": "large-origin",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 2,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 1,
+            "paintDraws": 8,
+            "paintPasses": 2,
+            "paths": 4,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.10000002384185791,
+          "firstGpuCompleteMs": 5.600000023841858,
+          "managedGpuBytes": 1378464,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 2.599999964237213,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 2.599999964237213,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            2.599999964237213
+          ],
+          "setupMs": 0
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 1,
+            "denseGroups": 1,
+            "geometryDraws": 8,
+            "groups": 0,
+            "paintDraws": 8,
+            "paintPasses": 1,
+            "paths": 4,
+            "renderPasses": 3,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.09999996423721313,
+          "firstGpuCompleteMs": 8,
+          "managedGpuBytes": 10553504,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 4.699999988079071,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 4.699999988079071,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            4.699999988079071
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 524288,
+            "comparisons": 2,
+            "coveragePasses": 2,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 1,
+            "paintDraws": 8,
+            "paintPasses": 2,
+            "paths": 4,
+            "renderPasses": 5,
+            "resolvePixels": 524288,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0.10000002384185791,
+          "firstGpuCompleteMs": 5.600000023841858,
+          "managedGpuBytes": 1378464,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 2.599999964237213,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 2.599999964237213,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            2.599999964237213
+          ],
+          "setupMs": 0
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 16,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 0,
+            "paintDraws": 8,
+            "paintPasses": 8,
+            "paths": 4,
+            "renderPasses": 17,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 8,
+            "uploadBytes": 384
+          },
+          "firstEncodeMs": 0.10000002384185791,
+          "firstGpuCompleteMs": 54.10000002384186,
+          "managedGpuBytes": 1312928,
+          "medianEncodeMs": 0.09999996423721313,
+          "medianGpuCompleteMs": 5.199999988079071,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 5.199999988079071,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            5.199999988079071
+          ],
+          "setupMs": 0
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 2097152,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 0,
+            "geometryDraws": 8,
+            "groups": 4,
+            "paintDraws": 8,
+            "paintPasses": 8,
+            "paths": 4,
+            "renderPasses": 17,
+            "resolvePixels": 2097152,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 2048
+          },
+          "firstEncodeMs": 0,
+          "firstGpuCompleteMs": 8.100000023841858,
+          "managedGpuBytes": 1378464,
+          "medianEncodeMs": 0,
+          "medianGpuCompleteMs": 5.200000047683716,
+          "meshCounts": [
+            12,
+            4,
+            4
+          ],
+          "p95GpuCompleteMs": 5.200000047683716,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            5.200000047683716
+          ],
+          "setupMs": 0.09999996423721313
+        }
+      }
+    },
+    {
+      "case": "dense-color-order-partial-group",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 31,
+            "bindGroupsCreated": 0,
+            "clearPixels": 16777216,
+            "comparisons": 31,
+            "coveragePasses": 8,
+            "denseGroups": 8,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 8,
+            "paths": 33,
+            "renderPasses": 17,
+            "resolvePixels": 16777216,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.699999988079071,
+          "firstGpuCompleteMs": 49.89999997615814,
+          "managedGpuBytes": 10639104,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 46,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 46,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            46
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 16777216,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 8,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 8,
+            "paths": 33,
+            "renderPasses": 17,
+            "resolvePixels": 16777216,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.6000000238418579,
+          "firstGpuCompleteMs": 227.89999997615814,
+          "managedGpuBytes": 10639104,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 46,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 46,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            46
+          ],
+          "setupMs": 0
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 31,
+            "bindGroupsCreated": 0,
+            "clearPixels": 15204352,
+            "comparisons": 31,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 32,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.699999988079071,
+          "firstGpuCompleteMs": 51.10000002384186,
+          "managedGpuBytes": 1464064,
+          "medianEncodeMs": 0.2999999523162842,
+          "medianGpuCompleteMs": 48.5,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 48.5,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            48.5
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 116,
+            "clearPixels": 15204352,
+            "comparisons": 0,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 58,
+            "uploadBytes": 2784
+          },
+          "firstEncodeMs": 0.9000000357627869,
+          "firstGpuCompleteMs": 94.80000001192093,
+          "managedGpuBytes": 1398528,
+          "medianEncodeMs": 0.3999999761581421,
+          "medianGpuCompleteMs": 47.69999998807907,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 47.69999998807907,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            47.69999998807907
+          ],
+          "setupMs": 0
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 15204352,
+            "comparisons": 0,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 33,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.6000000238418579,
+          "firstGpuCompleteMs": 52.5,
+          "managedGpuBytes": 1464064,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 48.69999998807907,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 48.69999998807907,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            48.69999998807907
+          ],
+          "setupMs": 0.10000002384185791
+        }
+      }
+    },
+    {
+      "case": "dense-transform-ROI",
+      "differentRGBA16FBytes": {
+        "Batched": 0,
+        "Dense": 0,
+        "Disjoint": 0,
+        "Legacy": 0,
+        "Pooled": 0
+      },
+      "modes": {
+        "Batched": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 31,
+            "bindGroupsCreated": 0,
+            "clearPixels": 16777216,
+            "comparisons": 31,
+            "coveragePasses": 8,
+            "denseGroups": 8,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 8,
+            "paths": 33,
+            "renderPasses": 17,
+            "resolvePixels": 16777216,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.800000011920929,
+          "firstGpuCompleteMs": 60.19999998807907,
+          "managedGpuBytes": 10639104,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 56.09999996423721,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 56.09999996423721,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            56.09999996423721
+          ],
+          "setupMs": 0
+        },
+        "Dense": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 16777216,
+            "comparisons": 0,
+            "coveragePasses": 8,
+            "denseGroups": 8,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 8,
+            "paths": 33,
+            "renderPasses": 17,
+            "resolvePixels": 16777216,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.800000011920929,
+          "firstGpuCompleteMs": 60.09999996423721,
+          "managedGpuBytes": 10639104,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 56.90000003576279,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 56.90000003576279,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            56.90000003576279
+          ],
+          "setupMs": 0.10000002384185791
+        },
+        "Disjoint": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 31,
+            "bindGroupsCreated": 0,
+            "clearPixels": 15204352,
+            "comparisons": 31,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 32,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.800000011920929,
+          "firstGpuCompleteMs": 62.60000002384186,
+          "managedGpuBytes": 1464064,
+          "medianEncodeMs": 0.30000001192092896,
+          "medianGpuCompleteMs": 58.89999997615814,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 58.89999997615814,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            58.89999997615814
+          ],
+          "setupMs": 0.09999996423721313
+        },
+        "Legacy": {
+          "arenaBytes": 0,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 116,
+            "clearPixels": 15204352,
+            "comparisons": 0,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 0,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 58,
+            "uploadBytes": 2784
+          },
+          "firstEncodeMs": 0.8999999761581421,
+          "firstGpuCompleteMs": 111,
+          "managedGpuBytes": 1398528,
+          "medianEncodeMs": 0.3999999761581421,
+          "medianGpuCompleteMs": 60.30000001192093,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 60.30000001192093,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            60.30000001192093
+          ],
+          "setupMs": 0
+        },
+        "Pooled": {
+          "arenaBytes": 65536,
+          "counters": {
+            "barriers": 0,
+            "bindGroupsCreated": 0,
+            "clearPixels": 15204352,
+            "comparisons": 0,
+            "coveragePasses": 58,
+            "denseGroups": 0,
+            "geometryDraws": 58,
+            "groups": 33,
+            "paintDraws": 58,
+            "paintPasses": 58,
+            "paths": 33,
+            "renderPasses": 117,
+            "resolvePixels": 15204352,
+            "uniformBuffersCreated": 0,
+            "uploadBytes": 14848
+          },
+          "firstEncodeMs": 0.6000000238418579,
+          "firstGpuCompleteMs": 62.200000047683716,
+          "managedGpuBytes": 1464064,
+          "medianEncodeMs": 0.19999998807907104,
+          "medianGpuCompleteMs": 60,
+          "meshCounts": [
+            99,
+            33,
+            33
+          ],
+          "p95GpuCompleteMs": 60,
+          "queueSubmitsPerFrame": 1,
+          "samplesMs": [
+            60
+          ],
+          "setupMs": 0.09999996423721313
+        }
+      }
+    }
+  ],
+  "denseLifetimes": {
+    "cachedScratchEviction": true,
+    "pass": true,
+    "pressureBudget": 710400,
+    "pressureBytes": 644864,
+    "pressureCounters": {
+      "barriers": 95,
+      "bindGroupsCreated": 2,
+      "clearPixels": 17104896,
+      "comparisons": 95,
+      "coveragePasses": 174,
+      "denseGroups": 0,
+      "geometryDraws": 174,
+      "groups": 96,
+      "paintDraws": 174,
+      "paintPasses": 174,
+      "paths": 99,
+      "renderPasses": 349,
+      "resolvePixels": 17104896,
+      "uniformBuffersCreated": 1,
+      "uploadBytes": 44544
+    },
+    "queuedResize": true,
+    "sameEncoderResize": true,
+    "warmBytes": 4151040,
+    "warmBytesStable": true
+  },
+  "denseSupported": true,
+  "format": "rgba16float",
+  "implementation": "MRT8",
+  "measuredFrames": 1,
+  "multipleCallsBeforeSubmit": {
+    "counters": {
+      "barriers": 0,
+      "bindGroupsCreated": 4,
+      "clearPixels": 1048576,
+      "comparisons": 712,
+      "coveragePasses": 4,
+      "denseGroups": 0,
+      "geometryDraws": 400,
+      "groups": 2,
+      "paintDraws": 400,
+      "paintPasses": 4,
+      "paths": 200,
+      "renderPasses": 10,
+      "resolvePixels": 1048576,
+      "uniformBuffersCreated": 2,
+      "uploadBytes": 102400
+    },
+    "pass": true
+  },
+  "notes": [
+    "CPU encode and queue completion are measured separately; not GPU timestamps.",
+    "Readback and validation scope collection are outside frame timings.",
+    "Vello is not used in the production RGBA16F path."
+  ],
+  "pass": true,
+  "queuedSubmissions": {
+    "pass": true
+  },
+  "reverseOrder": false,
+  "warmupFrames": 3,
+  "browser": "Chrome/155.0.8059.84",
+  "artifacts": {
+    "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+    "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "3455925b0e967e94d286d193b2dc47b6c1252110befa0fffff2128c0d20e2dec",
+    "examples/vector-comparison/pkg/alto_wasm_bg.wasm": "9728b2423ca0d36414068e603fc0bb49546c65b853d2c85ee3eb402d06bc60d0"
+  },
+  "recordedAt": "2026-10-25T18:12:07.724Z"
+}

@@ -45,6 +45,23 @@ export interface ImportedFontRecord {
   warnings: { code: string; details: Record<string, string> }[];
 }
 export type FrameStats = Record<string, unknown> & {
+  /** Engine-managed allocation estimates, not browser/driver VRAM. */
+  gpuBytes: number;
+  gpu: {
+    fixed: number;
+    liveFixed: number;
+    effects: number;
+    stroke: number;
+    vector: number;
+    retiredFixed: number;
+    retired: number;
+    effectsAllocations: number;
+    effectsReuses: number;
+    atlasLayers: number;
+    displayLayers: number;
+    overviewTiles: number;
+    overviewReady: number;
+  };
   /** Display tiles composited this frame. */
   composed: number;
   pending: number;
@@ -133,15 +150,20 @@ export interface Requests {
 export type RequestName = keyof Requests;
 export type Args<K extends RequestName> = Requests[K]["args"];
 export type Result<K extends RequestName> = Requests[K]["result"];
+/** Ownership of the document a request reads or changes (SDK–Worker only). */
+export interface DocumentScope {
+  documentEpoch?: number;
+  nextDocumentEpoch?: number;
+}
 /** A request as posted: `t` names it, `id` pairs the reply. */
-export type RequestMessage = { [K in RequestName]: Args<K> & { t: K; id: number } }[RequestName];
+export type RequestMessage = { [K in RequestName]: Args<K> & { t: K; id: number } }[RequestName] & DocumentScope;
 
 /** Fire-and-forget messages: frames, input samples and view changes. */
 export type StreamMessage =
   | { t: "tick"; time: number }
   | { t: "viewport"; version: number; center: [number, number]; zoom: number; rotation: number }
   | { t: "resize"; width: number; height: number }
-  | { t: "input"; samples: Float32Array };
+  | { t: "input"; samples: Float32Array; documentEpoch?: number };
 
 export type Reply = { t: "reply"; id: number } & ({ ok: true; value: unknown } | { ok: false; error: WireError });
 

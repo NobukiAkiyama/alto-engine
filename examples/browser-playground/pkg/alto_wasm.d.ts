@@ -87,7 +87,7 @@ export class Runtime {
     select(spec: string): string;
     selectionOutline(): string;
     /**
-     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+     * Names for `tick`'s numbers, in order. A `prefetch.`, `gpu.` or `profile.` prefix
      * nests the field; `profile.*` is present only when `hasProfile` is 1.
      * Whether resumable jobs leave input decoding to the Worker's decode pool.
      */

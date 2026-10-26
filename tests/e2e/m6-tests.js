@@ -86,6 +86,28 @@ export async function runM6Tests(engine,log){
    const left=await unstable(engine).readTileLevel(-6,54,62),right=await unstable(engine).readTileLevel(-6,55,62);assert(Math.abs(pixel(left,255,128)[3]-pixel(right,0,128)[3])<=2,'blur seam at high zoom');assert(pixel(right,0,128)[3]>30&&pixel(right,0,128)[3]<230,'backdrop blur missing at high zoom');
    await doc.vectors.setMask(layer,{path:p.data,feather:64});await unstable(engine).readTileLevel(-6,55,62);await frame(engine);
  });
+ await test('dense ordered paths survive edits, tile seams, effects, masks, ZIP and GPU rebuild',async()=>{
+   doc=await engine.createDocument({width:512,height:512});
+   const data=await engine.vectors.parseSvg('M160 160H360V360H160Z');
+   const paths=Array.from({length:33},(_,i)=>({data,fill:[i%3/2,(i*7)%11/10,.7,.08],stroke:{color:[.8,.1,.3,.2],width:12,cap:'round',join:'round',miter_limit:4},fill_rule:'non_zero'}));
+   await doc.transact('dense paths',tx=>layer=tx.addVector(paths));await frame(engine);
+   const reference=[0,0,0,0];
+   for(const p of paths){const a=p.fill[3];for(let i=0;i<3;i++)reference[i]=p.fill[i]*a+reference[i]*(1-a);reference[3]=a+reference[3]*(1-a);}
+   assert(near(await at(engine,250,250),reference.map(v=>Math.round(v*255)),2),'dense color order');
+   assert(same(await at(engine,255,255),await at(engine,256,256)),'dense tile seam');
+   const before=await unstable(engine).readTile(0,0),edited=structuredClone(paths);edited[32].fill=[0,1,0,.5];
+   await doc.vectors.set(layer,edited);const after=await unstable(engine).readTile(0,0);
+   assert(!same(before,after),'dense edit was stale');await doc.undo();assert(same(before,await unstable(engine).readTile(0,0)),'dense Undo');
+   await doc.redo();assert(same(after,await unstable(engine).readTile(0,0)),'dense Redo');
+   await doc.effects.set(layer,[{type:'gaussian_blur',radius:4}],{useSelection:false});
+   await doc.vectors.setMask(layer,{path:await engine.vectors.parseSvg('M220 0H512V512H220Z'),feather:4});
+   assert((await at(engine,200,250))[3]===0,'dense mask exterior');assert((await at(engine,300,300))[3]>200,'dense mask interior');
+   const masked=await unstable(engine).readTile(0,0),hash=await doc.snapshotHash(),bytes=await testing(engine).saveBytes();
+   doc=await engine.open(new Blob([bytes]));assert(hash===await doc.snapshotHash(),'dense ZIP hash');assert(same(masked,await unstable(engine).readTile(0,0)),'dense ZIP pixels');
+   const restored=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{off();reject(Error('dense GPU recovery timeout'));},15000);const off=unstable(engine).onGpu(g=>{if(g==='restored'){clearTimeout(timer);off();resolve();}});});
+   await testing(engine).destroyGpu();await restored;
+   assert(same(masked,await unstable(engine).readTile(0,0)),'dense GPU rebuild pixels');await frame(engine);
+ });
  await test('mesh cache reuse / invalid vector edits reject atomically',async()=>{
    doc=await engine.createDocument({width:512,height:512});const p=await styled(engine,'M100 100 Q256 0 400 100 V400 H100 Z');await doc.transact('path',tx=>layer=tx.addVector([p]));await unstable(engine).readTile(0,0);const a=await unstable(engine).vectorStats();await doc.transact('opacity',tx=>tx.setProps(layer,{opacity:.8}));await unstable(engine).readTile(0,0);const b=await unstable(engine).vectorStats();assert(b.hits>a.hits,'mesh was not reused');assert(b.misses===a.misses,'opacity retessellated');
    const snapshot=(await doc.snapshotHash()),revision=doc.getSnapshot().revision;
