@@ -32,6 +32,7 @@ export type BuiltInIntent =
   | "image.flip"
   | "image.resize"
   | "version.restore"
+  | "render.upgrade"
   | "recovered.edit";
 
 export type IntentId = BuiltInIntent | `app:${string}`;

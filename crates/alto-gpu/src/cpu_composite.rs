@@ -1481,6 +1481,87 @@ fn pre_bump_documents_match_the_recorded_main_hashes() {
     );
 }
 
+/// Version 2 changes pixels, so moving a document onto it is one undoable edit.
+/// Opening and saving a version 1 snapshot leaves the version, and therefore the
+/// locked hashes, where they were.
+#[test]
+fn upgrading_a_version_one_document_switches_the_locked_hashes_and_undo_restores_them() {
+    use alto_engine::Engine;
+
+    let v1: std::collections::BTreeMap<_, _> =
+        parse_reference(&std::fs::read_to_string(render_v1_path()).unwrap())
+            .into_iter()
+            .map(|(name, hash, fnv)| (name, (hash, fnv)))
+            .collect();
+    let v2: std::collections::BTreeMap<_, _> =
+        parse_reference(&std::fs::read_to_string(reference_path()).unwrap())
+            .into_iter()
+            .map(|(name, hash, fnv)| (name, (hash, fnv)))
+            .collect();
+    let catalog: std::collections::BTreeMap<_, _> = cases()
+        .into_iter()
+        .map(|case| (case.name.clone(), case))
+        .collect();
+    let hashes = |case: &Case, version: u32| {
+        let tile = render_at(case, version);
+        (
+            ContentHash::of(&tile).hex(),
+            format!("{:016x}", fnv64(&tile)),
+        )
+    };
+    let bilinear = &catalog["scale-bilinear"];
+    let rotation = &catalog["rotation"];
+
+    let mut engine = Engine::new();
+    let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
+    meta.render_version = RENDER_VERSION_F32;
+    meta.format_version = 1;
+    let handle = engine.create_document(meta).unwrap();
+    let saved = engine.snapshot(handle).unwrap();
+    let text = String::from_utf8(saved.clone()).unwrap();
+    assert!(
+        !text.contains("render_version"),
+        "saving a version 1 document must not upgrade it"
+    );
+    let opened = engine.open_snapshot(&saved).unwrap();
+    assert_eq!(engine.snapshot(opened).unwrap(), saved);
+    assert_eq!(engine.history_state(opened).unwrap(), (0, 0));
+    assert_eq!(
+        engine.document(opened).unwrap().meta.render_version,
+        RENDER_VERSION_F32
+    );
+
+    let version = engine.document(handle).unwrap().meta.render_version;
+    assert_eq!(hashes(bilinear, version), v1["scale-bilinear"]);
+    let rotation_v1 = hashes(rotation, version);
+    assert_ne!(rotation_v1, v2["rotation"]);
+    assert_eq!(
+        engine.render_scene(handle).unwrap().render_version,
+        RENDER_VERSION_F32
+    );
+
+    engine.upgrade_render_version(handle).unwrap();
+    assert_eq!(engine.history_state(handle).unwrap(), (1, 0));
+    let version = engine.document(handle).unwrap().meta.render_version;
+    assert_eq!(version, RENDER_VERSION);
+    assert_eq!(hashes(bilinear, version), v2["scale-bilinear"]);
+    assert_eq!(hashes(rotation, version), v2["rotation"]);
+    assert_eq!(
+        engine.render_scene(handle).unwrap().render_version,
+        RENDER_VERSION
+    );
+    let upgraded = String::from_utf8(engine.snapshot(handle).unwrap()).unwrap();
+    assert!(upgraded.contains("\"render_version\": 2"));
+    assert!(upgraded.contains("\"format_version\": 3"));
+
+    engine.undo(handle).unwrap();
+    let version = engine.document(handle).unwrap().meta.render_version;
+    assert_eq!(version, RENDER_VERSION_F32);
+    assert_eq!(hashes(bilinear, version), v1["scale-bilinear"]);
+    assert_eq!(hashes(rotation, version), rotation_v1);
+    assert_eq!(engine.snapshot(handle).unwrap(), saved);
+}
+
 #[test]
 fn cpu_reference_hashes_match_the_locked_file() {
     let path = reference_path();

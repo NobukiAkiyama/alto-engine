@@ -839,6 +839,16 @@ impl Runtime {
             .map_err(error)?;
         self.command("effects.set", ops)
     }
+    /// One undoable edit from render version 1 to version 2. Load and save do not
+    /// call this. A document already on version 2 is rejected.
+    #[wasm_bindgen(js_name=upgradeRenderVersion)]
+    pub fn upgrade_render_version(&mut self) -> Result<String, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("CONFLICT: finish tool first"));
+        }
+        let ops = self.engine.render_upgrade_ops(self.doc).map_err(error)?;
+        self.command("render.upgrade", ops)
+    }
     #[wasm_bindgen(js_name=importRgba)]
     pub fn import_rgba(
         &mut self,

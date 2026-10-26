@@ -57,6 +57,12 @@ export declare class DocumentHandle {
     /** Redoes the last undone edit. */
     redo(): Promise<void>;
     /**
+     * Switches a version-1 document to render version 2 as one undoable edit.
+     * Bilinear and rotated samples change. Opening or saving a document does not
+     * do this. A document that is already version 2 is rejected.
+     */
+    upgradeRenderVersion(): Promise<void>;
+    /**
      * Resolves once every edit made so far is in the recovery journal. Edits resolve
      * when applied; this rejects with STORAGE if the journal could not be written.
      */

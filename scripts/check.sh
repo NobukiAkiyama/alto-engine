@@ -25,6 +25,12 @@ fi
 pkg_out=$(mktemp -d)
 trap 'rm -rf "$pkg_out"' EXIT
 sh scripts/build-wasm-pkg.sh "$pkg_out"
+# Left for the CI artifact upload when the hash check fails. Removed once the
+# aarch64-apple-darwin hashes are recorded.
+mkdir -p "$CARGO_TARGET_DIR/wasm-ci-release"
+rm -rf "$CARGO_TARGET_DIR/wasm-ci-release"
+mkdir -p "$CARGO_TARGET_DIR/wasm-ci-release"
+cp -a "$pkg_out"/. "$CARGO_TARGET_DIR/wasm-ci-release/"
 sh scripts/verify-wasm-sums.sh release "$pkg_out"
 sh scripts/guard-pkg-replace.sh examples/browser-playground/pkg
 rm -rf examples/browser-playground/pkg

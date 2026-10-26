@@ -88,7 +88,7 @@ export interface BrushOptions {
 }
 
 // @public
-export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "recovered.edit";
+export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "render.upgrade" | "recovered.edit";
 
 // @public (undocumented)
 export interface ClipPath {
@@ -296,6 +296,7 @@ export class DocumentHandle {
     };
     transact<T>(intent: Intent, build: (tx: Transaction) => T): Promise<T>;
     undo(): Promise<void>;
+    upgradeRenderVersion(): Promise<void>;
     readonly vectors: {
         set: (id: NodeId, paths: StyledPath[]) => Promise<void>;
         setMask: (id: NodeId, mask: VectorMask | null) => Promise<void>;

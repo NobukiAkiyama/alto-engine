@@ -226,3 +226,22 @@ pub fn bilinear_byte(a: u8, b: u8, d: u8, e: u8, fx: i32, fy: i32) -> u8 {
     let acc = ab * (256 - fy) + de * fy;
     ((acc + 32768) >> 16) as u8
 }
+
+#[cfg(test)]
+mod tests {
+    use super::source_axis;
+
+    #[test]
+    fn cancelling_q24_sum_is_exact_and_out_of_range_is_transparent() {
+        // m0*px is past 2^53. f64 rounds it, so the cancelled sum is 32768
+        // (Q8 1). The i64 sum is 32735, which rounds to Q8 0.
+        let q = source_axis(2_147_483_647, 2_000_000_033, 0, 0, -16_777_216_269_011_436);
+        assert_eq!(q, Some(0));
+        let f64_sum = 2_147_483_647f64 * 2_000_000_033f64 + -16_777_216_269_011_436f64 * 256.0;
+        assert_eq!(f64_sum, 32_768.0);
+        // Rounded Q8 is 2^31, outside i32.
+        assert_eq!(source_axis(0, 0, 0, 0, 1_i64 << 39), None);
+        // translation * 256 overflows i64.
+        assert_eq!(source_axis(0, 0, 0, 0, i64::MAX), None);
+    }
+}

@@ -7,6 +7,9 @@
  * (the default) uses the integer 4-tap from crates/alto-gpu/src/sample.rs:
  * Q16 coefficients, round half away from zero; Q8 positions; bilinear weights
  * in 0..255; channel bytes round half up with `(acc + 32768) >> 16`.
+ * The Q24 sum is BigInt, the same checked i64 arithmetic as Rust. A term past
+ * 2^53 that cancels to a small sum stays exact, and a rounded Q8 coordinate
+ * outside i32 is transparent.
  * The browser suite compares version 2 bytes with production readTile output.
  */
 export const RENDER_VERSION_F32 = 1;
@@ -277,16 +280,38 @@ function pixelQ8(origin, index, scale) {
   const q = origin * 256 + term * scale;
   return fitsI32(q) ? q : null;
 }
-function roundShr16(v) {
-  if (!Number.isSafeInteger(v)) return null;
-  const adjusted = v >= 0 ? v + 32768 : v - 32768;
-  if (!Number.isSafeInteger(adjusted)) return null;
-  return Math.floor(adjusted / 65536);
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+function asBig(v) {
+  return typeof v === "bigint" ? v : BigInt(v);
 }
-function sourceAxis(m0, px, m1, py, translation) {
-  const sum = m0 * px + m1 * py + translation * 256;
+function fitsI64(v) {
+  return v >= I64_MIN && v <= I64_MAX;
+}
+function roundShr16(v) {
+  if (!fitsI64(v)) return null;
+  const half = 1n << 15n;
+  const adjusted = v >= 0n ? v + half : v - half;
+  if (!fitsI64(adjusted)) return null;
+  return adjusted >> 16n;
+}
+/**
+ * Q8 source coordinate for one axis. `m0`, `px`, `m1`, `py` are i32; `translation`
+ * is i64 Q16. The sum is exact integer arithmetic. `null` when an i64 step
+ * overflows or the rounded Q8 value does not fit in i32.
+ */
+export function sourceAxis(m0, px, m1, py, translation) {
+  const a = asBig(m0) * asBig(px);
+  const b = asBig(m1) * asBig(py);
+  const t = asBig(translation) * 256n;
+  if (!fitsI64(a) || !fitsI64(b) || !fitsI64(t)) return null;
+  const ab = a + b;
+  if (!fitsI64(ab)) return null;
+  const sum = ab + t;
+  if (!fitsI64(sum)) return null;
   const q = roundShr16(sum);
-  return q !== null && fitsI32(q) ? q : null;
+  if (q === null || q < BigInt(I32_MIN) || q > BigInt(I32_MAX)) return null;
+  return Number(q);
 }
 function sourceQ8(q, px, py) {
   const x = sourceAxis(q.m[0], px, q.m[2], py, q.tx);
