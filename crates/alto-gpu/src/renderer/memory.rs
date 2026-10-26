@@ -95,6 +95,12 @@ impl Ledger {
 mod tests {
     use super::*;
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_renderer_remains_transferable_to_its_worker() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::super::Renderer>();
+    }
+    #[test]
     fn budget_reservations_fit_half_and_preserve_default() {
         for (mb, expected) in [
             (512, (512, 256)),

@@ -752,8 +752,11 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
     .map_err(error)?;
     queue.submit(Some(e.finish()));
     r.after_submit();
-    let budget = r.bytes() + 1;
-    r.take_counters();
+    // Legacy also allocates one 48-byte uniform per mesh draw. Reserve those
+    // commands, while leaving too little space for a 64 KiB arena page.
+    let legacy_commands = r.take_counters().upload_bytes;
+    let budget = r.bytes() + legacy_commands;
+    idle(&queue).await?;
     r.set_mode(VectorMode::Batched);
     let mut e = device.create_command_encoder(&Default::default());
     r.render(
@@ -890,15 +893,27 @@ async fn check_dense_lifetimes(
     let budget = r.mesh_bytes() + 256 * 384 * 5 + r.arena_bytes().max(65536);
     r.take_counters();
     let mut e = device.create_command_encoder(&Default::default());
-    r.render(device, queue, &mut e, b, &refs, world, rois[1], 20, budget)
+    // Retiring optional scratch does not free its physical allocation before
+    // completion. A new arena page must be blocked while those bytes remain.
+    let blocked = matches!(
+        r.render(device, queue, &mut e, b, &refs, world, rois[1], 20, budget),
+        Err(alto_gpu::RenderError::Budget(_))
+    );
+    queue.submit(Some(e.finish()));
+    r.after_submit();
+    idle(queue).await?;
+    r.take_counters();
+    let mut e = device.create_command_encoder(&Default::default());
+    r.render(device, queue, &mut e, b, &refs, world, rois[1], 21, budget)
         .map_err(error)?;
     queue.submit(Some(e.finish()));
     r.after_submit();
     let c = r.take_counters();
-    let pressure = r.bytes() <= budget
+    let pressure = blocked
+        && r.bytes() <= budget
         && c.dense_groups == 0
         && pixels(device, queue, b).await? == expected[1];
-    let result = serde_json::json!({"pass":same_encoder && queued && stable && pressure,"sameEncoderResize":same_encoder,"queuedResize":queued,"warmBytesStable":stable,"cachedScratchEviction":pressure,"warmBytes":before,"pressureBytes":r.bytes(),"pressureBudget":budget,"pressureCounters":metrics(c)});
+    let result = serde_json::json!({"pass":same_encoder && queued && stable && pressure,"sameEncoderResize":same_encoder,"queuedResize":queued,"warmBytesStable":stable,"cachedScratchEviction":pressure,"retirementPressureBlocked":blocked,"warmBytes":before,"pressureBytes":r.bytes(),"pressureBudget":budget,"pressureCounters":metrics(c)});
     r.destroy_after_submit();
     Ok(result)
 }

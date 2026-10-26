@@ -1,7 +1,7 @@
 //! General M5 tile renderer. Back-propagated ROIs provide the halo for every blur stage.
 //! Temporary targets are pooled and reused in queue order, including between display tiles.
 use super::*;
-use std::rc::{Rc, Weak};
+use std::sync::Weak;
 const POOL_IDLE_FRAMES: u64 = 8;
 fn bucket(n: u32) -> u32 {
     n.max(1).next_multiple_of(64)
@@ -75,7 +75,7 @@ struct Params {
 struct Target {
     index: usize,
     roi: Roi,
-    _lease: Rc<()>,
+    _lease: Arc<()>,
 }
 struct Pooled {
     texture: wgpu::Texture,
@@ -181,7 +181,7 @@ impl Context<'_> {
     fn dummy(&self) -> Target {
         Target {
             index: 0,
-            _lease: Rc::new(()),
+            _lease: Arc::new(()),
             roi: Roi {
                 x: 0.0,
                 y: 0.0,
@@ -243,7 +243,7 @@ impl Context<'_> {
                 "effect bucket exceeds texture limits".into(),
             ));
         }
-        let lease = Rc::new(());
+        let lease = Arc::new(());
         // Weak leases track every retained ancestor and clipping backdrop. A slot is
         // reused only after its last CPU owner has encoded its last read.
         let reuse = self
@@ -293,7 +293,7 @@ impl Context<'_> {
             self.resources.pool.len() - 1
         };
         let pooled = &mut self.resources.pool[index];
-        pooled.lease = Rc::downgrade(&lease);
+        pooled.lease = Arc::downgrade(&lease);
         pooled.used = self.r.frame;
         let view = pooled.texture.create_view(&Default::default());
         // This GPU clear follows all old reads in this encoder. Queue writes here
@@ -1217,8 +1217,8 @@ mod pool_tests {
         assert_eq!(bucket(256), 256);
         assert_eq!(bucket(280), 320);
         assert_eq!(bucket(1), 64);
-        let owner = Rc::new(());
-        let lease = Rc::downgrade(&owner);
+        let owner = Arc::new(());
+        let lease = Arc::downgrade(&owner);
         let ancestor = owner.clone();
         drop(owner);
         assert_eq!(lease.strong_count(), 1);
