@@ -43,6 +43,8 @@ export class DocumentHandle {
     }
     /** @internal */
     apply(state) {
+        if (this.closed)
+            return;
         const change = this.store.apply(state);
         if (!change)
             return;
@@ -67,22 +69,27 @@ export class DocumentHandle {
     /** Requests go through here, so a replaced handle cannot touch the new document. */
     request = ((...args) => this.closed
         ? Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }))
-        : this.core.request(...args));
+        : this.core.requestForDocument(this, ...args));
     /** @internal The engine opened another document; this handle refuses further calls. */
     close() {
         this.closed = true;
+        this.abortTool(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
         this.listeners.clear();
     }
     command(type, payload) {
         return this.edit(async () => {
-            this.apply(await this.core.request(type, payload));
+            this.apply(await this.request(type, payload));
         });
     }
     async edit(fn) {
         if (this.closed)
             throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
-        await this.endTool();
-        return this.core.mutate(fn);
+        return this.core.mutate(async () => {
+            if (this.closed)
+                throw new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" });
+            await this.endTool();
+            return fn();
+        });
     }
     /**
      * Applies one edit. `build` must be synchronous; its return value is returned.

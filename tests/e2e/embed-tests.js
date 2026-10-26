@@ -1,6 +1,6 @@
 // Embedding: engines a host creates in its own containers, with their own storage
 // namespaces, through the public API. Each test starts and disposes its own engines.
-import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces } from "../../packages/alto-sdk/dist/index.js";
+import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
 import { blobTarget } from "../../packages/alto-sdk/dist/browser.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
@@ -33,7 +33,7 @@ function container(width = 320, height = 240) {
 }
 const started = [];
 async function engineIn(el, options = {}) {
-  const engine = await createEngine({ container: el, storage: { namespace: name("engine"), ...options.storage } });
+  const engine = await createEngine({ container: el, gpu: options.gpu, storage: { namespace: name("engine"), ...options.storage } });
   started.push({ engine, el });
   return engine;
 }
@@ -91,6 +91,26 @@ export async function runEmbedTests(_playground, log) {
     log("PASS " + label);
   };
   try {
+    await test("64/128/256 MiB budgets reserve at most half and preserve brush pixels", async () => {
+      for (const [budget, fixed] of [[64,32],[128,64],[256,128]]) {
+        const engine=await engineIn(container(128,128),{gpu:{memoryBudgetMB:budget}});
+        const doc=await engine.createDocument({width:64,height:64});
+        let layer; await doc.transact("layer",tx=>{layer=tx.addRaster();});
+        const stroke=doc.tools.begin("brush",{layer,color:[1,0,0,1],tip:{size:16,hardness:1}});
+        stroke.input({x:32,y:32,pressure:1}); await stroke.end();
+        const tile=await unstable(engine).readTile(0,0), i=(32*256+32)*4;
+        assert(Array.from(tile.slice(i,i+4)).join()==="255,0,0,255",`brush at ${budget}`);
+        const frame=await unstable(engine).settle();
+        assert(frame.gpu.fixed-frame.gpu.retiredFixed===fixed*1048576,`reservation at ${budget}: ${frame.gpu.fixed}`);
+        assert(frame.gpuBytes<=budget*1048576,"GPU budget exceeded");
+        await cleanUp();
+      }
+      const el=container();
+      let rejected=false;
+      try { const bad=await createEngine({container:el,gpu:{memoryBudgetMB:63},storage:{namespace:name("too-small")}}); await bad.dispose(); }
+      catch(e){ rejected=String(e).includes("64 MiB"); }
+      el.remove(); assert(rejected,"budget under 64 MiB was accepted");
+    });
     await test("the browser is supported", async () => {
       const support = await isSupported();
       assert(support.ok, "isSupported: " + JSON.stringify(support));
@@ -299,6 +319,112 @@ export async function runEmbedTests(_playground, log) {
       assert(engine.recovery.available, "the new document was not journaled after discard");
       const restored = await engine.recovery.restore();
       assert(restored.getSnapshot().meta.width === 64, "restored the discarded document");
+    });
+    await test("an edit queued on the old handle cannot select the replacement document", async () => {
+      const engine = await engineIn(container());
+      const old = await engine.createDocument({ width: 64, height: 64 });
+      let replacement, selected, triggered = false;
+      old.subscribe(() => {
+        if (triggered) return;
+        triggered = true;
+        replacement = engine.createDocument({ width: 128, height: 128 });
+        selected = rejectsWith(old.selection.all(), "CONFLICT", "document-closed");
+      });
+      await old.transact("layer.add", (tx) => tx.addRaster({ name: "old" }));
+      const next = await replacement;
+      assert(await selected, "the queued selection on the old handle succeeded");
+      assert(next.getSnapshot().selection === null, "the old handle selected the new document");
+      assert(old.getSnapshot().meta.width === 64, "the old handle adopted the replacement's state");
+      await next.transact("layer.add", (tx) => tx.addRaster({ name: "new" }));
+    });
+    await test("discard refuses a live document and preserves its confirmed recovery journal", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      await doc.transact("layer.add", (tx) => tx.addRaster({ name: "kept" }));
+      await doc.durable();
+      const hash = await doc.snapshotHash();
+      const before = await testing(engine).recoveryStore();
+      assert(await rejectsWith(engine.recovery.discard(), "CONFLICT", "no-recovery"),
+        "discard deleted a live document's recovery journal");
+      // The Worker must enforce the condition too, even without the SDK's guard.
+      assert(await rejectsWith(testing(engine).request("discardRecovery"), "CONFLICT", "no-recovery"),
+        "the Worker discarded the live journal");
+      const after = await testing(engine).recoveryStore();
+      assert(JSON.stringify(after) === JSON.stringify(before), "discard changed the recovery store");
+      await testing(engine).crash();
+      assert((await doc.snapshotHash()) === hash, "the confirmed document did not recover");
+    });
+    await test("archive and folder opens reject edits queued on the replaced handle", async () => {
+      for (const format of ["archive", "folder"]) {
+        const engine = await engineIn(container());
+        const old = await engine.createDocument({ width: 64, height: 64 });
+        await old.transact("layer.add", (tx) => tx.addRaster({ name: "saved" }));
+        const target = blobTarget(), folder = new MemoryObjectProvider();
+        if (format === "archive") await old.save(target);
+        else await old.saveFolder(folder);
+        let replacement, selected, triggered = false;
+        old.subscribe(() => {
+          if (triggered) return;
+          triggered = true;
+          replacement = format === "archive" ? engine.open(target.blob) : engine.openFolder(folder);
+          selected = rejectsWith(old.selection.all(), "CONFLICT", "document-closed");
+        });
+        await old.transact("layer.add", (tx) => tx.addRaster({ name: "after save" }));
+        const next = await replacement;
+        assert(await selected, format + " let an old edit through");
+        assert(next !== old && next.getSnapshot().selection === null, format + " selected the new document");
+        await engine.dispose();
+      }
+    });
+    await test("the Worker rejects obsolete document epochs for edits, reads and durability", async () => {
+      const engine = await engineIn(container());
+      await engine.createDocument({ width: 64, height: 64 });
+      const next = await engine.createDocument({ width: 128, height: 128 });
+      // Epoch 1 belonged to the first handle. Bypass the SDK check to test the
+      // Worker's execution-time guard, including durable's separate reply path.
+      for (const [request, payload] of [
+        ["select", { spec: { kind: "all" } }], ["snapshotHash", {}], ["durable", {}],
+      ])
+        assert(await rejectsWith(testing(engine).request(request, { ...payload, documentEpoch: 1 }), "CONFLICT", "document-closed"),
+          "the Worker accepted a stale " + request);
+      assert(next.getSnapshot().selection === null, "a stale request changed the new document");
+      await next.transact("layer.add", (tx) => tx.addRaster());
+      await next.durable();
+      const hash = await next.snapshotHash();
+      await testing(engine).crash();
+      assert((await next.snapshotHash()) === hash, "the current epoch stopped working after restart");
+    });
+    await test("document replacement finishes the stroke on the old document first", async () => {
+      const engine = await engineIn(container());
+      const old = await engine.createDocument({ width: 64, height: 64 });
+      let layer;
+      await old.transact("layer.add", (tx) => (layer = tx.addRaster()));
+      const stroke = old.tools.begin("brush", { layer, color: [1, 0, 0, 1] });
+      stroke.input({ x: 10, y: 10 });
+      stroke.input({ x: 40, y: 40 });
+      const next = await engine.createDocument({ width: 128, height: 128 });
+      await stroke.end();
+      assert(!stroke.active && !old.activeTool, "the old stroke was left active");
+      assert(old.getSnapshot().history.undo === 2, "the stroke was not committed to the old document");
+      assert(next.getSnapshot().history.undo === 0 && next.getSnapshot().nodes.size === 1,
+        "the old stroke changed the replacement document");
+    });
+    await test("restore and discard cannot race to delete the restored journal", async () => {
+      const el = container();
+      const namespace = name("restore-discard");
+      let engine = await engineIn(el, { storage: { namespace } });
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      await doc.transact("layer.add", (tx) => tx.addRaster({ name: "kept" }));
+      await doc.durable();
+      const hash = await doc.snapshotHash();
+      await engine.dispose();
+      engine = await engineIn(el, { storage: { namespace } });
+      const restored = engine.recovery.restore();
+      const discarded = rejectsWith(engine.recovery.discard(), "CONFLICT", "no-recovery");
+      const next = await restored;
+      assert(await discarded, "discard deleted the journal after restore");
+      await testing(engine).crash();
+      assert((await next.snapshotHash()) === hash, "the restored journal was lost");
     });
     await test("journals are listed by namespace and deleted only when unused", async () => {
       const namespace = name("listed");

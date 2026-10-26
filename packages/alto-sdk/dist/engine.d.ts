@@ -67,7 +67,7 @@ export interface Engine {
         /** A journal from an earlier session is waiting. */
         readonly available: boolean;
         restore(): Promise<DocumentHandle>;
-        /** Deletes the waiting journal, so a new document can start. */
+        /** Deletes the waiting journal, so a new document can start. Refused when a document is open. */
         discard(): Promise<void>;
         /** The live document as a `.alto` archive, for use when storage has failed. */
         exportEmergency(): Promise<Blob>;

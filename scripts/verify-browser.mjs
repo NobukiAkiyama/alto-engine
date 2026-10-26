@@ -3,8 +3,13 @@
 // ALTO_BROWSER_GPU=swiftshader runs WebGPU on a software adapter in CI.
 // --examples opens the Vite builds of examples/minimal-embed and react-embed instead
 // and drives each through the public API it exposes (build them first).
+// --suite=functional (or comma-separated names) narrows a diagnostic run.
+// Every run saves Chrome stderr and CDP GPU/process/console diagnostics. An explicit
+// ALTO_BROWSER_EXPECTED_VERSION refuses a changed browser; watchdogs stay on unless
+// ALTO_BROWSER_DISABLE_GPU_WATCHDOG=1 is set for a controlled comparison.
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, createReadStream, existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
@@ -15,6 +20,17 @@ const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
 const benchmarkOnly = process.argv.includes("--benchmark-only");
 const examplesOnly = process.argv.includes("--examples");
+const vectorOnly = process.argv.includes("--vector-optimization");
+const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
+const startupOnly = process.argv.includes("--startup-only");
+const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
+const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
+const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
+const surfaceRecording = process.env.ALTO_BROWSER_SURFACE_RECORDING === "1";
+const resizeBarrier = process.env.ALTO_BROWSER_RESIZE_BARRIER === "1";
+const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
+const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
+if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
 const browserDpr = Number(process.env.ALTO_BROWSER_DPR || 0);
 const browserWidth = Number(process.env.ALTO_BROWSER_WIDTH || 0);
 const browserHeight = Number(process.env.ALTO_BROWSER_HEIGHT || 0);
@@ -92,7 +108,15 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      createReadStream(path).on("error", () => res.destroy()).pipe(res);
+      if ((surfaceRecording || resizeBarrier) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+        let source = await readFile(path, "utf8");
+        if (resizeBarrier) {
+          const target = "runtime.resize(pendingResize.width, pendingResize.height);";
+          if (source.split(target).length !== 2) throw Error("resize barrier target changed");
+          source = source.replace(target, "await runtime.gpuIdle(); " + target);
+        }
+        res.end((surfaceRecording ? (await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8")) + "\n" : "") + source);
+      } else createReadStream(path).on("error", () => res.destroy()).pipe(res);
     } catch {
       res.writeHead(404).end();
     }
@@ -107,7 +131,7 @@ async function startServer() {
 async function browserPage(profile, proc, chromeError) {
   for (let i = 0; i < 160; i++) {
     if (chromeError()) throw Error("Chrome failed to start: " + chromeError());
-    if (proc.exitCode !== null) throw Error("Chrome exited with " + proc.exitCode);
+    if (proc.exitCode !== null || proc.signalCode !== null) throw Error("Chrome exited with " + (proc.signalCode ?? proc.exitCode));
     try {
       const port = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
       const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
@@ -120,12 +144,13 @@ async function browserPage(profile, proc, chromeError) {
   throw Error("Chrome debugging port did not open");
 }
 
-async function connect(url) {
+async function connect(url, onEvent = () => {}) {
   const ws = new WebSocket(url);
   const pending = new Map();
   let id = 0;
   ws.addEventListener("message", ({ data }) => {
     const message = JSON.parse(data);
+    if (message.method) onEvent(message);
     const request = pending.get(message.id);
     if (!request) return;
     clearTimeout(request.timer);
@@ -140,12 +165,12 @@ async function connect(url) {
   });
   return {
     close: () => ws.close(),
-    send: (method, params = {}) => new Promise((resolve, reject) => {
+    send: (method, params = {}, timeoutMs = 600000) => new Promise((resolve, reject) => {
       const requestId = ++id;
       const timer = setTimeout(() => {
         pending.delete(requestId);
         reject(Error("CDP timeout: " + method));
-      }, 600000);
+      }, timeoutMs);
       pending.set(requestId, { resolve, reject, timer });
       ws.send(JSON.stringify({ id: requestId, method, params }));
     }),
@@ -161,26 +186,54 @@ const suites = [
   ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
   ["parity", `const { runParityTests } = await import('../../tests/e2e/parity-tests.js'); await runParityTests(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
+  ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
+if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
+  throw Error("Unknown --suite: " + selectedSuites.join(","));
 
-let server, chrome, client, profile;
+let server, chrome, client, browserClient, profile;
 const summary = [];
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, resizeBarrier, browser: null, executable: null, args: [], events: [], system: [] };
+let stderr = "", traceStream = null, traceStarted = false, unexpectedSurfaceFault = false;
+const recordEvent = ({ method, params }) => {
+  if (method === "Tracing.tracingComplete") traceStream = params.stream;
+  if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
+  diagnostics.events.push({ at: new Date().toISOString(), method, params });
+  if (diagnostics.events.length > 500) diagnostics.events.shift();
+};
+async function sampleSystem(label) {
+  if (!browserClient) return;
+  const sample = { label, at: new Date().toISOString() };
+  for (const method of ["SystemInfo.getInfo", "SystemInfo.getProcessInfo"])
+    try { sample[method] = (await browserClient.send(method, {}, 5000)).result; }
+    catch (error) { sample[method] = { error: String(error) }; }
+  diagnostics.system.push(sample);
+  await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
+}
 try {
   await mkdir(reportDir, { recursive: true });
+  await writeFile(join(reportDir, "chrome-stderr.log"), "");
+  diagnostics.artifacts = {};
+  for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm", ...(vectorOnly ? ["examples/vector-comparison/pkg/alto_wasm_bg.wasm"] : [])])
+    diagnostics.artifacts[file] = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
   server = await startServer();
   const address = server.address();
   const query = new URLSearchParams();
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
-  const pageUrl = `http://127.0.0.1:${address.port}/examples/browser-playground/${query.size ? "?" + query : ""}`;
+  const pageUrl = `http://127.0.0.1:${address.port}/${vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
-  let stderr = "";
-  chrome = spawn(chromeBin(), [
+  const executable = chromeBin();
+  const args = [
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
     "--headless=new",
     "--enable-unsafe-webgpu",
+    "--enable-logging=stderr",
+    ...(graphiteBackend === "swiftshader" ? ["--enable-skia-graphite", "--skia-graphite-dawn-backend=swiftshader",
+      ...(platform() === "linux" ? ["--enable-gpu", "--use-angle=swiftshader"] : [])] : []),
+    ...(disableGpuWatchdog ? ["--disable-gpu-watchdog"] : []),
     ...(process.env.ALTO_BROWSER_GPU === "swiftshader"
       ? ["--use-webgpu-adapter=swiftshader", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader"]
       : platform() === "darwin" ? ["--use-angle=metal"] : []),
@@ -188,21 +241,46 @@ try {
     "--disable-gpu-sandbox",
     "--window-size=1280,800",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ];
+  diagnostics.executable = executable;
+  diagnostics.args = args;
+  chrome = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
   chrome.on("error", (error) => { launchError = error; });
-  chrome.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+  chrome.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk).slice(-2 * 1024 * 1024);
+    if (surfaceRecording && stderr.includes('"SURFACE-FAILURE ')) unexpectedSurfaceFault = true;
+    // Keep the evidence even if a hung test is killed before finally runs.
+    appendFileSync(join(reportDir, "chrome-stderr.log"), chunk);
+  });
   const { version, page } = await browserPage(profile, chrome, () => launchError);
   console.log(version.Browser);
-  client = await connect(page.webSocketDebuggerUrl);
+  diagnostics.browser = version;
+  if (expectedVersion && version.Browser.split("/").pop() !== expectedVersion)
+    throw Error(`Expected Chrome ${expectedVersion}, got ${version.Browser}`);
+  browserClient = await connect(version.webSocketDebuggerUrl, recordEvent);
+  await browserClient.send("Target.setDiscoverTargets", { discover: true }, 5000);
+  client = await connect(page.webSocketDebuggerUrl, recordEvent);
   const { send } = client;
-  const evaluate = async (expression) => {
-    const message = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  const evaluate = async (expression, timeoutMs = 600000) => {
+    const message = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
     const details = message.result?.exceptionDetails;
     if (details) throw Error(details.text + " " + (details.exception?.description || ""));
     return message.result?.result?.value;
   };
   await send("Page.enable");
+  if (surfaceRecording) await send("Page.addScriptToEvaluateOnNewDocument", { source: await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8") });
   await send("Runtime.enable");
+  await send("Log.enable");
+  await sampleSystem("startup");
+  if (gpuTrace) {
+    await browserClient.send("Tracing.start", { transferMode: "ReturnAsStream", traceConfig: {
+      recordMode: "recordContinuously", traceBufferSizeInKb: 65536,
+      includedCategories: ["gpu", "cc", "blink", "disabled-by-default-gpu.dawn", "disabled-by-default-gpu.service"],
+    } }, 10000);
+    traceStarted = true;
+  }
+  if (graphiteBackend === "swiftshader" && diagnostics.system[0]?.["SystemInfo.getInfo"]?.gpu?.auxAttributes?.skiaBackendType !== "GraphiteDawnVulkan")
+    throw Error("The requested Graphite SwiftShader comparison is not active");
   if (browserDpr || browserWidth) {
     await send("Emulation.setDeviceMetricsOverride", {
       width: browserWidth || 1280,
@@ -211,7 +289,41 @@ try {
       mobile: false,
     });
   }
-  if (examplesOnly) {
+  if (vectorOnly) {
+    await send("Page.navigate", { url: pageUrl });
+    let ready = false;
+    for (let i = 0; i < 120 && !ready; i++) {
+      ready = !!(await evaluate("!!window.runVectorOptimization").catch(() => false));
+      if (!ready) await sleep(100);
+    }
+    if (!ready) throw Error("Vector optimization fixture did not load");
+    const frames = Number(process.env.ALTO_VECTOR_FRAMES || 100);
+    if (!Number.isInteger(frames) || frames < 1 || frames > 200) throw Error("Invalid vector frame count");
+    const result = await evaluate(`window.runVectorOptimization(${frames}, ${process.env.ALTO_VECTOR_REVERSE === "1"})`, 600000);
+    result.browser = version.Browser;
+    result.artifacts = diagnostics.artifacts;
+    result.recordedAt = new Date().toISOString();
+    await writeFile(join(reportDir, "vector-optimization.json"), JSON.stringify(result, null, 2) + "\n");
+    summary.push({ name: "vector optimization", ok: result.pass === true, count: result.cases?.length, error: result.error });
+    await sampleSystem("vector-optimization");
+  } else if (lifecycleOnly) {
+    await send("Page.navigate", { url: pageUrl }, 30000);
+    let ready = false;
+    for (let i = 0; i < 120; i++) {
+      ready = !!(await evaluate("!!window.runGpuLifecycle").catch(() => false));
+      if (ready) break;
+      await sleep(100);
+    }
+    if (!ready) throw Error("Raw WebGPU fixture did not load");
+    const options = { mode: process.env.ALTO_GPU_LIFECYCLE_MODE || "stable", cycles: Number(process.env.ALTO_GPU_LIFECYCLE_CYCLES || 120), memoryMiB: Number(process.env.ALTO_GPU_LIFECYCLE_MEMORY_MIB || 0), implementation: process.env.ALTO_GPU_LIFECYCLE_IMPLEMENTATION || "webgpu" };
+    if (!["webgpu", "wasm"].includes(options.implementation)) throw Error("invalid lifecycle implementation");
+    if (![0, 192].includes(options.memoryMiB)) throw Error("invalid lifecycle memory size");
+    if (!Number.isInteger(options.cycles) || options.cycles < 1 || options.cycles > 2000) throw Error("invalid lifecycle cycles");
+    const result = await evaluate(`window.runGpuLifecycle(${JSON.stringify(options)})`, 180000);
+    await writeFile(join(reportDir, "gpu-lifecycle.json"), JSON.stringify(result, null, 2) + "\n");
+    summary.push({ name: "gpu-lifecycle " + options.mode, ok: result.pass, count: result.cycles ?? result.cyclesCompleted, error: result.error });
+    await sampleSystem("gpu-lifecycle " + options.mode);
+  } else if (examplesOnly) {
     for (const name of ["minimal-embed", "react-embed"]) {
       console.log("RUN example", name);
       const url = `http://127.0.0.1:${address.port}/examples/${name}/dist/index.html`;
@@ -232,6 +344,7 @@ try {
       }
       console.log(name, error ? "FAIL " + error : "PASS");
       summary.push({ name: "example " + name, ok: !error, count: 1, error });
+      await sampleSystem("example " + name);
     }
   } else {
     const navigation = await send("Page.navigate", { url: pageUrl });
@@ -250,7 +363,10 @@ try {
       const info = (await navigator.gpu.requestAdapter())?.info;
       return info ? { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description } : null;
     })()`);
+    diagnostics.adapter = adapter;
     console.log("WebGPU adapter", JSON.stringify(adapter));
+    if (process.env.ALTO_BROWSER_GPU === "swiftshader" && !adapter?.architecture?.includes("swiftshader"))
+      throw Error("SwiftShader was requested but a different WebGPU adapter was selected");
     await evaluate(`if (!document.querySelector('#recovery').hidden) document.querySelector('#discard').click()`);
     for (let i = 0; i < 120; i++) {
       if (await evaluate("!!window.altoEngine.document")) break;
@@ -258,7 +374,20 @@ try {
       if (i === 119) throw Error("Document did not open");
     }
 
-    for (const [name, body] of suites) {
+    if (startupOnly) {
+      await evaluate(`(async () => {
+        const { unstable } = await import('../../packages/alto-sdk/dist/unstable.js');
+        await unstable(window.altoEngine).settle();
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await unstable(window.altoEngine).settle();
+        return window.altoEngine.document.snapshotHash();
+      })()`, 45000);
+      summary.push({ name: "startup", ok: true, count: 1 });
+      await sampleSystem("startup-settled");
+    }
+    for (const [name, body] of (startupOnly ? [] : suites)) {
+      if (name === "dense-benchmark" && !selectedSuites?.includes(name)) continue;
+      if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (benchmarkOnly && name !== "benchmark") continue;
       // Embed tests dispatch window pagehide/pageshow. That suspends the Playground
@@ -290,15 +419,45 @@ try {
       const ok = !suiteError && results.length > 0 && failed.length === 0;
       console.log(name, "results", results.length, "failed", failed.length);
       summary.push({ name, ok, count: results.length, error: suiteError?.message });
+      await sampleSystem(name);
       if (!ok) break;
     }
   }
 } catch (error) {
   console.error("Browser verification failed:", error);
-  summary.push({ name: "startup", ok: false, error: String(error) });
+  summary.push({ name: vectorOnly ? "vector optimization harness" : lifecycleOnly ? "gpu-lifecycle harness" : "startup", ok: false, error: String(error) });
 } finally {
+  if (traceStarted) {
+    try {
+      await browserClient.send("Tracing.end", {}, 10000);
+      for (let i = 0; i < 450 && !traceStream; i++) await sleep(100);
+      if (!traceStream) throw Error("Tracing did not return a stream");
+      const path = join(reportDir, "chrome-gpu-trace.json");
+      await writeFile(path, "");
+      for (;;) {
+        const { result } = await browserClient.send("IO.read", { handle: traceStream, size: 1024 * 1024 }, 10000);
+        appendFileSync(path, result.base64Encoded ? Buffer.from(result.data, "base64") : result.data);
+        if (result.eof) break;
+      }
+      await browserClient.send("IO.close", { handle: traceStream }, 5000);
+      diagnostics.trace = { file: "chrome-gpu-trace.json", bufferKiB: 65536 };
+    } catch (error) { diagnostics.trace = { error: String(error) }; summary.push({ name: "gpu-trace", ok: false, error: String(error) }); }
+  }
+  if (startupOnly && /SharedImageManager::ProduceSkia:.*non-existent mailbox/.test(stderr)) {
+    summary.push({ name: "unexpected startup surface loss", ok: false, error: "SharedImage mailbox vanished before any fault injection; a later recovery does not make startup clean" });
+  }
+  if (surfaceRecording) {
+    diagnostics.unexpectedSurfaceFault = unexpectedSurfaceFault;
+    summary.push({ name: "surface lifetime recording", ok: !unexpectedSurfaceFault, count: 1,
+      ...(unexpectedSurfaceFault ? { error: "Unexpected GPU validation/loss was recorded; later automatic recovery does not make this run clean. See SURFACE-FAILURE in chrome-stderr.log." } : {}) });
+  }
+  await sampleSystem("shutdown");
+  await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
   if (externalReports) await writeFile(join(reportDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  if (summary.some((suite) => !suite.ok))
+    console.error("Chrome stderr (tail):\n" + stderr.slice(-12000));
   client?.close();
+  browserClient?.close();
   if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
     chrome.kill();
     await new Promise((resolve) => {

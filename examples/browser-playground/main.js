@@ -411,7 +411,7 @@ try {
     (f) =>
       engine.status.state === "ready" &&
       status(
-        `${f.pending ? "合成中 " + f.pending + " タイル · " : ""}${f.cpuMs.toFixed(1)} ms · GPU ${(f.gpuBytes / 1048576).toFixed(0)} MiB · WASM ${(f.wasmBytes / 1048576).toFixed(0)} MiB`,
+        `${f.pending ? "合成中 " + f.pending + " タイル · " : ""}${f.cpuMs.toFixed(1)} ms · GPU ${(f.gpuBytes / 1048576).toFixed(0)} MiB (固定 ${(f.gpu.fixed / 1048576).toFixed(1)} / 効果 ${(f.gpu.effects / 1048576).toFixed(1)} / 筆 ${(f.gpu.stroke / 1048576).toFixed(1)} / 図形 ${(f.gpu.vector / 1048576).toFixed(1)}) · WASM ${(f.wasmBytes / 1048576).toFixed(0)} MiB`,
       ),
   );
   diagnostics.onGpu((e) => status(e === "lost" ? "GPUを復旧しています…" : "GPUを復旧しました"));

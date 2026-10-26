@@ -3,16 +3,91 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      chrome_version:
+        description: Chrome for Testing version (exact four-part version)
+        default: '156.0.8078.47'
+        type: string
+      diagnostic_runner:
+        description: Runner for the manual surface investigation (Linux remains experimental)
+        default: macos-15
+        type: choice
+        options:
+          - macos-15
+          - ubuntu-24.04
+      surface_recording:
+        description: Record Canvas and WebGPU calls around the first surface fault
+        default: false
+        type: boolean
+      resize_barrier:
+        description: Diagnostic only - wait for GPU submissions before applying SDK resize
+        default: false
+        type: boolean
+      gpu_trace:
+        description: Capture a bounded Chrome GPU command trace for diagnosis
+        default: false
+        type: boolean
+      graphite_backend:
+        description: Display compositor backend comparison (default keeps the production path)
+        default: default
+        type: choice
+        options:
+          - default
+          - swiftshader
+      lifecycle_mode:
+        description: Run all lifetime probes or isolate queued GPU work
+        default: all
+        type: choice
+        options:
+          - all
+          - backlog-resize
+          - backlog-replace
+          - unused-present
+          - unused-replace
+          - recorded-startup
+      lifecycle_implementation:
+        description: Surface isolation level (raw WebGPU, shipped WASM Runtime, or all SDK browser suites)
+        default: webgpu
+        type: choice
+        options:
+          - webgpu
+          - wasm
+          - sdk
+          - startup
+      lifecycle_memory_mib:
+        description: Texture allocation in the raw JavaScript probe (192 approximates Alto's initial atlases)
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '192'
+      gpu_lifecycle:
+        description: Run raw WebGPU surface lifetime probes on macOS and Linux
+        default: false
+        type: boolean
+      gpu_watchdog:
+        description: Keep Chrome's GPU watchdog enabled (disable only to investigate a timeout)
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: ${{ !inputs.gpu_lifecycle }}
     # The checked-in WASM package is built on arm64 macOS. Keep the exact-byte
     # rebuild check on the same Rust host target as the release build.
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
+      ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -30,6 +105,19 @@ jobs:
             packages/alto-sdk/pnpm-lock.yaml
             examples/*/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          chrome_dir="$RUNNER_TEMP/alto-chrome"
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/mac-arm64/chrome-mac-arm64.zip" \
+            --output "$RUNNER_TEMP/alto-chrome.zip"
+          unzip -q "$RUNNER_TEMP/alto-chrome.zip" -d "$chrome_dir"
+          chrome_executable="$chrome_dir/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          "$chrome_executable" --version
+          echo "CHROME=$chrome_executable" >> "$GITHUB_ENV"
+          echo "ALTO_BROWSER_EXPECTED_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
       - name: Confirm release build host
         run: |
           test "$(uname -m)" = arm64
@@ -43,10 +131,95 @@ jobs:
       - name: Build the embedding examples with Vite and run them
         env:
           ALTO_BROWSER_GPU: swiftshader
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/examples
         run: sh scripts/check-examples.sh
+      - name: Verify vector batching against legacy RGBA16F pixels
+        # Keep the no-Canvas comparison observable if the separate surface suites fail.
+        # This does not change the failed status of an earlier step or of this job.
+        if: ${{ !cancelled() }}
+        env:
+          ALTO_BROWSER_GPU: swiftshader
+          ALTO_VECTOR_FRAMES: '1'
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/vector
+        run: |
+          sh scripts/build-vector-comparison.sh
+          node scripts/verify-browser.mjs --vector-optimization
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
+
+  gpu-lifecycle:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}
+    runs-on: ${{ inputs.diagnostic_runner || 'macos-15' }}
+    timeout-minutes: 25
+    env:
+      ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
+      ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ (inputs.graphite_backend == 'swiftshader' || inputs.diagnostic_runner == 'ubuntu-24.04') && 'swiftshader' || 'default' }}
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_GPU: swiftshader
+      ALTO_GPU_LIFECYCLE_CYCLES: ${{ (inputs.lifecycle_implementation == 'wasm' || inputs.lifecycle_mode == 'recorded-startup') && '20' || '120' }}
+      ALTO_GPU_LIFECYCLE_MODE: ${{ inputs.lifecycle_mode || 'all' }}
+      ALTO_GPU_LIFECYCLE_IMPLEMENTATION: ${{ inputs.lifecycle_implementation || 'webgpu' }}
+      ALTO_GPU_LIFECYCLE_MEMORY_MIB: ${{ inputs.lifecycle_memory_mib || '0' }}
+      ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$RUNNER_OS" in
+            Linux) archive=linux64; executable=chrome-linux64/chrome ;;
+            macOS) archive=mac-arm64; executable="chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" ;;
+            *) exit 1 ;;
+          esac
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$archive/chrome-$archive.zip" \
+            --output "$RUNNER_TEMP/chrome.zip"
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome"
+          echo "CHROME=$RUNNER_TEMP/chrome/$executable" >> "$GITHUB_ENV"
+      - name: Allow user namespaces for this Chrome executable on Ubuntu
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Scope Ubuntu's exception to this ephemeral runner's pinned executable.
+          printf 'abi <abi/4.0>,\nprofile alto-cft "%s" flags=(unconfined) { userns, }\n' \
+            "$RUNNER_TEMP/chrome/chrome-linux64/chrome" | sudo tee /etc/apparmor.d/alto-cft
+          sudo apparmor_parser -r /etc/apparmor.d/alto-cft
+      - name: Probe independent surface lifetime conditions
+        shell: bash
+        run: |
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == startup ]]; then
+            status=0
+            # Independent fresh profiles, not retries that turn a failure green.
+            for trial in 1 2 3 4 5; do
+              ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/startup-$trial" node scripts/verify-browser.mjs --startup-only || status=1
+            done
+            exit "$status"
+          fi
+          if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == sdk ]]; then
+            ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/sdk" node scripts/verify-browser.mjs --functional
+            exit
+          fi
+          status=0
+          modes="stable same-size resize same-size-burst resize-burst replace-abrupt replace-graceful recover recover-unconfigure"
+          if [[ "$ALTO_GPU_LIFECYCLE_MODE" != all ]]; then modes="$ALTO_GPU_LIFECYCLE_MODE"; fi
+          for mode in $modes; do
+            ALTO_GPU_LIFECYCLE_MODE="$mode" ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/$mode" \
+              node scripts/verify-browser.mjs --gpu-lifecycle || status=1
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-lifecycle-${{ runner.os }}
+          path: ${{ runner.temp }}/lifecycle
+          if-no-files-found: error
