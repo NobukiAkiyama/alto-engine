@@ -10,7 +10,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-WASMバイナリはGitに入れません。SHA-256は [`wasm/SHA256SUMS`](wasm/SHA256SUMS) にあり、バイナリはGitHub Releaseの資産です。`sh scripts/fetch-wasm.sh` は新しい順にReleaseを見て、`alto_wasm_bg.wasm` と `alto_decode_bg.wasm` のSHA-256が `wasm/SHA256SUMS` と一致する最新のものを落とします。`wasm/RELEASE` の `tag` は参照しません。`tag=none` のままでも、一致するReleaseがあればRustなしで取得できます。一致するReleaseが一つも無いときだけ失敗し、そのときは手元で作ります。Python 3でPlaygroundを開けます。
+WASMバイナリはGitに入れません。SHA-256は [`wasm/SHA256SUMS`](wasm/SHA256SUMS) にあり、バイナリはGitHub Releaseの資産です。`sh scripts/fetch-wasm.sh` は新しい順にReleaseを見て、先にそのReleaseの `SHA256SUMS` を落とします。`alto_wasm_bg.wasm` と `alto_decode_bg.wasm` の値が出荷ハッシュと一致したReleaseだけ、WASM本体を落とします。一覧はGitHub APIを100件ずつ取り、一致したページで止めます。`GITHUB_TOKEN` または `GH_TOKEN` があればそのリクエストに付けます。`wasm/RELEASE` の `tag` は参照しません。`tag=none` のままでも、一致するReleaseがあればRustなしで取得できます。一致するReleaseが一つも無いときだけ失敗し、そのときは手元で作ります。Python 3でPlaygroundを開けます。
 
 ```sh
 cd alto-engine

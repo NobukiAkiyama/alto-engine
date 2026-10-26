@@ -46,20 +46,6 @@ node scripts/check-build-metadata.mjs
 sh scripts/fetch-wasm.test.sh
 sh scripts/guard-pkg-replace.test.sh
 sh scripts/mark-vector-enforced.test.sh
-# SHA256SUMS must not name a gitignored path. verification/*.log matches *.log
-# and is not in the tree; listing it makes `sha256sum -c` fail on a clean checkout.
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    ''|\#*) continue ;;
-  esac
-  file=$(printf '%s\n' "$line" | cut -c 67-)
-  if git check-ignore -q -- "$file"; then
-    echo "SHA256SUMS lists a gitignored path: $file" >&2
-    exit 1
-  fi
-done < SHA256SUMS
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum -c SHA256SUMS
-else
-  shasum -a 256 -c SHA256SUMS
-fi
+# The root tree manifest used to be committed as SHA256SUMS. Git already
+# hashes every tracked blob, and that file changed on every PR. WASM drift
+# is still gated by wasm/SHA256SUMS above.
