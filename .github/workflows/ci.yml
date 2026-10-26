@@ -207,7 +207,8 @@ jobs:
 
   gpu-parity:
     if: ${{ !inputs.gpu_lifecycle }}
-    runs-on: ubuntu-latest
+    # ubuntu-latest moves when GitHub retargets it, and that changes Mesa and lavapipe.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -225,20 +226,58 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libvulkan1 mesa-vulkan-drivers
+          mesa=$(dpkg-query -W -f '${Package} ${Version}' mesa-vulkan-drivers)
+          mkdir -p "$RUNNER_TEMP/alto-gpu-parity"
+          {
+            echo "runner: ubuntu-24.04"
+            echo "mesa-vulkan-drivers: $mesa"
+          } > "$RUNNER_TEMP/alto-gpu-parity/driver.txt"
+          {
+            echo "### GPU parity driver"
+            echo ""
+            echo "- Runner: \`ubuntu-24.04\`"
+            echo "- Mesa: \`$mesa\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           icd=$(find /usr/share/vulkan /usr/lib -name 'lvp_icd*.json' 2>/dev/null | head -n 1)
           if [ -z "$icd" ]; then
             echo "lavapipe ICD not found" >&2
             exit 1
           fi
+          echo "icd: $icd" >> "$RUNNER_TEMP/alto-gpu-parity/driver.txt"
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          echo "MESA_VULKAN_DRIVERS=$mesa" >> "$GITHUB_ENV"
           echo "pinned lavapipe ICD: $icd"
+          echo "mesa package: $mesa"
       - name: GPU versus CPU parity on lavapipe
         env:
           ALTO_REQUIRE_GPU_PARITY: "1"
           ALTO_REQUIRE_LAVAPIPE: "1"
-        run: cargo test -p alto-gpu --locked --lib cpu_composite::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1
+        run: |
+          log="$RUNNER_TEMP/alto-gpu-parity/parity.log"
+          set +e
+          cargo test -p alto-gpu --locked --lib cpu_composite::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1 >"$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          # The harness already prints "gpu pixel parity adapter: llvmpipe (LLVM …) (Vulkan)".
+          adapter=$(awk -F 'gpu pixel parity adapter: ' '/gpu pixel parity adapter: / { print $2; exit }' "$log")
+          if [ -z "$adapter" ]; then
+            adapter="(no adapter line)"
+          fi
+          echo "adapter: $adapter" >> "$RUNNER_TEMP/alto-gpu-parity/driver.txt"
+          {
+            echo "- Adapter: \`$adapter\`"
+            echo "- Test exit: \`$status\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-parity-report
+          path: ${{ runner.temp }}/alto-gpu-parity
+          if-no-files-found: ignore
 
   gpu-lifecycle:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}
