@@ -1,11 +1,34 @@
 #!/bin/sh
+# Usage: check.sh [all|native|wasm]
+#   all     host checks, then the WASM rebuild (local default)
+#   native  rustfmt, cargo test, and host clippy
+#   wasm    wasm32 clippy, the from-scratch release rebuild, SDK, and shell tests
+# CI runs native and wasm as separate jobs. ALTO_WASM_TARGET_DIR, when set, is
+# the only cargo target used for wasm32 clippy and the release rebuild. That
+# directory is not the cached native target, so wasm/SHA256SUMS is compared
+# with a clean build.
 set -eu
 cd "$(dirname "$0")/.."
+phase=${1:-all}
+case "$phase" in
+  all|native|wasm) ;;
+  *)
+    echo "usage: check.sh [all|native|wasm]" >&2
+    exit 1
+    ;;
+esac
+# Native artifacts, including the wasm-bindgen-cli install below.
 export CARGO_TARGET_DIR="${ALTO_TARGET_DIR:-target}"
-cargo fmt --all -- --check
-cargo test --workspace --locked -- --show-output
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+wasm_target="${ALTO_WASM_TARGET_DIR:-$CARGO_TARGET_DIR}"
+if [ "$phase" != wasm ]; then
+  cargo fmt --all -- --check
+  cargo test --workspace --locked -- --show-output
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+fi
+if [ "$phase" = native ]; then
+  exit 0
+fi
+CARGO_TARGET_DIR="$wasm_target" cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
 # The release WASM package is not stored in git. Rebuild it with the pinned
 # rustc and wasm-bindgen CLI and fail unless every output byte matches
 # wasm/SHA256SUMS. A source change without that hash update fails here.
