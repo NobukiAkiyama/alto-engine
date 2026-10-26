@@ -1,9 +1,16 @@
 /**
- * f32 port of composite.wgsl and the Rust CPU reference in
- * crates/alto-gpu/src/cpu_composite.rs. Every arithmetic result is Math.fround.
- * World matrices stay f64, then each inverse component is rounded to f32.
- * The browser suite compares these bytes with production readTile output.
+ * Port of composite.wgsl and the Rust CPU reference in
+ * crates/alto-gpu/src/cpu_composite.rs.
+ *
+ * Render version 1 keeps the f32 path: world matrices stay f64, each inverse
+ * component is Math.fround, and bilinear is the f32 mix. Render version 2
+ * (the default) uses the integer 4-tap from crates/alto-gpu/src/sample.rs:
+ * Q16 coefficients, round half away from zero; Q8 positions; bilinear weights
+ * in 0..255; channel bytes round half up with `(acc + 32768) >> 16`.
+ * The browser suite compares version 2 bytes with production readTile output.
  */
+export const RENDER_VERSION_F32 = 1;
+export const RENDER_VERSION = 2;
 const f = Math.fround;
 const EPS = f(0.000001);
 const AXIS = f(0.0001);
@@ -156,7 +163,7 @@ export function parityCases() {
   base("translate-across-tile", moved, { w: 512, h: 256 });
   base("translate-across-tile-1", moved, { w: 512, h: 256, tx: 1 });
   base("half-pixel-translate", [raster(ramp(256, 256), 0, 1, true, [1, 0, 0, 1, 0.5, 0])]);
-  base("scale-bilinear", [raster(ramp(256, 256), 0, 1, true, [2, 0, 0, 2, 0, 0])], { w: 512, h: 512, rounding: true });
+  base("scale-bilinear", [raster(ramp(256, 256), 0, 1, true, [2, 0, 0, 2, 0, 0])], { w: 512, h: 512 });
   base("extremes", [raster(checker(256, 256, [0, 0, 0, 255], [255, 255, 255, 255]))]);
   base("alpha-extremes", [raster(blue), raster(checker(256, 256, [255, 0, 0, 0], [255, 0, 0, 255]))]);
   base("two-partial", [raster(solid(256, 256, [0, 0, 255, 200])), raster(solid(256, 256, [255, 0, 0, 100]))]);
@@ -170,10 +177,13 @@ export function parityCases() {
   const angle = 0.3;
   const c = Math.cos(angle);
   const s = Math.sin(angle);
-  // SwiftShader matches this JS matrix bit-exactly. Native Metal and lavapipe still
-  // miss the Rust reference by at most 1/255, so only the Rust xfail keeps rotation.
-  // The hash file omits it because Math.cos can differ from f64::cos by an ulp.
-  base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512, lock: false });
+  // Q16 rounding absorbs an ulp between Math.cos and f64::cos, so rotation is locked.
+  base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512 });
+  // Inverse translation is -40000px, which does not fit in i32 Q16.
+  base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
+  // Inverse translation is -8400000px. The origin tile's left pixels have a
+  // source Q8 past -2^23 px, so the whole 256px canvas is transparent.
+  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])]);
   return cases;
 }
 
@@ -218,7 +228,7 @@ function texel(tiles, q) {
   const i = (localY * 256 + localX) * 4;
   return [div(pixels[i], f(255)), div(pixels[i + 1], f(255)), div(pixels[i + 2], f(255)), div(pixels[i + 3], f(255))];
 }
-function fetch(tiles, inv, p) {
+function fetchFloat(tiles, inv, p) {
   const q = [
     add(add(mul(inv[0], p[0]), mul(inv[2], p[1])), inv[4]),
     add(add(mul(inv[1], p[0]), mul(inv[3], p[1])), inv[5]),
@@ -238,6 +248,94 @@ function fetch(tiles, inv, p) {
     const de = add(mul(d[i], sub(f(1), fx)), mul(e[i], fx));
     return add(mul(ab, sub(f(1), fy)), mul(de, fy));
   });
+}
+const F64_EXACT_INT = 9007199254740992;
+function quantizeQ16(v) {
+  if (!Number.isFinite(v)) return null;
+  const scaled = v * 65536;
+  if (!Number.isFinite(scaled) || Math.abs(scaled) >= F64_EXACT_INT) return null;
+  return scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5);
+}
+function quantizeInverse(inv) {
+  const m = inv.slice(0, 4).map(quantizeQ16);
+  if (m.some((v) => v === null)) return null;
+  for (const v of m) {
+    if (v > 2147483647 || v < -2147483647) return null;
+  }
+  const tx = quantizeQ16(inv[4]);
+  const ty = quantizeQ16(inv[5]);
+  if (tx === null || ty === null) return null;
+  return { m, tx, ty };
+}
+const I32_MIN = -2147483648;
+const I32_MAX = 2147483647;
+function fitsI32(v) {
+  return Number.isSafeInteger(v) && v >= I32_MIN && v <= I32_MAX;
+}
+function pixelQ8(origin, index, scale) {
+  const term = index * 256 + 128;
+  const q = origin * 256 + term * scale;
+  return fitsI32(q) ? q : null;
+}
+function roundShr16(v) {
+  if (!Number.isSafeInteger(v)) return null;
+  const adjusted = v >= 0 ? v + 32768 : v - 32768;
+  if (!Number.isSafeInteger(adjusted)) return null;
+  return Math.floor(adjusted / 65536);
+}
+function sourceAxis(m0, px, m1, py, translation) {
+  const sum = m0 * px + m1 * py + translation * 256;
+  const q = roundShr16(sum);
+  return q !== null && fitsI32(q) ? q : null;
+}
+function sourceQ8(q, px, py) {
+  const x = sourceAxis(q.m[0], px, q.m[2], py, q.tx);
+  const y = sourceAxis(q.m[1], px, q.m[3], py, q.ty);
+  if (x === null || y === null) return null;
+  return [x, y];
+}
+function floorFracQ8(q) {
+  const base = Math.floor(q / 256);
+  return [base, q - base * 256];
+}
+function sampleU8(tiles, x, y) {
+  const key = [Math.floor(x / 256), Math.floor(y / 256)];
+  const pixels = lookup(tiles, key);
+  if (!pixels) return [0, 0, 0, 0];
+  const localX = Math.min(255, Math.max(0, x - key[0] * 256));
+  const localY = Math.min(255, Math.max(0, y - key[1] * 256));
+  const i = (localY * 256 + localX) * 4;
+  return [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]];
+}
+function bilinearByte(a, b, d, e, fx, fy) {
+  const ab = a * (256 - fx) + b * fx;
+  const de = d * (256 - fx) + e * fx;
+  return (ab * (256 - fy) + de * fy + 32768) >> 16;
+}
+function fetchInteger(tiles, q, originPx, scale, x, y) {
+  const clear = [f(0), f(0), f(0), f(0)];
+  const px = pixelQ8(originPx[0], x, scale);
+  const py = pixelQ8(originPx[1], y, scale);
+  if (px === null || py === null) return clear;
+  const pos = sourceQ8(q, px, py);
+  if (!pos) return clear;
+  const [ix, fx] = floorFracQ8(pos[0]);
+  const [iy, fy] = floorFracQ8(pos[1]);
+  const a = sampleU8(tiles, ix, iy);
+  const b = sampleU8(tiles, ix + 1, iy);
+  const d = sampleU8(tiles, ix, iy + 1);
+  const e = sampleU8(tiles, ix + 1, iy + 1);
+  return [0, 1, 2, 3].map((i) => div(f(bilinearByte(a[i], b[i], d[i], e[i], fx, fy)), f(255)));
+}
+function axisUnit(inv) {
+  return Math.abs(inv[1]) < AXIS && Math.abs(inv[2]) < AXIS
+    && Math.abs(Math.abs(inv[0]) - 1) < AXIS && Math.abs(Math.abs(inv[3]) - 1) < AXIS;
+}
+function fetch(tiles, inv, p, originPx, scale, x, y, version) {
+  const inv32 = inv.map(f);
+  const q = quantizeInverse(inv);
+  if (version < RENDER_VERSION || axisUnit(inv32) || !q) return fetchFloat(tiles, inv32, p);
+  return fetchInteger(tiles, q, originPx, scale, x, y);
 }
 function popSrc(accum, opacity) {
   const rgb = accum[3] > 0
@@ -263,10 +361,10 @@ function multiply(a, b) {
     a[1] * b[4] + a[3] * b[5] + a[5],
   ];
 }
-function inverse(m) {
+function inverseF64(m) {
   const det = m[0] * m[3] - m[1] * m[2];
   if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
-  return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det].map(f);
+  return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
 }
 function walk(node, parent, ops) {
   if (!node.visible || node.opacity <= 0) return;
@@ -277,12 +375,12 @@ function walk(node, parent, ops) {
     for (const child of node.children) walk(child, world, ops);
     if (isolate) ops.push({ t: "pop", opacity: f(node.opacity), mode: node.mode });
   } else {
-    const inv = inverse(world);
+    const inv = inverseF64(world);
     if (!inv) return;
     ops.push({ t: "draw", inv, opacity: f(node.opacity), mode: node.mode, tiles: splitTiles(node.image) });
   }
 }
-function composite(ops, width, height, origin, scale) {
+function composite(ops, width, height, origin, scale, originPx, scaleI, version) {
   const out = new Uint8Array(256 * 256 * 4);
   const w = f(width);
   const h = f(height);
@@ -297,7 +395,7 @@ function composite(ops, width, height, origin, scale) {
           accum = [f(0), f(0), f(0), f(0)];
         } else if (op.t === "pop") accum = blend(stack.pop(), popSrc(accum, op.opacity), op.mode);
         else {
-          const s = fetch(op.tiles, op.inv, p);
+          const s = fetch(op.tiles, op.inv, p, originPx, scaleI, x, y, version);
           accum = blend(accum, [s[0], s[1], s[2], mul(s[3], op.opacity)], op.mode);
         }
       }
@@ -308,12 +406,14 @@ function composite(ops, width, height, origin, scale) {
   return out;
 }
 
-export function renderCase(testCase) {
+export function renderCase(testCase, version = RENDER_VERSION) {
   const ops = [];
   for (const node of testCase.nodes) walk(node, IDENT, ops);
-  const scale = f(2 ** testCase.level);
+  const scaleI = 2 ** testCase.level;
+  const scale = f(scaleI);
   const origin = [f(testCase.tx * 256 * scale), f(testCase.ty * 256 * scale)];
-  return composite(ops, testCase.w, testCase.h, origin, scale);
+  const originPx = [testCase.tx * 256 * scaleI, testCase.ty * 256 * scaleI];
+  return composite(ops, testCase.w, testCase.h, origin, scale, originPx, scaleI, version);
 }
 
 export function fnv64(bytes) {

@@ -120,6 +120,9 @@ pub struct RenderScene {
     pub canvas: IRect,
     pub root: RIdx,
     pub nodes: Vec<RNode>,
+    /// [`alto_core::RENDER_VERSION_F32`] keeps float bilinear. [`alto_core::RENDER_VERSION`]
+    /// uses the integer 4-tap. Copied from the document so a saved file selects its sampler.
+    pub render_version: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -297,6 +300,7 @@ mod tests {
                 y1: 512,
             },
             root: 0,
+            render_version: alto_core::RENDER_VERSION,
             nodes: vec![
                 node(RContent::Group {
                     children: vec![1, 2],

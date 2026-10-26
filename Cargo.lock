@@ -82,11 +82,13 @@ name = "alto-gpu"
 version = "0.4.0"
 dependencies = [
  "alto-core",
+ "alto-doc",
  "alto-raster",
  "alto-scene",
  "alto-vector",
  "bytemuck",
  "futures-channel",
+ "log",
  "naga",
  "pollster",
  "wgpu",

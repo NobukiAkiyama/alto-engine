@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TARGET_DIR="${ALTO_TARGET_DIR:-target}"
 cargo fmt --all -- --check
-cargo test --workspace --locked
+cargo test --workspace --locked -- --show-output
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
 # The release WASM package is not stored in git. Rebuild it with the pinned

@@ -14,26 +14,20 @@ const assert = (ok, message) => {
   if (!ok) throw Error(message);
 };
 const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-function maxDelta(cpu, gpu) {
-  let max = 0;
-  const n = Math.min(cpu.length, gpu.length);
-  for (let i = 0; i < n; i++) max = Math.max(max, Math.abs(cpu[i] - gpu[i]));
-  return max;
-}
 function diff(cpu, gpu) {
   let count = 0;
-  let first = "none";
+  let at = null;
   const n = Math.min(cpu.length, gpu.length) / 4;
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     if (cpu[o] !== gpu[o] || cpu[o + 1] !== gpu[o + 1] || cpu[o + 2] !== gpu[o + 2] || cpu[o + 3] !== gpu[o + 3]) {
       count++;
-      if (first === "none") {
-        first = `pixel ${i % 256},${(i / 256) | 0} gpu ${gpu[o]},${gpu[o + 1]},${gpu[o + 2]},${gpu[o + 3]} cpu ${cpu[o]},${cpu[o + 1]},${cpu[o + 2]},${cpu[o + 3]}`;
-      }
+      if (!at) at = { x: i % 256, y: (i / 256) | 0, o };
     }
   }
-  return `${count} pixels differ; first ${first}; lengths cpu ${cpu.length} gpu ${gpu.length}`;
+  if (!at) return `0 pixels differ; first none; gpu none; cpu none; lengths cpu ${cpu.length} gpu ${gpu.length}`;
+  const o = at.o;
+  return `${count} pixels differ; first ${at.x},${at.y}; gpu ${gpu[o]},${gpu[o + 1]},${gpu[o + 2]},${gpu[o + 3]}; cpu ${cpu[o]},${cpu[o + 1]},${cpu[o + 2]},${cpu[o + 3]}; lengths cpu ${cpu.length} gpu ${gpu.length}`;
 }
 async function imported(engine, image) {
   return testing(engine).request("import", {
@@ -80,10 +74,10 @@ export async function runParityTests(engine, log) {
   const test = async (name, fn) => {
     const start = performance.now();
     try {
-      await fn();
-      const row = { name, pass: true, ms: performance.now() - start };
+      const detail = await fn();
+      const row = { name, pass: true, ms: performance.now() - start, detail: detail || "" };
       results.push(row);
-      log(`PASS ${name} ${row.ms.toFixed(1)} ms`);
+      log(`PASS ${name} ${row.ms.toFixed(1)} ms${detail ? `; ${detail}` : ""}`);
     } catch (error) {
       if (error.xfail) {
         results.push({ name, pass: true, xfail: true, reason: error.reason, ms: performance.now() - start });
@@ -112,16 +106,10 @@ export async function runParityTests(engine, log) {
         for (const node of testCase.nodes) await addNode(doc, engine, node);
         const cpu = renderCase(testCase);
         const gpu = await gpuTile(engine, testCase);
-        if (testCase.rounding) {
-          if (same(cpu, gpu)) throw Error("matched bit-exactly; remove the rounding xfail");
-          const gap = diff(cpu, gpu);
-          assert(maxDelta(cpu, gpu) <= 1, gap);
-          const marked = Error(gap);
-          marked.xfail = true;
-          marked.reason = `f32 interpolation is not bit-exact across GPUs (lavapipe delta 1/255): ${gap}`;
-          throw marked;
-        }
-        assert(same(cpu, gpu), diff(cpu, gpu));
+        const gap = diff(cpu, gpu);
+        log(`${testCase.name}: ${gap}`);
+        assert(same(cpu, gpu), gap);
+        return gap;
       });
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {

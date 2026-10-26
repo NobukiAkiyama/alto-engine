@@ -1439,14 +1439,66 @@ mod tests {
             .unwrap();
         let snapshot = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 2);
+        assert_eq!(value["meta"]["format_version"], 3);
+        assert_eq!(value["meta"]["render_version"], 2);
         let reopened = engine.open_snapshot(&snapshot).unwrap();
-        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 2);
+        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 3);
+        engine.undo(handle).unwrap();
+        let snapshot = engine.snapshot(handle).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        // The document is still render version 2, so removing levels does not
+        // drop the file back to a format a pre-#10 build would accept.
+        assert_eq!(value["meta"]["format_version"], 3);
+        assert_eq!(value["meta"]["render_version"], 2);
+        engine.open_snapshot(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn render_version_one_levels_stay_format_two_and_resave_identically() {
+        let mut engine = Engine::new();
+        let mut meta = DocumentMeta::srgb_u8(32, 32);
+        meta.render_version = alto_core::RENDER_VERSION_F32;
+        meta.format_version = 1;
+        let handle = engine.create_document(meta).unwrap();
+        let id = layer(&mut engine, handle);
+        let revision = engine.document(handle).unwrap().revision;
+        engine
+            .transact(
+                handle,
+                "levels",
+                vec![Op::SetProps {
+                    id,
+                    patch: PropPatch {
+                        effects: Some(vec![alto_doc::Effect::Levels {
+                            in_black: 0.0,
+                            in_white: 1.0,
+                            gamma: 1.0,
+                            out_black: 0.0,
+                            out_white: 1.0,
+                            selection: None,
+                            extra: Default::default(),
+                        }]),
+                        ..PropPatch::default()
+                    },
+                }],
+                revision,
+            )
+            .unwrap();
+        let snapshot = engine.snapshot(handle).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(value["meta"]["format_version"], 2);
+        assert!(value["meta"].get("render_version").is_none());
+        let reopened = engine.open_snapshot(&snapshot).unwrap();
+        let again = engine.document(reopened).unwrap().snapshot_bytes().unwrap();
+        assert_eq!(again, snapshot);
         engine.undo(handle).unwrap();
         let snapshot = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
         assert_eq!(value["meta"]["format_version"], 1);
-        engine.open_snapshot(&snapshot).unwrap();
+        assert!(value["meta"].get("render_version").is_none());
+        let reopened = engine.open_snapshot(&snapshot).unwrap();
+        let again = engine.document(reopened).unwrap().snapshot_bytes().unwrap();
+        assert_eq!(again, snapshot);
     }
 
     #[test]

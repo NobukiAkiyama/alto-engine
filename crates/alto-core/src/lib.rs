@@ -8,6 +8,13 @@ pub const MAX_ISOLATED_GROUPS: u32 = 31;
 /// Structural walk limit. This stops a cycle; it is not the compositor depth.
 /// Drawn isolated groups stop at `MAX_ISOLATED_GROUPS`.
 pub const MAX_TREE_DEPTH: u32 = 128;
+/// Float bilinear (`mix`) and f32 source coordinates. Documents saved before the
+/// integer filter omit `render_version` and load as this version, so their pixels
+/// stay on that path.
+pub const RENDER_VERSION_F32: u32 = 1;
+/// Integer 4-tap bilinear. Inverse coefficients are Q16, source positions are Q8,
+/// and the filter accumulates bytes with round-half-up. New documents use this.
+pub const RENDER_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
