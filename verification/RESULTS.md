@@ -1,5 +1,17 @@
 # M7・M8 検証結果
 
+## 2026-10-26：GPUとCPUの画素一致
+
+plain scene の `composite.wgsl` を、f32 の CPU 参照および lavapipe（Mesa 25.2.8）上の同じシェーダと比較した。ロックしたレシピは 34 件（`tests/parity/cpu-reference.txt`）。GPU で比較したのはそれに回転を加えた 35 件で、lavapipe では 33 件が全画素一致した。一致しない 2 件は許容誤差に緩めず、チャネル差が 1/255 を超えたら失敗する明示的な xfail である。
+
+- ビット一致: 17 合成モード、不透明度、非表示、孤立グループとパススルー、入れ子グループ、タイル境界をまたぐ最近傍移動、半画素の平行移動、0/255 とアルファの端、半透明の重ね、8 層、奇数キャンバス、レベル 1 の画素中心。
+- xfail `scale-bilinear`: lavapipe で 4906 画素。最初の不一致は pixel 15,0、GPU `[8, 0, 25, 255]`、CPU `[8, 0, 24, 255]`。双一次の `a*(1-t)+b*t` を GPU が縮約する。SwiftShader では 5137 画素で、最初の画素は同じ。
+- xfail `rotation`（native のみ）: lavapipe で 5 画素。最初の不一致は pixel 43,156、GPU `[50, 123, 177, 255]`、CPU `[50, 123, 178, 255]`。macOS Metal も 1/255 以内で一致しない（CI の `cargo test` はこの xfail があるときだけ通る）。SwiftShader は JS 参照と全画素一致したので、ブラウザ側の xfail は外した。
+- 別経路のため CPU 画素参照を持たない xfail: マスク、Gaussian、色調整、ベクター塗り（4x MSAA）、テキスト（グリフアトラスまたはベクター）。
+- フレーム待ちはアイドルな遅延表示が 40 回（約 2 秒）を超えると `GPU_LOST` で終わり、デバイスとサーフェスを作り直して次のフレームで文書から再表示する。
+
+`cargo test --workspace --locked` は **123 件**（変更前の記録は 118 件、追加は alto-gpu の 5 件）。Node の SDK テストは 7 件から **11 件**（待ち上限 2 件、CPU 参照のロックステップ 2 件）。ブラウザの parity スイートは 41 件。macos-15 SwiftShader の push 実行では失敗 0（ビット一致 34、丸め xfail は `scale-bilinear` の 1 件、別経路 xfail 5、フレーム待ち 1）。同じコミットの pull_request 実行は、embed の往復キャッシュ試験が Playground のエンジンを再起動している途中に parity が始まり、41 件とも `the engine is restarting` で落ちた。各スイートの前に Playground が `ready` になるまで待つ。機能スイートの他は functional 32、M5 8、M6 10、M7 9、M8 6、embed 24。この Linux の SwiftShader は main の配布 SDK でも表示タイルの読み戻しでデバイスが破棄される。最新のブラウザ計測は [フレームペーシング](FRAME-PACING-RESULTS-2026-10-26.md) と [組み込み API](EMBEDDING-API-RESULTS-2026-10-25.md) を参照。
+
 ## 2026-10-23：現在の配布版
 
 中断可能な低倍率親タイル先読みを実装した配布WASMは **4,328,183 bytes**、gzip **1,101,543 bytes**、SHA-256 `65d988114c677d07806a7251c315ee33653c4ad7e8d12b3b9adcc8e07e37ea6c`。PlaygroundとSDKの配布バイト列は一致する。Rust94件、SwiftShader機能54件が成功した。Metalの半透明20層・DPR 2負荷テストは5回ともB1/B2/B3/B7を満たし、ズーム前の親タイルは35/35枚だった。最大同期ステップは2.1–2.3 msで、目標2.0 msは厳密には未達。詳細と生データは[中断可能な先読みの検証](RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。

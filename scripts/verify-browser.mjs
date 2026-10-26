@@ -184,6 +184,7 @@ const suites = [
   ["m7", `const { runM7Tests } = await import('../../tests/e2e/m7-tests.js'); await runM7Tests(window.altoEngine, (line) => console.log(line));`],
   ["m8", `const { runM8Tests } = await import('../../tests/e2e/m8-tests.js'); await runM8Tests(window.altoEngine, (line) => console.log(line));`],
   ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
+  ["parity", `const { runParityTests } = await import('../../tests/e2e/parity-tests.js'); await runParityTests(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
@@ -389,6 +390,16 @@ try {
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (benchmarkOnly && name !== "benchmark") continue;
+      // Embed tests dispatch window pagehide/pageshow. That suspends the Playground
+      // engine too, and its restart can still be in flight when the suite returns.
+      for (let i = 0; i < 120; i++) {
+        const state = await evaluate("window.altoEngine?.status?.state || ''");
+        if (state === "ready") break;
+        if (state === "failed" || state === "disposed")
+          throw Error(`Playground engine is ${state} before ${name}`);
+        await sleep(250);
+        if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
+      }
       console.log("RUN", name);
       await evaluate("document.querySelector('#test-results').dataset.report = ''");
       let suiteError = null;
