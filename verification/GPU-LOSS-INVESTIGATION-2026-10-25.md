@@ -1,5 +1,8 @@
 # CI の間欠的な GPU 喪失：調査結果（2026-10-25）
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 結論と限界
 
 元の `GPU_LOST` を、ブラウザの版を固定した GitHub Actions でも再現した。**最初に観測された異常は、表示用 SharedImage の mailbox が存在しないことだった。無効な表示テクスチャ、present コマンドの失敗、その後のデバイス喪失という順序を確認した。**
@@ -32,7 +35,7 @@ GPU プロセスの PID は変わらず、`processCrashCount` は 0 のままだ
 | [40165835977](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40165835977) | 152.0.7977.82 | 有効 | M7 中に init がタイムアウト。最終段階は `wasm-load` |
 | [40166157495](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40166157495) | 156.0.8078.47 | 有効 | CI 全体が成功 |
 
-数値・設定・プロセス情報の抜粋は [gpu-loss-ci-summary-2026-10-25.json](gpu-loss-ci-summary-2026-10-25.json)。生のブラウザ記録と Chrome stderr は、各実行の `alto-browser-reports` artifact にある。
+数値・設定・プロセス情報の抜粋は `gpu-loss-ci-summary-2026-10-25.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。生のブラウザ記録と Chrome stderr は、各実行の `alto-browser-reports` artifact にある。
 
 ## GPU 喪失直前の順序
 

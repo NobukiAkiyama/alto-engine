@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 20層・DPR 2・物理倍率0.5、120フレームのパン直後 | 現行WASMの5回測定でB2 1.8–3.5 ms、ズーム前の親35/35、B1 p95 3.3–4.2 ms、B3 p95 10.4–20.7 ms | **先読み成功時**の値。コールド性能ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
 | 同条件のWorker再起動と初回完全描画 | 現行WASMのB7 1391.0–1421.2 ms | 起動・ジャーナル復旧・初回描画の合計。描画単独の値ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
-| 親がない低倍率表示 | **現行WASMの反復測定なし** | 旧実装の1回測定は428.8 ms、1960回・513.8 MB転送、`commandsMs` 304.7 ms。現行の予測値に転用しない。[旧測定](verification/dpr2-same-physical-zoom-2026-10-22.json) |
+| 親がない低倍率表示 | **現行WASMの反復測定なし** | 旧実装の1回測定は428.8 ms、1960回・513.8 MB転送、`commandsMs` 304.7 ms。現行の予測値に転用しない。旧測定（`dpr2-same-physical-zoom-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 | メモリ | 現行測定はGPU計上値484.75/512 MiB、WASM 241.06–241.56/1024 MiB | GPU計上値は内部ステージングや実VRAM量の完全な測定ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
 
 現行の`Renderer::render`は可視キーを列挙し、欠けたキーごとに`compose()`を同期実行する。時間予算を超えても最初の1枚は完了させる。ラスタの`compose()`は完成済み子4枚があれば`downsample_cached()`を使うが、子が欠けると`commands()`から元タイルを取得・転送する。`prefetch_step()`は短いジョブに分割済みだが、可視描画には使われない。したがって、先読みの成功と初回表示の応答性は別問題である。[Renderer](crates/alto-gpu/src/renderer.rs)、[Worker](packages/alto-sdk/src/worker.js)。

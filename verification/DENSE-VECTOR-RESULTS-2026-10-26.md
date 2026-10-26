@@ -1,5 +1,8 @@
 # 密集ベクターの MRT8 実装結果
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-26 JST。対象は `16e4ce0` と、先行 SDK 修正を保持した密集ベクターの作業ツリー。[設計](../docs/design/2026-10-26-dense-vector-mrt.md)。Canvas / compositor の間欠的 GPU 喪失を修正したという報告ではない。
 
 ## 変更
@@ -22,7 +25,7 @@ Chrome 155.0.8059.84 / Apple M5 / Metal、512²、R8 / 4x MSAA → premultiplied
 | 重なる100パス | 21.25 ms | 3.45 ms | 401 → 51 |
 | 重なる1,000パス | 217.55 ms | **32.25 ms** | **4001 → 501** |
 
-各プロファイル中央値の中央値。密集1,000パスは約85.2%短縮、約6.75倍。疎な条件の差は0.05 msで、個々の観測は0.1 ms程度に量子化されている。CPU encode の中央値も同条件で7.5 msから4.75 msへ短縮した。Legacy / Pooled / Disjoint / Dense 強制 / Batched 自動選択を比較した。[全生データ](dense-vector-metal-2026-10-26.json)。
+各プロファイル中央値の中央値。密集1,000パスは約85.2%短縮、約6.75倍。疎な条件の差は0.05 msで、個々の観測は0.1 ms程度に量子化されている。CPU encode の中央値も同条件で7.5 msから4.75 msへ短縮した。Legacy / Pooled / Disjoint / Dense 強制 / Batched 自動選択を比較した。全生データ（`dense-vector-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 1,000パス条件の管理対象 GPU 資源は1,847,068 bytesから11,022,108 bytesへ増えた。差分9,175,040 bytesが追加7組の coverage。warm の uniform buffer / bind group 作成は双方0個。arena は524,288 bytes。driver の内部資源や退役待ちの全一時確保を含む総 GPU 使用量ではない。clear / resolve の論理画素数と draw 数は削減しておらず、主に pass 境界を減らした。
 
@@ -40,20 +43,20 @@ SDK には1レイヤー128パスの既存上限がある。単体 renderer の1,
 | 編集 → GPU 完了・中央値 | **1001.0 ms** | **134.2 ms** |
 | 同 p95 | 1094.1 ms | 164.7 ms |
 
-各1プロファイルの前後観測。統計的な採用判断は上の6プロファイルの renderer 比較で行う。初回 commit はアプリ全体のコールド起動ではない。全8レイヤーを再描画する条件であり、通常の単一パスの編集や compositor 表示の latency とは区別する。[SDK の前後記録](dense-vector-sdk-edits-2026-10-26.json)。最初の診断用 fixture は1レイヤーに1,000パスを渡して既存の入力検査に拒否された。その記録も保持し、engine の上限は緩めていない。
+各1プロファイルの前後観測。統計的な採用判断は上の6プロファイルの renderer 比較で行う。初回 commit はアプリ全体のコールド起動ではない。全8レイヤーを再描画する条件であり、通常の単一パスの編集や compositor 表示の latency とは区別する。SDK の前後記録（`dense-vector-sdk-edits-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。最初の診断用 fixture は1レイヤーに1,000パスを渡して既存の入力検査に拒否された。その記録も保持し、engine の上限は緩めていない。
 
 ## 正しさ
 
 - 10条件×5方式の RGBA16F 全バイト比較で差分0。Metal の6プロファイルと SwiftShader で一致。色の異なる半透明、0 / 微小 alpha、塗り・線、自己重なり、穴、cap / join、変形・ROI、大きな原点、8の倍数でないバッチ数を含む。
-- 同じ encoder 内で ROI を変える検査、uniform の複数ページ、GPU 完了を待たない連続 submit、warm の管理量の安定、低予算で既存 scratch を退役させる検査を通過した。[SwiftShader](dense-vector-swiftshader-2026-10-26.json)。
+- 同じ encoder 内で ROI を変える検査、uniform の複数ページ、GPU 完了を待たない連続 submit、warm の管理量の安定、低予算で既存 scratch を退役させる検査を通過した。SwiftShader（`dense-vector-swiftshader-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 - SDK の M6 に、密集33パスの色順・tile seam・編集・Undo/Redo・blur / mask・ZIP・GPU 再作成の回帰を追加した。変更前の配布 WASM でも同じ検査を通過し、比較条件を確認した。
 
 ## 既存回帰と配布物
 
 - `scripts/check.sh` 成功。Rust123件、Clippy の native / WASM、SDK build / API check、Node7件、fresh release build と配布2箇所の完全一致、metadata / SHA256SUMS の照合を含む。optional vello-probe の WASM Clippy も成功した。
-- SwiftShader と Apple Metal でそれぞれ94件成功：functional32、M5 8、M6 11、M7 9、M8 6、embed28。[SwiftShader 回帰](dense-vector-regression-swiftshader-2026-10-26.json)、[Metal 回帰](dense-vector-regression-metal-2026-10-26.json)。
+- SwiftShader と Apple Metal でそれぞれ94件成功：functional32、M5 8、M6 11、M7 9、M8 6、embed28。SwiftShader 回帰（`dense-vector-regression-swiftshader-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Metal 回帰（`dense-vector-regression-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 - Vite でビルドした minimal-embed / react-embed の描画、Undo/Redo、PNG export、保存・再読込も成功した。SwiftShader 回帰 JSON に結果を含めた。
-- ラスター主体の C2 / C3・B1〜B8 は13条件を通過した。[編集全体の回帰記録](dense-vector-editor-regression-metal-2026-10-26.json)。密集ベクター以外の性能向上を主張する根拠にはしない。
+- ラスター主体の C2 / C3・B1〜B8 は13条件を通過した。編集全体の回帰記録（`dense-vector-editor-regression-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。密集ベクター以外の性能向上を主張する根拠にはしない。
 - 配布 WASM：4,603,311 bytes、gzip1,164,303 bytes、SHA-256 `b3a7df524b5e136e420f0af47baf3a89c4e6c9cc2a690d25dce508e07da45314`。先行版から22,996 bytes増加。比較専用 WASM：6,346,465 bytes、SHA-256 `9728b2423ca0d36414068e603fc0bb49546c65b853d2c85ee3eb402d06bc60d0`。通常配布に vello はリンクしていない。
 
 GitHub CI の結果はローカル検査と区別して記録する。

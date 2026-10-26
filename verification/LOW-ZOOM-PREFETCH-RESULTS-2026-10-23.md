@@ -1,14 +1,17 @@
 # 低倍率の親タイル先読み: 実装と検証
 
-2026-10-23。Chrome 155.0.8059.84、Apple Metal WebGPU、1093×827 CSS viewport、DPR 2、1566×1284物理キャンバス、3840×2160・半透明ラスタ20層。各回は新規ブラウザプロファイルで、120フレーム連続パンの直後に待機せず物理倍率0.5へズームした。B2はズーム要求から完全描画とGPU完了まで。変更前の同条件B2は[単発測定](dpr2-same-physical-zoom-2026-10-22.json)で428.8 msだった。
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
+2026-10-23。Chrome 155.0.8059.84、Apple Metal WebGPU、1093×827 CSS viewport、DPR 2、1566×1284物理キャンバス、3840×2160・半透明ラスタ20層。各回は新規ブラウザプロファイルで、120フレーム連続パンの直後に待機せず物理倍率0.5へズームした。B2はズーム要求から完全描画とGPU完了まで。変更前の同条件B2は単発測定（`dpr2-same-physical-zoom-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）で428.8 msだった。
 
 | 回 | B1 p95 | B2 | B3 p95 | B7 | ズーム前の親タイル | 先読み最大同期ステップ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| [1](low-zoom-prefetch-metal-run1-2026-10-23.json) | 8.4 ms | 2.0 ms | 16.5 ms | 1414.3 ms | 35/35 | 15.0 ms |
-| [2](low-zoom-prefetch-metal-run2-2026-10-23.json) | 7.1 ms | 1.8 ms | 15.8 ms | 1424.7 ms | 35/35 | 15.6 ms |
-| [3](low-zoom-prefetch-metal-run3-2026-10-23.json) | 5.4 ms | 2.0 ms | 15.2 ms | 1417.4 ms | 35/35 | 15.0 ms |
-| [4](low-zoom-prefetch-metal-run4-2026-10-23.json) | 4.0 ms | 1.8 ms | 13.5 ms | 1414.2 ms | 35/35 | 14.5 ms |
-| [5](low-zoom-prefetch-metal-run5-2026-10-23.json) | 7.1 ms | 3.1 ms | 11.1 ms | 1408.0 ms | 35/35 | 14.6 ms |
+| 1（`low-zoom-prefetch-metal-run1-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 8.4 ms | 2.0 ms | 16.5 ms | 1414.3 ms | 35/35 | 15.0 ms |
+| 2（`low-zoom-prefetch-metal-run2-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 7.1 ms | 1.8 ms | 15.8 ms | 1424.7 ms | 35/35 | 15.6 ms |
+| 3（`low-zoom-prefetch-metal-run3-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 5.4 ms | 2.0 ms | 15.2 ms | 1417.4 ms | 35/35 | 15.0 ms |
+| 4（`low-zoom-prefetch-metal-run4-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 4.0 ms | 1.8 ms | 13.5 ms | 1414.2 ms | 35/35 | 14.5 ms |
+| 5（`low-zoom-prefetch-metal-run5-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 7.1 ms | 3.1 ms | 11.1 ms | 1408.0 ms | 35/35 | 14.6 ms |
 | 中央値 | 7.1 ms | 2.0 ms | 15.2 ms | 1414.3 ms | 35/35 | 15.0 ms |
 
 B1 ≤16.7 ms、B2 ≤250 ms、B3 ≤33.4 ms、B7 ≤1500 msを各回で満たした。B6のサンプル推定は各回GPU 484.75/512 MiB、WASM 240.94–241.38/1024 MiB。このGPU値には再利用scratchの1 MiBを含むが、wgpu内部の未完了ステージングを厳密に計上した値ではない。
@@ -22,4 +25,4 @@ B1 ≤16.7 ms、B2 ≤250 ms、B3 ≤33.4 ms、B7 ≤1500 msを各回で満た�
 
 先読みの合計CPU時間は各回336.3–357.9 ms、元タイル転送は各回550,502,400 bytesだった。ズーム時の転送を前倒ししたのであり、総仕事量の削減は示していない。親タイル1枚の合成は同期処理で、最長14.5–15.6 ms。元の[設計](../LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)が求めた「2 ms単位の中断可能な子ジョブ」は未実装であり、遅いGPUや大きな文書で入力遅延が再発する余地がある。コールド表示のB2、長時間編集後のキャッシュ圧迫、別GPUでの性能は未測定。
 
-SwiftShaderでは[集計](low-zoom-prefetch-swiftshader-summary-2026-10-23.json)の機能54件（functional 21、M5 8、M6 10、M7 9、M8 6）が失敗0。[画素試験](low-zoom-prefetch-swiftshader-functional-2026-10-23.json)は512×512全面と300×300の透明端で、直接合成と先読み親タイルの一致を確認した。CI結果はPRのChecksを参照。
+SwiftShaderでは集計（`low-zoom-prefetch-swiftshader-summary-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）の機能54件（functional 21、M5 8、M6 10、M7 9、M8 6）が失敗0。画素試験（`low-zoom-prefetch-swiftshader-functional-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）は512×512全面と300×300の透明端で、直接合成と先読み親タイルの一致を確認した。CI結果はPRのChecksを参照。

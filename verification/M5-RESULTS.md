@@ -1,5 +1,8 @@
 # M5 最終検証結果
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-18、このMac上で同梱のM5ビルドを検証しました。
 
 ## 実装と機能検証
@@ -14,7 +17,7 @@
 - UI上で選択範囲のドラッグ、既存ぼかし半径12→19、Undoで12へ復元、M5サンプルの読み込みを確認しました。
 - **外部Chrome 154では、途中ビルドのM5 8項目が成功**。最終ビルドの再検証は途中まで確認しましたが、Macの画面ロックで結果JSONを書き出せませんでした。外部ChromeのJSONは途中ビルドの記録です。最終版の合否は内蔵Chromiumの記録を参照してください。
 
-生データ：[M5機能](m5-browser-functional.json)、[既存機能の回帰](m5-browser-m4-regression.json)、[性能](m5-browser-benchmark.json)、[UI](m5-ui.json)、[Rust/SDKログ](m5-rust-and-sdk.log)、[Chrome途中ビルド](m5-chrome-functional.json)。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
+生データ：M5機能（`m5-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、既存機能の回帰（`m5-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、性能（`m5-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、UI（`m5-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](m5-rust-and-sdk.log)、Chrome途中ビルド（`m5-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
 
 ## B1〜B7（最終ビルド・内蔵Chromium）
 
@@ -28,7 +31,7 @@
 | B6 GPU / WASM | 483.75 / 240.375 MiB | 512 / 1024 MiB | PASS |
 | B7 復旧と初回表示 | 1276.8 ms | 1500 ms | PASS |
 
-B7は最初1727.7msで基準を超えました。内容ハッシュの形式を維持したストリーミング計算と、ハッシュ/展開ライブラリの最適化により1276.8msになりました。ハッシュ検証は引き続き行います。[最適化前の記録](m5-browser-benchmark-before-optimization.json)も同梱しています。
+B7は最初1727.7msで基準を超えました。内容ハッシュの形式を維持したストリーミング計算と、ハッシュ/展開ライブラリの最適化により1276.8msになりました。ハッシュ検証は引き続き行います。最適化前の記録（`m5-browser-benchmark-before-optimization.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）も同梱しています。
 
 ### 測定条件と範囲
 

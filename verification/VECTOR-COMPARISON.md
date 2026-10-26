@@ -1,5 +1,8 @@
 # M6：lyon / vello 比較
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 方法
 
 2026-10-18、このMacの内蔵Chromium 155・WebGPUで実行しました。kurboで作った同一の型付きパス100本を10×10に配置し、512×512へ曲線の塗りと半透明の線を描画します。3フレームのウォームアップの後、20フレームを測定。編集を行わない同一Scene/メッシュを再使用します。
@@ -43,4 +46,4 @@ sh scripts/run.sh
 
 比較用WASMの再ビルドは `sh scripts/build-vector-comparison.sh`。本体WASMは2,532,853 bytes / gzip 599,840 bytes、比較用WASMは4,223,713 bytes / gzip 984,224 bytesです。比較版には本体のRuntimeもリンクされているため、この差はvelloライブラリ単体のサイズではありません。
 
-[生JSON](m6-vector-comparison.json) / [比較版Clippy](m6-comparison-clippy.log)。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。
+生JSON（`m6-vector-comparison.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） / [比較版Clippy](m6-comparison-clippy.log)。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。

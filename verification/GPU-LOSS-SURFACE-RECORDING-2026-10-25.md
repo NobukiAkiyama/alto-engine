@@ -1,12 +1,15 @@
 # GPU 喪失の呼び出し記録による調査（2026-10-25）
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 判定
 
 **表示用 SharedImage の取り込み失敗 → 無効な表示テクスチャ → present のコマンドエラー → デバイス喪失、という故障経路を、実際の SDK の呼び出し記録付きで確認した。mailbox が登録前なのか、早く破棄されたのかを決める根本原因の特定には、まだ至っていない。**
 
 今回の進展は、障害直前のデバイス・Canvas・configure・寸法設定・取得・投入・明示的破棄を対応付けられたこと。初回起動の再現では、最初のデバイスと最初の Canvas のまま発生しており、**先行する Worker 差し替えやアプリからの device / texture の destroy はない**。ブラウザ内部の自動破棄は JavaScript の記録では観測できない。
 
-[前回の切り分け](GPU-LOSS-ISOLATION-2026-10-25.md) と合わせて読む。今回の呼び出し記録、実行条件、プロセス、成果物のハッシュと結果は [構造化した証拠](gpu-loss-surface-ci-2026-10-25.json) に保存した。修正済みとする報告ではない。
+[前回の切り分け](GPU-LOSS-ISOLATION-2026-10-25.md) と合わせて読む。今回の呼び出し記録、実行条件、プロセス、成果物のハッシュと結果は 構造化した証拠（`gpu-loss-surface-ci-2026-10-25.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） に保存した。修正済みとする報告ではない。
 
 ## 1. 最初のデバイスでの再現
 

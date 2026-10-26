@@ -1,0 +1,6 @@
+# Pin of the GitHub Release whose WASM assets match wasm/SHA256SUMS.
+# tag=none until that release is published. scripts/fetch-wasm.sh reads tag=.
+tag=none
+# 1 after update-wasm-sums.sh rewrites the comparison package on aarch64-apple-darwin.
+# The release workflow then rejects a tag whose comparison WASM does not match.
+enforce_vector=0

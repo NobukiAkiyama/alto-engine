@@ -77,8 +77,8 @@ permissions:
 jobs:
   check:
     if: ${{ !inputs.gpu_lifecycle }}
-    # The checked-in WASM package is built on arm64 macOS. Keep the exact-byte
-    # rebuild check on the same Rust host target as the release build.
+    # wasm/SHA256SUMS is the arm64 macOS release build. Rebuild and hash-check
+    # on that same host; other hosts do not reproduce those bytes.
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -142,6 +142,7 @@ jobs:
           ALTO_VECTOR_FRAMES: '1'
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/vector
         run: |
+          sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed
           sh scripts/build-vector-comparison.sh
           node scripts/verify-browser.mjs --vector-optimization
       - uses: actions/upload-artifact@v7

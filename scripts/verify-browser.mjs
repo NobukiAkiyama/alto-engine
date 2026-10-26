@@ -42,7 +42,7 @@ if (browserDpr && (!Number.isFinite(browserDpr) || browserDpr < 0.5 || browserDp
   throw Error("ALTO_BROWSER_DPR must be between 0.5 and 3");
 if ((browserWidth && !browserHeight) || (!browserWidth && browserHeight))
   throw Error("Set both ALTO_BROWSER_WIDTH and ALTO_BROWSER_HEIGHT");
-const reportDir = process.env.ALTO_BROWSER_REPORT_DIR || "verification";
+const reportDir = process.env.ALTO_BROWSER_REPORT_DIR || "verification/out";
 const externalReports = !!process.env.ALTO_BROWSER_REPORT_DIR;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mime = {
