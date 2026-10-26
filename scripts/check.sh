@@ -26,6 +26,7 @@ pkg_out=$(mktemp -d)
 trap 'rm -rf "$pkg_out"' EXIT
 sh scripts/build-wasm-pkg.sh "$pkg_out"
 sh scripts/verify-wasm-sums.sh release "$pkg_out"
+sh scripts/guard-pkg-replace.sh examples/browser-playground/pkg
 rm -rf examples/browser-playground/pkg
 mkdir -p examples/browser-playground/pkg
 cp -a "$pkg_out"/. examples/browser-playground/pkg/
@@ -40,8 +41,11 @@ if grep -nE '(:|<|\|) *any\b' packages/alto-sdk/api/*.api.md; then
   echo "the public API must not use any" >&2
   exit 1
 fi
-node --test packages/alto-sdk/test/storage-session.test.js
+node --test packages/alto-sdk/test/*.test.js
 node scripts/check-build-metadata.mjs
+sh scripts/fetch-wasm.test.sh
+sh scripts/guard-pkg-replace.test.sh
+sh scripts/mark-vector-enforced.test.sh
 # SHA256SUMS must not name a gitignored path. verification/*.log matches *.log
 # and is not in the tree; listing it makes `sha256sum -c` fail on a clean checkout.
 while IFS= read -r line || [ -n "$line" ]; do

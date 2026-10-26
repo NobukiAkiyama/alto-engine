@@ -16,6 +16,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - name: Refuse to publish while comparison WASM is unchecked
+        run: |
+          set -eu
+          flag=$(sed -n 's/^enforce_vector=//p' wasm/RELEASE | head -n 1)
+          if [ "$flag" != 1 ]; then
+            echo "refusing to publish ${GITHUB_REF#refs/tags/}: wasm/RELEASE has enforce_vector=${flag:-unset}" >&2
+            echo "The vector-comparison hash is not a release gate until enforce_vector=1." >&2
+            echo "On Apple Silicon run: sh scripts/update-wasm-sums.sh" >&2
+            echo "See https://github.com/NobukiAkiyama/alto-engine/issues/9" >&2
+            echo "That rewrites wasm/SHA256SUMS and sets enforce_vector=1. It does not clear tag=." >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
@@ -60,7 +72,9 @@ jobs:
 
           vector-comparison-alto_wasm_bg.wasm is the vello-probe build. fetch-wasm.sh installs an asset only when its SHA-256 matches wasm/SHA256SUMS.
 
-          sh scripts/fetch-wasm.sh ${tag}"
+          sh scripts/fetch-wasm.sh ${tag}
+
+          With no argument, fetch-wasm.sh picks the newest release whose assets match wasm/SHA256SUMS."
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber "$RUNNER_TEMP/wasm-assets"/*
           else

@@ -1,6 +1,7 @@
 [package]
 name = "alto-gpu"
 version = "0.4.0"
+license = "MIT OR Apache-2.0"
 edition = "2024"
 
 [dependencies]
@@ -8,9 +9,17 @@ alto-vector = { path = "../alto-vector" }
 alto-core = { path = "../alto-core" }
 alto-raster = { path = "../alto-raster" }
 alto-scene = { path = "../alto-scene" }
-wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu", "std"] }
 bytemuck = { version = "1", features = ["derive"] }
 futures-channel = "0.3"
 
+# Native tests run composite.wgsl on a real adapter. wasm32 keeps the browser backend only,
+# so a Linux rebuild of the shipped package does not pick up Metal, Vulkan, or DX12.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu", "std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "std", "vulkan", "metal", "dx12"] }
+
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
+pollster = "0.4"

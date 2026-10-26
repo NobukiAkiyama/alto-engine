@@ -69,13 +69,8 @@ metadata.comparisonWasm.sha256 = sha(comparison);
 writeFileSync("verification/build.json", JSON.stringify(metadata, null, 2) + "\n");
 EOF
 
-if grep -q '^enforce_vector=' wasm/RELEASE; then
-  sed -i.bak 's/^enforce_vector=.*/enforce_vector=1/' wasm/RELEASE && rm -f wasm/RELEASE.bak
-else
-  printf '\nenforce_vector=1\n' >> wasm/RELEASE
-fi
-if grep -q '^tag=' wasm/RELEASE; then
-  sed -i.bak 's/^tag=.*/tag=none/' wasm/RELEASE && rm -f wasm/RELEASE.bak
-fi
+# Sets enforce_vector=1 and leaves tag= as it is. A published tag stays valid
+# for the assets that tag already has; fetch-wasm.sh does not need this pin.
+sh scripts/mark-vector-enforced.sh
 echo "updated wasm/SHA256SUMS, verification/build.json, and wasm/RELEASE"
-echo "tag is none until you publish this commit; enforce_vector=1 so the release workflow checks the comparison package"
+echo "enforce_vector=1 so the release workflow checks the comparison package; tag= was left unchanged"
