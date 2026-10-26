@@ -123,8 +123,6 @@ jobs:
           test "$(uname -m)" = arm64
           rustc -vV | grep -q '^host: aarch64-apple-darwin$'
       - run: sh scripts/check.sh
-        env:
-          ALTO_WASM_REBUILD_DIR: ${{ runner.temp }}/alto-wasm-rebuild
       - name: Run browser correctness suites
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
@@ -151,12 +149,6 @@ jobs:
         with:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: alto-wasm-rebuild
-          path: ${{ runner.temp }}/alto-wasm-rebuild
           if-no-files-found: ignore
 
   gpu-lifecycle:
