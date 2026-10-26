@@ -261,6 +261,16 @@ try {
     for (const [name, body] of suites) {
       if (functionalOnly && name === "benchmark") continue;
       if (benchmarkOnly && name !== "benchmark") continue;
+      // Embed tests dispatch window pagehide/pageshow. That suspends the Playground
+      // engine too, and its restart can still be in flight when the suite returns.
+      for (let i = 0; i < 120; i++) {
+        const state = await evaluate("window.altoEngine?.status?.state || ''");
+        if (state === "ready") break;
+        if (state === "failed" || state === "disposed")
+          throw Error(`Playground engine is ${state} before ${name}`);
+        await sleep(250);
+        if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
+      }
       console.log("RUN", name);
       await evaluate("document.querySelector('#test-results').dataset.report = ''");
       let suiteError = null;
