@@ -154,7 +154,10 @@ fn restricted_fonts_warn_and_invalid_fonts_are_rejected() {
     let offset = u32::from_be_bytes(bytes[os2 + 8..os2 + 12].try_into().unwrap()) as usize;
     bytes[offset + 8..offset + 10].copy_from_slice(&2u16.to_be_bytes());
     let err = e.import_font(bytes, 0).unwrap_err().to_string();
-    assert!(err.contains("埋め込みが禁止"), "{err}");
+    assert!(
+        err.contains("INVALID_ARGUMENT") && err.contains("forbids embedding"),
+        "{err}"
+    );
     assert!(e.font_warnings(d).unwrap().is_empty());
 }
 
@@ -235,7 +238,7 @@ fn commits_diff_restore_and_persist_history() {
     let brush = c2.intents.iter().find(|i| i.intent == "ブラシ").unwrap();
     assert_eq!(
         (brush.count, brush.target_names.clone()),
-        (3, vec!["背景".to_string()])
+        (3, vec![Some("背景".to_string())])
     );
     let log = e.log(d).unwrap();
     assert_eq!(

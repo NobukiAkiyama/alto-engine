@@ -11,6 +11,10 @@ pub const MAX_MESSAGE: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentSummary {
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub undone: bool,
     pub targets: Vec<NodeId>,
     pub count: u32,
 }
@@ -93,23 +97,53 @@ impl Commit {
     }
 }
 
-/// Groups the edit log by intent and targets, keeping first-use order: 「ブラシ ×3」.
+/// Groups the edit log by intent and targets, keeping first-use order: `brush.stroke` ×3.
 pub fn summarize(log: &[IntentLogEntry]) -> Vec<IntentSummary> {
     let mut out: Vec<IntentSummary> = vec![];
     for e in log {
-        match out
-            .iter_mut()
-            .find(|s| s.intent == e.intent && s.targets == e.targets)
-        {
+        match out.iter_mut().find(|s| {
+            s.intent == e.intent
+                && s.label == e.label
+                && s.undone == e.undone
+                && s.targets == e.targets
+        }) {
             Some(s) => s.count += 1,
             None => out.push(IntentSummary {
                 intent: e.intent.clone(),
+                label: e.label.clone(),
+                undone: e.undone,
                 targets: e.targets.clone(),
                 count: 1,
             }),
         }
     }
     out
+}
+
+/// What changed inside a node, as data the host turns into its own wording.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContentDetail {
+    /// Path and command counts, before and after.
+    Vector {
+        paths: [usize; 2],
+        commands: [usize; 2],
+    },
+    /// `text` holds excerpts (24 characters at most), before and after, when the text changed.
+    Text {
+        text: Option<[String; 2]>,
+        style: bool,
+        writing_mode: Option<alto_text::WritingMode>,
+        frame: bool,
+        tate_chu_yoko: bool,
+    },
+    Adjustment,
+    Unsupported,
+    /// The node became a different kind of node.
+    KindChanged {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -152,7 +186,7 @@ pub enum DiffItem {
         id: NodeId,
         name: String,
         kind: String,
-        detail: String,
+        detail: ContentDetail,
     },
     AssetChanged {
         id: AssetId,
@@ -310,43 +344,27 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
             let cmds = |p: &[alto_vector::StyledPath]| {
                 p.iter().map(|p| p.data.commands.len()).sum::<usize>()
             };
-            format!(
-                "パス {}本/{}命令 → {}本/{}命令",
-                x.len(),
-                cmds(x),
-                y.len(),
-                cmds(y)
-            )
+            ContentDetail::Vector {
+                paths: [x.len(), y.len()],
+                commands: [cmds(x), cmds(y)],
+            }
         }
         (NodeKind::Text { content: x }, NodeKind::Text { content: y }) if x != y => {
-            let mut parts = vec![];
-            if x.text != y.text {
-                parts.push(format!("「{}」→「{}」", excerpt(&x.text), excerpt(&y.text)));
+            ContentDetail::Text {
+                text: (x.text != y.text).then(|| [excerpt(&x.text), excerpt(&y.text)]),
+                style: x.style != y.style || x.spans != y.spans,
+                writing_mode: (x.writing_mode != y.writing_mode).then_some(y.writing_mode),
+                frame: x.frame != y.frame || x.align != y.align,
+                tate_chu_yoko: x.tcy != y.tcy || x.auto_tcy != y.auto_tcy,
             }
-            if x.style != y.style || x.spans != y.spans {
-                parts.push("書式".into());
-            }
-            if x.writing_mode != y.writing_mode {
-                parts.push(match y.writing_mode {
-                    alto_text::WritingMode::VerticalRl => "縦組みへ".into(),
-                    alto_text::WritingMode::HorizontalTb => "横組みへ".into(),
-                });
-            }
-            if x.frame != y.frame || x.align != y.align {
-                parts.push("枠・揃え".into());
-            }
-            if x.tcy != y.tcy || x.auto_tcy != y.auto_tcy {
-                parts.push("縦中横".into());
-            }
-            parts.join("、")
         }
         (NodeKind::Adjustment { adjustment: x }, NodeKind::Adjustment { adjustment: y })
             if x != y =>
         {
-            "調整値".into()
+            ContentDetail::Adjustment
         }
         (NodeKind::Unsupported { raw: x }, NodeKind::Unsupported { raw: y }) if x != y => {
-            "未対応ノードの内容".into()
+            ContentDetail::Unsupported
         }
         _ => return None,
     };
@@ -484,7 +502,10 @@ pub fn diff(a: &Document, b: &Document) -> Vec<DiffItem> {
                 id,
                 name: n.name.clone(),
                 kind: n.kind_name().into(),
-                detail: format!("{} → {}", old.kind_name(), n.kind_name()),
+                detail: ContentDetail::KindChanged {
+                    from: old.kind_name().into(),
+                    to: n.kind_name().into(),
+                },
             });
         } else if let (NodeKind::Raster { tiles: x }, NodeKind::Raster { tiles: y }) =
             (&old.kind, &n.kind)
@@ -668,7 +689,7 @@ pub fn restore_ops(current: &Document, target: &Document) -> Result<Vec<Op>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssetRecord, DocumentMeta, Editor, Op, TileChange};
+    use crate::{AssetRecord, DocumentMeta, Editor, Intent, Op, TileChange};
     use alto_core::TileKey;
     use alto_text::{TextContent, TextStyle, WritingMode};
 
@@ -780,11 +801,11 @@ mod tests {
     fn intent_log_summarises_and_follows_undo() {
         let mut e = editor();
         let root = e.doc.root;
-        let layer = Node::raster("背景");
+        let layer = Node::raster("Background");
         let id = layer.id;
         tx(
             &mut e,
-            "レイヤー追加",
+            "layer.add",
             vec![Op::InsertNode {
                 node: layer,
                 parent: root,
@@ -792,9 +813,9 @@ mod tests {
             }],
         );
         for _ in 0..3 {
-            tx(
-                &mut e,
-                "ブラシ",
+            let rev = e.doc.revision;
+            e.transact(
+                Intent::labeled("app:fade", "Fade"),
                 vec![Op::SetProps {
                     id,
                     patch: PropPatch {
@@ -802,18 +823,28 @@ mod tests {
                         ..Default::default()
                     },
                 }],
-            );
+                rev,
+            )
+            .unwrap();
         }
         e.undo().unwrap();
         let s = summarize(e.intent_log());
         assert_eq!(s.len(), 2);
         assert_eq!(
-            (s[1].intent.as_str(), s[1].count, s[1].targets.clone()),
-            ("ブラシ", 2, vec![id])
+            (
+                s[1].intent.as_str(),
+                s[1].label.as_deref(),
+                s[1].undone,
+                s[1].count,
+                s[1].targets.clone()
+            ),
+            ("app:fade", Some("Fade"), false, 2, vec![id])
         );
         e.take_intent_log();
         e.undo().unwrap();
-        assert_eq!(e.intent_log()[0].intent, "取り消し: ブラシ");
+        let undone = &e.intent_log()[0];
+        assert_eq!((undone.intent.as_str(), undone.undone), ("app:fade", true));
+        assert_eq!(undone.label.as_deref(), Some("Fade"));
     }
 
     #[test]
@@ -977,7 +1008,18 @@ mod tests {
         };
         let d = diff(&before, &mid);
         assert!(
-            matches!(&d[0], DiffItem::ContentChanged { detail, .. } if detail.contains("「吾輩は猫である」→「吾輩は犬である」") && detail.contains("縦組みへ")),
+            matches!(
+                &d[0],
+                DiffItem::ContentChanged {
+                    detail: ContentDetail::Text {
+                        text: Some([from, to]),
+                        writing_mode: Some(WritingMode::VerticalRl),
+                        style: false,
+                        ..
+                    },
+                    ..
+                } if from == "吾輩は猫である" && to == "吾輩は犬である"
+            ),
             "{d:?}"
         );
         assert!(diff(&e.doc, &e.doc).is_empty());
@@ -1121,7 +1163,9 @@ mod tests {
             snapshot: ContentHash::of(b"s"),
             message: "最初の版".into(),
             intents: vec![IntentSummary {
-                intent: "ブラシ".into(),
+                intent: "brush.stroke".into(),
+                label: Some("ブラシ".into()),
+                undone: false,
                 targets: vec![],
                 count: 3,
             }],

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-const FRAME_FIELDS: [&str; 32] = [
+const FRAME_FIELDS: [&str; 33] = [
     "composed",
     "pending",
     "gpuBytes",
@@ -43,6 +43,7 @@ const FRAME_FIELDS: [&str; 32] = [
     "profile.steps",
     "profile.uniqueInputs",
     "profile.atlasEvictions",
+    "presentDeferred",
 ];
 /// Release builds abort on panic, which reaches JS only as "RuntimeError: unreachable".
 /// Keep the message and location where the Worker's error handler can report them.
@@ -103,6 +104,8 @@ fn clock() -> f64 {
 #[derive(Deserialize)]
 struct Request {
     intent: String,
+    #[serde(default)]
+    label: Option<String>,
     ops: Vec<Op>,
     #[serde(rename = "baseRevision")]
     base_revision: u64,
@@ -122,7 +125,7 @@ pub struct Runtime {
     journal: Vec<Vec<u8>>,
     saved: ContentHash,
     budget: u32,
-    warnings: Vec<String>,
+    warnings: Vec<alto_engine::Warning>,
     /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
     /// The store deletes objects only at startup, so this set only grows.
     stored_objects: std::collections::BTreeSet<ContentHash>,
@@ -283,13 +286,17 @@ impl Runtime {
             return Err(error("CONFLICT: finish active tool first"));
         }
         let r: Request = serde_json::from_str(request).map_err(error)?;
+        let intent = alto_doc::Intent {
+            id: r.intent,
+            label: r.label,
+        };
         let edited = self
             .engine
-            .transact(self.doc, &r.intent, r.ops.clone(), r.base_revision)
+            .transact(self.doc, intent.clone(), r.ops.clone(), r.base_revision)
             .map_err(error)?;
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Transact, &r.intent, &r.ops)
+                .journal_record(self.doc, JournalKind::Transact, intent, &r.ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -310,7 +317,7 @@ impl Runtime {
             .unwrap_or_default();
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Undo, "Undo", &ops)
+                .journal_record(self.doc, JournalKind::Undo, "edit.undo", &ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -331,7 +338,7 @@ impl Runtime {
             .unwrap_or_default();
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Redo, "Redo", &ops)
+                .journal_record(self.doc, JournalKind::Redo, "edit.redo", &ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -415,6 +422,7 @@ impl Runtime {
             q.unique_inputs as f64,
             q.atlas_evictions as f64,
         ]);
+        out.push(f64::from(u8::from(r.deferred)));
         debug_assert_eq!(out.len(), FRAME_FIELDS.len());
         Ok(out)
     }
@@ -708,7 +716,7 @@ impl Runtime {
             let rev = self.engine.document(self.doc).map_err(error)?.revision;
             let edited = match self
                 .engine
-                .transact(self.doc, "Brush stroke", ops.clone(), rev)
+                .transact(self.doc, "brush.stroke", ops.clone(), rev)
             {
                 Ok(edited) => edited,
                 Err(e) => {
@@ -719,7 +727,7 @@ impl Runtime {
             };
             self.journal.push(
                 self.engine
-                    .journal_record(self.doc, JournalKind::Transact, "Brush stroke", &ops)
+                    .journal_record(self.doc, JournalKind::Transact, "brush.stroke", &ops)
                     .map_err(error)?,
             );
             edited
@@ -742,7 +750,7 @@ impl Runtime {
         }
         let v = serde_json::from_str(spec).map_err(error)?;
         let ops = self.engine.selection_ops(self.doc, &v).map_err(error)?;
-        self.command("Selection", ops)
+        self.command("selection.set", ops)
     }
     #[wasm_bindgen(js_name=selectionOutline)]
     pub fn selection_outline(&self) -> Result<String, JsValue> {
@@ -772,7 +780,7 @@ impl Runtime {
             _ => return Err(error("INVALID_ARGUMENT: mask source")),
         };
         self.command(
-            "Layer mask",
+            "mask.set",
             vec![
                 Op::SetMask { layer: id, mask },
                 Op::SetProps {
@@ -801,7 +809,7 @@ impl Runtime {
             .engine
             .effect_ops(self.doc, id, effects, use_selection)
             .map_err(error)?;
-        self.command("Non-destructive effects", ops)
+        self.command("effects.set", ops)
     }
     #[wasm_bindgen(js_name=importRgba)]
     pub fn import_rgba(
@@ -915,10 +923,8 @@ impl Runtime {
                 == alto_engine::Replayed::Diverged
             {
                 // Later records build on a state this replay did not reach.
-                self.warnings.push(
-                    "復旧記録の再生が記録時の状態と一致しなかったため、その手前までを復旧しました"
-                        .into(),
-                );
+                self.warnings
+                    .push(alto_engine::Warning::new("RECOVERY_DIVERGED"));
                 break;
             }
             rest = next;
@@ -1002,6 +1008,23 @@ impl Runtime {
             .await
             .map_err(error)
     }
+    /// Display tiles at `level`, `coords` = [tx0, ty0, tx1, ty1, …], at most 64, back to
+    /// back with one GPU readback.
+    #[wasm_bindgen(js_name=readTiles)]
+    pub async fn read_tiles(&mut self, level: i32, coords: Vec<i32>) -> Result<Vec<u8>, JsValue> {
+        if !(0..=12).contains(&level)
+            || !coords.len().is_multiple_of(2)
+            || coords.len() > 128
+            || coords.iter().any(|c| c.unsigned_abs() > 1_000_000)
+        {
+            return Err(error("INVALID_ARGUMENT: read tiles"));
+        }
+        let keys: Vec<_> = coords.chunks(2).map(|c| (level, c[0], c[1])).collect();
+        self.renderer
+            .read_tiles(&self.scene, &self.engine, &keys)
+            .await
+            .map_err(error)
+    }
     #[wasm_bindgen(js_name=readTile)]
     pub async fn read_tile(&mut self, tx: i32, ty: i32) -> Result<Vec<u8>, JsValue> {
         self.renderer
@@ -1015,7 +1038,7 @@ impl Runtime {
         &mut self,
         engine: Engine,
         doc: DocHandle,
-        warnings: Vec<String>,
+        warnings: Vec<alto_engine::Warning>,
     ) -> Result<String, JsValue> {
         self.renderer.cancel_stroke();
         self.engine = engine;
@@ -1097,6 +1120,20 @@ impl Runtime {
             return Err(error(format!("INTERNAL: GPU validation: {validation}")));
         }
         Ok(())
+    }
+    /// Resolves once the GPU work submitted so far completes, or when the device can
+    /// no longer report it. Unlike `gpuIdle` it holds no borrow of the Runtime while
+    /// it waits, so the Worker may give up waiting and call `tick` again.
+    #[wasm_bindgen(js_name=submittedWorkDone)]
+    pub fn submitted_work_done(&self) -> js_sys::Promise {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        self.renderer.queue.on_submitted_work_done(move || {
+            let _ = tx.send(());
+        });
+        wasm_bindgen_futures::future_to_promise(async move {
+            let _ = rx.await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
     #[wasm_bindgen(js_name=gpuIdle)]
     pub async fn gpu_idle(&self) -> Result<(), JsValue> {

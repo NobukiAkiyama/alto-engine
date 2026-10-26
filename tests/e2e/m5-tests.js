@@ -1,3 +1,5 @@
+import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
+import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => {
   if (!v) throw Error(m);
 };
@@ -7,7 +9,7 @@ const pixel = (t, x, y) =>
   Array.from(t.slice((y * 256 + x) * 4, (y * 256 + x) * 4 + 4));
 async function at(engine, x, y) {
   return pixel(
-    await engine.unstable.readTile(Math.floor(x / 256), Math.floor(y / 256)),
+    await unstable(engine).readTile(Math.floor(x / 256), Math.floor(y / 256)),
     x % 256,
     y % 256,
   );
@@ -74,8 +76,8 @@ export async function runM5Tests(engine, log) {
         width: 80,
         height: 100,
       });
-      const initial = JSON.stringify(doc.view.selection);
-      assert(doc.view.selection.format === "r8", "selection format");
+      const initial = JSON.stringify(doc.getSnapshot().selection);
+      assert(doc.getSnapshot().selection.format === "r8", "selection format");
       await doc.selection.apply({
         kind: "rectangle",
         x: 240,
@@ -85,11 +87,11 @@ export async function runM5Tests(engine, log) {
         mode: "subtract",
       });
       assert(
-        JSON.stringify(doc.view.selection) !== initial,
+        JSON.stringify(doc.getSnapshot().selection) !== initial,
         "subtract did not change selection",
       );
       await doc.undo();
-      assert(JSON.stringify(doc.view.selection) === initial, "selection Undo");
+      assert(JSON.stringify(doc.getSnapshot().selection) === initial, "selection Undo");
       await doc.redo();
       await doc.selection.apply({
         kind: "ellipse",
@@ -146,14 +148,14 @@ export async function runM5Tests(engine, log) {
         height: 256,
       });
       await paint(doc, layer, 250, 128, { size: 100 });
-      const painted = await engine.unstable.readTile(0, 0);
+      const painted = await unstable(engine).readTile(0, 0);
       assert((await at(engine, 240, 128))[3] > 200, "selected paint missing");
       assert((await at(engine, 268, 128))[3] === 0, "paint escaped selection");
       await doc.undo();
       assert((await at(engine, 240, 128))[3] === 0, "selected stroke Undo");
       await doc.redo();
       assert(
-        same(painted, await engine.unstable.readTile(0, 0)),
+        same(painted, await unstable(engine).readTile(0, 0)),
         "selected stroke Redo differs",
       );
       await doc.selection.clear();
@@ -167,11 +169,11 @@ export async function runM5Tests(engine, log) {
         width: 32,
         height: 256,
       });
-      const selectedHistory = doc.view.history.undo;
+      const selectedHistory = doc.getSnapshot().history.undo;
       await paint(doc, layer, 400, 128, { size: 64, color: [1, 0, 0, 1] });
       assert(
         JSON.stringify(await doc.nodeTiles(layer)) === canonical &&
-          doc.view.history.undo === selectedHistory,
+          doc.getSnapshot().history.undo === selectedHistory,
         "unselected hidden RGB bytes changed",
       );
       await doc.selection.clear();
@@ -192,7 +194,7 @@ export async function runM5Tests(engine, log) {
       });
       await doc.masks.fromSelection(layer);
       await doc.selection.clear();
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assert(
         close(await at(engine, 64, 128), [255, 0, 0, 255]),
         "mask interior",
@@ -238,7 +240,7 @@ export async function runM5Tests(engine, log) {
       );
       await doc.undo();
       await doc.undo();
-      const before = await engine.unstable.readTile(0, 0),
+      const before = await unstable(engine).readTile(0, 0),
         source = JSON.stringify(await doc.nodeTiles(layer));
       const session = doc.tools.begin("brush", {
         layer,
@@ -250,16 +252,16 @@ export async function runM5Tests(engine, log) {
       await session.flush();
       assert((await at(engine, 200, 128))[3] === 0, "mask preview missing");
       await session.end();
-      const masked = await engine.unstable.readTile(0, 0);
-      assert(doc.view.node(layer).props.mask.format === "r8", "mask not R8");
+      const masked = await unstable(engine).readTile(0, 0);
+      assert(doc.getSnapshot().nodes.get(layer).props.mask.format === "r8", "mask not R8");
       assert(
         JSON.stringify(await doc.nodeTiles(layer)) === source,
         "mask painted source pixels",
       );
       await doc.undo();
-      assert(same(before, await engine.unstable.readTile(0, 0)), "mask Undo");
+      assert(same(before, await unstable(engine).readTile(0, 0)), "mask Undo");
       await doc.redo();
-      assert(same(masked, await engine.unstable.readTile(0, 0)), "mask Redo");
+      assert(same(masked, await unstable(engine).readTile(0, 0)), "mask Redo");
     });
     await test("clipping chain preserves the base alpha including translucent bases", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -277,7 +279,7 @@ export async function runM5Tests(engine, log) {
         top = tx.addRasterFromAsset(blue);
         tx.setProps(top, { clip_to_below: true });
       });
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assert(
         close(await at(engine, 64, 128), [0, 0, 128, 128]),
         "clipping altered base alpha " + (await at(engine, 64, 128)),
@@ -301,11 +303,11 @@ export async function runM5Tests(engine, log) {
       );
       const original = JSON.stringify(await doc.nodeTiles(layer));
       await doc.effects.set(layer, [{ type: "gaussian_blur", radius: 12 }]);
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       const tiles = new Map();
       for (const y of [0, 1])
         for (const x of [0, 1])
-          tiles.set(x + "," + y, await engine.unstable.readTile(x, y));
+          tiles.set(x + "," + y, await unstable(engine).readTile(x, y));
       for (let y = 208; y < 302; y++)
         for (let x = 208; x < 302; x++) {
           const expected = Math.round(
@@ -327,11 +329,11 @@ export async function runM5Tests(engine, log) {
         JSON.stringify(await doc.nodeTiles(layer)) === original,
         "blur changed canonical pixels",
       );
-      const blurred = await engine.unstable.readTile(0, 0);
+      const blurred = await unstable(engine).readTile(0, 0);
       await doc.undo();
       assert((await at(engine, 214, 250))[3] === 0, "blur Undo");
       await doc.redo();
-      assert(same(blurred, await engine.unstable.readTile(0, 0)), "blur Redo");
+      assert(same(blurred, await unstable(engine).readTile(0, 0)), "blur Redo");
       await doc.effects.set(
         layer,
         [
@@ -340,7 +342,7 @@ export async function runM5Tests(engine, log) {
         ],
         { useSelection: false },
       );
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assert((await at(engine, 215, 250))[3] > 0, "serial blur stack");
     });
     await test("effect captures selection and group blur receives a halo", async () => {
@@ -363,14 +365,14 @@ export async function runM5Tests(engine, log) {
       });
       await doc.effects.set(group, [{ type: "gaussian_blur", radius: 12 }]);
       await doc.selection.clear();
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assert((await at(engine, 246, 250))[3] > 0, "selected filter missing");
       assert(
         (await at(engine, 260, 250))[3] === 255,
         "filter escaped captured selection",
       );
       assert(
-        doc.view.node(group).props.effects[0].selection.format === "r8",
+        doc.getSnapshot().nodes.get(group).props.effects[0].selection.format === "r8",
         "effect mask not captured",
       );
     });
@@ -394,7 +396,7 @@ export async function runM5Tests(engine, log) {
           { parent: group },
         );
       });
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assert(
         close(await at(engine, 64, 128), [179, 179, 179, 255]),
         "adjustment color " + (await at(engine, 64, 128)),
@@ -442,7 +444,7 @@ export async function runM5Tests(engine, log) {
         tx.setAdjustment(adjustment, { type: "gaussian_blur", radius: 12 }),
       );
       await doc.masks.remove(adjustment);
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       const near = await at(engine, 255, 128),
         far = await at(engine, 256, 128);
       assert(Math.abs(near[1] - far[1]) < 20, "backdrop blur seam");
@@ -459,25 +461,26 @@ export async function runM5Tests(engine, log) {
       await doc.effects.set(layer, [{ type: "gaussian_blur", radius: 8 }]);
       // Each readback names its step, so an intermittent failure says where it was.
       const read = (step) =>
-        engine.unstable.readTile(0, 0).catch((error) => {
+        unstable(engine).readTile(0, 0).catch((error) => {
           throw Error(`readTile after ${step}: ${error.code || ""} ${error.message}`);
         });
       const hash = (await doc.snapshotHash()),
         reference = await read("effects"),
-        bytes = await engine.unstable.saveBytes();
-      doc = await engine.openDocument(new Blob([bytes]));
+        bytes = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([bytes]));
       assert((await doc.snapshotHash()) === hash, "M5 snapshot changed on open");
       assert(
         same(reference, await read("ZIP open")),
         "M5 ZIP pixels",
       );
       const restored = new Promise((resolve) => {
-        const off = engine.on("gpuRestored", () => {
+        const off = unstable(engine).onGpu((gpuEvent) => {
+          if (gpuEvent !== "restored") return;
           off();
           resolve();
         });
       });
-      await engine.unstable.destroyGpu();
+      await testing(engine).destroyGpu();
       await restored;
       assert(
         same(reference, await read("GPU recovery")),
@@ -488,7 +491,7 @@ export async function runM5Tests(engine, log) {
       );
       const recoveryHash = (await doc.snapshotHash());
       await doc.durable();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === recoveryHash, "M5 journal hash");
       assert(
@@ -496,7 +499,7 @@ export async function runM5Tests(engine, log) {
         "M5 recovery pixels",
       );
       const before = (await doc.snapshotHash()),
-        undo = doc.view.history.undo;
+        undo = doc.getSnapshot().history.undo;
       let rejected = false;
       try {
         await doc.effects.set(layer, [{ type: "gaussian_blur", radius: -1 }]);
@@ -506,7 +509,7 @@ export async function runM5Tests(engine, log) {
       assert(
         rejected &&
           (await doc.snapshotHash()) === before &&
-          doc.view.history.undo === undo,
+          doc.getSnapshot().history.undo === undo,
         "invalid effect was not atomic",
       );
       rejected = false;

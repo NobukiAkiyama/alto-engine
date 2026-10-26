@@ -1,5 +1,7 @@
+import type { Args, FrameStats, RecoveryInfo, RequestMessage, StreamMessage, WireError } from "./protocol.js";
+import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
-const yieldTask = () => new Promise((resolve) => {
+const yieldTask = () => new Promise<void>((resolve) => {
   const channel = new MessageChannel();
   channel.port1.onmessage = () => {
     channel.port1.close(); channel.port2.close(); resolve();
@@ -8,6 +10,50 @@ const yieldTask = () => new Promise((resolve) => {
 });
 import init, { Runtime } from "./pkg/alto_wasm.js";
 import { createStorageSession } from "./storage-session.js";
+/**
+ * Waits for the frame in flight on the GPU, when a frame was held back for it. The
+ * timer bounds the wait: a lost device may never settle its queue, and the next
+ * tick reports the loss. `gpuIdle` would keep the Runtime borrowed past the timer,
+ * and the next tick would fail with "recursive use of an object".
+ */
+const presentSettled = () => Promise.race([
+  runtime.submittedWorkDone(),
+  new Promise<void>((resolve) => setTimeout(resolve, 50)),
+]);
+declare const self: DedicatedWorkerGlobalScope & { altoPanic?: string };
+type Timer = ReturnType<typeof setTimeout>;
+interface Decoder {
+  worker: Worker;
+  /** Batch id → timer and bytes, for batches sent and not yet answered. */
+  pending: Map<number, { timer: Timer; bytes: number }>;
+  ready: boolean;
+  memory: number;
+}
+/** What the drain loop runs in order: requests, and stroke input that has no reply. */
+type Queued = RequestMessage | (Extract<StreamMessage, { t: "input" }> & { id?: undefined });
+interface StoreState {
+  available: boolean;
+  records: number;
+  truncated: boolean;
+  latestGeneration: number;
+  objects?: string[];
+  packs: number;
+}
+interface Candidate {
+  generation: number;
+  latestGeneration: number;
+  truncated: boolean;
+}
+interface CandidateContents {
+  base: Uint8Array;
+  metadata: { format: number; opaque: string[] } | null;
+  records: Uint8Array[];
+}
+interface Write {
+  kind: "append" | "checkpoint";
+  bytes: Uint8Array;
+  seq?: number;
+}
 self.addEventListener("error", (e) => {
   postMessage({
     t: "diagnostic",
@@ -21,35 +67,37 @@ self.addEventListener("error", (e) => {
     },
   });
 });
-let diagnosticProfiles = null;
-let injectedStorageFault = null;
-const readableAfterFailure = new Set([
+let diagnosticProfiles: Record<string, number>[] | null = null;
+let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
+const readableAfterFailure = new Set<string>([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
 ]);
-let storageFailure = null;
-function freezeStorage(error) {
+let storageFailure: WireError | null = null;
+// False when the page started without a recovery journal: nothing is written.
+let journaling = true;
+function freezeStorage(error: unknown) {
   if (storageFailure) return;
   storageFailure = structured(error);
   writes = [];
   pendingBytes = 0;
-  for (const d of durableWaiters.splice(0)) d.reject(Error(storageFailure.message));
+  for (const d of durableWaiters.splice(0)) d.reject(Error(storageFailure!.message));
   for (const wake of roomWaiters.splice(0)) wake();
   postMessage({ t: "storageFailure", value: storageFailure });
 }
-let runtime,
-  canvas,
+let runtime!: Runtime,
+  canvas!: OffscreenCanvas,
   budget = 512,
-  queue = [],
+  queue: Queued[] = [],
   draining = false,
   wantTick = false,
-  pendingViewport = null,
-  pendingResize = null,
+  pendingViewport: Extract<StreamMessage, { t: "viewport" }> | null = null,
+  pendingResize: Extract<StreamMessage, { t: "resize" }> | null = null,
   viewVersion = 0,
   frameSettled = false,
-  prefetchTimer = null,
+  prefetchTimer: Timer | null = null,
   prefetchDisabled = false,
   prefetchSpentMs = 0,
   lastMessageAt = performance.now();
@@ -92,13 +140,13 @@ const DECODES_IN_FLIGHT_PER_WORKER = 2;
 // A batch of 16 tiles decodes in a few milliseconds. A decode Worker silent for this
 // long is hung; its requests go back to inline decoding.
 const DECODE_TIMEOUT_MS = 2000;
-let decoders = [];
+let decoders: Decoder[] = [];
 let decodersOn = false;
 let decodeBatchId = 0;
 // Results wait here: a decode Worker answers at any time, possibly while an async
 // runtime call (endBrush, readTile) holds the runtime. Only the drain loop and
 // waitFrame apply them, between runtime calls.
-let decodedResults = [];
+let decodedResults: ArrayBuffer[] = [];
 let decodedResultBytes = 0;
 let decodersAllowed = true;
 // Highest decode pool memory seen in this Worker's life, sampled at every send and
@@ -118,7 +166,7 @@ function startDecoders() {
       break;
     }
     // pending: batch id -> { timer, bytes } for batches sent and not yet answered.
-    const decoder = { worker, pending: new Map(), ready: false, memory: 0 };
+    const decoder: Decoder = { worker, pending: new Map(), ready: false, memory: 0 };
     worker.onmessage = ({ data }) => {
       decoder.memory = data.memory ?? decoder.memory;
       if (data.ready) decoder.ready = true;
@@ -144,7 +192,7 @@ function startDecoders() {
  * async runtime call is running); the next pumpDecodes tells the engine to forget its
  * outstanding requests, and the jobs that asked for them decode them inline.
  */
-function stopDecoders(why) {
+function stopDecoders(why?: string) {
   for (const decoder of decoders) {
     for (const { timer } of decoder.pending.values()) clearTimeout(timer);
     decoder.worker.terminate();
@@ -213,15 +261,20 @@ const journal = createStorageSession({
     freezeStorage(error);
   },
 });
-async function io(t, payload = {}, transfer = []) {
+/** A storage request; results are typed where they are used. */
+async function io<T = unknown>(
+  t: StorageMessage["t"],
+  payload: Omit<StorageMessage, "t"> = {},
+  transfer: Transferable[] = [],
+): Promise<T> {
   try {
-    return await journal.request(t, payload, transfer);
+    return (await journal.request(t, payload as Record<string, unknown>, transfer)) as T;
   } catch (error) {
     freezeStorage(error);
     throw error;
   }
 }
-function structured(error) {
+function structured(error: unknown): WireError {
   const message = error instanceof Error ? error.message : String(error);
   const code =
     [
@@ -245,13 +298,13 @@ function structured(error) {
 // The runtime may be ahead of the journal; durable() reports when it caught up.
 const MAX_PENDING_BYTES = 64 * 1024 * 1024;
 const MAX_PENDING_WRITES = 256;
-let writes = [];
+let writes: Write[] = [];
 let pendingBytes = 0;
 let queuedSeq = 0;
 let durableSeq = 0;
-let pumping = null;
-let durableWaiters = [];
-let roomWaiters = [];
+let pumping: Promise<void> | null = null;
+let durableWaiters: { seq: number; resolve(): void; reject(e: Error): void }[] = [];
+let roomWaiters: (() => void)[] = [];
 // A long session without saves or commits would grow the journal without bound and
 // make recovery replay all of it. Past these, checkpoint once the user pauses.
 const AUTO_CHECKPOINT_BYTES = 32 * 1024 * 1024;
@@ -260,7 +313,7 @@ const AUTO_CHECKPOINT_IDLE_MS = 2000;
 let lastCommandAt = 0;
 let journaledBytes = 0;
 let journaledRecords = 0;
-let autoCheckpointTimer = null;
+let autoCheckpointTimer: Timer | null = null;
 function scheduleAutoCheckpoint() {
   if (autoCheckpointTimer !== null) return;
   // Fire when the pause would be long enough, not a fixed interval after the last check.
@@ -277,12 +330,13 @@ function scheduleAutoCheckpoint() {
       try {
         queueCheckpoint();
       } catch (error) {
-        freezeStorage(Error("STORAGE: automatic checkpoint failed: " + String(error.message || error)));
+        freezeStorage(Error("STORAGE: automatic checkpoint failed: " + String((error as Error).message || error)));
       }
     }
   }, wait);
 }
-function enqueue(entry) {
+function enqueue(entry: Write) {
+  if (!journaling) return;
   entry.seq = ++queuedSeq;
   writes.push(entry);
   pendingBytes += entry.bytes.length;
@@ -297,6 +351,7 @@ function queueJournal() {
  * holds. It contains every edit queued so far, so their appends are dropped.
  */
 function queueCheckpoint() {
+  if (!journaling) return;
   journaledBytes = 0;
   journaledRecords = 0;
   const bytes = runtime.checkpointParts();
@@ -305,16 +360,16 @@ function queueCheckpoint() {
   for (const w of writes) pendingBytes += w.bytes.length;
   enqueue({ kind: "checkpoint", bytes });
 }
-async function write(w) {
+async function write(w: Write) {
   if (w.kind === "checkpoint") {
-    await io("checkpoint", { entries: w.bytes.buffer }, [w.bytes.buffer]);
+    await io("checkpoint", { entries: w.bytes.buffer as ArrayBuffer }, [w.bytes.buffer]);
     return;
   }
   if (injectedStorageFault === "beforeAppend") {
     injectedStorageFault = null;
     throw Error("STORAGE: injected failure before append");
   }
-  await io("append", { bytes: w.bytes.buffer }, [w.bytes.buffer]);
+  await io("append", { bytes: w.bytes.buffer as ArrayBuffer }, [w.bytes.buffer]);
   if (injectedStorageFault === "afterAppend") {
     injectedStorageFault = null;
     throw Error("STORAGE: injected lost reply after append");
@@ -322,7 +377,7 @@ async function write(w) {
 }
 async function pump() {
   while (writes.length && !storageFailure) {
-    const w = writes.shift();
+    const w = writes.shift()!;
     // Writing transfers the buffer; read its size first.
     const size = w.bytes.length;
     pendingBytes -= size;
@@ -332,7 +387,7 @@ async function pump() {
       freezeStorage(error);
       return;
     }
-    durableSeq = w.seq;
+    durableSeq = w.seq!;
     if (w.kind === "append") {
       journaledBytes += size;
       journaledRecords++;
@@ -347,16 +402,16 @@ function hasRoom() {
   return writes.length < MAX_PENDING_WRITES && pendingBytes < MAX_PENDING_BYTES;
 }
 function waitForRoom() {
-  return hasRoom() || storageFailure ? null : new Promise((resolve) => roomWaiters.push(resolve));
+  return hasRoom() || storageFailure ? null : new Promise<void>((resolve) => roomWaiters.push(resolve));
 }
 /** Resolves once everything queued so far is in OPFS; rejects if storage failed. */
 function durable() {
   if (storageFailure) return Promise.reject(Error(storageFailure.message));
   if (durableSeq >= queuedSeq) return Promise.resolve();
-  return new Promise((resolve, reject) => durableWaiters.push({ seq: queuedSeq, resolve, reject }));
+  return new Promise<void>((resolve, reject) => durableWaiters.push({ seq: queuedSeq, resolve, reject }));
 }
 /** Length-prefixed records, so recovery crosses into WASM once. */
-function frameRecords(records) {
+function frameRecords(records: Uint8Array[]) {
   const out = new Uint8Array(records.reduce((n, r) => n + 4 + r.length, 0));
   const view = new DataView(out.buffer);
   let at = 0;
@@ -372,45 +427,95 @@ async function writesIdle() {
   while (pumping) await pumping;
 }
 // tick() returns numbers in the order frameFields() names them, fixed for the build.
-let frameFields = [];
+let frameFields: string[] = [];
 let adapterName = "";
-function decodeFrame(numbers) {
+function decodeFrame(numbers: Float64Array): FrameStats {
   const pool = decodePoolBytes();
   // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
-  const out = {
+  const prefetch: Record<string, number> = {};
+  const out: Record<string, unknown> & { profile: Record<string, number> | null; hasProfile?: number } = {
     adapter: adapterName,
-    prefetch: {},
+    prefetch,
     profile: null,
     decodeWorkerBytes: pool.workers,
     decodeTransitBytes: pool.transit,
     decodePeakBytes: decodePoolPeak,
+    // The drawing buffer, in device pixels.
+    surface: [canvas.width, canvas.height],
   };
-  const profile = {};
+  const profile: Record<string, number> = {};
   frameFields.forEach((name, i) => {
     const [group, key] = name.split(".");
     if (key === undefined) out[group] = numbers[i];
-    else (group === "profile" ? profile : out.prefetch)[key] = numbers[i];
+    else (group === "profile" ? profile : prefetch)[key] = numbers[i];
   });
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;
-  return out;
+  return out as FrameStats;
+}
+/** Display tiles read back per GPU round trip. */
+const EXPORT_BATCH = 64;
+/**
+ * The document as an image file, from the same display tiles the canvas shows. A
+ * reduced export reads the pyramid level at or above its scale: each level halves the
+ * tiles to read. Tiles are premultiplied; image files hold straight alpha.
+ */
+async function exportImage({ region, scale, type }: Args<"exportImage">) {
+  const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
+  const f = 2 ** level;
+  const x0 = Math.floor(region.x0 / f), y0 = Math.floor(region.y0 / f);
+  const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
+  const w = x1 - x0, h = y1 - y0;
+  if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
+  const pixels = new Uint8ClampedArray(w * h * 4);
+  const tiles: [number, number][] = [];
+  for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
+    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) tiles.push([tx, ty]);
+  for (let at = 0; at < tiles.length; at += EXPORT_BATCH) {
+    const batch = tiles.slice(at, at + EXPORT_BATCH);
+    const bytes = await runtime.readTiles(level, Int32Array.from(batch.flat()));
+    batch.forEach(([tx, ty], i) => {
+      const tile = bytes.subarray(i * 262144, (i + 1) * 262144);
+      const left = Math.max(x0, tx * 256), right = Math.min(x1, tx * 256 + 256);
+      for (let y = Math.max(y0, ty * 256); y < Math.min(y1, ty * 256 + 256); y++)
+        for (let x = left; x < right; x++) {
+          const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, d = ((y - y0) * w + (x - x0)) * 4;
+          const a = tile[s + 3];
+          pixels[d + 3] = a;
+          if (a) for (let c = 0; c < 3; c++) pixels[d + c] = Math.round((tile[s + c] * 255) / a);
+        }
+    });
+  }
+  const full = new OffscreenCanvas(w, h);
+  full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
+  // The region in level pixels, and the size the caller asked for.
+  const sx = region.x0 / f - x0, sy = region.y0 / f - y0;
+  const sw = (region.x1 - region.x0) / f, sh = (region.y1 - region.y0) / f;
+  const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
+  const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
+  if (sx === 0 && sy === 0 && ow === w && oh === h) return full.convertToBlob({ type });
+  const out = new OffscreenCanvas(ow, oh);
+  const ctx = out.getContext("2d")!;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(full, sx, sy, sw, sh, 0, 0, ow, oh);
+  return out.convertToBlob({ type });
 }
 let savedToken = 0;
 // The state each save wrote, until the page confirms or releases it.
-const saves = new Map();
+const saves = new Map<number, { hash: string; revision: number }>();
 const MAX_PENDING_SAVES = 4;
-function rememberSave(entry) {
+function rememberSave(entry: { hash: string; revision: number }) {
   const token = ++savedToken;
   saves.set(token, entry);
   // A caller that never confirms (or crashed mid-save) must not pin packages forever.
-  while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value);
+  while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value!);
   return token;
 }
-async function execute(m) {
+async function execute(m: Queued): Promise<unknown> {
   // The in-memory runtime may be ahead of the last confirmed journal write.
   // Keep it available for an emergency export, but accept no more edits.
   if (storageFailure && !readableAfterFailure.has(m.t))
-    throw Error("STORAGE: 保存状態を確認できません。現在の内容を退避してから復旧してください");
+    throw Error("STORAGE: the journal cannot confirm writes; export the document, then recover");
   if (!readableAfterFailure.has(m.t)) await waitForRoom();
   switch (m.t) {
     case "init":
@@ -424,11 +529,21 @@ async function execute(m) {
       startDecoders();
       if (runtime.protocolVersion?.() !== 4)
         throw Error("CONFLICT: SDK/WASM version mismatch");
-      const recovery = await io("inspect");
+      journaling = m.journal !== false;
+      if (!journaling) return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+      await io("configure", { namespace: m.namespace || "default" });
+      const recovery = await io<StoreState>("inspect");
       // Later checkpoints skip the objects the store already holds.
       runtime.noteStoredObjects(JSON.stringify(recovery.objects));
       delete recovery.objects;
-      return { protocol: 4, recovery };
+      const info: RecoveryInfo = recovery;
+      return { protocol: 4, recovery: info };
+    case "discardRecovery":
+      if (!journaling) return true;
+      await writesIdle();
+      await io("discard");
+      runtime.forgetStoredObjects();
+      return true;
     case "createDocument": {
       const state = JSON.parse(runtime.createDocument(m.width, m.height));
       queueCheckpoint();
@@ -439,6 +554,7 @@ async function execute(m) {
         runtime.transact(
           JSON.stringify({
             intent: m.intent,
+            label: m.label,
             ops: m.ops,
             baseRevision: m.baseRevision,
           }),
@@ -597,22 +713,23 @@ async function execute(m) {
       return s;
     }
     case "recover": {
+      if (!journaling) throw Error("NOT_FOUND: the engine keeps no recovery journal");
       await writesIdle();
-      const candidates = await io("loadCandidates");
+      const candidates = await io<Candidate[]>("loadCandidates");
       if (!candidates.length) {
-        const state = await io("inspect");
+        const state = await io<StoreState>("inspect");
         throw Error(state.latestGeneration
           ? "CORRUPT_DATA: no usable recovery generation"
           : "NOT_FOUND: recovery journal");
       }
-      let recovery = null;
-      let lastError;
+      let recovery: Candidate | null = null;
+      let lastError: unknown;
       for (const candidate of candidates) {
         try {
           // A candidate that cannot be read (a missing object) is skipped like one that
           // cannot be opened; it does not stop storage.
-          const full = await journal.request("loadCandidate", { generation: candidate.generation });
-          if (full.metadata?.format >= 3)
+          const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents;
+          if (full.metadata && full.metadata.format >= 3)
             runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
           else if (full.metadata)
             runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
@@ -628,9 +745,9 @@ async function execute(m) {
       await io("activate", { generation: recovery.generation });
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
-        s.warnings.push("新しい復旧記録が破損していたため、前の世代を開きました");
+        s.warnings.push({ code: "RECOVERED_OLDER_GENERATION", details: {} });
       if (recovery.truncated)
-        s.warnings.push("最後の不完全な記録を除いて復旧しました");
+        s.warnings.push({ code: "RECOVERED_TRUNCATED", details: {} });
       return s;
     }
     case "validateFrame":
@@ -644,11 +761,11 @@ async function execute(m) {
       );
     case "recoveryStore": {
       await writesIdle();
-      const store = await io("inspect");
+      const store = await io<StoreState>("inspect");
       return {
         latestGeneration: store.latestGeneration,
         records: store.records,
-        objects: store.objects.length,
+        objects: store.objects!.length,
         packs: store.packs,
       };
     }
@@ -667,13 +784,13 @@ async function execute(m) {
     case "looseCheckpoint": {
       await writesIdle();
       const entries = runtime.checkpointParts();
-      await io("checkpointLoose", { entries: entries.buffer }, [entries.buffer]);
+      await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer }, [entries.buffer]);
       return true;
     }
     case "legacyCheckpoint": {
       await writesIdle();
       const bytes = runtime.savePackage();
-      await io("checkpointLegacy", { bytes: bytes.buffer }, [bytes.buffer]);
+      await io("checkpointLegacy", { bytes: bytes.buffer as ArrayBuffer }, [bytes.buffer]);
       return true;
     }
     case "injectStorageFault":
@@ -688,6 +805,8 @@ async function execute(m) {
     case "readTileLevel": return await runtime.readTileLevel(m.level,m.x,m.y);
     case "readTile":
       return await runtime.readTile(m.x, m.y);
+    case "exportImage":
+      return exportImage(m);
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
@@ -725,7 +844,8 @@ async function execute(m) {
         pumpDecodes();
         if (frame.profile) profiles.push(frame.profile);
         if (frame.pending) await yieldTask();
-      } while (frame.pending);
+        else if (frame.presentDeferred) await presentSettled();
+      } while (frame.pending || frame.presentDeferred);
       await runtime.gpuIdle();
       diagnosticProfiles = null;
       frameSettled = true;
@@ -759,17 +879,14 @@ async function drain() {
         pendingViewport = null;
       }
       if (queue.length) {
-        const m = queue.shift();
+        const m = queue.shift()!;
         try {
           const value = await execute(m);
+          const bytes = (value as { bytes?: unknown } | null)?.bytes;
           if (m.id)
             postMessage(
               { t: "reply", id: m.id, ok: true, value },
-              value?.bytes instanceof Uint8Array
-                ? [value.bytes.buffer]
-                : value instanceof Uint8Array
-                  ? [value.buffer]
-                  : [],
+              bytes instanceof Uint8Array ? [bytes.buffer] : value instanceof Uint8Array ? [value.buffer] : [],
             );
         } catch (error) {
           const e = structured(error);
@@ -783,11 +900,14 @@ async function drain() {
             const value = { ...decodeFrame(runtime.tick(8)), viewVersion };
             pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
-            frameSettled = value.pending === 0;
-            if (value.pending) wantTick = true;
+            frameSettled = value.pending === 0 && !value.presentDeferred;
+            if (!frameSettled) wantTick = true;
             if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });
-            if (value.pending) await yieldTask();
+            // A held-back frame with nothing new composed waits for the GPU instead of
+            // spinning: on a software adapter, spinning takes the GPU's CPU time.
+            if (value.presentDeferred && !value.composed) await presentSettled();
+            else if (value.pending) await yieldTask();
           } catch (error) {
             if (String(error).includes("GPU_LOST")) {
               postMessage({ t: "gpuLost" });
@@ -808,7 +928,7 @@ async function drain() {
   }
 }
 
-self.onmessage = ({ data: m }) => {
+self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage | { t: "durable"; id: number }>) => {
   if (m.t === "durable") {
     // Answered beside the queue: waiting for OPFS must not hold back edits or frames.
     durable().then(

@@ -88,6 +88,9 @@ pub struct FrameReport {
     pub pending: u32,
     pub gpu_bytes: u64,
     pub profile: Option<RenderProfile>,
+    /// The frame was not presented because the previous one is still on the GPU;
+    /// render again once it finishes.
+    pub deferred: bool,
 }
 #[derive(Default, Clone, Copy, Debug)]
 pub struct RenderProfile {
@@ -248,6 +251,12 @@ pub struct Renderer {
     visible_keys: HashSet<CacheKey>,
     last_view: Option<Viewport>,
     last_pending: u32,
+    /// Set from the last present until its GPU work completes. At most one frame is
+    /// presented ahead of the GPU: Chrome loses the device when a worker canvas is
+    /// resized while presented frames pile up (crbug.com/557281760).
+    present_in_flight: Arc<AtomicBool>,
+    /// A frame was held back by `present_in_flight` and is still owed.
+    present_deferred: bool,
     prefetch_stats: PrefetchStatus,
     prefetch_job: Option<TileJob>,
     visible_job: Option<TileJob>,
@@ -257,7 +266,14 @@ pub struct Renderer {
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
+    /// Kept for the device's lifetime. On WebGPU these hold the `GPU` and `GPUAdapter`
+    /// objects; CI lost the device with "A valid external Instance reference no longer
+    /// exists" while only the device was referenced.
+    _instance: wgpu::Instance,
+    _adapter: wgpu::Adapter,
     pub lost: Arc<AtomicBool>,
+    /// The reason and message the device was lost with, for error reports.
+    lost_detail: Arc<std::sync::Mutex<String>>,
     frame: u64,
     pub stroke: Option<GpuStroke>,
     pub adapter_name: String,
@@ -645,8 +661,12 @@ impl Renderer {
         }
         surface.configure(&device, &config);
         let lost = Arc::new(AtomicBool::new(false));
-        let flag = lost.clone();
-        device.set_device_lost_callback(move |_, _| {
+        let lost_detail = Arc::new(std::sync::Mutex::new(String::new()));
+        let (flag, detail) = (lost.clone(), lost_detail.clone());
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut d) = detail.lock() {
+                *d = format!("{reason:?}: {message}");
+            }
             flag.store(true, Ordering::Relaxed);
         });
         let atlas = texture(
@@ -746,6 +766,8 @@ impl Renderer {
             visible_keys: HashSet::new(),
             last_view: None,
             last_pending: 0,
+            present_in_flight: Arc::new(AtomicBool::new(false)),
+            present_deferred: false,
             prefetch_stats: PrefetchStatus::default(),
             prefetch_job: None,
             visible_job: None,
@@ -755,7 +777,10 @@ impl Renderer {
             present,
             brush,
             sampler,
+            _instance: instance.clone(),
+            _adapter: adapter.clone(),
             lost,
+            lost_detail,
             frame: 0,
             stroke: None,
             adapter_name: adapter.get_info().name,
@@ -919,6 +944,13 @@ impl Renderer {
     }
     pub fn destroy_device(&self) {
         self.device.destroy();
+    }
+    /// Why the device was lost, as the browser reported it; empty while it is not.
+    pub fn lost_detail(&self) -> String {
+        self.lost_detail
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
@@ -1827,7 +1859,10 @@ impl Renderer {
         budget_ms: f64,
     ) -> Result<FrameReport> {
         if self.is_lost() {
-            return Err(RenderError::GpuLost("device lost".into()));
+            return Err(RenderError::GpuLost(format!(
+                "device lost ({})",
+                self.lost_detail()
+            )));
         }
         let now = self.clock;
         self.frame += 1;
@@ -1979,9 +2014,19 @@ impl Renderer {
         self.last_pending = pending;
         // Preparing inputs does not change any displayed pixel. Avoid submitting
         // an identical present pass on every resumable slice.
-        if composed == 0 && pending > 0 && unchanged {
+        if composed == 0 && pending > 0 && unchanged && !self.present_deferred {
             return self.frame_report(composed, pending);
         }
+        // Runs completion callbacks on native backends; WebGPU runs them from the event loop.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.present_in_flight.load(Ordering::Acquire) {
+            self.present_deferred = true;
+            return Ok(FrameReport {
+                deferred: true,
+                ..self.frame_report(composed, pending)?
+            });
+        }
+        self.present_deferred = false;
         let mut visible = Vec::new();
         if pending > 0 {
             for (&key, entry) in &self.cache_map {
@@ -2100,6 +2145,10 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.retired.release();
         self.queue.present(frame);
+        self.present_in_flight.store(true, Ordering::Release);
+        let in_flight = self.present_in_flight.clone();
+        self.queue
+            .on_submitted_work_done(move || in_flight.store(false, Ordering::Release));
         self.frame_report(composed, pending)
     }
     fn frame_report(&self, composed: u32, pending: u32) -> Result<FrameReport> {
@@ -2107,6 +2156,7 @@ impl Renderer {
             composed,
             pending,
             profile: self.profiling.then_some(self.profile),
+            deferred: false,
             gpu_bytes: self.vector_bytes()
                 + self.m5.as_ref().map_or(0, |m| m.bytes())
                 + (self.atlas_slots.len() as u64 + 256) * 262144
@@ -2479,7 +2529,10 @@ impl Renderer {
             }
             // As in read_tile: say whether the device was lost while the maps waited.
             return Err(if self.is_lost() {
-                RenderError::GpuLost(format!("device lost while reading back a stroke: {e}"))
+                RenderError::GpuLost(format!(
+                    "device lost ({}) while reading back a stroke: {e}",
+                    self.lost_detail()
+                ))
             } else {
                 RenderError::Internal(format!(
                     "reading back a stroke ({} tiles): {e}",
@@ -2554,48 +2607,31 @@ impl Renderer {
         store: &dyn TileStore,
         key: CacheKey,
     ) -> Result<Vec<u8>> {
-        if !self.cache_map.contains_key(&key) {
-            self.compose(scene, key, store, false)?;
-        }
-        let slot = self
-            .cache_map
-            .get(&key)
-            .ok_or(RenderError::Internal("cache tile".into()))?
-            .slot;
+        self.read_tiles(scene, store, &[key]).await
+    }
+    /// Display tiles, 256×256 RGBA premultiplied each, back to back in `keys` order,
+    /// with one map for all. Each copy is submitted right after its tile is composed:
+    /// composing a later tile may reuse an earlier tile's cache slot, and the queue
+    /// runs the copy before that.
+    pub async fn read_tiles(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        keys: &[CacheKey],
+    ) -> Result<Vec<u8>> {
+        const TILE_BYTES: u64 = 256 * 256 * 4;
         let b = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe"),
-            size: 262144,
+            size: TILE_BYTES * keys.len().max(1) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut e = self.device.create_command_encoder(&Default::default());
-        e.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.cache,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: slot,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &b,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(1024),
-                    rows_per_image: Some(256),
-                },
-            },
-            wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(e.finish()));
-        self.retired.release();
+        for (i, key) in keys.iter().enumerate() {
+            if let Err(e) = self.copy_display_tile(scene, store, *key, &b, i as u64 * TILE_BYTES) {
+                b.destroy();
+                return Err(e);
+            }
+        }
         let (tx, rx) = futures_channel::oneshot::channel();
         b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
@@ -2607,10 +2643,12 @@ impl Renderer {
             b.destroy();
             return Err(if self.is_lost() {
                 RenderError::GpuLost(format!(
-                    "device lost while reading display tile {key:?}: {e}"
+                    "device lost ({}) while reading {} display tiles: {e}",
+                    self.lost_detail(),
+                    keys.len()
                 ))
             } else {
-                RenderError::Internal(format!("reading display tile {key:?}: {e}"))
+                RenderError::Internal(format!("reading {} display tiles: {e}", keys.len()))
             });
         }
         let view = b
@@ -2624,6 +2662,52 @@ impl Renderer {
         // until JS collects it. Readbacks are frequent: release it now.
         b.destroy();
         Ok(data)
+    }
+    fn copy_display_tile(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        key: CacheKey,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+    ) -> Result<()> {
+        if !self.cache_map.contains_key(&key) {
+            self.compose(scene, key, store, false)?;
+        }
+        let slot = self
+            .cache_map
+            .get(&key)
+            .ok_or(RenderError::Internal("cache tile".into()))?
+            .slot;
+        let mut e = self.device.create_command_encoder(&Default::default());
+        e.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.cache,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(e.finish()));
+        self.retired.release();
+        Ok(())
     }
 }
 

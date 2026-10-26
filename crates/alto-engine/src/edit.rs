@@ -701,7 +701,7 @@ impl Engine {
         self.geometry(
             handle,
             Geom {
-                intent: "切り抜き",
+                intent: "image.crop",
                 width,
                 height,
                 map_px: |px, py| {
@@ -726,7 +726,7 @@ impl Engine {
             self.geometry(
                 handle,
                 Geom {
-                    intent: "回転",
+                    intent: "image.rotate",
                     width: h,
                     height: w,
                     map_px: move |x, y| Some((h as i32 - 1 - y, x)),
@@ -739,7 +739,7 @@ impl Engine {
             self.geometry(
                 handle,
                 Geom {
-                    intent: "回転",
+                    intent: "image.rotate",
                     width: h,
                     height: w,
                     map_px: move |x, y| Some((y, w as i32 - 1 - x)),
@@ -760,7 +760,7 @@ impl Engine {
             self.geometry(
                 handle,
                 Geom {
-                    intent: "反転",
+                    intent: "image.flip",
                     width: w,
                     height: h,
                     map_px: move |x, y| Some((w as i32 - 1 - x, y)),
@@ -773,7 +773,7 @@ impl Engine {
             self.geometry(
                 handle,
                 Geom {
-                    intent: "反転",
+                    intent: "image.flip",
                     width: w,
                     height: h,
                     map_px: move |x, y| Some((x, h as i32 - 1 - y)),
@@ -895,7 +895,7 @@ impl Engine {
             ops.push(Op::SetMeta { meta });
         }
         if !ops.is_empty() {
-            self.transact(handle, "画像サイズ", ops, doc.revision)?;
+            self.transact(handle, "image.resize", ops, doc.revision)?;
         }
         Ok(())
     }
@@ -949,7 +949,7 @@ impl Engine {
             .as_ref()
             .map(|map| m5::decode(map, self))
             .transpose()?;
-        self.paint_layer(handle, layer, "塗り", move |x, y, _| {
+        self.paint_layer(handle, layer, "layer.fill", move |x, y, _| {
             if decoded
                 .as_ref()
                 .is_some_and(|tiles| m5::sample(tiles, x, y) < 128)
@@ -974,7 +974,7 @@ impl Engine {
             end,
             radial,
         } = gradient;
-        self.paint_layer(handle, layer, "グラデーション", move |x, y, _| {
+        self.paint_layer(handle, layer, "layer.gradient", move |x, y, _| {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let dx = to.0 - from.0;
@@ -1023,7 +1023,7 @@ impl Engine {
             }
             copied
         };
-        self.paint_layer(handle, layer, "スタンプ", move |x, y, _pixel| {
+        self.paint_layer(handle, layer, "layer.stamp", move |x, y, _pixel| {
             let dx = x - to.0;
             let dy = y - to.1;
             if dx < 0 || dy < 0 || dx >= size.0 as i32 || dy >= size.1 as i32 {
@@ -1068,7 +1068,7 @@ impl Engine {
             }
             (sources, radius_i, span)
         };
-        self.paint_layer(handle, layer, "指先", move |x, y, pixel| {
+        self.paint_layer(handle, layer, "layer.smudge", move |x, y, pixel| {
             let dx = x - at.0;
             let dy = y - at.1;
             if (dx * dx + dy * dy) as f32 > radius * radius {
@@ -1165,7 +1165,7 @@ impl Engine {
                     });
                 }
                 if !ops.is_empty() {
-                    self.transact(handle, "ラスタライズ", ops, doc.revision)?;
+                    self.transact(handle, "layer.rasterize", ops, doc.revision)?;
                 }
                 Ok(())
             }
@@ -1215,7 +1215,7 @@ impl Engine {
                     id,
                     node: replacement,
                 });
-                self.transact(handle, "ラスタライズ", ops, doc.revision)?;
+                self.transact(handle, "layer.rasterize", ops, doc.revision)?;
                 Ok(())
             }
             _ => Err(bad("Rasterize supports a raster or a group of rasters")),
@@ -1312,7 +1312,7 @@ impl Engine {
             ops.push(op);
         }
         ops.push(Op::RemoveNode { id });
-        self.transact(handle, "結合", ops, doc.revision)?;
+        self.transact(handle, "layer.merge", ops, doc.revision)?;
         Ok(())
     }
 }

@@ -30,7 +30,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 - 「保存 .alto」で保存。「開く」で復元。File System Access API対応環境ではファイルへ書き込み、それ以外ではダウンロードします。
 - 異常終了後、同じオリジンで開き直すと「編集を復旧」が表示されます。OPFSの記録はブラウザのサイトデータに保存されます。
 
-「検証と計測」から機能テスト30件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+「検証と計測」から機能テスト32件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
 
 ## M7の使い方（テキスト・縦組み）
 
@@ -61,13 +61,13 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 
 ```ts
 const jp = await engine.assets.importFont(await (await fetch('NotoSansJP.otf')).blob());
-console.log(jp.info.family, jp.warnings); // fsTypeの警告
+console.log(jp.info.family, jp.warnings); // fsTypeの警告（code と details）
 let id;
-await doc.transact('縦組み', tx => {
+await doc.transact('layer.add', tx => {
   tx.addFont(jp);
   id = tx.addText({
     text: '令和8年10月19日、第12回「縦組み」。',
-    style: { fonts: [jp.record.id], size: 32, line_height: 1.75, features: [{ tag: 'palt', value: 1 }] },
+    style: { fonts: [jp.id], size: 32, line_height: 1.75, features: [{ tag: 'palt', value: 1 }] },
     writing_mode: 'vertical_rl',
     frame: { kind: 'area', width: 400, height: 600 },
     auto_tcy: 2,
@@ -125,12 +125,12 @@ const v2 = await doc.versions.commit('線画を描く');
 const log = await doc.versions.log();               // 新しい順
 const { items, names } = await doc.versions.diff(v1.hash, v2.hash);
 await doc.versions.restore(v1.hash);                 // Undo可能
-const folder = await engine.storage.pickFolder();    // または opfsFolder('名前') / new MemoryObjectProvider()
+const folder = await pickFolder();                   // @alto/engine/browser。または opfsFolder('名前') / new MemoryObjectProvider()
 await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。SDK・Worker・WASMは**v0.4 / プロトコル4**で照合します。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。SDK・Worker・WASMは**v0.5 / プロトコル4**で照合します。
 
 ## M6の使い方
 
@@ -158,7 +158,7 @@ const reopened = await engine.openFolder(folder);
 ```ts
 const data = await engine.vectors.parseSvg('M80 240 Q240 0 400 240 L400 400 H80 Z');
 let vector;
-await doc.transact('ベクター追加', tx => {
+await doc.transact('layer.add', tx => {
   vector = tx.addVector([{
     data, fill: [0.3, 0.5, 1, 1], fill_rule: 'non_zero',
     stroke: { color: [1, 1, 1, 1], width: 6, cap: 'round', join: 'round' },
@@ -233,15 +233,15 @@ Mainは入力と読み取り専用ミラー、Engine Workerは文書・GPU、Sto
 
 ## SDKの最小例
 
-```ts
-import { AltoEngine } from './packages/alto-sdk/dist/index.js';
+ほかの Web アプリに組み込む方法（バンドラーの設定、保存場所の名前、状態、エラー、React での使い方）は、[組み込みの手引き](docs/embedding.md) にまとめています。動く例は [`examples/minimal-embed`](examples/minimal-embed) と [`examples/react-embed`](examples/react-embed) です。
 
-const engine = await AltoEngine.create({ canvas });
+```ts
+import { createEngine } from '@alto/engine';
+import { downloadTarget } from '@alto/engine/browser';
+
+const engine = await createEngine({ container: document.querySelector('#editor') });
 const doc = await engine.createDocument({ width: 1920, height: 1080 });
-let layer;
-await doc.transact('レイヤー追加', tx => {
-  layer = tx.addRaster({ name: 'ペイント' });
-});
+const layer = await doc.transact('layer.add', tx => tx.addRaster({ name: 'ペイント' }));
 const stroke = doc.tools.begin('brush', {
   layer,
   tip: { size: 40, hardness: 0.8 },
@@ -249,15 +249,15 @@ const stroke = doc.tools.begin('brush', {
 });
 stroke.input({ x: 100, y: 100, pressure: 1 });
 stroke.input({ x: 300, y: 200, pressure: 0.5 });
-await stroke.end(); // GPU読み戻し・Transaction・ジャーナルflush
+await stroke.end(); // GPU読み戻し・Transaction・ジャーナル
 await doc.undo();
 await doc.redo();
-await doc.save(); // ブラウザの保存先選択またはダウンロード
+await doc.save(downloadTarget('work.alto'));
 ```
 
-Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。Promiseはメモリ上の文書に適用された時点で解決し、復旧用ジャーナルへの書き込みは描画と別に進みます。書き込みの完了は `await doc.durable()` で待てます（書き込みに失敗すると `STORAGE` で失敗します）。`doc.view.node(id)` は凍結した読み取り専用の値です。ラスターレイヤーの `kind.tiles` はタイル数と範囲（`{format, count, bounds}`）だけで、タイル一覧は `await doc.nodeTiles(id)` で取得します。`doc.view.snapshotHash` は文書を開いたときや保存したときにだけ入り、編集の後は `null` です。保存されるスナップショットのハッシュは `await doc.snapshotHash()` で取得します。独自保存先は `ArchiveStorageProvider` の `readArchive` / `writeArchive` を実装できます。型定義は `packages/alto-sdk/dist/index.d.ts` を参照してください。`unstable` APIは検証用です。
+Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。Promiseはメモリ上の文書に適用された時点で解決し、復旧用ジャーナルへの書き込みは描画と別に進みます。書き込みの完了は `await doc.durable()` で待てます（書き込みに失敗すると `STORAGE` で失敗します）。文書は `doc.getSnapshot()`（凍結済みの値）と `doc.subscribe(listener)` で読みます。ラスターレイヤーの `tiles` はタイル数と範囲（`{format, count, bounds}`）だけで、タイル一覧は `await doc.nodeTiles(id)` で取得します。保存されるスナップショットのハッシュは `await doc.snapshotHash()` で取得します。公開APIの一覧は [packages/alto-sdk/api](packages/alto-sdk/api) にあります。`@alto/engine/unstable` と `@alto/engine/testing` は検証用です。
 
-`viewport.zoom` は物理ピクセル/文書ピクセルです。画面上の倍率を指定する場合は `engine.viewport.setCssZoom(1)`、読み取る場合は `engine.viewport.getCssZoom()` を使います。実効DPRは `engine.effectiveDpr`（最大2）で確認できます。Workerが停止した場合、`engine.lifecycleState` と `engine.engineFailure` を確認し、`engine.retryWorker()` で確定済みの作業記録から復旧できます。`recovering` 中は編集を停止し、`recovered` の通知後に `engine.document` を取得し直してください。保存障害は従来どおり別の `storageFailure` で通知されます。
+表示倍率 `engine.viewport.get().zoom` はCSSピクセル/文書ピクセルです。エンジンの状態は `engine.status` と `status` イベント（`ready` / `restarting` / `storage-failed` / `failed`）で知らせます。Workerが停止しても、`engine.document` と表示位置はそのまま使えます。`failed` のときは `engine.retry()` で確定済みの作業記録から立て直せます。
 
 ## M5 SDK例
 
@@ -273,7 +273,7 @@ const maskStroke = doc.tools.begin('brush', {
 });
 maskStroke.input({ x: 240, y: 180, pressure: 1 });
 await maskStroke.end();
-await doc.transact('クリッピング', tx => tx.setProps(layer, { clip_to_below: true }));
+await doc.transact('layer.props', tx => tx.setProps(layer, { clip_to_below: true }));
 ```
 
 `doc.masks.fromSelection(layer)` / `remove(layer)`、`tx.addAdjustment(...)` / `setAdjustment(...)`、`mask_enabled` / `mask_linked`、`doc.selection.outline()` も利用できます。

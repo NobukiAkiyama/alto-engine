@@ -171,11 +171,10 @@ impl Runtime {
         let hash: ContentHash = hash
             .parse()
             .map_err(|_| error("INVALID_ARGUMENT: commit hash"))?;
-        let ops = self.engine.restore_version(self.doc, hash).map_err(error)?;
-        let label = format!("版を復元: {}", &hash.hex()[..10]);
+        let (ops, intent) = self.engine.restore_version(self.doc, hash).map_err(error)?;
         self.journal.push(
             self.engine
-                .journal_record(self.doc, JournalKind::Transact, &label, &ops)
+                .journal_record(self.doc, JournalKind::Transact, intent, &ops)
                 .map_err(error)?,
         );
         self.refresh()?;
@@ -221,6 +220,12 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+    /// The recovery store was emptied (its journal discarded); the next checkpoint
+    /// writes every object again.
+    #[wasm_bindgen(js_name=forgetStoredObjects)]
+    pub fn forget_stored_objects(&mut self) {
+        self.stored_objects.clear();
     }
     /// Only called by the journal worker after verifying the checkpoint digest.
     #[wasm_bindgen(js_name=openRecoveryEntries)]

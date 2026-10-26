@@ -1,8 +1,10 @@
 // M8: version commits, semantic layer diffs, restore, history in .alto and the folder form.
+import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
+import { testing } from "../../packages/alto-sdk/dist/testing.js";
 import { MemoryObjectProvider, FileSystemDirectoryProvider } from "../../packages/alto-sdk/dist/index.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
 const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-const frame = async (e) => { await e.request("validateFrame"); await e.unstable.settle(); };
+const frame = async (e) => { await testing(e).request("validateFrame"); await unstable(e).settle(); };
 async function stroke(doc, layer, x, y, color) {
   const s = doc.tools.begin("brush", { layer, tip: { size: 60, hardness: 0.9, spacing: 0.1 }, color });
   for (let i = 0; i < 8; i++) s.input({ x: x + i * 12, y, pressure: 1 });
@@ -18,23 +20,23 @@ export async function runM8Tests(engine, log) {
       await doc.transact("レイヤー追加", (tx) => { bg = tx.addRaster({ name: "背景" }); ink = tx.addRaster({ name: "線画" }); });
       await stroke(doc, bg, 40, 60, [0.2, 0.4, 0.9, 1]);
       v1 = await doc.versions.commit("下地", { author: "tester" });
-      pixels1 = await engine.unstable.readTile(0, 0);
+      pixels1 = await unstable(engine).readTile(0, 0);
       assert(v1.parents.length === 0 && v1.author === "tester", "first commit");
-      assert(doc.view.versions.head === v1.hash && !doc.view.versions.changed, "status after commit");
+      assert(doc.getSnapshot().versions.head === v1.hash && !doc.getSnapshot().versions.changed, "status after commit");
       let refused = false;
       try { await doc.versions.commit("空"); } catch (e) { refused = e.code === "INVALID_ARGUMENT"; }
       assert(refused, "empty commit accepted");
       for (let i = 0; i < 3; i++) await stroke(doc, ink, 200, 200 + i * 30, [0, 0, 0, 1]);
       await doc.undo();
       await doc.transact("不透明度", (tx) => tx.setProps(bg, { opacity: 0.5 }));
-      assert(doc.view.versions.changed && doc.view.versions.changes === 2, "working changes " + JSON.stringify(doc.view.versions));
+      assert(doc.getSnapshot().versions.changed && doc.getSnapshot().versions.changes === 2, "working changes " + JSON.stringify(doc.getSnapshot().versions));
       v2 = await doc.versions.commit("線画を描く");
-      pixels2 = await engine.unstable.readTile(0, 0);
-      const brush = v2.intents.find((i) => i.intent === "Brush stroke");
+      pixels2 = await unstable(engine).readTile(0, 0);
+      const brush = v2.intents.find((i) => i.intent === "brush.stroke");
       assert(brush && brush.count === 2 && brush.target_names[0] === "線画", "intent summary " + JSON.stringify(v2.intents));
       const log = await doc.versions.log();
       assert(log.length === 2 && log[0].hash === v2.hash && log[0].parents[0] === v1.hash, "log");
-      assert(doc.view.dirty, "a new commit is unsaved");
+      assert(doc.getSnapshot().dirty, "a new commit is unsaved");
     });
     await test("semantic diff reads layer by layer (pixels, props, moves, text, assets)", async () => {
       const d = await doc.versions.diff(v1.hash, v2.hash);
@@ -51,21 +53,21 @@ export async function runM8Tests(engine, log) {
     await test("restore an earlier version as one undoable edit", async () => {
       await doc.versions.restore(v1.hash);
       await frame(engine);
-      assert(same(pixels1, await engine.unstable.readTile(0, 0)), "restored pixels");
+      assert(same(pixels1, await unstable(engine).readTile(0, 0)), "restored pixels");
       assert((await doc.versions.diff(v1.hash, "working")).items.length === 0, "restored document");
       assert((await doc.versions.log()).length === 2, "history is not rewritten");
       await doc.undo();
       await doc.undo();
       assert((await doc.versions.diff(v2.hash, "working")).items.length === 0, "undo restore");
-      assert(same(pixels2, await engine.unstable.readTile(0, 0)), "undo pixels");
+      assert(same(pixels2, await unstable(engine).readTile(0, 0)), "undo pixels");
     });
     await test(".alto keeps history; old versions restore after reopening", async () => {
-      const bytes = await engine.unstable.saveBytes();
-      doc = await engine.openDocument(new Blob([bytes]));
+      const bytes = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([bytes]));
       const log = await doc.versions.log();
       assert(log.map((c) => c.hash).join() === [v2.hash, v1.hash].join(), "reopened log");
       await doc.versions.restore(v1.hash);
-      assert(same(pixels1, await engine.unstable.readTile(0, 0)), "reopened restore pixels");
+      assert(same(pixels1, await unstable(engine).readTile(0, 0)), "reopened restore pixels");
       await doc.undo();
       metrics.zipBytes = bytes.length;
     });
@@ -75,7 +77,7 @@ export async function runM8Tests(engine, log) {
       const provider = new FileSystemDirectoryProvider(await root.getDirectoryHandle(name, { create: true }));
       try {
         const first = await doc.saveFolder(provider);
-        assert(!doc.view.dirty, "saved state");
+        assert(!doc.getSnapshot().dirty, "saved state");
         const files = [...(await provider.list(""))];
         for (const f of ["manifest.json", "document.json", ".gitattributes"]) assert(f === ".gitattributes" ? !!(await provider.readRef(f)) : files.includes(f), "missing " + f);
         assert(files.filter((f) => f.startsWith("commits/")).length === 2, "commits " + files);
@@ -93,7 +95,7 @@ export async function runM8Tests(engine, log) {
         assert((await doc.snapshotHash()) === hash, "folder snapshot");
         assert((await doc.versions.log()).map((c) => c.hash).join() === [v3.hash, v2.hash, v1.hash].join(), "folder log");
         await doc.versions.restore(v1.hash);
-        assert(same(pixels1, await engine.unstable.readTile(0, 0)), "folder restore");
+        assert(same(pixels1, await unstable(engine).readTile(0, 0)), "folder restore");
         await doc.undo();
         // Another writer changed the folder: the next save is rejected and nothing is overwritten.
         await provider.writeRef("manifest.json", new TextEncoder().encode('{"format":1}'));
@@ -114,14 +116,14 @@ export async function runM8Tests(engine, log) {
     await test("commits survive a Worker crash (checkpoint) and journal recovery", async () => {
       await stroke(doc, bg, 300, 400, [1, 0, 0, 1]);
       const c = await doc.versions.commit("赤い線");
-      const after = await engine.unstable.readTile(1, 1);
+      const after = await unstable(engine).readTile(1, 1);
       // The commit's checkpoint is written after the reply.
       await doc.durable();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       const log = await doc.versions.log();
       assert(log[0].hash === c.hash && log.length === 4, "commit lost in crash");
-      assert(same(after, await engine.unstable.readTile(1, 1)), "pixels after recovery");
+      assert(same(after, await unstable(engine).readTile(1, 1)), "pixels after recovery");
       await frame(engine);
     });
   } catch (error) {

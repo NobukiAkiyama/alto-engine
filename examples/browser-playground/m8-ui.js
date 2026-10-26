@@ -1,6 +1,27 @@
+import { pickFolder } from "../../packages/alto-sdk/dist/browser.js";
+import { describeIntent } from "./messages.js";
 const $ = (s) => document.querySelector(s);
 const short = (h) => h.slice(0, 10);
 const time = (ms) => new Date(ms).toLocaleString("ja-JP", { dateStyle: "short", timeStyle: "short" });
+/** What changed inside a node, from the engine's structured detail. */
+function detail(d) {
+  switch (d.kind) {
+    case "vector": return `パス ${d.paths[0]}本/${d.commands[0]}命令 → ${d.paths[1]}本/${d.commands[1]}命令`;
+    case "text": {
+      const parts = [];
+      if (d.text) parts.push(`「${d.text[0]}」→「${d.text[1]}」`);
+      if (d.style) parts.push("書式");
+      if (d.writing_mode) parts.push(d.writing_mode === "vertical_rl" ? "縦組みへ" : "横組みへ");
+      if (d.frame) parts.push("枠・揃え");
+      if (d.tate_chu_yoko) parts.push("縦中横");
+      return parts.join("、");
+    }
+    case "adjustment": return "調整値";
+    case "unsupported": return "未対応ノードの内容";
+    case "kind_changed": return `${d.from} → ${d.to}`;
+    default: return JSON.stringify(d);
+  }
+}
 /** One readable line per change, layer by layer. */
 export function describe(item, names) {
   const n = (id) => (names[id] ? `「${names[id]}」` : "ルート");
@@ -13,7 +34,7 @@ export function describe(item, names) {
       const r = item.document_bounds;
       return `～ 画素 ${item.name}${item.target === "mask" ? "（マスク）" : ""}: ${item.tiles}タイル (${r.x0},${r.y0})–(${r.x1},${r.y1})`;
     }
-    case "content_changed": return `～ 内容 [${item.kind}] ${item.name}: ${item.detail}`;
+    case "content_changed": return `～ 内容 [${item.kind}] ${item.name}: ${detail(item.detail)}`;
     case "asset_changed": return `～ アセット ${item.kind} ${{ added: "追加", removed: "削除" }[item.change] || "変更"}`;
     case "meta_changed": return `～ 文書 ${item.fields.join(", ")}`;
     case "selection_changed": return `～ 選択範囲 ${item.tiles}タイル`;
@@ -22,7 +43,7 @@ export function describe(item, names) {
 }
 export function installM8({ engine, getDocument, attach, run }) {
   let chosen = null, log = [], folder = null, ticket = 0;
-  const intents = (c) => c.intents.map((i) => `${i.intent}${i.count > 1 ? " ×" + i.count : ""}${i.target_names.length ? "（" + i.target_names.join("、") + "）" : ""}`).join(" / ");
+  const intents = (c) => c.intents.map((i) => `${describeIntent(i)}${i.count > 1 ? " ×" + i.count : ""}${i.target_names.length ? "（" + i.target_names.map((n) => n ?? "削除済み").join("、") + "）" : ""}`).join(" / ");
   function showDiff(diff, empty) {
     const items = diff.items.map((i) => { const li = document.createElement("li"); li.textContent = describe(i, diff.names); return li; });
     if (!items.length) { const li = document.createElement("li"); li.textContent = empty; items.push(li); }
@@ -77,12 +98,12 @@ export function installM8({ engine, getDocument, attach, run }) {
   });
   $("#save-folder").onclick = () => run(async () => {
     const d = getDocument();
-    folder = d.folder?.provider || folder || (await engine.storage.pickFolder());
+    folder = d.folder || folder || (await pickFolder());
     const r = await d.saveFolder(folder, { overwrite: !d.folder });
     $("#version-state").textContent += ` · フォルダへ保存（新規 ${r.written} / 既存 ${r.skipped}）`;
   });
   $("#open-folder").onclick = () => run(async () => {
-    const provider = await engine.storage.pickFolder();
+    const provider = await pickFolder();
     attach(await engine.openFolder(provider));
     folder = provider;
   });

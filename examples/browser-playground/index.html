@@ -60,6 +60,10 @@
       min-height: 0;
       position: relative;
     }
+    #canvas-host {
+      position: absolute;
+      inset: 0;
+    }
     canvas {
       display: block;
       width: 100%;
@@ -128,10 +132,17 @@
       background: #263c4f;
     }
     #recovery-result.warning { background: #57471a; }
+    /* A fixed height: the text changes every frame, and a taller line (Japanese
+       glyphs) would move the editor below it each time. */
     #status {
+      box-sizing: border-box;
+      height: 32px;
       padding: 7px 16px;
+      line-height: 18px;
       color: #9fc4ff;
-      min-height: 32px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     #test-results {
       white-space: pre-wrap;
@@ -319,7 +330,7 @@
   <div id="status">エンジン起動中…</div>
   <main>
     <div id="stage">
-      <canvas id="canvas"></canvas
+      <div id="canvas-host"></div
       ><svg id="selection-overlay" aria-hidden="true">
         <g id="selection-transform">
           <path id="outline-black" />

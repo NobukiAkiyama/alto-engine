@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alto Engine: React embed</title>
+    <style>
+      body { margin: 0; font: 14px system-ui, sans-serif; }
+      #app { display: grid; grid-template-columns: 1fr 220px; height: 100vh; }
+      .editor { position: relative; background: #e6e6e6; }
+      aside { padding: 8px; border-left: 1px solid #ccc; }
+      li.active { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createStorageSession } from "./storage-session.js";
+import { createStorageSession } from "../dist/storage-session.js";
 
 function fakeTimers() {
   const timers = [];

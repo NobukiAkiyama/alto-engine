@@ -106,7 +106,6 @@ fn restricted_fstype_is_reported() {
     bytes[offset + 8..offset + 10].copy_from_slice(&2u16.to_be_bytes());
     let info = inspect(&bytes, 0).unwrap();
     assert_eq!(info.embedding, FontEmbedding::Restricted);
-    assert!(info.warnings()[0].contains("埋め込みが禁止"));
 }
 
 #[test]

@@ -1,20 +1,35 @@
 {
   "name": "@alto/engine",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./unstable": {
+      "types": "./dist/unstable.d.ts",
+      "import": "./dist/unstable.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc && node build.mjs"
+    "build": "node build.mjs",
+    "api": "api-extractor run --local && api-extractor run --local -c api-extractor.browser.json",
+    "api:check": "api-extractor run && api-extractor run -c api-extractor.browser.json"
   },
   "devDependencies": {
+    "@microsoft/api-extractor": "7.59.4",
     "typescript": "^6.0.0"
   }
 }

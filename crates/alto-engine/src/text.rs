@@ -29,7 +29,7 @@ pub struct TextCache {
 pub struct ImportedFont {
     pub record: AssetRecord,
     pub info: FontInfo,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<crate::Warning>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,14 +94,27 @@ impl Engine {
             alto_text::inspect(&bytes, face_index).map_err(|e| DocError::Invalid(e.to_string()))?;
         if info.embedding == FontEmbedding::Restricted {
             return Err(DocError::Invalid(format!(
-                "INVALID_ARGUMENT: フォント「{}」はライセンス（OS/2 fsType）で埋め込みが禁止されています",
+                "INVALID_ARGUMENT: the licence of font {} (OS/2 fsType) forbids embedding it",
                 info.family
             ))
             .into());
         }
         let byte_len = bytes.len() as u64;
         let hash = self.put_import_blob(bytes);
-        let warnings = info.warnings();
+        // Restricted fonts were refused above.
+        let mut warnings = vec![];
+        if info.embedding == FontEmbedding::PreviewAndPrint {
+            warnings.push(
+                crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                    .with("family", &info.family)
+                    .with("level", "preview_and_print"),
+            );
+        }
+        if !info.subsetting_allowed {
+            warnings.push(
+                crate::Warning::new("FONT_SUBSETTING_FORBIDDEN").with("family", &info.family),
+            );
+        }
         Ok(ImportedFont {
             record: AssetRecord {
                 id: AssetId::new(),
@@ -289,7 +302,7 @@ impl Engine {
     }
 
     /// Licence warnings for fonts used by the document.
-    pub fn font_warnings(&self, h: DocHandle) -> Result<Vec<String>, EngineError> {
+    pub fn font_warnings(&self, h: DocHandle) -> Result<Vec<crate::Warning>, EngineError> {
         let doc = self.document(h)?;
         let mut out = vec![];
         for a in doc.assets.values() {
@@ -298,16 +311,20 @@ impl Engine {
             } = &a.kind
             {
                 match embedding {
-                    alto_text::FontEmbedding::Restricted => out.push(format!(
-                        "フォント「{family}」は埋め込みが禁止されています（OS/2 fsType）"
-                    )),
-                    alto_text::FontEmbedding::PreviewAndPrint => out.push(format!(
-                        "フォント「{family}」は閲覧・印刷用の埋め込みのみ許可されています"
-                    )),
+                    alto_text::FontEmbedding::Restricted => out.push(
+                        crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                            .with("family", family)
+                            .with("level", "restricted"),
+                    ),
+                    alto_text::FontEmbedding::PreviewAndPrint => out.push(
+                        crate::Warning::new("FONT_EMBEDDING_RESTRICTED")
+                            .with("family", family)
+                            .with("level", "preview_and_print"),
+                    ),
                     _ => {}
                 }
                 if !self.blobs.contains_key(&a.hash) {
-                    out.push(format!("フォント「{family}」のデータがありません"));
+                    out.push(crate::Warning::new("FONT_MISSING").with("family", family));
                 }
             }
         }

@@ -8,28 +8,72 @@ const MAGIC = new TextEncoder().encode("ALTOJ001");
 const MAX_RECORD_BYTES = 540 * 1024 * 1024;
 const OBJECT_PATH = /^objects\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
 const PACK_NAME = /^[0-9]+\.pack$/;
-let directory,
-  objectsDirectory,
-  packsDirectory,
-  active = null,
-  candidates = [],
+// Each storage namespace has its own folder, so engines with different names never
+// share a journal. The Worker names it before the first request.
+type Bytes = Uint8Array;
+interface Location {
+  pack: string;
+  offset: number;
+  length: number;
+  loose?: undefined;
+}
+type Stored = Location | { loose: true; pack?: undefined; offset?: undefined; length?: undefined };
+interface Metadata {
+  format: number;
+  entriesSha256?: string;
+  packageSha256?: string;
+  objects: string[];
+  opaque: string[];
+  packs?: string[];
+  locations?: [number, number, number][];
+}
+interface Parsed {
+  generation: number;
+  base: Bytes | null;
+  metadata: Metadata | null;
+  records: Bytes[] | null;
+  truncated: boolean;
+  validLength: number;
+}
+interface Candidate extends Parsed {
+  name: string;
+  file: FileSystemFileHandle;
+  recordCount: number;
+}
+/** A request from the engine Worker. Fields depend on `t`. */
+export interface StorageMessage {
+  t: string;
+  namespace?: string;
+  generation?: number;
+  entries?: ArrayBuffer;
+  bytes?: ArrayBuffer;
+}
+let namespace = "default",
+  directory: FileSystemDirectoryHandle | null = null,
+  objectsDirectory!: FileSystemDirectoryHandle,
+  packsDirectory!: FileSystemDirectoryHandle,
+  active: Candidate | null = null,
+  candidates: Candidate[] = [],
   generation = 0,
   offset = 0,
   // Where each stored object is: { pack, offset, length }, or { loose: true } for a
   // format 3 file. Nothing is deleted mid-session: a checkpoint skips objects listed
   // here, so one must never vanish, and every location recorded stays readable.
-  stored = new Map(),
+  stored = new Map<string, Stored>(),
   // What a valid checkpoint referenced at startup; the rest is garbage.
-  keptPacks = new Set(),
-  keptLoose = new Set(),
+  keptPacks = new Set<string>(),
+  keptLoose = new Set<string>(),
   // Parsed checkpoints and records stay in memory only until recovery is decided.
   released = false,
   // Unreferenced objects are deleted once per session, before its first write.
   collected = false;
 const encoder = new TextEncoder();
+/** A directory's entries; the WebWorker lib does not declare the async iterator. */
+const entries = (dir: FileSystemDirectoryHandle) =>
+  (dir as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries();
 const decoder = new TextDecoder();
-async function sha256(bytes) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+async function sha256(bytes: Bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 const crcTable = Array.from({ length: 256 }, (_, n) => {
@@ -37,12 +81,12 @@ const crcTable = Array.from({ length: 256 }, (_, n) => {
   for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   return c >>> 0;
 });
-function crc(bytes) {
+function crc(bytes: Bytes) {
   let c = 0xffffffff;
   for (const b of bytes) c = crcTable[(c ^ b) & 255] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function record(tag, bytes) {
+function record(tag: number, bytes: Bytes) {
   const payload = new Uint8Array(bytes.length + 1);
   payload[0] = tag;
   payload.set(bytes, 1);
@@ -54,7 +98,7 @@ function record(tag, bytes) {
   return out;
 }
 /** Entries framed as the engine frames them: count, then (name length, name, data length, data). */
-function frame(entries) {
+function frame(entries: Map<string, Bytes>) {
   const names = [...entries.keys()].map((k) => encoder.encode(k));
   let size = 4;
   let i = 0;
@@ -75,9 +119,9 @@ function frame(entries) {
   }
   return out;
 }
-function unframe(b) {
+function unframe(b: Bytes) {
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  const out = new Map();
+  const out = new Map<string, Bytes>();
   let p = 4;
   for (let i = 0, n = view.getUint32(0, true); i < n; i++) {
     const l = view.getUint32(p, true);
@@ -89,12 +133,12 @@ function unframe(b) {
   }
   return out;
 }
-function parse(bytes) {
+function parse(bytes: Bytes): Parsed | null {
   if (bytes.length < 12 || !MAGIC.every((b, i) => bytes[i] === b)) return null;
   let p = 12,
-    base = null,
-    metadata = null,
-    records = [],
+    base: Bytes | null = null,
+    metadata: Metadata | null = null,
+    records: Bytes[] = [],
     truncated = false;
   while (p < bytes.length) {
     if (p + 8 > bytes.length) {
@@ -150,30 +194,30 @@ function parse(bytes) {
       }
     : null;
 }
-const isHash = (hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
-async function validMetadata(candidate) {
+const isHash = (hash: unknown) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+async function validMetadata(candidate: Parsed) {
   const meta = candidate.metadata;
   if (!meta) return true;
   if (!Array.isArray(meta.opaque) || meta.opaque.some((hash) => !isHash(hash))) return false;
   if (meta.format === 2)
-    return isHash(meta.packageSha256) && (await sha256(candidate.base)) === meta.packageSha256;
+    return isHash(meta.packageSha256) && (await sha256(candidate.base!)) === meta.packageSha256;
   if (meta.format !== 3 && meta.format !== 4) return false;
   const objects = meta.objects;
   if (
     !isHash(meta.entriesSha256) ||
     !Array.isArray(objects) ||
-    !objects.every((path) => typeof path === "string" && OBJECT_PATH.test(path))
+    !objects.every((path: unknown) => typeof path === "string" && OBJECT_PATH.test(path))
   )
     return false;
   if (meta.format === 4) {
     const packs = meta.packs;
     const valid =
       Array.isArray(packs) &&
-      packs.every((name) => typeof name === "string" && PACK_NAME.test(name)) &&
+      packs.every((name: unknown) => typeof name === "string" && PACK_NAME.test(name)) &&
       Array.isArray(meta.locations) &&
       meta.locations.length === objects.length &&
       meta.locations.every(
-        (l) =>
+        (l: unknown) =>
           Array.isArray(l) &&
           l.length === 3 &&
           l.every(Number.isSafeInteger) &&
@@ -184,24 +228,27 @@ async function validMetadata(candidate) {
       );
     if (!valid) return false;
   }
-  return (await sha256(candidate.base)) === meta.entriesSha256;
+  return (await sha256(candidate.base!)) === meta.entriesSha256;
 }
 async function listObjects() {
-  const present = new Map();
-  for await (const [shard, dir] of objectsDirectory.entries()) {
+  const present = new Map<string, FileSystemDirectoryHandle>();
+  for await (const [shard, dir] of entries(objectsDirectory)) {
     if (dir.kind !== "directory") continue;
-    for await (const [name] of dir.entries()) {
+    for await (const [name] of entries(dir as FileSystemDirectoryHandle)) {
       const path = `objects/${shard}/${name}`;
-      if (OBJECT_PATH.test(path)) present.set(path, dir);
+      if (OBJECT_PATH.test(path)) present.set(path, dir as FileSystemDirectoryHandle);
     }
   }
   return present;
 }
+/** The folder name of a namespace: its UTF-8 bytes in hex, so any allowed name is a valid name. */
+export function namespaceFolder(name: string) {
+  return "ns-" + Array.from(encoder.encode(name), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 async function init() {
   if (directory) return;
-  directory = await (
-    await navigator.storage.getDirectory()
-  ).getDirectoryHandle("alto-engine", { create: true });
+  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine", { create: true });
+  directory = await root.getDirectoryHandle(namespaceFolder(namespace), { create: true });
   objectsDirectory = await directory.getDirectoryHandle("objects", { create: true });
   packsDirectory = await directory.getDirectoryHandle("packs", { create: true });
   await scan();
@@ -212,22 +259,22 @@ async function init() {
  * fails its checkpoint when recovery reads it.
  */
 async function scan() {
-  const found = [];
-  const seenGenerations = [];
+  const found: Candidate[] = [];
+  const seenGenerations: number[] = [];
   for (const name of ["journal-a.bin", "journal-b.bin"])
     try {
-      const f = await directory.getFileHandle(name);
+      const f = await directory!.getFileHandle(name);
       const bytes = new Uint8Array(await (await f.getFile()).arrayBuffer());
       if (bytes.length >= 12 && MAGIC.every((b, i) => bytes[i] === b))
         seenGenerations.push(new DataView(bytes.buffer, bytes.byteOffset + 8, 4).getUint32(0, true));
       const parsed = parse(bytes);
-      if (parsed) found.push({ name, file: f, ...parsed });
+      if (parsed) found.push({ name, file: f, recordCount: 0, ...parsed });
     } catch {}
   generation = Math.max(0, ...seenGenerations);
   candidates = [];
   for (const candidate of found)
     if (await validMetadata(candidate)) {
-      candidate.recordCount = candidate.records.length;
+      candidate.recordCount = candidate.records!.length;
       candidates.push(candidate);
     }
   candidates.sort((a, b) => b.generation - a.generation);
@@ -240,10 +287,11 @@ async function scan() {
         if (!stored.has(path)) stored.set(path, { loose: true });
       }
     if (meta?.format === 4) {
-      for (const name of meta.packs) keptPacks.add(name);
+      const packs = meta.packs!;
+      for (const name of packs) keptPacks.add(name);
       meta.objects.forEach((path, i) => {
-        const [pack, offset, length] = meta.locations[i];
-        if (!stored.has(path)) stored.set(path, { pack: meta.packs[pack], offset, length });
+        const [pack, offset, length] = meta.locations![i];
+        if (!stored.has(path)) stored.set(path, { pack: packs[pack], offset, length });
       });
     }
   }
@@ -262,7 +310,7 @@ async function scan() {
 async function collectGarbage() {
   if (collected) return;
   collected = true;
-  for await (const [name, handle] of packsDirectory.entries())
+  for await (const [name, handle] of entries(packsDirectory))
     if (handle.kind === "file" && !keptPacks.has(name))
       await packsDirectory.removeEntry(name).catch(() => {});
   for (const [path, dir] of await listObjects())
@@ -276,13 +324,13 @@ function release() {
   }
   released = true;
 }
-async function readObject(path) {
+async function readObject(path: string) {
   const [, shard, name] = path.split("/");
   const dir = await objectsDirectory.getDirectoryHandle(shard);
   const file = await dir.getFileHandle(name);
   return new Uint8Array(await (await file.getFile()).arrayBuffer());
 }
-async function writeObject(path, bytes) {
+async function writeObject(path: string, bytes: Bytes) {
   const [, shard, name] = path.split("/");
   const dir = await objectsDirectory.getDirectoryHandle(shard, { create: true });
   const file = await dir.getFileHandle(name, { create: true });
@@ -296,7 +344,7 @@ async function writeObject(path, bytes) {
   }
 }
 /** Whole packs, read once each and in parallel. */
-async function readPacks(names) {
+async function readPacks(names: string[]) {
   const unique = [...new Set(names)];
   const bytes = await Promise.all(
     unique.map(async (name) => {
@@ -306,14 +354,14 @@ async function readPacks(names) {
   );
   return new Map(unique.map((name, i) => [name, bytes[i]]));
 }
-function slicePack(packs, { pack, offset, length }) {
-  const bytes = packs.get(pack);
+function slicePack(packs: Map<string, Bytes>, { pack, offset, length }: Location) {
+  const bytes = packs.get(pack)!;
   if (offset + length > bytes.length) throw Error(`pack ${pack} is shorter than its objects`);
   return bytes.subarray(offset, offset + length);
 }
 /** Format 3 objects, one OPFS read each; overlapping them hides most of the latency. */
-async function readLoose(paths) {
-  const objects = new Array(paths.length);
+async function readLoose(paths: string[]) {
+  const objects: Bytes[] = new Array(paths.length);
   let next = 0;
   const reader = async () => {
     while (next < paths.length) {
@@ -325,27 +373,28 @@ async function readLoose(paths) {
   return objects;
 }
 /** The package a candidate recovers from: formats 3 and 4 rejoin entries and objects. */
-async function packageOf(candidate) {
+async function packageOf(candidate: Candidate) {
   const meta = candidate.metadata;
   if (meta?.format !== 3 && meta?.format !== 4) return candidate.base;
-  const entries = unframe(candidate.base);
+  const framed = unframe(candidate.base!);
   const paths = meta.objects;
   if (meta.format === 3) {
     const objects = await readLoose(paths);
-    paths.forEach((path, i) => entries.set(path, objects[i]));
+    paths.forEach((path, i) => framed.set(path, objects[i]));
   } else {
-    const packs = await readPacks(meta.packs);
+    const names = meta.packs!;
+    const packs = await readPacks(names);
     paths.forEach((path, i) => {
-      const [pack, offset, length] = meta.locations[i];
-      entries.set(path, slicePack(packs, { pack: meta.packs[pack], offset, length }));
+      const [pack, offset, length] = meta.locations![i];
+      framed.set(path, slicePack(packs, { pack: names[pack], offset, length }));
     });
   }
-  return frame(entries);
+  return frame(framed);
 }
-async function writeGeneration(tag, payload, metadata) {
+async function writeGeneration(tag: number, payload: Bytes, metadata: Metadata | null) {
   const name =
     active?.name === "journal-a.bin" ? "journal-b.bin" : "journal-a.bin";
-  const file = await directory.getFileHandle(name, { create: true });
+  const file = await directory!.getFileHandle(name, { create: true });
   const h = await file.createSyncAccessHandle();
   try {
     const header = new Uint8Array(12);
@@ -375,7 +424,7 @@ async function writeGeneration(tag, payload, metadata) {
     h.close();
   }
 }
-function withMetadata(metadata, bytes) {
+function withMetadata(metadata: Metadata, bytes: Bytes) {
   const metaBytes = encoder.encode(JSON.stringify(metadata));
   const payload = new Uint8Array(4 + metaBytes.length + bytes.length);
   new DataView(payload.buffer).setUint32(0, metaBytes.length, true);
@@ -391,11 +440,11 @@ function withMetadata(metadata, bytes) {
  * A pack mostly of objects no checkpoint references any more is copied too, and so are
  * format 3 files.
  */
-async function objectsToCopy(paths, newBytes) {
-  const loose = [];
-  const live = new Map();
+async function objectsToCopy(paths: string[], newBytes: number) {
+  const loose: string[] = [];
+  const live = new Map<string, { bytes: number; paths: string[] }>();
   for (const path of paths) {
-    const at = stored.get(path);
+    const at = stored.get(path)!;
     if (at.loose) loose.push(path);
     else {
       const pack = live.get(at.pack) || { bytes: 0, paths: [] };
@@ -407,9 +456,9 @@ async function objectsToCopy(paths, newBytes) {
   const looseBytes = await readLoose(loose);
   const copied = new Map(loose.map((path, i) => [path, looseBytes[i]]));
   let pending = newBytes + looseBytes.reduce((n, b) => n + b.length, 0);
-  const merge = [];
+  const merge: string[] = [];
   for (const name of [...live.keys()].sort((a, b) => parseInt(b) - parseInt(a))) {
-    const pack = live.get(name);
+    const pack = live.get(name)!;
     const size = (await (await packsDirectory.getFileHandle(name)).getFile()).size;
     if (pack.bytes < 2 * pending || 2 * pack.bytes < size) {
       merge.push(name);
@@ -418,11 +467,11 @@ async function objectsToCopy(paths, newBytes) {
   }
   const packs = await readPacks(merge);
   for (const name of merge)
-    for (const path of live.get(name).paths) copied.set(path, slicePack(packs, stored.get(path)));
+    for (const path of live.get(name)!.paths) copied.set(path, slicePack(packs, stored.get(path) as Location));
   return copied;
 }
 /** Writes and flushes one pack; returns where each object went. */
-async function writePack(name, objects) {
+async function writePack(name: string, objects: Map<string, Bytes>) {
   const file = await packsDirectory.getFileHandle(name, { create: true });
   const h = await file.createSyncAccessHandle();
   const locations = new Map();
@@ -446,13 +495,13 @@ async function writePack(name, objects) {
  * object it names is written as its own file instead (format 3), so tests can produce
  * a journal the previous SDK wrote.
  */
-async function checkpoint(framed, loose = false) {
+async function checkpoint(framed: Bytes, loose = false) {
   await init();
   await collectGarbage();
   const entries = unframe(framed);
-  const meta = JSON.parse(decoder.decode(entries.get("checkpoint.json")));
+  const meta: { objects: string[]; opaque: string[] } = JSON.parse(decoder.decode(entries.get("checkpoint.json")));
   entries.delete("checkpoint.json");
-  const added = new Map();
+  const added = new Map<string, Bytes>();
   for (const [path, bytes] of entries) {
     if (!OBJECT_PATH.test(path)) continue;
     if (!stored.has(path)) added.set(path, bytes);
@@ -461,31 +510,33 @@ async function checkpoint(framed, loose = false) {
   const missing = meta.objects.filter((path) => !stored.has(path) && !added.has(path));
   if (missing.length) throw Error("checkpoint names objects the store lacks: " + missing.slice(0, 3).join(", "));
   const base = frame(entries);
-  const metadata = {
+  const metadata: Metadata = {
     format: loose ? 3 : 4,
     entriesSha256: await sha256(base),
     objects: meta.objects,
     opaque: meta.opaque,
   };
-  let moved;
+  let moved: Map<string, Stored>;
   if (loose) {
-    const old = meta.objects.filter((path) => stored.get(path) && !stored.get(path).loose);
-    const packs = await readPacks(old.map((path) => stored.get(path).pack));
-    for (const path of old) added.set(path, slicePack(packs, stored.get(path)));
+    const old = meta.objects.filter((path) => stored.get(path) && !stored.get(path)!.loose);
+    const packs = await readPacks(old.map((path) => stored.get(path)!.pack!));
+    for (const path of old) added.set(path, slicePack(packs, stored.get(path) as Location));
     for (const [path, bytes] of added) await writeObject(path, bytes);
-    moved = new Map([...added.keys()].map((path) => [path, { loose: true }]));
+    moved = new Map([...added.keys()].map((path) => [path, { loose: true } as Stored]));
   } else {
     let newBytes = 0;
     for (const bytes of added.values()) newBytes += bytes.length;
     const copied = await objectsToCopy(meta.objects.filter((path) => stored.has(path)), newBytes);
     for (const [path, bytes] of copied) added.set(path, bytes);
-    moved = added.size ? await writePack(`${generation + 1}.pack`, added) : new Map();
-    const at = (path) => moved.get(path) || stored.get(path);
-    metadata.packs = [...new Set(meta.objects.map((path) => at(path).pack))];
-    const index = new Map(metadata.packs.map((name, i) => [name, i]));
+    const written: Map<string, Stored> = added.size ? await writePack(`${generation + 1}.pack`, added) : new Map();
+    moved = written;
+    const at = (path: string) => (written.get(path) || stored.get(path)) as Location;
+    const packs = [...new Set(meta.objects.map((path) => at(path).pack))];
+    const index = new Map(packs.map((name, i) => [name, i]));
+    metadata.packs = packs;
     metadata.locations = meta.objects.map((path) => {
       const { pack, offset, length } = at(path);
-      return [index.get(pack), offset, length];
+      return [index.get(pack)!, offset, length];
     });
   }
   await writeGeneration(metadata.format, withMetadata(metadata, base), metadata);
@@ -494,12 +545,12 @@ async function checkpoint(framed, loose = false) {
   release();
 }
 /** Format 1, kept so tests can produce a journal an older engine wrote. */
-async function checkpointLegacy(bytes) {
+async function checkpointLegacy(bytes: Bytes) {
   await init();
   await writeGeneration(0, bytes, null);
   release();
 }
-async function damageCheckpoint(candidate, preserveRecordCrc) {
+async function damageCheckpoint(candidate: Candidate | null, preserveRecordCrc: boolean) {
   if (!candidate) throw Error("Journal has no checkpoint");
   const bytes = new Uint8Array(await (await candidate.file.getFile()).arrayBuffer());
   const recordLength = new DataView(bytes.buffer, 12, 4).getUint32(0, true);
@@ -522,7 +573,37 @@ async function damageCheckpoint(candidate, preserveRecordCrc) {
 }
 
 /** Handles one journal request; shared by the Storage Worker and the inline fallback. */
-export async function handle(data) {
+/** Deletes this namespace's journals and objects and starts an empty store. */
+async function discard() {
+  await init();
+  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+  await root.removeEntry(namespaceFolder(namespace), { recursive: true });
+  directory = null;
+  active = null;
+  candidates = [];
+  offset = 0;
+  stored = new Map();
+  keptPacks = new Set();
+  keptLoose = new Set();
+  released = false;
+  collected = true;
+  await init();
+}
+
+export async function handle(data: StorageMessage): Promise<unknown> {
+  // The session pings before the Worker names the namespace; opening the store here
+  // would open the default one.
+  if (data.t === "ping") return true;
+  if (data.t === "configure") {
+    if (directory && data.namespace !== namespace) throw Error("CONFLICT: the store is already open for another namespace");
+    namespace = data.namespace!;
+    await init();
+    return true;
+  }
+  if (data.t === "discard") {
+    await discard();
+    return true;
+  }
   await init();
   let value;
   if (data.t === "inspect")
@@ -569,18 +650,18 @@ export async function handle(data) {
     release();
     value = true;
   } else if (data.t === "checkpoint") {
-    await checkpoint(new Uint8Array(data.entries));
+    await checkpoint(new Uint8Array(data.entries!));
     value = true;
   } else if (data.t === "checkpointLoose") {
-    await checkpoint(new Uint8Array(data.entries), true);
+    await checkpoint(new Uint8Array(data.entries!), true);
     value = true;
   } else if (data.t === "checkpointLegacy") {
-    await checkpointLegacy(new Uint8Array(data.bytes));
+    await checkpointLegacy(new Uint8Array(data.bytes!));
     value = true;
   } else if (data.t === "append") {
     if (!active) throw Error("Journal has no checkpoint");
     await collectGarbage();
-    const bytes = new Uint8Array(data.bytes);
+    const bytes = new Uint8Array(data.bytes!);
     const r = record(1, bytes);
     const h = await active.file.createSyncAccessHandle();
     try {

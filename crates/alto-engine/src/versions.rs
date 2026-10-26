@@ -1,6 +1,6 @@
 //! M8: version commits, history, semantic diff, restore, and the package parts that
 //! carry history in both the single-file and folder forms.
-use crate::{DocHandle, Engine, EngineError, node_hashes};
+use crate::{DocHandle, Engine, EngineError, Warning, node_hashes};
 use alto_core::{ContentHash, NodeId};
 use alto_doc::{Commit, DiffItem, DocError, Document, version::summarize};
 use alto_raster::TileStore;
@@ -47,9 +47,12 @@ pub enum VersionRef {
 #[derive(Clone, Debug, Serialize)]
 pub struct IntentView {
     pub intent: String,
+    pub label: Option<String>,
+    pub undone: bool,
     pub count: u32,
     pub targets: Vec<NodeId>,
-    pub target_names: Vec<String>,
+    /// `None` for a node that no longer exists.
+    pub target_names: Vec<Option<String>>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct CommitView {
@@ -177,7 +180,7 @@ impl Engine {
                 .and_then(|c| store.commits.get(&c))
                 .is_some_and(|c| c.snapshot == sh)
         {
-            return Err(invalid("前の版から変更がありません"));
+            return Err(invalid("nothing changed since the last version"));
         }
         let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
         let commit = Commit {
@@ -221,7 +224,7 @@ impl Engine {
             doc.as_ref()
                 .and_then(|d| d.nodes.get(id))
                 .or_else(|| current.nodes.get(id))
-                .map_or_else(|| "（削除済み）".to_string(), |n| n.name.clone())
+                .map(|n| n.name.clone())
         };
         Ok(CommitView {
             hash,
@@ -235,6 +238,8 @@ impl Engine {
                 .iter()
                 .map(|i| IntentView {
                     intent: i.intent.clone(),
+                    label: i.label.clone(),
+                    undone: i.undone,
                     count: i.count,
                     targets: i.targets.clone(),
                     target_names: i.targets.iter().map(name).collect(),
@@ -340,11 +345,12 @@ impl Engine {
     }
 
     /// Restores a version as one undoable transaction. History is not rewritten.
+    /// Returns the ops and the intent, which a journal record of the edit repeats.
     pub fn restore_version(
         &mut self,
         h: DocHandle,
         commit: ContentHash,
-    ) -> Result<Vec<alto_doc::Op>, EngineError> {
+    ) -> Result<(Vec<alto_doc::Op>, alto_doc::Intent), EngineError> {
         let target = self.resolve(h, VersionRef::Commit(commit))?;
         let message = self.versions(h)?.commits[&commit].message.clone();
         let current = self.document(h)?;
@@ -357,8 +363,9 @@ impl Engine {
             .chars()
             .take(40)
             .collect();
-        self.transact(h, format!("版を復元: {label}"), ops.clone(), revision)?;
-        Ok(ops)
+        let intent = alto_doc::Intent::labeled("version.restore", label);
+        self.transact(h, intent.clone(), ops.clone(), revision)?;
+        Ok((ops, intent))
     }
 
     /// Package contents including every committed snapshot and its objects.
@@ -505,7 +512,7 @@ impl Engine {
     pub fn open_entries(
         &mut self,
         entries: BTreeMap<String, Vec<u8>>,
-    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let p = alto_store::decode_entries(entries)?;
         self.open_decoded_package(p, false, None)
     }
@@ -516,7 +523,7 @@ impl Engine {
         &mut self,
         bytes: &[u8],
         opaque: &std::collections::BTreeSet<ContentHash>,
-    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         self.open_recovery_entries(alto_store::read_entries(bytes)?, opaque)
     }
 
@@ -526,7 +533,7 @@ impl Engine {
         &mut self,
         mut entries: BTreeMap<String, Vec<u8>>,
         opaque: &std::collections::BTreeSet<ContentHash>,
-    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let history = match entries.remove("history.json") {
             Some(bytes) => Some(
                 serde_json::from_slice::<alto_doc::History>(&bytes)
@@ -543,26 +550,34 @@ impl Engine {
         p: alto_store::Package,
         deferred_verify: bool,
         history: Option<alto_doc::History>,
-    ) -> Result<(DocHandle, Vec<String>), EngineError> {
-        let (handle, mut warnings) = self.install_package(
-            p.objects,
-            p.opaque,
-            &p.snapshot,
-            p.warnings,
-            deferred_verify,
-        )?;
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
+        let package = p
+            .warnings
+            .iter()
+            .map(|w| Warning::new("PACKAGE_DAMAGED").with("detail", w))
+            .collect();
+        let (handle, mut warnings) =
+            self.install_package(p.objects, p.opaque, &p.snapshot, package, deferred_verify)?;
         let current = ContentHash::of(&p.snapshot);
         let mut store = VersionStore::default();
         for (hash, bytes) in &p.commits {
             let commit = match Commit::parse_history(bytes) {
                 Ok((c, warning)) => {
                     if let Some(w) = warning {
-                        warnings.push(format!("commit {hash}: {w}"));
+                        warnings.push(
+                            Warning::new("COMMIT_DAMAGED")
+                                .with("commit", hash)
+                                .with("detail", w),
+                        );
                     }
                     c
                 }
                 Err(e) => {
-                    warnings.push(format!("damaged commit {hash}: {e}"));
+                    warnings.push(
+                        Warning::new("COMMIT_DAMAGED")
+                            .with("commit", hash)
+                            .with("detail", e),
+                    );
                     continue;
                 }
             };
@@ -574,17 +589,21 @@ impl Engine {
             match snapshot {
                 Some(s) => {
                     if let Err(e) = store.insert(*hash, commit, bytes.clone(), s) {
-                        warnings.push(format!("damaged version {hash}: {e}"));
+                        warnings.push(
+                            Warning::new("COMMIT_DAMAGED")
+                                .with("commit", hash)
+                                .with("detail", e),
+                        );
                     }
                 }
-                None => warnings.push(format!("snapshot missing for commit {hash}")),
+                None => warnings.push(Warning::new("COMMIT_SNAPSHOT_MISSING").with("commit", hash)),
             }
         }
         let head = p.head.filter(|h| store.commits.contains_key(h));
         store.set_head(head);
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
-                warnings.push(format!("missing object {hash} in version history"));
+                warnings.push(Warning::new("HISTORY_OBJECT_MISSING").with("hash", hash));
             }
         }
         warnings.dedup();

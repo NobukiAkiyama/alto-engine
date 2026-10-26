@@ -1,3 +1,4 @@
+import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 const $ = (s) => document.querySelector(s);
 export function installM5({
   engine,
@@ -16,17 +17,17 @@ export function installM5({
   const existing = () => {
     const d = getDocument();
     const id = getSelected();
-    return { d, id, n: id && d ? d.view.node(id) : null };
+    return { d, id, n: id && d ? d.getSnapshot().nodes.get(id) ?? null : null };
   };
   function draw() {
     const svg = $("#selection-overlay"),
-      r = engine.canvas.getBoundingClientRect(),
-      ratio = Math.min(devicePixelRatio || 1, 2),
-      scale = engine.viewport.zoom / ratio,
-      a = engine.viewport.rotation,
+      r = engine.element.getBoundingClientRect(),
+      view = engine.viewport.get(),
+      scale = view.zoom,
+      a = view.rotation,
       c = Math.cos(a),
       s = Math.sin(a),
-      [cx, cy] = engine.viewport.center;
+      [cx, cy] = view.center;
     svg.setAttribute("viewBox", `0 0 ${r.width} ${r.height}`);
     $("#selection-transform").setAttribute(
       "transform",
@@ -55,7 +56,8 @@ export function installM5({
     draw();
   }
   function bind() {
-    const canvas = engine.canvas;
+    // The container keeps its listeners when the engine replaces its canvas.
+    const canvas = $("#canvas-host");
     canvas.addEventListener(
       "pointerdown",
       (e) => {
@@ -135,12 +137,13 @@ export function installM5({
     ])
       $("#" + control).disabled = !n;
     if (!d) return;
-    $("#selection-state").textContent = d.view.selection
-      ? Object.keys(d.view.selection.tiles).length
+    const { selection, root } = d.getSnapshot();
+    $("#selection-state").textContent = selection
+      ? Object.keys(selection.tiles).length
         ? "選択あり"
         : "空の選択範囲"
       : "選択なし";
-    const key = d.view.root.id + JSON.stringify(d.view.selection);
+    const key = root + JSON.stringify(selection);
     if (key !== outlineKey) {
       outlineKey = key;
       const ticket = ++outlineTicket;
@@ -238,7 +241,7 @@ export function installM5({
       }
       $("#effect-list").append(row);
     });
-    const adjustment = n.kind.kind === "adjustment" ? n.kind.adjustment : null;
+    const adjustment = n.type === "adjustment" ? n.adjustment : null;
     $("#update-adjustment").disabled = !adjustment;
     if (adjustment)
       for (const k of ["brightness", "contrast", "saturation"])
@@ -280,7 +283,7 @@ export function installM5({
     $("#" + id).onchange = () =>
       run(() => {
         const { d, id: node } = existing();
-        return d.transact("マスク設定", (tx) =>
+        return d.transact("layer.props", (tx) =>
           tx.setProps(node, { [prop]: $("#" + id).checked }),
         );
       });
@@ -316,9 +319,10 @@ export function installM5({
     run(async () => {
       const { d, n } = existing();
       let id;
-      await d.transact("色調整レイヤー追加", (tx) => {
+      await d.transact("layer.add", (tx) => {
         id = tx.addAdjustment(adjustment(), {
-          parent: n?.kind.kind === "group" ? n.id : n?.parent || d.view.root.id,
+          name: "色調整",
+          parent: n?.type === "group" ? n.id : n?.parent || d.getSnapshot().root,
         });
       });
       select(id);
@@ -326,7 +330,7 @@ export function installM5({
   $("#update-adjustment").onclick = () =>
     run(() => {
       const { d, id } = existing();
-      return d.transact("色調整を変更", (tx) =>
+      return d.transact({ id: "app:adjustment", label: "色調整を変更" }, (tx) =>
         tx.setAdjustment(id, adjustment()),
       );
     });
@@ -335,7 +339,7 @@ export function installM5({
       const blob = await (
         await fetch("../../verification/sample-m5.alto")
       ).blob();
-      attach(await engine.openDocument(blob));
+      attach(await engine.open(blob));
     });
   $("#test-m5").onclick = () =>
     run(async () => {
@@ -372,10 +376,9 @@ export function installM5({
     }
   });
   engine.on("viewport", draw);
-  engine.on("frame", draw);
-  engine.on("change", () => queueMicrotask(refresh));
-  engine.on("canvasReplaced", () => {
-    bind();
+  unstable(engine).onFrame(draw);
+  engine.on("status", ({ state }) => {
+    if (state !== "ready") return;
     outlineKey = "";
     refresh();
   });

@@ -2,6 +2,7 @@ mod edit;
 pub mod m5;
 pub mod text;
 pub mod versions;
+mod warning;
 use alto_core::ContentHash;
 use alto_doc::{BlendMode, ChangeSet, DocError, Document, DocumentMeta, Editor, NodeKind, Op};
 use alto_raster::{DecodeCache, ObjectStore, TileData, TileStore};
@@ -31,6 +32,7 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
     }
 }
 pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
+pub use warning::Warning;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocHandle(pub u64);
@@ -147,7 +149,7 @@ impl Engine {
     pub fn transact(
         &mut self,
         handle: DocHandle,
-        intent: impl Into<String>,
+        intent: impl Into<alto_doc::Intent>,
         ops: Vec<Op>,
         base_revision: u64,
     ) -> Result<ChangeSet, EngineError> {
@@ -507,7 +509,7 @@ impl Engine {
         }
         Ok(())
     }
-    pub fn open_package(&mut self, bytes: &[u8]) -> Result<(DocHandle, Vec<String>), EngineError> {
+    pub fn open_package(&mut self, bytes: &[u8]) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         self.open_entries(alto_store::read_entries(bytes)?)
     }
     pub(crate) fn install_package(
@@ -515,9 +517,9 @@ impl Engine {
         objects: BTreeMap<ContentHash, Vec<u8>>,
         opaque: std::collections::BTreeSet<ContentHash>,
         snapshot: &[u8],
-        mut warnings: Vec<String>,
+        mut warnings: Vec<Warning>,
         deferred_verify: bool,
-    ) -> Result<(DocHandle, Vec<String>), EngineError> {
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
                 let insert = if deferred_verify {
@@ -551,7 +553,7 @@ impl Engine {
         }
         for h in hashes {
             if !self.tiles.contains(&h) {
-                warnings.push(format!("missing tile {h}"));
+                warnings.push(Warning::new("MISSING_TILE").with("hash", h));
             }
         }
         Ok((handle, warnings))
@@ -562,15 +564,17 @@ impl Engine {
         &self,
         h: DocHandle,
         kind: JournalKind,
-        intent: &str,
+        intent: impl Into<alto_doc::Intent>,
         ops: &[Op],
     ) -> Result<Vec<u8>, EngineError> {
+        let intent = intent.into();
         let mut entries = BTreeMap::new();
         let after = self.state_digest(h)?;
         entries.insert(
             "transaction.json".into(),
             serde_json::to_vec(&serde_json::json!({
-                "kind": kind.name(), "intent": intent, "ops": ops, "after": after,
+                "kind": kind.name(), "intent": intent.id, "label": intent.label,
+                "ops": ops, "after": after,
             }))
             .map_err(|e| DocError::Serialization(e.to_string()))?,
         );
@@ -617,7 +621,10 @@ impl Engine {
             }
             _ => {
                 let revision = self.document(h)?.revision;
-                let intent = v["intent"].as_str().unwrap_or("Recovered edit");
+                let intent = alto_doc::Intent {
+                    id: v["intent"].as_str().unwrap_or("recovered.edit").into(),
+                    label: v["label"].as_str().map(Into::into),
+                };
                 self.transact(h, intent, ops, revision)?;
                 JournalKind::Transact
             }
@@ -1296,7 +1303,7 @@ mod package_tests {
         let ops = e.undo_operations(d).unwrap();
         e.undo(d).unwrap();
         records.push(
-            e.journal_record(d, JournalKind::Undo, "Undo", &ops)
+            e.journal_record(d, JournalKind::Undo, "edit.undo", &ops)
                 .unwrap(),
         );
         let (mut fresh, r, replayed) = recover(checkpoint, &records);

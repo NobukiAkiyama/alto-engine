@@ -1510,9 +1510,42 @@ pub struct AppliedOp {
     pub op: Op,
     pub inverse: Op,
 }
+/// What an edit was for: an identifier such as `layer.add`, and a label the host may
+/// give for display. History and commit summaries keep both; neither is shown text the
+/// engine chose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Intent {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+impl Intent {
+    pub fn labeled(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: Some(label.into()),
+        }
+    }
+}
+impl From<&str> for Intent {
+    fn from(id: &str) -> Self {
+        Self {
+            id: id.into(),
+            label: None,
+        }
+    }
+}
+impl From<String> for Intent {
+    fn from(id: String) -> Self {
+        Self { id, label: None }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transaction {
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub ops: Vec<AppliedOp>,
     pub base_revision: u64,
     #[serde(default)]
@@ -1533,6 +1566,11 @@ pub struct History {
 pub struct IntentLogEntry {
     pub seq: u64,
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// An undo of the edit, recorded when the edit was in an earlier commit.
+    #[serde(default)]
+    pub undone: bool,
     pub targets: Vec<NodeId>,
 }
 
@@ -1590,7 +1628,7 @@ impl Editor {
     pub fn intent_log(&self) -> &[IntentLogEntry] {
         &self.log
     }
-    fn log_tx(&mut self, tx: &Transaction, prefix: &str) {
+    fn log_tx(&mut self, tx: &Transaction, undone: bool) {
         let mut targets = vec![];
         for op in &tx.ops {
             if let Some(t) = op.op.target()
@@ -1601,7 +1639,9 @@ impl Editor {
         }
         self.log.push(IntentLogEntry {
             seq: tx.seq,
-            intent: format!("{prefix}{}", tx.intent),
+            intent: tx.intent.clone(),
+            label: tx.label.clone(),
+            undone,
             targets,
         });
     }
@@ -1651,7 +1691,7 @@ impl Editor {
     }
     pub fn transact(
         &mut self,
-        intent: impl Into<String>,
+        intent: impl Into<Intent>,
         ops: Vec<Op>,
         base_revision: u64,
     ) -> Result<ChangeSet, DocError> {
@@ -1667,13 +1707,15 @@ impl Editor {
         let (applied, changes) = self.replay(ops, true)?;
         self.doc.revision += 1;
         self.seq += 1;
+        let intent = intent.into();
         let tx = Transaction {
-            intent: intent.into(),
+            intent: intent.id,
+            label: intent.label,
             ops: applied,
             base_revision,
             seq: self.seq,
         };
-        self.log_tx(&tx, "");
+        self.log_tx(&tx, false);
         self.undo.push(tx);
         if self.undo.len() > self.max_undo {
             self.undo.remove(0);
@@ -1698,7 +1740,7 @@ impl Editor {
         if self.log.last().is_some_and(|e| e.seq == tx.seq) {
             self.log.pop();
         } else {
-            self.log_tx(&tx, "取り消し: ");
+            self.log_tx(&tx, true);
         }
         self.redo.push(tx);
         self.digest.update(&self.doc, &changes);
@@ -1712,7 +1754,7 @@ impl Editor {
         let (_, changes) = self.replay(ops, true)?;
         self.doc.revision += 1;
         self.redo.pop();
-        self.log_tx(&tx, "");
+        self.log_tx(&tx, false);
         self.undo.push(tx);
         self.digest.update(&self.doc, &changes);
         Ok(Some(changes))

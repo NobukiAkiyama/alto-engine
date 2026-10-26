@@ -30,7 +30,14 @@ rm -rf "$pkg_out"
 [ "$pkg_status" -eq 0 ]
 pnpm --dir packages/alto-sdk install --frozen-lockfile
 pnpm --dir packages/alto-sdk build
-node --test packages/alto-sdk/src/storage-session.test.js
+# The public API is what the reports in packages/alto-sdk/api say. A change to it
+# must update them in the same commit; `pnpm --dir packages/alto-sdk api` does.
+pnpm --dir packages/alto-sdk api:check
+if grep -nE '(:|<|\|) *any\b' packages/alto-sdk/api/*.api.md; then
+  echo "the public API must not use any" >&2
+  exit 1
+fi
+node --test packages/alto-sdk/test/storage-session.test.js
 node scripts/check-build-metadata.mjs
 # SHA256SUMS must not name a gitignored path. verification/*.log matches *.log
 # and is not in the tree; listing it makes `sha256sum -c` fail on a clean checkout.

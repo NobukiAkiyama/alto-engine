@@ -1,3 +1,5 @@
+import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
+import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (ok, m) => {
   if (!ok) throw Error(m);
 };
@@ -30,14 +32,16 @@ async function stroke(
   for (const p of samples) s.input(p);
   await s.end();
 }
-async function event(engine, name, action) {
+/** Runs `action` and waits for an engine event that `match` accepts. */
+async function event(engine, name, action, match = () => true) {
   let off;
   const p = new Promise((resolve, reject) => {
     const t = setTimeout(() => {
       off?.();
       reject(Error("timeout " + name));
     }, 15000);
-    off = engine.on(name, () => {
+    off = engine.on(name, (value) => {
+      if (!match(value)) return;
       clearTimeout(t);
       off();
       resolve();
@@ -46,8 +50,27 @@ async function event(engine, name, action) {
   await action();
   await p;
 }
+/** Runs `action` and waits until the GPU device is restored. */
+async function gpuRestored(engine, action) {
+  let off;
+  const p = new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      off?.();
+      reject(Error("timeout gpuRestored"));
+    }, 15000);
+    off = unstable(engine).onGpu((e) => {
+      if (e !== "restored") return;
+      clearTimeout(t);
+      off();
+      resolve();
+    });
+  });
+  await action();
+  await p;
+}
+const ready = (s) => s.state === "ready";
 async function settled(engine) {
-  return engine.unstable.settle();
+  return unstable(engine).settle();
 }
 /**
  * Six layers whose 256 px tiles all differ (content addressing cannot merge them), seen
@@ -71,16 +94,16 @@ async function decodeFixture(engine) {
   await doc.transact("layers", (tx) => assets.forEach((a) => tx.addRasterFromAsset(a)));
   const view = { center: [512, 256], zoom: 0.5, rotation: 0 };
   const cold = async (workers, { keepPool = false } = {}) => {
-    if (!keepPool && !(await engine.request("setDecodeWorkers", { enabled: workers })) && workers)
+    if (!keepPool && !(await testing(engine).request("setDecodeWorkers", { enabled: workers })) && workers)
       return null;
     // Set the level before clearing, so no tick composes level 0 first.
     engine.viewport.set(view);
-    await engine.request("resetRenderCache", { cpu: true });
+    await testing(engine).request("resetRenderCache", { cpu: true });
     engine.viewport.set(view);
     const frame = await settled(engine);
     return {
       frame,
-      tiles: [await engine.unstable.readTileLevel(1, 0, 0), await engine.unstable.readTileLevel(1, 1, 0)],
+      tiles: [await unstable(engine).readTileLevel(1, 0, 0), await unstable(engine).readTileLevel(1, 1, 0)],
     };
   };
   return { doc, cold };
@@ -102,34 +125,34 @@ export async function runTests(engine, benchmark, log) {
     let doc, lower, upper, assetRed, assetBlue;
     await test("empty scene GPU validation / Normal / Multiply / Screen / opacity / visibility", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
-      await engine.request("validateFrame");
+      await testing(engine).request("validateFrame");
       assetRed = await image(engine, "rgb(255,0,0)");
       assetBlue = await image(engine, "rgba(0,0,255,.5)");
       await doc.transact("two images", (tx) => {
         lower = tx.addRasterFromAsset(assetRed);
         upper = tx.addRasterFromAsset(assetBlue);
       });
-      let tile = await engine.unstable.readTile(0, 0);
+      let tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile), [127, 0, 128, 255]), "normal " + pixel(tile));
       await doc.transact("multiply", (tx) =>
         tx.setProps(upper, { blend: "multiply" }),
       );
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile), [127, 0, 0, 255]), "multiply " + pixel(tile));
       await doc.transact("screen", (tx) =>
         tx.setProps(upper, { blend: "screen" }),
       );
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile), [255, 0, 128, 255]), "screen " + pixel(tile));
       await doc.transact("opacity", (tx) =>
         tx.setProps(upper, { blend: "normal", opacity: 0.5 }),
       );
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile), [191, 0, 64, 255]), "opacity " + pixel(tile));
       await doc.transact("hide", (tx) =>
         tx.setProps(upper, { visible: false }),
       );
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile), [255, 0, 0, 255]), "visibility " + pixel(tile));
     });
     await test("non-destructive transform / reorder / group isolation", async () => {
@@ -143,13 +166,13 @@ export async function runTests(engine, benchmark, log) {
           rotation: 0,
         });
       });
-      let tile = await engine.unstable.readTile(0, 0);
+      let tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile, 32), [255, 0, 0, 255]), "translation left");
       assert(close(pixel(tile, 96), [127, 0, 128, 255]), "translation right");
       await doc.transact("reorder", (tx) =>
-        tx.moveNode(upper, doc.view.root.id, 0),
+        tx.moveNode(upper, doc.getSnapshot().root, 0),
       );
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(close(pixel(tile, 96), [255, 0, 0, 255]), "reorder");
       let group;
       await doc.transact("isolation", (tx) => {
@@ -158,7 +181,7 @@ export async function runTests(engine, benchmark, log) {
         tx.moveNode(upper, group, 1);
         tx.setProps(group, { opacity: 0.5 });
       });
-      tile = await engine.unstable.readTile(0, 0);
+      tile = await unstable(engine).readTile(0, 0);
       assert(
         close(pixel(tile, 32), [128, 0, 0, 128]),
         "isolated group " + pixel(tile, 32),
@@ -166,7 +189,7 @@ export async function runTests(engine, benchmark, log) {
       await doc.undo();
       await doc.redo();
       assert(
-        same(tile, await engine.unstable.readTile(0, 0)),
+        same(tile, await unstable(engine).readTile(0, 0)),
         "group undo/redo",
       );
     });
@@ -180,20 +203,20 @@ export async function runTests(engine, benchmark, log) {
           tx.addRasterFromAsset(blue);
         });
         engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0 });
-        await engine.request("setVisibleTileJobs", { enabled: false });
-        await engine.request("resetRenderCache", { cpu: true });
-        const direct = await engine.unstable.readTileLevel(1, 0, 0);
-        await engine.request("setVisibleTileJobs", { enabled: true });
-        await engine.request("resetRenderCache", { cpu: true });
+        await testing(engine).request("setVisibleTileJobs", { enabled: false });
+        await testing(engine).request("resetRenderCache", { cpu: true });
+        const direct = await unstable(engine).readTileLevel(1, 0, 0);
+        await testing(engine).request("setVisibleTileJobs", { enabled: true });
+        await testing(engine).request("resetRenderCache", { cpu: true });
         engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0.17 });
         await settled(engine);
-        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+        assert(same(direct, await unstable(engine).readTileLevel(1, 0, 0)),
           `cold visible job differs from direct composite for ${size}px canvas`);
         engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
         // Remove the parent used by the preceding parity probes so this must
         // actually prepare a new parent from the level-0 view.
-        await engine.request("resetRenderCache", { cpu: false });
-        await engine.request("enablePrefetch");
+        await testing(engine).request("resetRenderCache", { cpu: false });
+        await testing(engine).request("enablePrefetch");
         let frame = await settled(engine);
         for (let i = 0; i < 20 && frame.prefetch.ready < frame.prefetch.candidates; i++) {
           await delay(10);
@@ -201,7 +224,7 @@ export async function runTests(engine, benchmark, log) {
         }
         assert(frame.prefetch.candidates === 1 && frame.prefetch.ready === 1,
           `low-zoom parent was not prepared for ${size}px canvas`);
-        assert(same(direct, await engine.unstable.readTileLevel(1, 0, 0)),
+        assert(same(direct, await unstable(engine).readTileLevel(1, 0, 0)),
           `prefetched parent differs from direct composite for ${size}px canvas`);
       }
     });
@@ -225,17 +248,17 @@ export async function runTests(engine, benchmark, log) {
         // can populate level-0 children and change the reference into a pyramid
         // downsample. Transformed edge sampling differs from direct level 1.
         engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
-        await engine.request("setVisibleTileJobs", { enabled: false });
-        await engine.request("resetRenderCache", { cpu: true });
-        const reference = await engine.unstable.readTileLevel(1, 0, 0);
-        await engine.request("setVisibleTileJobs", { enabled: true });
-        await engine.request("resetRenderCache", { cpu: true });
+        await testing(engine).request("setVisibleTileJobs", { enabled: false });
+        await testing(engine).request("resetRenderCache", { cpu: true });
+        const reference = await unstable(engine).readTileLevel(1, 0, 0);
+        await testing(engine).request("setVisibleTileJobs", { enabled: true });
+        await testing(engine).request("resetRenderCache", { cpu: true });
         engine.viewport.set({ center: [256, 200], zoom: 0.5, rotation: 0.1 });
         await settled(engine);
-        assert(same(reference, await engine.unstable.readTileLevel(1, 0, 0)), "cold group pixels differ");
+        assert(same(reference, await unstable(engine).readTileLevel(1, 0, 0)), "cold group pixels differ");
         if (edit) await doc.undo();
       }
-      await engine.request("enablePrefetch");
+      await testing(engine).request("enablePrefetch");
     });
     await test("edits discard only damaged display tiles and match a full recomposite", async () => {
       doc = await engine.createDocument({ width: 768, height: 512 });
@@ -249,19 +272,19 @@ export async function runTests(engine, benchmark, log) {
       // Prefetch composes level 1 directly, which samples edges differently from the
       // pyramid. The reset stops it, so both reads below build level 1 the same way.
       engine.viewport.set({ center: [384, 256], zoom: 1, rotation: 0 });
-      await engine.request("resetRenderCache", { cpu: false });
+      await testing(engine).request("resetRenderCache", { cpu: false });
       const keys = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]];
       // Level 0 first, so level 1 is always built from the same children.
       const readAll = async () => {
         const out = [];
-        for (const [x, y] of keys) out.push(await engine.unstable.readTile(x, y));
-        out.push(await engine.unstable.readTileLevel(1, 0, 0));
+        for (const [x, y] of keys) out.push(await unstable(engine).readTile(x, y));
+        out.push(await unstable(engine).readTileLevel(1, 0, 0));
         return out;
       };
       // Tiles that survived the edit must equal tiles composed from scratch.
       const check = async (label) => {
         const kept = await readAll();
-        await engine.request("resetRenderCache", { cpu: false });
+        await testing(engine).request("resetRenderCache", { cpu: false });
         const fresh = await readAll();
         kept.forEach((t, i) => assert(same(t, fresh[i]), `${label}: display tile ${i} is stale`));
       };
@@ -291,13 +314,13 @@ export async function runTests(engine, benchmark, log) {
       await check("opacity");
       await doc.transact("hide", tx => tx.setProps(bottom, { visible: false }));
       await check("hide");
-      await doc.transact("reorder", tx => tx.moveNode(top, doc.view.root.id, 0));
+      await doc.transact("reorder", tx => tx.moveNode(top, doc.getSnapshot().root, 0));
       await check("reorder");
       for (let i = 0; i < 7; i++) {
         await doc.undo();
         await check("undo " + i);
       }
-      await engine.request("enablePrefetch");
+      await testing(engine).request("enablePrefetch");
     });
     await test("cold frames decode inputs in the decode workers and match inline decoding", async () => {
       let cold;
@@ -310,22 +333,22 @@ export async function runTests(engine, benchmark, log) {
         assert(pooled.frame.decodeWorkerBytes > 0, "decode worker memory was not reported");
         pooled.tiles.forEach((t, i) => assert(same(t, inline.tiles[i]), `tile ${i} differs from inline decoding`));
       }
-      await engine.request("enablePrefetch");
+      await testing(engine).request("enablePrefetch");
     });
     await test("a decode worker that stops answering hands its tiles back to inline decoding", async () => {
       let cold;
       ({ doc, cold } = await decodeFixture(engine));
       const inline = await cold(false);
-      if (await engine.request("setDecodeWorkers", { enabled: true })) {
+      if (await testing(engine).request("setDecodeWorkers", { enabled: true })) {
         const stopped = new Promise((resolve) => {
-          const off = engine.on("diagnostic", (v) => {
+          const off = unstable(engine).onDiagnostic((v) => {
             if (String(v?.message).includes("did not answer")) {
               off();
               resolve(v.message);
             }
           });
         });
-        assert((await engine.request("stallDecodeWorkers")) > 0, "no decode worker to stall");
+        assert((await testing(engine).request("stallDecodeWorkers")) > 0, "no decode worker to stall");
         const started = performance.now();
         const stalled = await cold(true, { keepPool: true });
         const elapsed = performance.now() - started;
@@ -336,34 +359,34 @@ export async function runTests(engine, benchmark, log) {
         // A new pool starts on request and is used once a Worker is ready.
         let on = false;
         for (let i = 0; i < 100 && !on; i++) {
-          on = await engine.request("setDecodeWorkers", { enabled: true });
+          on = await testing(engine).request("setDecodeWorkers", { enabled: true });
           if (!on) await delay(20);
         }
         assert(on, "the decode pool did not restart");
       }
-      await engine.request("enablePrefetch");
+      await testing(engine).request("enablePrefetch");
     });
     await test("full display cache can yield and replace tiles without orphaning slots", async () => {
       doc = await engine.createDocument({ width: 300, height: 300 });
       const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);
       await doc.transact("layer", tx => tx.addRasterFromAsset(asset));
-      await engine.request("resetRenderCache", { cpu: true });
-      for (let x = 1000; x < 1256; x++) await engine.unstable.readTile(x, 0);
+      await testing(engine).request("resetRenderCache", { cpu: true });
+      for (let x = 1000; x < 1256; x++) await unstable(engine).readTile(x, 0);
       engine.viewport.set({ center: [150, 150], zoom: 0.5, rotation: 0 });
       await settled(engine);
-      const tile = await engine.unstable.readTileLevel(1, 0, 0);
+      const tile = await unstable(engine).readTileLevel(1, 0, 0);
       assert(pixel(tile)[3] > 0, "full cache lost the visible tile");
-      await engine.request("enablePrefetch");
+      await testing(engine).request("enablePrefetch");
     });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await doc.transact("layer", (tx) => (brushLayer = tx.addRaster()));
-      const empty = await engine.unstable.readTile(0, 0);
+      const empty = await unstable(engine).readTile(0, 0);
       await stroke(doc, brushLayer);
-      painted = await engine.unstable.readTile(0, 0);
+      painted = await unstable(engine).readTile(0, 0);
       const reference = new Uint8Array(
-        await engine.request("cpuReference", {
+        await testing(engine).request("cpuReference", {
           config: {
             size: 48,
             hardness: 0.8,
@@ -385,32 +408,32 @@ export async function runTests(engine, benchmark, log) {
         pixel(painted, 245, 128)[3] > 200,
         "brush did not paint " + pixel(painted, 245, 128),
       );
-      const right = await engine.unstable.readTile(1, 0);
+      const right = await unstable(engine).readTile(1, 0);
       assert(pixel(right, 12, 128)[3] > 0, "tile boundary missing");
       await doc.undo();
       assert(
-        same(empty, await engine.unstable.readTile(0, 0)),
+        same(empty, await unstable(engine).readTile(0, 0)),
         "undo changed pixels",
       );
       await doc.redo();
       assert(
-        same(painted, await engine.unstable.readTile(0, 0)),
+        same(painted, await unstable(engine).readTile(0, 0)),
         "redo changed pixels",
       );
       await stroke(doc, brushLayer, "eraser", [
         { x: 245, y: 128, pressure: 1 },
       ]);
-      const erased = await engine.unstable.readTile(0, 0);
+      const erased = await unstable(engine).readTile(0, 0);
       assert(pixel(erased, 245, 128)[3] === 0, "eraser did not clear");
       await doc.undo();
     });
     await test(".alto ZIP save/open preserves pixels and snapshot hash", async () => {
       const hash = (await doc.snapshotHash());
-      const bytes = await engine.unstable.saveBytes();
-      doc = await engine.openDocument(new Blob([bytes]));
+      const bytes = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([bytes]));
       assert((await doc.snapshotHash()) === hash, "snapshot hash changed");
       assert(
-        same(painted, await engine.unstable.readTile(0, 0)),
+        same(painted, await unstable(engine).readTile(0, 0)),
         "saved pixels changed",
       );
     });
@@ -430,8 +453,7 @@ export async function runTests(engine, benchmark, log) {
       let rejected = false;
       try {
         await doc.save({
-          kind: "injected-abort",
-          writeArchive: async (stream) => {
+          write: async (stream) => {
             const bytes = new Uint8Array(
               await new Response(stream).arrayBuffer(),
             );
@@ -453,7 +475,7 @@ export async function runTests(engine, benchmark, log) {
         "old file changed",
       );
       assert(
-        (await doc.snapshotHash()) === before && doc.view.dirty,
+        (await doc.snapshotHash()) === before && doc.getSnapshot().dirty,
         "save failure changed document",
       );
       const writerURL = URL.createObjectURL(
@@ -503,7 +525,7 @@ export async function runTests(engine, benchmark, log) {
     });
     await test("invalid transaction leaves mirror and history unchanged", async () => {
       const hash = (await doc.snapshotHash());
-      const undo = doc.view.history.undo;
+      const undo = doc.getSnapshot().history.undo;
       let rejected = false;
       try {
         await doc.transact("invalid", (tx) => {
@@ -516,14 +538,14 @@ export async function runTests(engine, benchmark, log) {
       assert(
         rejected &&
           (await doc.snapshotHash()) === hash &&
-          doc.view.history.undo === undo,
+          doc.getSnapshot().history.undo === undo,
         "atomic validation failed",
       );
     });
     await test("device loss rebuilds GPU from CPU content", async () => {
-      await event(engine, "gpuRestored", () => engine.unstable.destroyGpu());
+      await gpuRestored(engine, () => testing(engine).destroyGpu());
       assert(
-        same(painted, await engine.unstable.readTile(0, 0)),
+        same(painted, await unstable(engine).readTile(0, 0)),
         "device loss pixels changed",
       );
     });
@@ -534,22 +556,22 @@ export async function runTests(engine, benchmark, log) {
       const hash = (await doc.snapshotHash());
       // Edits resolve when applied; a crash test must wait for the journal.
       await doc.durable();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "journal recovery hash mismatch");
       assert(
-        same(painted, await engine.unstable.readTile(0, 0)),
+        same(painted, await unstable(engine).readTile(0, 0)),
         "journal recovery pixels mismatch",
       );
     });
     await test("a checkpoint writes only the objects the recovery store lacks", async () => {
       await doc.durable();
-      const start = await engine.unstable.recoveryStore();
+      const start = await testing(engine).recoveryStore();
       // Tile (1,0): later tests compare tile (0,0) with the pixels painted earlier.
       await stroke(doc, brushLayer, "brush", [{ x: 400, y: 40, pressure: 1 }]);
       await doc.versions.commit("one more tile");
       await doc.durable();
-      const after = await engine.unstable.recoveryStore();
+      const after = await testing(engine).recoveryStore();
       assert(after.latestGeneration === start.latestGeneration + 1, "the commit did not checkpoint");
       assert(after.records === 0, "the checkpoint kept journal records");
       const added = after.objects - start.objects;
@@ -558,41 +580,41 @@ export async function runTests(engine, benchmark, log) {
       await doc.undo();
     });
     await test("a long journal is checkpointed once editing pauses", async () => {
-      const name = doc.view.node(brushLayer).name;
-      const start = await engine.unstable.recoveryStore();
+      const name = doc.getSnapshot().nodes.get(brushLayer).name;
+      const start = await testing(engine).recoveryStore();
       // 500 journal records start an automatic checkpoint after 2 s without messages.
       for (let i = 0; i < 520; i++)
         await doc.transact("rename " + i, (tx) => tx.setProps(brushLayer, { name: "Long " + i }));
       await doc.durable();
-      let store = await engine.unstable.recoveryStore();
+      let store = await testing(engine).recoveryStore();
       assert(store.latestGeneration === start.latestGeneration, "checkpointed while editing");
       assert(store.records >= 500, `only ${store.records} records were journaled`);
       // A request counts as activity, so wait without polling.
       await delay(3000);
-      store = await engine.unstable.recoveryStore();
+      store = await testing(engine).recoveryStore();
       assert(store.latestGeneration === start.latestGeneration + 1, "no automatic checkpoint");
       assert(store.records === 0, "records remained after the checkpoint");
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("rapid edits keep journal order and survive a crash", async () => {
-      const before = doc.view.revision;
-      const name = doc.view.node(brushLayer).name;
+      const before = doc.getSnapshot().revision;
+      const name = doc.getSnapshot().nodes.get(brushLayer).name;
       // Edits no longer wait for their journal write, so they can run ahead of it.
       const edits = [];
       for (let i = 0; i < 300; i++)
         edits.push(doc.transact("rename " + i, (tx) => tx.setProps(brushLayer, { name: "Rename " + i })));
       await Promise.all(edits);
-      assert(doc.view.revision === before + 300, "an edit was lost or merged");
+      assert(doc.getSnapshot().revision === before + 300, "an edit was lost or merged");
       await doc.durable();
       const hash = await doc.snapshotHash();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
-      assert(doc.view.node(brushLayer).name === "Rename 299", "journal order changed");
+      assert(doc.getSnapshot().nodes.get(brushLayer).name === "Rename 299", "journal order changed");
       assert((await doc.snapshotHash()) === hash, "recovered document differs");
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("recovery keeps undo history from before the checkpoint", async () => {
-      const name = doc.view.node(brushLayer).name;
+      const name = doc.getSnapshot().nodes.get(brushLayer).name;
       for (const label of ["H1", "H2"])
         await doc.transact(label, (tx) => tx.setProps(brushLayer, { name: label }));
       await doc.versions.commit("history checkpoint");
@@ -601,12 +623,12 @@ export async function runTests(engine, benchmark, log) {
       await doc.undo();
       const walk = async () => {
         const out = [];
-        const redo = doc.view.history.redo;
-        while (doc.view.history.undo) {
+        const redo = doc.getSnapshot().history.redo;
+        while (doc.getSnapshot().history.undo) {
           await doc.undo();
           out.push(await doc.snapshotHash());
         }
-        while (doc.view.history.redo) {
+        while (doc.getSnapshot().history.redo) {
           await doc.redo();
           out.push(await doc.snapshotHash());
         }
@@ -614,16 +636,16 @@ export async function runTests(engine, benchmark, log) {
         for (let i = 0; i < redo; i++) await doc.undo();
         return out;
       };
-      const history = { ...doc.view.history };
+      const history = { ...doc.getSnapshot().history };
       const expected = await walk();
       // The walk's own undos and redos are edits too and change the intent log.
-      const pending = doc.view.versions.pending_intents;
+      const pending = doc.getSnapshot().versions.pending_intents;
       await doc.durable();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
-      assert(doc.view.history.undo === history.undo && doc.view.history.redo === history.redo,
-        `history ${JSON.stringify(doc.view.history)} after recovery, ${JSON.stringify(history)} before`);
-      assert(doc.view.versions.pending_intents === pending, "commit intents were lost");
+      assert(doc.getSnapshot().history.undo === history.undo && doc.getSnapshot().history.redo === history.redo,
+        `history ${JSON.stringify(doc.getSnapshot().history)} after recovery, ${JSON.stringify(history)} before`);
+      assert(doc.getSnapshot().versions.pending_intents === pending, "commit intents were lost");
       const actual = await walk();
       assert(actual.length === expected.length && actual.every((h, i) => h === expected[i]),
         "undo/redo after recovery reached different states");
@@ -631,125 +653,132 @@ export async function runTests(engine, benchmark, log) {
     });
     await test("simultaneous Worker restart requests share one recovery", async () => {
       const hash = (await doc.snapshotHash());
-      let replacements = 0;
+      const canvas = engine.element;
+      const container = canvas.parentElement;
       let nested;
-      const off = engine.on("canvasReplaced", () => { replacements++; });
-      const offRecovering = engine.on("recovering", () => { nested = engine.unstable.crash(); });
+      const off = engine.on("status", (s) => { if (s.state === "restarting") nested = testing(engine).crash(); });
       try {
-        const first = engine.unstable.crash();
-        const second = engine.unstable.crash();
+        const first = testing(engine).crash();
+        const second = testing(engine).crash();
         assert(first === second, "restart requests did not share a promise");
         assert(first === nested, "reentrant restart did not share a promise");
         await first;
-      } finally { off(); offRecovering(); }
-      doc = engine.document;
-      assert(replacements === 1, "Worker canvas was replaced more than once");
+      } finally { off(); }
+      assert(engine.document === doc, "the document handle changed across a restart");
+      assert(engine.element !== canvas && !canvas.isConnected, "the Worker canvas was not replaced");
+      assert(container.querySelectorAll("canvas").length === 1, "Worker canvas was replaced more than once");
+      assert(engine.element.parentElement === container, "the host container was replaced");
       assert((await doc.snapshotHash()) === hash, "concurrent restart changed the document");
     });
     await test("uncloneable request does not leave a pending reply", async () => {
-      const before = engine.unstable.pendingRequests();
+      const before = testing(engine).pendingRequests();
       let rejected = false;
-      try { await engine.request("view", { invalid: () => true }); }
+      try { await testing(engine).request("view", { invalid: () => true }); }
       catch { rejected = true; }
       assert(rejected, "uncloneable request was accepted");
-      assert(engine.unstable.pendingRequests() === before, "failed postMessage leaked a pending reply");
-      await engine.request("view");
+      assert(testing(engine).pendingRequests() === before, "failed postMessage leaked a pending reply");
+      await testing(engine).request("view");
     });
     await test("missing Worker script stops once and retries without corrupting the journal", async () => {
       const hash = (await doc.snapshotHash());
-      engine.unstable.setWorkerURL("/missing-alto-engine-worker.js");
+      testing(engine).setWorkerURL("/missing-alto-engine-worker.js");
       let code = null;
-      try { await engine.unstable.crash(); }
+      try { await testing(engine).crash(); }
       catch (error) { code = error.code; }
-      finally { engine.unstable.setWorkerURL(undefined); }
+      finally { testing(engine).setWorkerURL(null); }
       assert(code === "WORKER_UNAVAILABLE", "missing script was not classified: " + code);
-      assert(engine.lifecycleState === "failed" && engine.engineFailure, "Worker failure did not stop the engine");
-      assert(!engine.storageFailure, "Worker failure was mislabeled as saved-data corruption");
-      assert(engine.document === null, "stale document remained active");
+      assert(engine.status.state === "failed" && engine.status.error, "Worker failure did not stop the engine");
+      assert(engine.status.error.code !== "CORRUPT_DATA", "Worker failure was mislabeled as saved-data corruption");
+      let refused = false;
+      try { await doc.transact("app:during-failure", (tx) => tx.setProps(brushLayer, { name: "x" })); }
+      catch (error) { refused = error.code === "WORKER_UNAVAILABLE"; }
+      assert(refused, "the document accepted an edit while the Worker was down");
       assert(!document.querySelector("#engine-failure").hidden, "retry control was not shown");
       let blocked = false;
-      try { await engine.request("save"); }
+      try { await testing(engine).request("save"); }
       catch (error) { blocked = error.code === "WORKER_UNAVAILABLE"; }
       assert(blocked, "editing request continued after Worker failure");
-      await event(engine, "recovered", () => document.querySelector("#retry-worker").click());
+      const handle = doc;
+      await event(engine, "status", () => document.querySelector("#retry-worker").click(), ready);
       doc = engine.document;
-      assert(engine.lifecycleState === "running" && !engine.engineFailure, "retry did not restore the engine");
+      assert(doc === handle, "retry replaced the document handle");
+      assert(engine.status.state === "ready" && !engine.status.error, "retry did not restore the engine");
       assert((await doc?.snapshotHash()) === hash, "retry opened the wrong document");
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "retry changed saved pixels");
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "retry changed saved pixels");
       assert(document.querySelector("#engine-failure").hidden, "failure controls remained open");
     });
     await test("truncated journal tail is excluded during recovery", async () => {
       const hash = (await doc.snapshotHash());
-      await engine.unstable.corruptJournalTail();
-      await engine.unstable.crash();
+      await testing(engine).corruptJournalTail();
+      await testing(engine).crash();
       doc = engine.document;
       assert(
         (await doc.snapshotHash()) === hash,
         "truncated journal lost valid edits",
       );
       assert(
-        doc.view.warnings.some((w) => w.includes("不完全")),
+        doc.getSnapshot().warnings.some((w) => w.code === "RECOVERED_TRUNCATED"),
         "truncation warning missing",
       );
     });
     await test("damaged latest checkpoint falls back to the previous generation", async () => {
-      const before = await engine.unstable.saveBytes();
+      const before = await testing(engine).saveBytes();
       const previousHash = (await doc.snapshotHash());
-      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.open(new Blob([before]));
       doc = await engine.createDocument({ width: 64, height: 64 });
-      await engine.unstable.corruptCheckpoint();
-      await engine.unstable.crash();
+      await testing(engine).corruptCheckpoint();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === previousHash, "previous checkpoint was not opened");
-      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "fallback warning missing");
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "fallback pixels changed");
+      assert(doc.getSnapshot().warnings.some((w) => w.code === "RECOVERED_OLDER_GENERATION"), "fallback warning missing");
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "fallback pixels changed");
     });
     await test("checkpoint CRC failure falls back without losing the older journal", async () => {
-      const before = await engine.unstable.saveBytes();
+      const before = await testing(engine).saveBytes();
       const previousHash = (await doc.snapshotHash());
-      doc = await engine.openDocument(new Blob([before]));
+      doc = await engine.open(new Blob([before]));
       doc = await engine.createDocument({ width: 64, height: 64 });
-      await engine.unstable.corruptCheckpointCrc();
-      await engine.unstable.crash();
+      await testing(engine).corruptCheckpointCrc();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === previousHash, "CRC fallback opened the wrong generation");
-      assert(doc.view.warnings.some((w) => w.includes("前の世代")), "CRC fallback warning missing");
+      assert(doc.getSnapshot().warnings.some((w) => w.code === "RECOVERED_OLDER_GENERATION"), "CRC fallback warning missing");
     });
     await test("V1 checkpoint opens and the next checkpoint migrates to V2", async () => {
       const hash = (await doc.snapshotHash());
-      await engine.unstable.legacyCheckpoint();
-      await engine.unstable.crash();
+      await testing(engine).legacyCheckpoint();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "V1 checkpoint did not open");
-      const bytes = await engine.unstable.saveBytes();
-      doc = await engine.openDocument(new Blob([bytes]));
+      const bytes = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([bytes]));
       await doc.durable();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "V2 migration changed the document");
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "migration pixels changed");
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "migration pixels changed");
     });
     await test("a checkpoint of one file per object opens and the next one packs them", async () => {
       const hash = await doc.snapshotHash();
-      await engine.unstable.looseCheckpoint();
-      await engine.unstable.crash();
+      await testing(engine).looseCheckpoint();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "format 3 checkpoint did not open");
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "format 3 pixels changed");
-      const start = await engine.unstable.recoveryStore();
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "format 3 pixels changed");
+      const start = await testing(engine).recoveryStore();
       assert(start.packs === 0, "the format 3 checkpoint named packs");
-      const name = doc.view.node(brushLayer).name;
+      const name = doc.getSnapshot().nodes.get(brushLayer).name;
       await doc.transact("rename", (tx) => tx.setProps(brushLayer, { name: "Packed" }));
       await doc.versions.commit("pack the objects");
       await doc.durable();
-      const after = await engine.unstable.recoveryStore();
+      const after = await testing(engine).recoveryStore();
       assert(after.latestGeneration === start.latestGeneration + 1, "the commit did not checkpoint");
       assert(after.packs === 1, `the objects went into ${after.packs} packs`);
       const packed = await doc.snapshotHash();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === packed, "the packed checkpoint changed the document");
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "packed pixels changed");
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "packed pixels changed");
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("checkpoints that each add objects keep the packs few", async () => {
@@ -759,57 +788,55 @@ export async function runTests(engine, benchmark, log) {
         await doc.versions.commit("pack " + i);
       }
       await doc.durable();
-      const store = await engine.unstable.recoveryStore();
+      const store = await testing(engine).recoveryStore();
       // One pack for the first checkpoint, then sizes doubling with age: about log2(12) more.
       assert(store.packs <= 5, `${store.packs} packs after 12 checkpoints`);
       const hash = await doc.snapshotHash();
-      await engine.unstable.crash();
+      await testing(engine).crash();
       doc = engine.document;
       assert((await doc.snapshotHash()) === hash, "recovery from packs changed the document");
       for (let i = 0; i < 12; i++) await doc.undo();
-      assert(same(painted, await engine.unstable.readTile(0, 0)), "recovered pixels changed");
+      assert(same(painted, await unstable(engine).readTile(0, 0)), "recovered pixels changed");
     });
     await test("failed append freezes edits and preserves live emergency export", async () => {
-      const before = doc.view.revision;
-      const name = doc.view.node(brushLayer).name;
-      const baseline = await engine.unstable.saveBytes();
-      await engine.unstable.injectStorageFault("beforeAppend");
+      const before = doc.getSnapshot().revision;
+      const name = doc.getSnapshot().nodes.get(brushLayer).name;
+      const baseline = await testing(engine).saveBytes();
+      await testing(engine).injectStorageFault("beforeAppend");
       // An edit is applied when transact resolves; durable() reports the journal.
       await doc.transact("unconfirmed edit", (tx) =>
         tx.setProps(brushLayer, { name: "Unconfirmed paint" }),
       );
-      assert(doc.view.revision === before + 1, "edit was not applied in memory");
+      assert(doc.getSnapshot().revision === before + 1, "edit was not applied in memory");
       let failed = false;
       try {
         await doc.durable();
       } catch (error) {
         failed = error.code === "STORAGE";
       }
-      assert(failed && engine.storageFailure, "append failure was not surfaced");
+      assert(failed && engine.status.state === "storage-failed", "append failure was not surfaced");
       assert(!document.querySelector("#storage-failure").hidden, "recovery controls were not shown");
       assert(document.querySelector("main").inert, "editor was not disabled");
-      const emergency = await engine.exportEmergencyBytes();
-      assert(emergency.length > 100, "emergency export failed");
+      const emergency = await engine.recovery.exportEmergency();
+      assert(emergency.size > 100, "emergency export failed");
       let blocked = false;
       try { await doc.undo(); } catch (error) { blocked = error.code === "STORAGE"; }
       assert(blocked, "editing continued after storage failure");
-      await event(engine, "recovered", () =>
-        document.querySelector("#recover-storage").click(),
-      );
+      await event(engine, "status", () => document.querySelector("#recover-storage").click(), ready);
       await delay(0);
       doc = engine.document;
       assert(document.querySelector("#storage-failure").hidden, "recovery controls remained open");
       assert(!document.querySelector("main").inert, "editor remained disabled");
       assert(!document.querySelector("#recovery-result").hidden, "recovery result was not shown");
-      assert(doc.view.revision === before, "confirmed journal changed unexpectedly");
-      assert(doc.view.node(brushLayer).name === name, "unconfirmed edit was replayed");
-      doc = await engine.openDocument(new Blob([emergency]));
-      assert(doc.view.node(brushLayer).name === "Unconfirmed paint", "emergency export lost live edit");
-      doc = await engine.openDocument(new Blob([baseline]));
+      assert(doc.getSnapshot().revision === before, "confirmed journal changed unexpectedly");
+      assert(doc.getSnapshot().nodes.get(brushLayer).name === name, "unconfirmed edit was replayed");
+      doc = await engine.open(emergency);
+      assert(doc.getSnapshot().nodes.get(brushLayer).name === "Unconfirmed paint", "emergency export lost live edit");
+      doc = await engine.open(new Blob([baseline]));
     });
     await test("lost append reply replays once and matches the display", async () => {
-      const before = doc.view.revision;
-      await engine.unstable.injectStorageFault("afterAppend");
+      const before = doc.getSnapshot().revision;
+      await testing(engine).injectStorageFault("afterAppend");
       await doc.transact("reply lost", (tx) =>
         tx.setProps(brushLayer, { name: "Confirmed despite lost reply" }),
       );
@@ -819,13 +846,13 @@ export async function runTests(engine, benchmark, log) {
       } catch (error) {
         failed = error.code === "STORAGE";
       }
-      assert(failed && engine.storageFailure, "lost reply was not surfaced");
-      const recovered = await engine.recoverAfterStorageFailure();
+      assert(failed && engine.status.state === "storage-failed", "lost reply was not surfaced");
+      const recovered = await engine.recovery.recoverAfterStorageFailure();
       doc = recovered.document;
       // The record reached OPFS, so the journal agrees with what was on screen.
       assert(recovered.matchesDisplay === true, "recovery differs from the display");
-      assert(doc.view.revision === before + 1, "lost reply replayed twice or not at all");
-      assert(doc.view.node(brushLayer).name === "Confirmed despite lost reply", "journal edit missing");
+      assert(doc.getSnapshot().revision === before + 1, "lost reply replayed twice or not at all");
+      assert(doc.getSnapshot().nodes.get(brushLayer).name === "Confirmed despite lost reply", "journal edit missing");
     });
     await test("PNG/JPEG decoding to raster layers", async () => {
       const c = new OffscreenCanvas(64, 64),
@@ -839,19 +866,17 @@ export async function runTests(engine, benchmark, log) {
         assert(a.width === 64 && a.height === 64, "decoded size");
         await doc.transact("image decode", (tx) => tx.addRasterFromAsset(a));
       }
-      const p = pixel(await engine.unstable.readTile(0, 0), 16, 16);
+      const p = pixel(await unstable(engine).readTile(0, 0), 16, 16);
       assert(p[1] > 240 && p[3] === 255, "JPEG/PNG color " + p);
     });
     await test("second engine cannot overwrite the active recovery journal", async () => {
-      const { AltoEngine } = await import(
-        "../../packages/alto-sdk/dist/index.js"
-      );
+      const { createEngine } = await import("../../packages/alto-sdk/dist/index.js");
       const hash = (await doc.snapshotHash());
       let rejected = false;
       try {
-        await AltoEngine.create({ canvas: document.createElement("canvas") });
+        await createEngine({ container: document.createElement("div") });
       } catch (error) {
-        rejected = error.code === "CONFLICT";
+        rejected = error.code === "CONFLICT" && error.details?.reason === "namespace-in-use";
       }
       assert(
         rejected && (await doc.snapshotHash()) === hash,
@@ -859,19 +884,19 @@ export async function runTests(engine, benchmark, log) {
       );
     });
     await test("two damaged journals freeze editing until an external file opens", async () => {
-      const backup = await engine.unstable.saveBytes();
+      const backup = await testing(engine).saveBytes();
       const hash = (await doc.snapshotHash());
-      await engine.unstable.corruptBothCheckpoints();
+      await testing(engine).corruptBothCheckpoints();
       let rejected = false;
-      try { await engine.unstable.crash(); }
+      try { await testing(engine).crash(); }
       catch (error) { rejected = error.code === "CORRUPT_DATA"; }
-      assert(rejected && engine.storageFailure?.code === "CORRUPT_DATA", "damage was hidden");
+      assert(rejected && engine.status.error?.code === "CORRUPT_DATA", "damage was hidden");
       assert(engine.document === null, "stale document remained editable");
       assert(!document.querySelector("#storage-failure").hidden, "damage controls were not shown");
       assert(!document.querySelector("#open-recovery-file").hidden, "external recovery was not offered");
-      doc = await engine.openDocument(new Blob([backup]));
+      doc = await engine.open(new Blob([backup]));
       assert((await doc.snapshotHash()) === hash, "external recovery changed the document");
-      assert(!engine.storageFailure, "editing stayed frozen after external recovery");
+      assert(engine.status.state === "ready", "editing stayed frozen after external recovery");
       assert(document.querySelector("#storage-failure").hidden, "damage controls stayed open");
     });
     log("ALL " + results.length + " TESTS PASSED");
@@ -880,7 +905,7 @@ export async function runTests(engine, benchmark, log) {
     log("FAIL " + e);
     throw e;
   } finally {
-    const canvas = engine.canvas.getBoundingClientRect();
+    const canvas = engine.element.getBoundingClientRect();
     document.querySelector("#test-results").dataset.report = JSON.stringify({
       date: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -890,7 +915,7 @@ export async function runTests(engine, benchmark, log) {
         height: innerHeight,
         dpr: devicePixelRatio,
         canvasCss: [canvas.width, canvas.height],
-        canvasPixels: [engine.canvas.width, engine.canvas.height],
+        canvasPixels: [engine.element.width, engine.element.height],
         benchmarkView: new URLSearchParams(location.search).get("benchmarkView") || "physical",
       },
       results,
@@ -900,8 +925,11 @@ export async function runTests(engine, benchmark, log) {
 async function benches(engine, log, results) {
   const profiling = new URLSearchParams(location.search).has("profile");
   const sameView = new URLSearchParams(location.search).get("benchmarkView") === "css";
-  const zoomScale = sameView ? engine.effectiveDpr : 1;
-  if (profiling) await engine.request("setProfiling", { enabled: true });
+  // Zoom is in CSS pixels. "physical" (the default) maps one document pixel to one
+  // device pixel at zoom 1, as before the CSS unit existed.
+  const ratio = unstable(engine).pixelRatio();
+  const zoomScale = sameView ? 1 : 1 / ratio;
+  if (profiling) await testing(engine).request("setProfiling", { enabled: true });
   let doc = await engine.createDocument({ width: 3840, height: 2160 });
   const layers = [];
   log("Preparing 4K × 20 translucent raster layers…");
@@ -925,21 +953,21 @@ async function benches(engine, log, results) {
   // Cold runs have no opportunity for parent prefetch. The hook clears GPU
   // inputs and outputs; C3 additionally drops the decoded CPU tile cache.
   for (const jobs of [false, true]) {
-    await engine.request("setVisibleTileJobs", { enabled: jobs });
+    await testing(engine).request("setVisibleTileJobs", { enabled: jobs });
     for (const cpu of [false, true]) {
-      await engine.request("resetRenderCache", { cpu });
+      await testing(engine).request("resetRenderCache", { cpu });
       engine.viewport.set({ center: [1920, 1080], zoom: 0.5 * zoomScale, rotation: 0 });
       const began = performance.now();
       const coldFrame = await settled(engine);
       results.push({ id: (cpu ? "C3 CPU+GPU cold ms" : "C2 GPU cold ms") + (jobs ? "" : " (synchronous reference)"),
         value: performance.now() - began, pass: true, profile: coldFrame.profile,
-        canvasPixels: [engine.canvas.width, engine.canvas.height],
-        physicalZoom: engine.viewport.zoom });
+        canvasPixels: [engine.element.width, engine.element.height],
+        physicalZoom: engine.viewport.get().zoom * ratio });
       log("COLD " + JSON.stringify(results.at(-1)));
     }
   }
-  await engine.request("resetRenderCache", { cpu: false });
-  await engine.request("enablePrefetch");
+  await testing(engine).request("resetRenderCache", { cpu: false });
+  await testing(engine).request("enablePrefetch");
   engine.viewport.set({ center: [1920, 1080], zoom: zoomScale, rotation: 0 });
   let frame = await settled(engine);
   const record = (id, value, target, pass) => {
@@ -976,14 +1004,14 @@ async function benches(engine, log, results) {
   record("B2 zoom ms", zoom, 250, zoom <= 250);
   if (profiling) results.at(-1).profile = frame.profile;
   results.at(-1).prefetchBeforeZoom = prefetchBeforeZoom;
-  const canvasCss = engine.canvas.getBoundingClientRect();
+  const canvasCss = engine.element.getBoundingClientRect();
   results.at(-1).canvasCss = [canvasCss.width, canvasCss.height];
-  results.at(-1).canvasPixels = [engine.canvas.width, engine.canvas.height];
-  results.at(-1).physicalZoom = engine.viewport.zoom;
-  results.at(-1).cssZoom = engine.viewport.getCssZoom();
+  results.at(-1).canvasPixels = [engine.element.width, engine.element.height];
+  results.at(-1).physicalZoom = engine.viewport.get().zoom * ratio;
+  results.at(-1).cssZoom = engine.viewport.get().zoom;
   results.at(-1).visibleDocument = {
-    width: engine.canvas.width / engine.viewport.zoom,
-    height: engine.canvas.height / engine.viewport.zoom,
+    width: canvasCss.width / engine.viewport.get().zoom,
+    height: canvasCss.height / engine.viewport.get().zoom,
   };
   engine.viewport.set({ zoom: zoomScale });
   await settled(engine);
@@ -1027,10 +1055,10 @@ async function benches(engine, log, results) {
   const undo = performance.now() - start;
   record("B4 full-canvas Undo ms", undo, 50, undo <= 50);
   start = performance.now();
-  const bytes = await engine.unstable.saveBytes();
+  const bytes = await testing(engine).saveBytes();
   const save = performance.now() - start;
   start = performance.now();
-  doc = await engine.openDocument(new Blob([bytes]));
+  doc = await engine.open(new Blob([bytes]));
   const open = performance.now() - start;
   record(
     "B5 save/open ms",
@@ -1058,17 +1086,14 @@ async function benches(engine, log, results) {
     "512 / 1024 (WASM, decode pool included)",
     peakGpu <= 512 * 1048576 && peakWasm + peakPool <= 1024 * 1048576,
   );
-  const bootHash = doc.view.snapshotHash;
+  const bootHash = await doc.snapshotHash();
   // Older SDKs had no durable(); their open already waited for the checkpoint.
   await doc.durable?.();
   const bootStart = performance.now();
-  await engine.unstable.crash();
-  assert(
-    engine.document.view.snapshotHash === bootHash,
-    "restart lost saved document",
-  );
+  await testing(engine).crash();
   await settled(engine);
   const boot = performance.now() - bootStart;
+  assert((await engine.document.snapshotHash()) === bootHash, "restart lost saved document");
   record("B7 cached Worker restart + first draw ms", boot, 1500, boot <= 1500);
   // B8: what one small edit costs to show. Before incremental invalidation every
   // commit discarded the whole display cache. Public SDK calls only, so the same

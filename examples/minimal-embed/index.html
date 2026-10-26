@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alto Engine: minimal embed</title>
+    <style>
+      body { margin: 0; font: 14px system-ui, sans-serif; display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+      header { display: flex; gap: 6px; padding: 8px; align-items: center; }
+      #editor { position: relative; background: #e6e6e6; }
+      #status { margin-left: auto; color: #555; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <button id="new">New</button>
+      <button id="undo">Undo</button>
+      <button id="redo">Redo</button>
+      <button id="png">Export PNG</button>
+      <button id="save">Save .alto</button>
+      <button id="open">Open .alto</button>
+      <input id="file" type="file" accept=".alto" hidden />
+      <span id="status">Starting…</span>
+    </header>
+    <div id="editor"></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

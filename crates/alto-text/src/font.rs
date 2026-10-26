@@ -32,30 +32,6 @@ pub struct FontInfo {
     pub has_vertical_alternates: bool,
     pub outline: String,
 }
-impl FontInfo {
-    pub fn warnings(&self) -> Vec<String> {
-        let mut w = vec![];
-        match self.embedding {
-            FontEmbedding::Restricted => w.push(format!(
-                "フォント「{}」はライセンス（OS/2 fsType）で埋め込みが禁止されています。配布前に権利を確認してください",
-                self.family
-            )),
-            FontEmbedding::PreviewAndPrint => w.push(format!(
-                "フォント「{}」は閲覧・印刷用の埋め込みのみ許可されています",
-                self.family
-            )),
-            _ => {}
-        }
-        if !self.subsetting_allowed {
-            w.push(format!(
-                "フォント「{}」はサブセット化が許可されていません",
-                self.family
-            ));
-        }
-        w
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[error("Invalid font: {0}")]
 pub struct FontError(pub String);

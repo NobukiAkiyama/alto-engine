@@ -1,18 +1,18 @@
 {
   "date": "2026-10-24",
   "version": "0.4.0",
-  "milestone": "M8 + typed renderer errors + packed recovery objects",
+  "milestone": "M8 + embedding API",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4517370,
-  "gzipBytes": 1142922,
-  "wasmSha256": "55b31fe549d57337d9123e674c8788f40b34e6fa7dc14c6f2e7263dd05bc80f5",
+  "wasmBytes": 4563595,
+  "gzipBytes": 1150480,
+  "wasmSha256": "2f4da8acbdef06d9b6c72d86dbfd0b7ae5ac7a247ba9683a117858d7cd305115",
   "comparisonWasm": {
     "bytes": 4223713,
     "gzipBytes": 984224,
     "sha256": "a1a29fb3596f6361e170e760f5c14604b5b172cf6256fbaac798e20ac51c899b"
   },
-  "nativeTests": 117,
+  "nativeTests": 118,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"

@@ -1,4 +1,5 @@
 import { replaceText } from "../../packages/alto-sdk/dist/index.js";
+import { describeWarning } from "./messages.js";
 const $ = (s) => document.querySelector(s);
 const color = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).concat(1);
 const hex = (c) => "#" + c.slice(0, 3).map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
@@ -16,12 +17,12 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
   let sel = null, dragging = false, composing = false, lastKey = "";
   const current = () => {
     const d = getDocument(), id = getSelected();
-    const n = d && id ? d.view.node(id) : null;
-    return { d, id, n, text: n?.kind.kind === "text" ? n.kind.content : null };
+    const n = d && id ? d.getSnapshot().nodes.get(id) ?? null : null;
+    return { d, id, n, text: n?.type === "text" ? n.content : null };
   };
   function fontOrder() {
     const d = getDocument();
-    const all = (d?.view.assets || []).filter((a) => a.kind.kind === "font").map((a) => a.id);
+    const all = (d?.getSnapshot().assets || []).filter((a) => a.kind.kind === "font").map((a) => a.id);
     const first = $("#text-font").value;
     return first ? [first, ...all.filter((f) => f !== first)] : all;
   }
@@ -51,7 +52,7 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
     };
   }
   function load(n) {
-    const c = n.kind.content;
+    const c = n.content;
     $("#text-content").value = c.text;
     $("#text-writing").value = c.writing_mode || "horizontal_tb";
     $("#text-size").value = c.style.size;
@@ -72,9 +73,9 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
     const d = getDocument();
     const imported = [];
     for (const f of files) imported.push(await engine.assets.importFont(f));
-    await d.transact("フォント追加", (tx) => imported.forEach((f) => tx.addFont(f)));
+    await d.transact({ id: "app:font-add", label: "フォント追加" }, (tx) => imported.forEach((f) => tx.addFont(f)));
     const warnings = imported.flatMap((f) => f.warnings);
-    if (warnings.length) fail(new Error(warnings.join("\n")));
+    if (warnings.length) fail(new Error(warnings.map(describeWarning).join("\n")));
     refresh();
     return imported;
   }
@@ -83,20 +84,20 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
     const f = $("#font-file").files[0];
     if (f) {
       const [font] = await registerFonts([f]);
-      $("#text-font").value = font.record.id;
+      $("#text-font").value = font.id;
     }
     $("#font-file").value = "";
   });
   $("#font-demo").onclick = () => run(async () => {
     const files = await Promise.all(TEST_FONTS.map(async (u) => new File([await (await fetch(u)).blob()], u.split("/").pop())));
     const [jp] = await registerFonts(files);
-    $("#text-font").value = jp.record.id;
+    $("#text-font").value = jp.id;
   });
   $("#text-add").onclick = () => run(async () => {
     const { d, n } = current();
     let id;
-    await d.transact("テキスト追加", (tx) => {
-      id = tx.addText(content(), { parent: n?.kind.kind === "group" ? n.id : n?.parent || d.view.root.id });
+    await d.transact("layer.add", (tx) => {
+      id = tx.addText(content(), { parent: n?.type === "group" ? n.id : n?.parent || d.getSnapshot().root });
       tx.setTransform(id, [1, 0, 0, 1, 60, 60]);
     });
     select(id);
@@ -116,8 +117,8 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
 
   // ---- Canvas selection, caret and keyboard / IME editing ----
   function screenMap() {
-    const ratio = Math.min(devicePixelRatio || 1, 2), z = engine.viewport.zoom / ratio, a = engine.viewport.rotation;
-    const c = Math.cos(a), s = Math.sin(a), r = engine.canvas.getBoundingClientRect(), [cx, cy] = engine.viewport.center;
+    const view = engine.viewport.get(), z = view.zoom, a = view.rotation;
+    const c = Math.cos(a), s = Math.sin(a), r = engine.element.getBoundingClientRect(), [cx, cy] = view.center;
     return { r, f: ([x, y]) => { const dx = x - cx, dy = y - cy; return [r.width / 2 + z * (c * dx - s * dy), r.height / 2 + z * (s * dx + c * dy)]; } };
   }
   let drawTicket = 0;
@@ -164,11 +165,11 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
       [a, b] = [Math.min(a, to), Math.max(a, to)];
       if (a === b) return;
     }
-    await d.text.replace(id, a, b, insert, insert ? "文字入力" : "文字削除");
+    await d.text.replace(id, a, b, insert, insert ? "text.input" : { id: "app:text-delete", label: "文字削除" });
     const caret = a + insert.length;
     sel = { id, anchor: caret, focus: caret };
     lastKey = "";
-    $("#text-content").value = d.view.node(id).kind.content.text;
+    $("#text-content").value = d.getSnapshot().nodes.get(id).content.text;
     await draw();
   }
   async function move(motion, extend) {
@@ -213,7 +214,7 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
   });
   function refresh() {
     const { d, n, text } = current();
-    const list = (d?.view.assets || []).filter((a) => a.kind.kind === "font");
+    const list = (d?.getSnapshot().assets || []).filter((a) => a.kind.kind === "font");
     const keep = $("#text-font").value;
     $("#text-font").replaceChildren(...list.map((a) => { const o = document.createElement("option"); o.value = a.id; o.textContent = a.kind.family || a.id.slice(0, 8); return o; }));
     if (list.some((a) => a.id === keep)) $("#text-font").value = keep;
@@ -233,7 +234,7 @@ export function installM7({ engine, getDocument, getSelected, select, attach, ru
     try { const { runM7Tests } = await import("../../tests/e2e/m7-tests.js"); await runM7Tests(engine, (l) => ($("#test-results").textContent += "\n" + l)); attach(engine.document); }
     finally { b.disabled = false; }
   });
-  $("#sample-m78").onclick = () => run(async () => attach(await engine.openDocument(await (await fetch("../../verification/sample-m78.alto")).blob())));
+  $("#sample-m78").onclick = () => run(async () => attach(await engine.open(await (await fetch("../../verification/sample-m78.alto")).blob())));
   refresh();
   return { refresh, pointer, isActive: () => !!sel };
 }

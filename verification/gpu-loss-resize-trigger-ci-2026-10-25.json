@@ -1,0 +1,332 @@
+{
+ "chrome": "156.0.8078.47 (Chrome for Testing), macOS CI, WebGPU adapter SwiftShader",
+ "classification": "a run counts as a loss when chrome-stderr.log contains 'non-existent mailbox' or a SURFACE-FAILURE dump, regardless of test outcome",
+ "comparison": [
+  {
+   "run": 40192050211,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192048200,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192046382,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192044792,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192043030,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192041198,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192039505,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192037721,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192036105,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192034318,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192032623,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192030554,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192028668,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192026882,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192025064,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192022975,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192021157,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192019217,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192017035,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192015210,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192013492,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40192011757,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192009790,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192007764,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192005634,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40192003749,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40192001506,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": false
+  },
+  {
+   "run": 40191999503,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  },
+  {
+   "run": 40191997474,
+   "branch": "codex/gpu-loss-ci",
+   "commit": "b3b70c1",
+   "loss": true
+  },
+  {
+   "run": 40191995568,
+   "branch": "claude/gpu-loss-debounced",
+   "commit": "207b713",
+   "loss": false
+  }
+ ],
+ "stress": [
+  {
+   "run": 40191010069,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 173.8,
+    "p95": 285.6,
+    "max": 321.1
+   }
+  },
+  {
+   "run": 40191012349,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 375.4,
+    "p95": 668.3,
+    "max": 814.3
+   }
+  },
+  {
+   "run": 40191014181,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 172.1,
+    "p95": 206.4,
+    "max": 223.1
+   }
+  },
+  {
+   "run": 40191016194,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 252.6,
+    "p95": 399.6,
+    "max": 417.2
+   }
+  },
+  {
+   "run": 40191018275,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 155,
+    "p95": 228.1,
+    "max": 241.8
+   }
+  },
+  {
+   "run": 40191019949,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 308.8,
+    "p95": 591.8,
+    "max": 600.6
+   }
+  },
+  {
+   "run": 40191021758,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 174.1,
+    "p95": 249.6,
+    "max": 295.2
+   }
+  },
+  {
+   "run": 40191023678,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 446.4,
+    "p95": 777.7,
+    "max": 802.7
+   }
+  },
+  {
+   "run": 40191025551,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 170.1,
+    "p95": 234.3,
+    "max": 300.5
+   }
+  },
+  {
+   "run": 40191027459,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 246.8,
+    "p95": 374.7,
+    "max": 381.3
+   }
+  },
+  {
+   "run": 40191029139,
+   "commit": "207b713",
+   "resizeBarrier": false,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 172.3,
+    "p95": 230.2,
+    "max": 260.4
+   }
+  },
+  {
+   "run": 40191030729,
+   "commit": "207b713",
+   "resizeBarrier": true,
+   "losses": 0,
+   "resizes": 40,
+   "latencyMs": {
+    "p50": 276.4,
+    "p95": 533.2,
+    "max": 567.1
+   }
+  }
+ ]
+}
