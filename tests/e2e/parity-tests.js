@@ -180,6 +180,42 @@ export async function runParityTests(engine, log) {
       assert(sceneGap(doc.getSnapshot()) === "text", sceneGap(doc.getSnapshot()));
       assert(!same(new Uint8Array(262144), gpu), "text matched an empty composite bit-exactly; remove the xfail");
     });
+    await test("render upgrade is one undoable edit and load or save keeps version 1", async () => {
+      const response = await fetch("../../tests/fixtures/render-v1-bilinear.alto");
+      assert(response.ok, `fixture status ${response.status}`);
+      let doc = await engine.open(new Blob([await response.arrayBuffer()]));
+      const opened = doc.getSnapshot().meta;
+      assert(opened.render_version == null || opened.render_version === 1, `opened at ${opened.render_version}`);
+      assert(opened.format_version === 1, `opened format ${opened.format_version}`);
+      const version1 = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+      const saved = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([saved]));
+      const resaved = doc.getSnapshot().meta;
+      assert(resaved.render_version == null || resaved.render_version === 1, "save upgraded the document");
+      assert(resaved.format_version === 1, `save wrote format ${resaved.format_version}`);
+      assert(same(version1, await gpuTile(engine, { level: 0, tx: 0, ty: 0 })), "reopened version 1 pixels changed");
+      await doc.upgradeRenderVersion();
+      const upgraded = doc.getSnapshot().meta;
+      assert(upgraded.render_version === 2 && upgraded.format_version === 3, `upgrade meta ${upgraded.render_version} format ${upgraded.format_version}`);
+      const version2 = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+      const cpu = renderCase(parityCases().find((item) => item.name === "scale-bilinear"));
+      const gap = diff(cpu, version2);
+      log(`render-upgrade: ${gap}`);
+      assert(same(cpu, version2), gap);
+      assert(!same(version1, version2), "upgrade left the version 1 pixels");
+      let rejected = false;
+      try {
+        await doc.upgradeRenderVersion();
+      } catch (error) {
+        rejected = String(error).includes("already current");
+      }
+      assert(rejected, "a second upgrade was accepted");
+      assert(doc.getSnapshot().history.undo === 1, `undo depth ${doc.getSnapshot().history.undo}`);
+      await doc.undo();
+      const restored = doc.getSnapshot().meta;
+      assert(restored.render_version == null || restored.render_version === 1, `undo left ${restored.render_version}`);
+      assert(same(version1, await gpuTile(engine, { level: 0, tx: 0, ty: 0 })), "undo did not restore version 1 pixels");
+    });
     await test("deferred present stops instead of waiting forever", async () => {
       await engine.createDocument({ width: 64, height: 64 });
       let lost = false;

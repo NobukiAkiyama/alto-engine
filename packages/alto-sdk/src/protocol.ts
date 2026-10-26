@@ -84,6 +84,7 @@ export interface Requests {
   transact: Q<{ intent: string; label?: string; ops: WireOp[]; baseRevision: number }, WireState>;
   undo: Q<None, WireState>;
   redo: Q<None, WireState>;
+  upgradeRenderVersion: Q<None, WireState>;
   beginBrush: Q<{ layer: string; config: BrushConfig; color: number[]; erase: boolean; mask: boolean }, true>;
   endBrush: Q<None, WireState>;
   cancelBrush: Q<None, true>;

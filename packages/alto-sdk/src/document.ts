@@ -126,7 +126,7 @@ export class DocumentHandle {
     this.abortTool(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     this.listeners.clear();
   }
-  private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion">(
+  private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion" | "upgradeRenderVersion">(
     type: K,
     payload: Args<K>,
   ): Promise<void> {
@@ -171,6 +171,14 @@ export class DocumentHandle {
   /** Redoes the last undone edit. */
   redo(): Promise<void> {
     return this.command("redo", {});
+  }
+  /**
+   * Switches a version-1 document to render version 2 as one undoable edit.
+   * Bilinear and rotated samples change. Opening or saving a document does not
+   * do this. A document that is already version 2 is rejected.
+   */
+  upgradeRenderVersion(): Promise<void> {
+    return this.command("upgradeRenderVersion", {});
   }
   /**
    * Resolves once every edit made so far is in the recovery journal. Edits resolve

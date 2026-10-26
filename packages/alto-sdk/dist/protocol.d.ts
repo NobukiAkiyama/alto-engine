@@ -90,6 +90,7 @@ export interface Requests {
     }, WireState>;
     undo: Q<None, WireState>;
     redo: Q<None, WireState>;
+    upgradeRenderVersion: Q<None, WireState>;
     beginBrush: Q<{
         layer: string;
         config: BrushConfig;
