@@ -181,9 +181,9 @@ export function parityCases() {
   base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512 });
   // Inverse translation is -40000px, which does not fit in i32 Q16.
   base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
-  // Inverse translation is -8400000px. Tile 983's rounded source Q8 does not
-  // fit in i32; truncating it would wrap pixel (124, 0) onto ramp texel (34, 50).
-  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])], { w: 251904, h: 256, tx: 983 });
+  // Inverse translation is -8400000px. The origin tile's left pixels have a
+  // source Q8 past -2^23 px, so the whole 256px canvas is transparent.
+  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])]);
   return cases;
 }
 

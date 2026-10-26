@@ -53,6 +53,7 @@ struct Image {
     pixels: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct Tile {
     tx: i32,
     ty: i32,
@@ -81,6 +82,10 @@ enum Node {
         mode: u32,
         visible: bool,
         transform: [f64; 6],
+        /// Tiles merged after the image. The out-of-range case plants one at the
+        /// coordinate a truncated i32 would wrap to, which an imported image
+        /// cannot reach (width is at most 32768).
+        extra_tiles: Vec<Tile>,
     },
     Group {
         isolated: bool,
@@ -148,6 +153,7 @@ fn raster(image: Image, mode: u32, opacity: f32, visible: bool, transform: [f64;
         mode,
         visible,
         transform,
+        extra_tiles: Vec::new(),
     }
 }
 
@@ -470,25 +476,37 @@ fn cases() -> Vec<Case> {
             [0.1, 0.0, 0.0, 0.1, 4000.0, 0.0],
         )],
     });
-    // Scale 0.01 and a 84000px move invert to −8400000px. At tile 983 the
-    // rounded source Q8 is past ±2^23 px. Truncating it to i32 would wrap
-    // pixel (124, 0) onto ramp texel (34, 50). The integer path returns
-    // transparent instead, for every pixel of the tile.
+    // Scale 0.01 and a 84000px move invert to −8400000px. On the origin tile
+    // the rounded source Q8 of the left pixels is past −2^23 px. Truncating
+    // it to i32 would wrap pixel (0, 0) onto source (8377265, 50), tile
+    // (32723, 0) local (177, 50). That texel is planted below. The canvas
+    // stays 256px (documents are limited to 65536). The sample is transparent.
+    let mut probe = vec![0u8; 256 * 256 * 4];
+    let probe_i = (50 * 256 + 177) * 4;
+    probe[probe_i..probe_i + 4].copy_from_slice(&[255, 0, 0, 255]);
+    let mut far = raster(
+        ramp(256, 256),
+        0,
+        1.0,
+        true,
+        [0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0],
+    );
+    if let Node::Raster { extra_tiles, .. } = &mut far {
+        extra_tiles.push(Tile {
+            tx: 32_723,
+            ty: 0,
+            pixels: probe,
+        });
+    }
     out.push(Case {
         name: "large-translation-out-of-range".into(),
-        w: 251_904,
+        w: 256,
         h: 256,
         level: 0,
-        tx: 983,
+        tx: 0,
         ty: 0,
         lock: true,
-        nodes: vec![raster(
-            ramp(256, 256),
-            0,
-            1.0,
-            true,
-            [0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0],
-        )],
+        nodes: vec![far],
     });
     out
 }
@@ -570,15 +588,23 @@ fn walk(node: &Node, parent: [f64; 6], ops: &mut Vec<Op>) {
                 });
             }
         }
-        Node::Raster { image, mode, .. } => {
+        Node::Raster {
+            image,
+            mode,
+            extra_tiles,
+            ..
+        } => {
             let Some(inv) = Affine2(world).inverse() else {
                 return;
             };
+            let mut tiles = split_tiles(image);
+            tiles.extend(extra_tiles.iter().cloned());
+            tiles.sort_by_key(|t| (t.tx, t.ty));
             ops.push(Op::Draw {
                 inv: inv.0,
                 opacity,
                 mode: *mode,
-                tiles: split_tiles(image),
+                tiles,
             });
         }
     }
@@ -1347,7 +1373,7 @@ fn large_translation_is_exact_on_the_integer_path() {
         SAMPLE_INTEGER
     );
     let far_q = integer_inverse(far_inv).unwrap();
-    let px = pixel_q8(983 * 256, 124, 1).unwrap();
+    let px = pixel_q8(0, 0, 1).unwrap();
     let py = pixel_q8(0, 0, 1).unwrap();
     assert!(
         source_q8(&far_q, px, py).is_none(),
@@ -1357,10 +1383,22 @@ fn large_translation_is_exact_on_the_integer_path() {
         .into_iter()
         .find(|c| c.name == "large-translation-out-of-range")
         .unwrap();
+    let mut ops = Vec::new();
+    walk(&far_case.nodes[0], ident(), &mut ops);
+    let Op::Draw { tiles, .. } = &ops[0] else {
+        panic!("expected one draw");
+    };
+    let planted = lookup(tiles, (32_723, 0)).expect("probe tile");
+    let probe_i = (50 * 256 + 177) * 4;
+    assert_eq!(
+        &planted[probe_i..probe_i + 4],
+        &[255, 0, 0, 255],
+        "the texel a truncated i32 would fetch has to be ink, or this test does not catch a wrap"
+    );
     let tile = render(&far_case);
     assert!(
         tile.iter().all(|&b| b == 0),
-        "out-of-range source must be transparent, not a wrapped texel"
+        "out-of-range source must be transparent, not the planted texel"
     );
     assert!(pixel_q8(8_388_608, 0, 1).is_none());
     assert_eq!(pixel_q8(0, 0, 1), Some(128));
