@@ -109,9 +109,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      # Fresh directory every job. rust-cache below does not save or restore
-      # target directories, and the build scripts prefer this path over target/.
-      ALTO_WASM_TARGET_DIR: ${{ runner.temp }}/alto-wasm-target
+      # ALTO_WASM_TARGET_DIR is set in a step. `runner` is not available in job env.
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
@@ -144,11 +142,15 @@ jobs:
           shared-key: wasm-registry
       - name: WASM cargo target is outside the cached native target
         run: |
-          case "$ALTO_WASM_TARGET_DIR" in
+          # runner.temp cannot be referenced from job-level env. Export it here
+          # so every later step, including the vector rebuild, uses this path.
+          # rust-cache does not know about it, and the directory starts empty.
+          echo "ALTO_WASM_TARGET_DIR=$RUNNER_TEMP/alto-wasm-target" >> "$GITHUB_ENV"
+          case "$RUNNER_TEMP/alto-wasm-target" in
             "$RUNNER_TEMP"/*) ;;
-            *) echo "ALTO_WASM_TARGET_DIR must live under RUNNER_TEMP" >&2; exit 1 ;;
+            *) echo "WASM target must live under RUNNER_TEMP" >&2; exit 1 ;;
           esac
-          echo "uncached wasm target: $ALTO_WASM_TARGET_DIR"
+          echo "uncached wasm target: $RUNNER_TEMP/alto-wasm-target"
       - name: Install pinned Chrome for Testing
         shell: bash
         run: |
