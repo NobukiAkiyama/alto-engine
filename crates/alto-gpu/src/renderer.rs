@@ -15,8 +15,12 @@ mod cache;
 mod m5;
 use cache::overview_level;
 mod memory;
+mod presentation;
+mod readback;
 pub use memory::GpuBytes;
-use memory::{Ledger, cache_layers};
+use memory::{Class, Governor, cache_layers};
+pub use presentation::DisplayReport;
+pub use readback::{FinishControl, ReadbackStats, StrokeReadback};
 pub mod vector;
 
 pub use crate::RenderError;
@@ -93,6 +97,7 @@ pub struct FrameReport {
     pub pending: u32,
     pub gpu_bytes: u64,
     pub gpu: GpuBytes,
+    pub display: DisplayReport,
     pub profile: Option<RenderProfile>,
     /// The frame was not presented because the previous one is still on the GPU;
     /// render again once it finishes.
@@ -213,18 +218,7 @@ pub struct StrokeTile {
     pub before: Option<ContentHash>,
     selection: Option<wgpu::Texture>,
 }
-impl StrokeTile {
-    /// Dropping GPU objects does nothing on WebGPU; a finished stroke frees its
-    /// textures now instead of whenever JS collects them.
-    fn destroy(self) {
-        self.output.destroy();
-        self.base.destroy();
-        self.coverage.destroy();
-        if let Some(selection) = self.selection {
-            selection.destroy();
-        }
-    }
-}
+
 pub struct GpuStroke {
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
@@ -298,7 +292,10 @@ pub struct Renderer {
     /// Some while the host decodes job inputs on other threads.
     decoder: Option<Decoder>,
     pub(crate) retired: Retired,
-    ledger: Ledger,
+    governor: Arc<Governor>,
+    readback: Option<readback::SharedPool>,
+    readback_fault: Option<u64>,
+    presentation: presentation::Presentation,
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
@@ -315,21 +312,29 @@ fn texture(
     label: &str,
     layers: u32,
     usage: wgpu::TextureUsages,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: TILE,
-            height: TILE,
-            depth_or_array_layers: layers,
+) -> Result<wgpu::Texture> {
+    memory::create_texture(
+        device,
+        &wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: TILE,
+                height: TILE,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage,
+            view_formats: &[],
         },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage,
-        view_formats: &[],
-    })
+        if label == "content atlas" || label == "display tiles" {
+            Class::Fixed
+        } else {
+            Class::Stroke
+        },
+    )
 }
 fn array_view(t: &wgpu::Texture) -> wgpu::TextureView {
     t.create_view(&wgpu::TextureViewDescriptor {
@@ -400,10 +405,10 @@ impl Retired {
     /// Only after the submit that used them.
     pub(crate) fn release(&mut self) {
         for (b, _) in self.buffers.drain(..) {
-            b.destroy();
+            memory::destroy_buffer(&b, false);
         }
         for (t, _) in self.textures.drain(..) {
-            t.destroy();
+            memory::destroy_texture(&t, false);
         }
     }
 }
@@ -417,7 +422,7 @@ fn buffer<T: Pod>(
     label: &str,
     data: &[T],
     usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
+) -> Result<wgpu::Buffer> {
     // WGSL runtime arrays still require space for one element when their logical length is zero.
     let zero = T::zeroed();
     let bytes: &[u8] = if data.is_empty() {
@@ -426,12 +431,24 @@ fn buffer<T: Pod>(
         bytemuck::cast_slice(data)
     };
     let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
-    let b = d.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    let class = if label.starts_with("vector") || label.starts_with("glyph") {
+        Class::Vector
+    } else if label.starts_with("M5") {
+        Class::Effects
+    } else {
+        Class::Fixed
+    };
+    let b = memory::create_buffer(
+        d,
+        &wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        },
+        class,
+        class == Class::Fixed,
+    )?;
     if bytes.len() as u64 == size {
         q.write_buffer(&b, 0, bytes);
     } else {
@@ -439,7 +456,7 @@ fn buffer<T: Pod>(
         padded.resize(size as usize, 0);
         q.write_buffer(&b, 0, &padded);
     }
-    b
+    Ok(b)
 }
 fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
     let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -698,6 +715,12 @@ impl Renderer {
             })
             .await
             .map_err(|e| RenderError::Internal(e.to_string()))?;
+        let governor = Governor::new(
+            budget_mb as u64 * 1048576,
+            readback::capacity(budget_mb as u64 * 1048576),
+        );
+        memory::install(&device, &governor);
+        let readback = readback::Pool::new(&device, &governor).await?;
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
@@ -719,6 +742,13 @@ impl Renderer {
             }
             flag.store(true, Ordering::Relaxed);
         });
+        let (flag, detail) = (lost.clone(), lost_detail.clone());
+        device.on_uncaptured_error(Arc::new(move |e| {
+            if let Ok(mut d) = detail.lock() {
+                *d = format!("uncaptured GPU error: {e}");
+            }
+            flag.store(true, Ordering::Release);
+        }));
         let atlas = texture(
             &device,
             "content atlas",
@@ -726,7 +756,7 @@ impl Renderer {
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC,
-        );
+        )?;
         let cache = texture(
             &device,
             "display tiles",
@@ -734,23 +764,27 @@ impl Renderer {
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-        );
-        let scratch = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pyramid input"),
-            size: wgpu::Extent3d {
-                width: 512,
-                height: 512,
-                depth_or_array_layers: 1,
+        )?;
+        let scratch = memory::create_texture(
+            &device,
+            &wgpu::TextureDescriptor {
+                label: Some("pyramid input"),
+                size: wgpu::Extent3d {
+                    width: 512,
+                    height: 512,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+            Class::Fixed,
+        )?;
         let atlas_view = array_view(&atlas);
         let cache_view = array_view(&cache);
         let downsample = compute(
@@ -847,7 +881,10 @@ impl Renderer {
             profiling: false,
             decoder: None,
             retired: Retired::default(),
-            ledger: Ledger::default(),
+            governor,
+            readback: Some(readback.shared()),
+            readback_fault: None,
+            presentation: Default::default(),
             clock: || 0.0,
             profile: RenderProfile::default(),
         })
@@ -855,6 +892,7 @@ impl Renderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         if self.config.width != w.max(1) || self.config.height != h.max(1) {
             self.cancel_prefetch();
+            self.presentation.resized();
             self.config.width = w.max(1);
             self.config.height = h.max(1);
             self.surface.configure(&self.device, &self.config);
@@ -1021,6 +1059,7 @@ impl Renderer {
     }
     /// Diagnostic reset: keep the document, discard all GPU-derived tiles.
     pub fn reset_render_cache(&mut self) {
+        self.reset_presentation();
         self.invalidate(None);
         self.atlas_map.clear();
         self.atlas_slots.iter_mut().for_each(|slot| *slot = None);
@@ -1042,6 +1081,7 @@ impl Renderer {
         self.cache_pressure = false;
     }
     pub fn invalidate(&mut self, bounds: Option<Rect>) {
+        self.presentation.changed();
         self.reset_jobs();
         if bounds.is_none() {
             self.prefetch_stats = PrefetchStatus::default();
@@ -1062,7 +1102,9 @@ impl Renderer {
             .copied()
             .collect();
         for k in keys {
-            if let Some(c) = self.cache_map.remove(&k) {
+            if let Some(c) = self.cache_map.remove(&k)
+                && !self.presentation.protects(c.slot)
+            {
                 self.cache_slots[c.slot as usize] = None;
             }
         }
@@ -1454,8 +1496,9 @@ impl Renderer {
             let Some((&old, _)) = self
                 .cache_map
                 .iter()
-                .filter(|(cached, _)| {
-                    !self.visible_keys.contains(cached)
+                .filter(|(cached, entry)| {
+                    !self.presentation.protects(entry.slot)
+                        && !self.visible_keys.contains(cached)
                         && !self.overview_keys.contains(cached)
                         && !self.overview_pins.contains(cached)
                         && !(prefetch
@@ -1568,7 +1611,7 @@ impl Renderer {
             "scene commands",
             &commands,
             wgpu::BufferUsages::STORAGE,
-        );
+        )?;
         self.retired.classified_buffer(&cb, MemoryClass::Fixed);
         let tb = buffer(
             &self.device,
@@ -1576,7 +1619,7 @@ impl Renderer {
             "sparse tile index",
             &entries,
             wgpu::BufferUsages::STORAGE,
-        );
+        )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
         let scale = 2f32.powi(key.0);
         let ub = buffer(
@@ -1598,7 +1641,7 @@ impl Renderer {
                 ],
             }],
             wgpu::BufferUsages::UNIFORM,
-        );
+        )?;
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
@@ -1717,7 +1760,7 @@ impl Renderer {
     }
     pub fn prefetch_status(&self, scene: &RenderScene, view: Viewport) -> PrefetchStatus {
         let mut keys = self.prefetch_keys(scene, view);
-        if self.cache_pressure {
+        if self.cache_pressure || self.presentation.needs_overview() {
             keys.extend(
                 self.overview_keys
                     .iter()
@@ -1746,13 +1789,15 @@ impl Renderer {
         if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
             return Ok(JobStep::Idle);
         }
-        if self.cache_pressure
+        if (self.cache_pressure || self.presentation.needs_overview())
             && self
                 .overview_keys
                 .iter()
                 .any(|k| !self.cache_map.contains_key(k))
         {
-            return self.overview_step(scene, store);
+            let step = self.overview_step(scene, store)?;
+            self.capture_overview();
+            return Ok(step);
         }
         self.overview_pins.clear();
         let keys = self.prefetch_keys(scene, view);
@@ -1969,6 +2014,9 @@ impl Renderer {
         }
         let now = self.clock;
         let _ = self.device.poll(wgpu::PollType::Poll);
+        if !self.present_in_flight.load(Ordering::Acquire) {
+            self.presentation.acknowledge();
+        }
         self.frame += 1;
         if let Some(m5) = &mut self.m5 {
             m5.expire(self.frame, &mut self.retired);
@@ -1984,8 +2032,8 @@ impl Renderer {
                 || n.features.clip_path.is_some()
         });
         let min_level = if vector_scene { -6.0 } else { 0.0 };
-        let level = (1.0 / zoom).log2().floor().clamp(min_level, 12.0) as i32;
-        let scale = 2f64.powi(level);
+        let requested_level = (1.0 / zoom).log2().floor().clamp(min_level, 12.0) as i32;
+        let mut level = requested_level;
         self.eviction_view = view;
         self.ideal_level = level;
         if self.last_view != Some(view) {
@@ -2033,19 +2081,39 @@ impl Renderer {
             .map(|p| p[1])
             .fold(f64::NEG_INFINITY, f64::max)
             .min(scene.canvas.y1 as f64);
-        let mut required = Vec::new();
-        for y in (y0 / (256.0 * scale)).floor() as i32..(y1 / (256.0 * scale)).ceil() as i32 {
-            for x in (x0 / (256.0 * scale)).floor() as i32..(x1 / (256.0 * scale)).ceil() as i32 {
-                required.push((level, x, y));
+        let workspace = 1 + 3 * ol as usize + 2 * self.overview_keys.len();
+        let available = self
+            .cache_slots
+            .len()
+            .checked_sub(workspace)
+            .filter(|n| *n > 0)
+            .ok_or(RenderError::Budget(
+                "GPU budget: overview workspace exceeds display capacity".into(),
+            ))?;
+        let mut required;
+        loop {
+            let span = 256.0 * 2f64.powi(level);
+            let nx = ((x1 / span).ceil() as i64 - (x0 / span).floor() as i64).max(0);
+            let ny = ((y1 / span).ceil() as i64 - (y0 / span).floor() as i64).max(0);
+            if nx.saturating_mul(ny) <= available as i64 {
+                required = Vec::with_capacity((nx * ny) as usize);
+                for y in (y0 / span).floor() as i32..(y1 / span).ceil() as i32 {
+                    for x in (x0 / span).floor() as i32..(x1 / span).ceil() as i32 {
+                        required.push((level, x, y));
+                    }
+                }
+                break;
             }
+            if level == 12 {
+                return Err(RenderError::Budget(
+                    "GPU budget: viewport coverage cannot fit".into(),
+                ));
+            }
+            level += 1;
         }
-        if required.len() > self.cache_slots.len() {
-            return Err(RenderError::Budget(format!(
-                "GPU budget: viewport needs {} display tiles, capacity {}",
-                required.len(),
-                self.cache_slots.len()
-            )));
-        }
+        let scale = 2f64.powi(level);
+        self.ideal_level = level;
+        self.presentation.request(view, requested_level, level);
         self.visible_keys = required.iter().copied().collect();
         if self.cache_slots.iter().filter(|s| s.is_none()).count() <= self.overview_keys.len() + 4 {
             self.cache_pressure = true;
@@ -2080,6 +2148,15 @@ impl Renderer {
                 break;
             }
             let step_start = now();
+            if self.presentation.hierarchy == Some(*key) {
+                self.hierarchy_step(scene, store, *key)?;
+                self.profile.steps += 1;
+                if self.cache_map.contains_key(key) {
+                    self.presentation.hierarchy = None;
+                    composed += 1;
+                }
+                break;
+            }
             if self.visible_tile_jobs && self.resumable_scene(scene) {
                 // Reuse already-composited children before touching source tiles.
                 if self.visible_job.is_none() {
@@ -2112,6 +2189,9 @@ impl Renderer {
                     JobStep::Ready => {
                         composed += 1;
                     }
+                    JobStep::Blocked if key.0 > 0 => {
+                        self.presentation.hierarchy = Some(*key);
+                    }
                     JobStep::Blocked => {
                         return Err(RenderError::Budget(
                             "GPU budget too small for one display tile".into(),
@@ -2140,25 +2220,39 @@ impl Renderer {
             .iter()
             .filter(|k| !self.cache_map.contains_key(k))
             .count() as u32;
-        let unchanged = self.last_view == Some(view);
         self.last_view = Some(view);
         self.last_pending = pending;
-        // Preparing inputs does not change any displayed pixel. Avoid submitting
-        // an identical present pass on every resumable slice.
-        if composed == 0 && pending > 0 && unchanged && !self.present_deferred {
+        self.presentation.set_pending(pending);
+        // Required coverage work also runs while optional idle prefetch is disabled.
+        if self.presentation.needs_overview()
+            && composed == 0
+            && !self.present_in_flight.load(Ordering::Acquire)
+            && now() - start < budget_ms
+        {
+            self.overview_step(scene, store)?;
+        }
+        self.capture_overview();
+        if !self.presentation.covers() {
             return self.frame_report(composed, pending);
         }
-        // Runs completion callbacks on native backends; WebGPU runs them from the event loop.
         let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.presentation.unchanged() && composed == 0 && !self.present_deferred {
+            let mut frame = self.frame_report(composed, pending)?;
+            frame.deferred = self.present_in_flight.load(Ordering::Acquire);
+            return Ok(frame);
+        }
         if self.present_in_flight.load(Ordering::Acquire) {
             self.present_deferred = true;
-            return Ok(FrameReport {
-                deferred: true,
-                ..self.frame_report(composed, pending)?
-            });
+            let mut frame = self.frame_report(composed, pending)?;
+            frame.deferred = true;
+            return Ok(frame);
         }
         self.present_deferred = false;
-        let mut visible = Vec::new();
+        let mut visible = if pending > 0 {
+            self.presentation.roots()
+        } else {
+            Vec::new()
+        };
         if pending > 0 {
             for (&key, entry) in &self.cache_map {
                 if key.0 != level {
@@ -2204,7 +2298,7 @@ impl Renderer {
                 canvas: [scene.canvas.x1 as f32, scene.canvas.y1 as f32, 0.0, 0.0],
             }],
             wgpu::BufferUsages::UNIFORM,
-        );
+        )?;
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let tb = buffer(
             &self.device,
@@ -2212,7 +2306,7 @@ impl Renderer {
             "visible tiles",
             &tiles,
             wgpu::BufferUsages::STORAGE,
-        );
+        )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present"),
@@ -2241,10 +2335,16 @@ impl Renderer {
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(FrameReport::default());
+                self.present_deferred = true;
+                let mut r = self.frame_report(composed, pending)?;
+                r.deferred = true;
+                return Ok(r);
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(FrameReport::default());
+                self.present_deferred = true;
+                let mut r = self.frame_report(composed, pending)?;
+                r.deferred = true;
+                return Ok(r);
             }
             _ => return Err(RenderError::GpuLost("surface".into())),
         };
@@ -2276,48 +2376,29 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.release_retired();
         self.queue.present(frame);
+        self.presentation.published();
         self.present_in_flight.store(true, Ordering::Release);
         let in_flight = self.present_in_flight.clone();
         self.queue
             .on_submitted_work_done(move || in_flight.store(false, Ordering::Release));
         self.frame_report(composed, pending)
     }
-    fn fixed_bytes(&self) -> u64 {
-        (self.atlas_slots.len() + self.cache_slots.len()) as u64 * TILE_RGBA_BYTES + SCRATCH_BYTES
-    }
-    fn stroke_bytes(&self) -> u64 {
-        self.stroke.as_ref().map_or(0, |s| {
-            s.tiles
-                .values()
-                .map(|t| 786432 + if t.selection.is_some() { 262144 } else { 0 })
-                .sum()
-        })
-    }
     fn gpu_bytes(&self) -> GpuBytes {
-        let mut gpu = GpuBytes {
-            fixed: self.fixed_bytes(),
-            live_fixed: (self.atlas_map.len() + self.cache_map.len()) as u64 * TILE_RGBA_BYTES
-                + SCRATCH_BYTES,
-            effects: self.m5.as_ref().map_or(0, |m| m.bytes()),
-            atlas_layers: self.atlas_slots.len() as u64,
-            display_layers: self.cache_slots.len() as u64,
-            overview_tiles: self.overview_keys.len() as u64,
-            overview_ready: self
-                .overview_keys
-                .iter()
-                .filter(|k| self.cache_map.contains_key(k))
-                .count() as u64,
-            effects_allocations: self.m5.as_ref().map_or(0, |m| m.allocations),
-            effects_reuses: self.m5.as_ref().map_or(0, |m| m.reuses),
-            stroke: self.stroke_bytes(),
-            vector: self.vector_bytes(),
-            ..Default::default()
-        };
-        gpu.add(self.retired.bytes());
-        gpu.add(self.ledger.bytes());
-        if let Some(v) = &self.vector {
-            gpu.add(v.retired.bytes());
-        }
+        let mut gpu = self.governor.snapshot();
+        gpu.live_fixed =
+            (self.atlas_map.len() + self.cache_slots.iter().filter(|s| s.is_some()).count()) as u64
+                * TILE_RGBA_BYTES
+                + SCRATCH_BYTES;
+        gpu.atlas_layers = self.atlas_slots.len() as u64;
+        gpu.display_layers = self.cache_slots.len() as u64;
+        gpu.overview_tiles = self.overview_keys.len() as u64;
+        gpu.overview_ready = self
+            .overview_keys
+            .iter()
+            .filter(|k| self.cache_map.contains_key(k))
+            .count() as u64;
+        gpu.effects_allocations = self.m5.as_ref().map_or(0, |m| m.allocations);
+        gpu.effects_reuses = self.m5.as_ref().map_or(0, |m| m.reuses);
         gpu
     }
     /// Called after submit or after discarding an encoder; never while a consumer is unsubmitted.
@@ -2327,9 +2408,8 @@ impl Renderer {
         if let Some(vector) = &mut self.vector {
             self.retired.take(&mut vector.retired);
         }
-        let bytes = self.retired.bytes();
         self.retired.release();
-        self.ledger.submitted(&self.queue, bytes);
+        self.governor.submitted(&self.queue);
     }
     fn frame_report(&self, composed: u32, pending: u32) -> Result<FrameReport> {
         let gpu = self.gpu_bytes();
@@ -2337,9 +2417,10 @@ impl Renderer {
             composed,
             pending,
             profile: self.profiling.then_some(self.profile),
-            deferred: false,
+            deferred: self.present_in_flight.load(Ordering::Acquire),
             gpu_bytes: gpu.total(),
             gpu,
+            display: self.display_report(),
         })
     }
     #[allow(clippy::too_many_arguments)] // One value per brush setting; the Worker passes them positionally.
@@ -2356,6 +2437,7 @@ impl Renderer {
         if self.stroke.is_some() {
             return Err(RenderError::Conflict("stroke already active".into()));
         }
+        self.governor.reset_peak();
         self.stroke = Some(GpuStroke {
             layer,
             tiles: BTreeMap::new(),
@@ -2418,26 +2500,6 @@ impl Renderer {
             .filter(|k| !stroke.tiles.contains_key(k))
             .count();
         let tile_bytes = 786432 + if selection.is_some() { 262144 } else { 0 };
-        let frame = self
-            .vector
-            .as_ref()
-            .map_or(0, |v| v.retired.bytes().total())
-            + self.ledger.bytes().total()
-            + self.retired.bytes().total()
-            + self.m5.as_ref().map_or(0, |m| m.bytes())
-            + (stroke.tiles.len() + new_tiles) as u64 * tile_bytes;
-        let fixed = self.fixed_bytes() + self.vector_fixed_bytes();
-        let Some(allowance) = crate::cache_allowance(self.budget_bytes, frame, fixed) else {
-            self.stroke = Some(stroke);
-            return Err(RenderError::InvalidArgument(
-                "stroke exceeds GPU memory budget".into(),
-            ));
-        };
-        if self.vector_mesh_bytes() > allowance
-            && let Some(vector) = self.vector.as_mut()
-        {
-            vector.discard_meshes();
-        }
         let command_bytes = affected
             .values()
             .map(|d| {
@@ -2445,119 +2507,80 @@ impl Renderer {
                     as u64
             })
             .sum::<u64>();
-        if self.gpu_bytes().total()
-            + (stroke.tiles.len() + new_tiles) as u64 * tile_bytes
-            + command_bytes
-            > self.budget_bytes
+        let new_bytes = new_tiles as u64 * tile_bytes + command_bytes;
+        let cpu_finish = (stroke.tiles.len() + new_tiles) as u64
+            * (TILE_RGBA_BYTES + TILE_RGBA_BYTES / 255 + 256)
+            * 4
+            + self.readback_capacity()
+            + 1048576;
+        if self.gpu_bytes().budget_used.saturating_add(new_bytes) > self.budget_bytes
+            || cpu_finish > 512 * 1048576
         {
             self.stroke = Some(stroke);
             return Err(RenderError::Budget(
-                "stroke allocation exceeds GPU budget (including retired allocations)".into(),
+                "stroke would consume its GPU or CPU finish reservation".into(),
             ));
         }
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("brush"),
-            });
-        let mut selection_tiles = HashMap::new();
-        if let Some((m, _, _)) = selection {
-            for (key, hash) in &m.tiles {
-                if let Some(tile) = alto_raster::load(store, hash)? {
-                    selection_tiles.insert(*key, tile);
+        let checkpoint = self.governor.checkpoint();
+        let old_keys: HashSet<_> = stroke.tiles.keys().copied().collect();
+        let result = (|| -> Result<()> {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("brush"),
+                });
+            let mut selection_tiles = HashMap::new();
+            if let Some((m, _, _)) = selection {
+                for (key, hash) in &m.tiles {
+                    if let Some(tile) = alto_raster::load(store, hash)? {
+                        selection_tiles.insert(*key, tile);
+                    }
                 }
             }
-        }
-        for (key, dabs) in affected {
-            if let std::collections::btree_map::Entry::Vacant(entry) = stroke.tiles.entry(key) {
-                let base = texture(
-                    &self.device,
-                    "stroke base",
-                    1,
-                    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                );
-                let output = texture(
-                    &self.device,
-                    "stroke output",
-                    1,
-                    wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                );
-                let coverage = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("stroke coverage"),
-                    size: 262144,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                });
-                let before = tiles.get(&key).copied();
-                let previous = before
-                    .map(|h| alto_raster::load(store, &h))
-                    .transpose()?
-                    .flatten();
-                let data = previous.unwrap_or_else(|| {
-                    Arc::new(TileData {
-                        format: if stroke.mask {
-                            alto_core::PixelFormat::R8
-                        } else {
-                            alto_core::PixelFormat::Rgba8
-                        },
-                        pixels: vec![0; if stroke.mask { 65536 } else { 262144 }]
-                            .into_boxed_slice(),
-                    })
-                });
-                self.queue.write_texture(
-                    base.as_image_copy(),
-                    &rgba_pixels(&data),
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(1024),
-                        rows_per_image: Some(256),
-                    },
-                    wgpu::Extent3d {
-                        width: 256,
-                        height: 256,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let selected = selection.map(|(_, world, size)| {
-                    let target = texture(
+            for (key, dabs) in affected {
+                if let std::collections::btree_map::Entry::Vacant(entry) = stroke.tiles.entry(key) {
+                    let base = texture(
                         &self.device,
-                        "stroke selection",
+                        "stroke base",
                         1,
                         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    );
-                    let mut pixels = vec![0u8; 262144];
-                    for y in 0..256 {
-                        for x in 0..256 {
-                            let p = point(
-                                world,
-                                [
-                                    (key.tx * 256 + x) as f64 + 0.5,
-                                    (key.ty * 256 + y) as f64 + 0.5,
-                                ],
-                            );
-                            let px = p[0].floor() as i32;
-                            let py = p[1].floor() as i32;
-                            let value =
-                                if px < 0 || py < 0 || px >= size[0] as i32 || py >= size[1] as i32
-                                {
-                                    0
-                                } else {
-                                    selection_tiles
-                                        .get(&TileKey {
-                                            tx: px.div_euclid(256),
-                                            ty: py.div_euclid(256),
-                                        })
-                                        .map_or(0, |t| {
-                                            t.pixels[(py.rem_euclid(256) * 256 + px.rem_euclid(256))
-                                                as usize]
-                                        })
-                                };
-                            pixels[(y * 256 + x) as usize * 4] = value;
-                        }
-                    }
+                    )?;
+                    let output = texture(
+                        &self.device,
+                        "stroke output",
+                        1,
+                        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    )?;
+                    let coverage = memory::create_buffer(
+                        &self.device,
+                        &wgpu::BufferDescriptor {
+                            label: Some("stroke coverage"),
+                            size: 262144,
+                            usage: wgpu::BufferUsages::STORAGE,
+                            mapped_at_creation: false,
+                        },
+                        Class::Stroke,
+                        false,
+                    )?;
+                    let before = tiles.get(&key).copied();
+                    let previous = before
+                        .map(|h| alto_raster::load(store, &h))
+                        .transpose()?
+                        .flatten();
+                    let data = previous.unwrap_or_else(|| {
+                        Arc::new(TileData {
+                            format: if stroke.mask {
+                                alto_core::PixelFormat::R8
+                            } else {
+                                alto_core::PixelFormat::Rgba8
+                            },
+                            pixels: vec![0; if stroke.mask { 65536 } else { 262144 }]
+                                .into_boxed_slice(),
+                        })
+                    });
                     self.queue.write_texture(
-                        target.as_image_copy(),
-                        &pixels,
+                        base.as_image_copy(),
+                        &rgba_pixels(&data),
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
                             bytes_per_row: Some(1024),
@@ -2569,90 +2592,156 @@ impl Renderer {
                             depth_or_array_layers: 1,
                         },
                     );
-                    target
-                });
-                entry.insert(StrokeTile {
-                    base,
-                    output,
-                    coverage,
-                    before,
-                    selection: selected,
-                });
-            }
-            let tile = stroke
-                .tiles
-                .get(&key)
-                .ok_or(RenderError::Internal("stroke tile".into()))?;
-            let db = buffer(
-                &self.device,
-                &self.queue,
-                "dabs",
-                &dabs,
-                wgpu::BufferUsages::STORAGE,
-            );
-            self.retired.classified_buffer(&db, MemoryClass::Fixed);
-            let ub = buffer(
-                &self.device,
-                &self.queue,
-                "brush config",
-                &[BrushUniform {
-                    color: stroke.color,
-                    params: [stroke.hardness, stroke.opacity, 0.0, 0.0],
-                    origin: [key.tx as f32 * 256.0, key.ty as f32 * 256.0, 0.0, 0.0],
-                    info: [
-                        dabs.len() as u32,
-                        u32::from(stroke.erase),
-                        u32::from(tile.selection.is_some()),
-                        0,
+                    let selected = selection
+                        .map(|(_, world, size)| -> Result<wgpu::Texture> {
+                            let target = texture(
+                                &self.device,
+                                "stroke selection",
+                                1,
+                                wgpu::TextureUsages::TEXTURE_BINDING
+                                    | wgpu::TextureUsages::COPY_DST,
+                            )?;
+                            let mut pixels = vec![0u8; 262144];
+                            for y in 0..256 {
+                                for x in 0..256 {
+                                    let p = point(
+                                        world,
+                                        [
+                                            (key.tx * 256 + x) as f64 + 0.5,
+                                            (key.ty * 256 + y) as f64 + 0.5,
+                                        ],
+                                    );
+                                    let px = p[0].floor() as i32;
+                                    let py = p[1].floor() as i32;
+                                    let value = if px < 0
+                                        || py < 0
+                                        || px >= size[0] as i32
+                                        || py >= size[1] as i32
+                                    {
+                                        0
+                                    } else {
+                                        selection_tiles
+                                            .get(&TileKey {
+                                                tx: px.div_euclid(256),
+                                                ty: py.div_euclid(256),
+                                            })
+                                            .map_or(0, |t| {
+                                                t.pixels[(py.rem_euclid(256) * 256
+                                                    + px.rem_euclid(256))
+                                                    as usize]
+                                            })
+                                    };
+                                    pixels[(y * 256 + x) as usize * 4] = value;
+                                }
+                            }
+                            self.queue.write_texture(
+                                target.as_image_copy(),
+                                &pixels,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(1024),
+                                    rows_per_image: Some(256),
+                                },
+                                wgpu::Extent3d {
+                                    width: 256,
+                                    height: 256,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                            Ok(target)
+                        })
+                        .transpose()?;
+                    entry.insert(StrokeTile {
+                        base,
+                        output,
+                        coverage,
+                        before,
+                        selection: selected,
+                    });
+                }
+                let tile = stroke
+                    .tiles
+                    .get(&key)
+                    .ok_or(RenderError::Internal("stroke tile".into()))?;
+                let db = buffer(
+                    &self.device,
+                    &self.queue,
+                    "dabs",
+                    &dabs,
+                    wgpu::BufferUsages::STORAGE,
+                )?;
+                self.retired.classified_buffer(&db, MemoryClass::Fixed);
+                let ub = buffer(
+                    &self.device,
+                    &self.queue,
+                    "brush config",
+                    &[BrushUniform {
+                        color: stroke.color,
+                        params: [stroke.hardness, stroke.opacity, 0.0, 0.0],
+                        origin: [key.tx as f32 * 256.0, key.ty as f32 * 256.0, 0.0, 0.0],
+                        info: [
+                            dabs.len() as u32,
+                            u32::from(stroke.erase),
+                            u32::from(tile.selection.is_some()),
+                            0,
+                        ],
+                    }],
+                    wgpu::BufferUsages::UNIFORM,
+                )?;
+                self.retired.classified_buffer(&ub, MemoryClass::Fixed);
+                let base = tile.base.create_view(&Default::default());
+                let output = tile.output.create_view(&Default::default());
+                let selected = tile
+                    .selection
+                    .as_ref()
+                    .unwrap_or(&tile.base)
+                    .create_view(&Default::default());
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("brush"),
+                    layout: &self.brush.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&base),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&output),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: tile.coverage.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: db.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: ub.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&selected),
+                        },
                     ],
-                }],
-                wgpu::BufferUsages::UNIFORM,
-            );
-            self.retired.classified_buffer(&ub, MemoryClass::Fixed);
-            let base = tile.base.create_view(&Default::default());
-            let output = tile.output.create_view(&Default::default());
-            let selected = tile
-                .selection
-                .as_ref()
-                .unwrap_or(&tile.base)
-                .create_view(&Default::default());
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("brush"),
-                layout: &self.brush.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&base),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&output),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: tile.coverage.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: db.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: ub.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&selected),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.brush);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(16, 16, 1);
+                });
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.brush);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(16, 16, 1);
+            }
+            self.queue.submit(Some(encoder.finish()));
+            self.release_retired();
+            Ok(())
+        })();
+        if let Err(e) = result {
+            stroke.tiles.retain(|key, _| old_keys.contains(key));
+            checkpoint.rollback(&self.queue);
+            self.release_retired();
+            self.stroke = Some(stroke);
+            return Err(e);
         }
-        self.queue.submit(Some(encoder.finish()));
-        self.release_retired();
         stroke.epoch += 1;
         let damage = crate::damage::layer_rect_damage(stroke.world, bounds);
         stroke.damage = Some(
@@ -2663,110 +2752,6 @@ impl Renderer {
         self.stroke = Some(stroke);
         self.invalidate(Some(damage));
         Ok(Some(damage))
-    }
-    pub async fn finish_stroke(&mut self) -> Result<Vec<(TileKey, Option<ContentHash>, TileData)>> {
-        let stroke = self
-            .stroke
-            .take()
-            .ok_or(RenderError::Conflict("no stroke".into()))?;
-        let mut buffers = Vec::new();
-        let mut finished = Vec::new();
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        for (key, tile) in stroke.tiles {
-            let b = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("readback"),
-                size: 262144,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            encoder.copy_texture_to_buffer(
-                tile.output.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &b,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(1024),
-                        rows_per_image: Some(256),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: 256,
-                    height: 256,
-                    depth_or_array_layers: 1,
-                },
-            );
-            buffers.push((key, tile.before, b));
-            finished.push(tile);
-        }
-        self.queue.submit(Some(encoder.finish()));
-        self.release_retired();
-        let mut waits = Vec::new();
-        for (_, _, b) in &buffers {
-            let (tx, rx) = futures_channel::oneshot::channel();
-            b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
-            waits.push(rx);
-        }
-        let mut failed = None;
-        for w in waits {
-            if let Err(e) = w.await.map_err(|e| RenderError::Internal(e.to_string()))? {
-                failed.get_or_insert(e);
-            }
-        }
-        if let Some(e) = failed {
-            for (_, _, b) in &buffers {
-                b.destroy();
-            }
-            for tile in finished {
-                tile.destroy();
-            }
-            // As in read_tile: say whether the device was lost while the maps waited.
-            return Err(if self.is_lost() {
-                RenderError::GpuLost(format!(
-                    "device lost ({}) while reading back a stroke: {e}",
-                    self.lost_detail()
-                ))
-            } else {
-                RenderError::Internal(format!(
-                    "reading back a stroke ({} tiles): {e}",
-                    buffers.len()
-                ))
-            });
-        }
-        let mut out = Vec::new();
-        for (k, before, b) in buffers {
-            let mapped = b
-                .slice(..)
-                .get_mapped_range()
-                .map_err(|e| RenderError::Internal(e.to_string()))?;
-            let data = TileData::new(
-                if stroke.mask {
-                    alto_core::PixelFormat::R8
-                } else {
-                    alto_core::PixelFormat::Rgba8
-                },
-                if stroke.mask {
-                    mapped.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
-                } else {
-                    mapped.to_vec()
-                },
-            )
-            .map_err(|_| RenderError::CorruptData("readback".into()))?;
-            drop(mapped);
-            b.unmap();
-            b.destroy();
-            out.push((k, before, data));
-        }
-        // Every readback has completed, so nothing still reads these textures.
-        for tile in finished {
-            tile.destroy();
-        }
-        // Tiles outside the stroke were composed from the same pixels with or without it.
-        if let Some(damage) = stroke.damage {
-            self.invalidate(Some(damage));
-        }
-        Ok(out)
     }
     pub fn cancel_stroke(&mut self) {
         let Some(stroke) = self.stroke.take() else {
@@ -2822,49 +2807,37 @@ impl Renderer {
         store: &dyn TileStore,
         keys: &[CacheKey],
     ) -> Result<Vec<u8>> {
-        const TILE_BYTES: u64 = 256 * 256 * 4;
-        let b = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("probe"),
-            size: TILE_BYTES * keys.len().max(1) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        for (i, key) in keys.iter().enumerate() {
-            if let Err(e) = self.copy_display_tile(scene, store, *key, &b, i as u64 * TILE_BYTES) {
-                b.destroy();
-                return Err(e);
+        const TILE_BYTES: u64 = TILE_RGBA_BYTES;
+        let total = TILE_BYTES
+            .checked_mul(keys.len() as u64)
+            .ok_or(RenderError::Budget("readback size overflow".into()))?;
+        if total > 512 * 1048576 {
+            return Err(RenderError::Budget("CPU readback exceeds 512 MiB".into()));
+        }
+        let pool = self
+            .readback
+            .as_ref()
+            .ok_or(RenderError::Internal("readback pool missing".into()))?
+            .clone();
+        let _lease = pool.acquire()?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(total as usize)
+            .map_err(|_| RenderError::Budget("CPU readback allocation failed".into()))?;
+        for batch in keys.chunks((pool.bytes / TILE_BYTES) as usize) {
+            for (i, key) in batch.iter().enumerate() {
+                self.copy_display_tile(scene, store, *key, &pool.buffer, i as u64 * TILE_BYTES)?;
             }
+            pool.map(batch.len() as u64 * TILE_BYTES).await?;
+            let view = pool
+                .buffer
+                .slice(..batch.len() as u64 * TILE_BYTES)
+                .get_mapped_range()
+                .map_err(|e| RenderError::Internal(e.to_string()))?;
+            out.extend_from_slice(&view);
+            drop(view);
+            pool.buffer.unmap();
         }
-        let (tx, rx) = futures_channel::oneshot::channel();
-        b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let mapped = rx.await.map_err(|e| RenderError::Internal(e.to_string()))?;
-        // A map fails when the device is lost while it waits; say so, so the caller
-        // can tell device loss from a renderer bug.
-        if let Err(e) = mapped {
-            b.destroy();
-            return Err(if self.is_lost() {
-                RenderError::GpuLost(format!(
-                    "device lost ({}) while reading {} display tiles: {e}",
-                    self.lost_detail(),
-                    keys.len()
-                ))
-            } else {
-                RenderError::Internal(format!("reading {} display tiles: {e}", keys.len()))
-            });
-        }
-        let view = b
-            .slice(..)
-            .get_mapped_range()
-            .map_err(|e| RenderError::Internal(e.to_string()))?;
-        let data = view.to_vec();
-        drop(view);
-        b.unmap();
-        // Dropping a buffer does nothing on WebGPU; its mapping memory would stay
-        // until JS collects it. Readbacks are frequent: release it now.
-        b.destroy();
-        Ok(data)
+        Ok(out)
     }
     fn copy_display_tile(
         &mut self,
@@ -2989,7 +2962,7 @@ impl Renderer {
             "pyramid slot",
             &[[slot, 0, 0, 0]],
             wgpu::BufferUsages::UNIFORM,
-        );
+        )?;
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("display pyramid"),
             layout: &self.downsample.get_bind_group_layout(0),
@@ -3016,7 +2989,8 @@ impl Renderer {
         }
         self.queue.submit(Some(e.finish()));
         // This takes &self; the uniform is its own and the submit above was its use.
-        ub.destroy();
+        memory::destroy_buffer(&ub, false);
+        self.governor.submitted(&self.queue);
         Ok(true)
     }
 }

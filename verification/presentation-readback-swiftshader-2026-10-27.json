@@ -1,0 +1,1036 @@
+{
+  "functional": {
+    "date": "2026-10-26T17:07:14.139Z",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "crossOriginIsolated": false,
+    "viewport": {
+      "width": 1280,
+      "height": 657,
+      "dpr": 1,
+      "canvasCss": [
+        970,
+        472
+      ],
+      "canvasPixels": [
+        300,
+        150
+      ],
+      "benchmarkView": "physical"
+    },
+    "results": [
+      {
+        "name": "queue-ordered reuse and destroy preserve earlier copies without a CPU fence",
+        "pass": true,
+        "ms": 10.699999999254942
+      },
+      {
+        "name": "GPU memory categories sum without counting occupied slots twice",
+        "pass": true,
+        "ms": 6.900000000372529
+      },
+      {
+        "name": "off-canvas brush tiles survive movement, history, save and GPU recovery",
+        "pass": true,
+        "ms": 467.1000000005588
+      },
+      {
+        "name": "empty scene GPU validation / Normal / Multiply / Screen / opacity / visibility",
+        "pass": true,
+        "ms": 84.79999999981374
+      },
+      {
+        "name": "non-destructive transform / reorder / group isolation",
+        "pass": true,
+        "ms": 66.30000000074506
+      },
+      {
+        "name": "low-zoom prefetch matches direct composite pixels",
+        "pass": true,
+        "ms": 162.59999999962747
+      },
+      {
+        "name": "cold jobs preserve transformed isolated groups through edit and Undo",
+        "pass": true,
+        "ms": 162.20000000018626
+      },
+      {
+        "name": "edits discard only damaged display tiles and match a full recomposite",
+        "pass": true,
+        "ms": 1438.1000000005588
+      },
+      {
+        "name": "cold frames decode inputs in the decode workers and match inline decoding",
+        "pass": true,
+        "ms": 231.59999999962747
+      },
+      {
+        "name": "a decode worker that stops answering hands its tiles back to inline decoding",
+        "pass": true,
+        "ms": 2199.7000000001863
+      },
+      {
+        "name": "full display cache can yield and replace tiles without orphaning slots",
+        "pass": true,
+        "ms": 660.7999999998137
+      },
+      {
+        "name": "cache pressure builds and pins an overview through pan and rotation",
+        "pass": true,
+        "ms": 1337.3999999994412
+      },
+      {
+        "name": "GPU brush / pressure / tile boundary / exact Undo-Redo / eraser",
+        "pass": true,
+        "ms": 71.5
+      },
+      {
+        "name": ".alto ZIP save/open preserves pixels and snapshot hash",
+        "pass": true,
+        "ms": 25.399999999441206
+      },
+      {
+        "name": "atomic save survives write failure and writer Worker termination",
+        "pass": true,
+        "ms": 6.6000000005587935
+      },
+      {
+        "name": "invalid transaction leaves mirror and history unchanged",
+        "pass": true,
+        "ms": 0.5
+      },
+      {
+        "name": "device loss rebuilds GPU from CPU content",
+        "pass": true,
+        "ms": 371
+      },
+      {
+        "name": "Worker restart replays flushed OPFS journal",
+        "pass": true,
+        "ms": 460.20000000018626
+      },
+      {
+        "name": "a checkpoint writes only the objects the recovery store lacks",
+        "pass": true,
+        "ms": 88.90000000037253
+      },
+      {
+        "name": "a long journal is checkpointed once editing pauses",
+        "pass": true,
+        "ms": 3376
+      },
+      {
+        "name": "rapid edits keep journal order and survive a crash",
+        "pass": true,
+        "ms": 254.90000000037253
+      },
+      {
+        "name": "recovery keeps undo history from before the checkpoint",
+        "pass": true,
+        "ms": 2206.7999999998137
+      },
+      {
+        "name": "simultaneous Worker restart requests share one recovery",
+        "pass": true,
+        "ms": 60.299999999813735
+      },
+      {
+        "name": "uncloneable request does not leave a pending reply",
+        "pass": true,
+        "ms": 335.29999999981374
+      },
+      {
+        "name": "missing Worker script stops once and retries without corrupting the journal",
+        "pass": true,
+        "ms": 535.0999999996275
+      },
+      {
+        "name": "truncated journal tail is excluded during recovery",
+        "pass": true,
+        "ms": 64.40000000037253
+      },
+      {
+        "name": "damaged latest checkpoint falls back to the previous generation",
+        "pass": true,
+        "ms": 891.4000000003725
+      },
+      {
+        "name": "checkpoint CRC failure falls back without losing the older journal",
+        "pass": true,
+        "ms": 397.20000000018626
+      },
+      {
+        "name": "V1 checkpoint opens and the next checkpoint migrates to V2",
+        "pass": true,
+        "ms": 1006.5999999996275
+      },
+      {
+        "name": "a checkpoint of one file per object opens and the next one packs them",
+        "pass": true,
+        "ms": 942.2000000001863
+      },
+      {
+        "name": "checkpoints that each add objects keep the packs few",
+        "pass": true,
+        "ms": 821.0999999996275
+      },
+      {
+        "name": "failed append freezes edits and preserves live emergency export",
+        "pass": true,
+        "ms": 410.5
+      },
+      {
+        "name": "lost append reply replays once and matches the display",
+        "pass": true,
+        "ms": 125.5
+      },
+      {
+        "name": "PNG/JPEG decoding to raster layers",
+        "pass": true,
+        "ms": 459.5
+      },
+      {
+        "name": "second engine cannot overwrite the active recovery journal",
+        "pass": true,
+        "ms": 11.599999999627471
+      },
+      {
+        "name": "two damaged journals freeze editing until an external file opens",
+        "pass": true,
+        "ms": 66.30000000074506
+      }
+    ]
+  },
+  "m5": {
+    "date": "2026-10-26T17:07:23.279Z",
+    "milestone": "M5",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "crossOriginIsolated": false,
+    "viewport": {
+      "width": 1280,
+      "height": 657,
+      "dpr": 1
+    },
+    "results": [
+      {
+        "name": "R8 selection combinations / feather / ellipse / lasso / Undo",
+        "pass": true,
+        "ms": 517.5
+      },
+      {
+        "name": "document-space selection restricts GPU brush on a transformed layer",
+        "pass": true,
+        "ms": 77.19999999925494
+      },
+      {
+        "name": "layer mask / enable / linked transform / GPU mask brush preview / exact Undo",
+        "pass": true,
+        "ms": 1389
+      },
+      {
+        "name": "clipping chain preserves the base alpha including translucent bases",
+        "pass": true,
+        "ms": 77.79999999981374
+      },
+      {
+        "name": "Gaussian blur matches CPU reference across both tile seams and preserves source",
+        "pass": true,
+        "ms": 2422.7999999998137
+      },
+      {
+        "name": "pooled blur reuses large buckets without stale halo pixels",
+        "pass": true,
+        "ms": 510.20000000018626,
+        "gpu": {
+          "fixed": 135266304,
+          "liveFixed": 7340032,
+          "effects": 3047432,
+          "stroke": 0,
+          "vector": 0,
+          "retiredFixed": 0,
+          "retired": 0,
+          "effectsAllocations": 7,
+          "effectsReuses": 145,
+          "atlasLayers": 256,
+          "displayLayers": 256,
+          "overviewTiles": 1,
+          "overviewReady": 1,
+          "readback": 8388608,
+          "reserved": 1048576,
+          "pendingAllocation": 0,
+          "budgetUsed": 147750920,
+          "budgetLimit": 536870912,
+          "operationPeak": 149437576
+        },
+        "chainGpu": {
+          "fixed": 135266304,
+          "liveFixed": 7340032,
+          "effects": 3047432,
+          "stroke": 0,
+          "vector": 0,
+          "retiredFixed": 0,
+          "retired": 0,
+          "effectsAllocations": 7,
+          "effectsReuses": 181,
+          "atlasLayers": 256,
+          "displayLayers": 256,
+          "overviewTiles": 1,
+          "overviewReady": 1,
+          "readback": 8388608,
+          "reserved": 1048576,
+          "pendingAllocation": 0,
+          "budgetUsed": 147750920,
+          "budgetLimit": 536870912,
+          "operationPeak": 149437576
+        }
+      },
+      {
+        "name": "effect captures selection and group blur receives a halo",
+        "pass": true,
+        "ms": 221.09999999962747
+      },
+      {
+        "name": "adjustment only affects lower siblings in its group and supports a mask",
+        "pass": true,
+        "ms": 774.2000000001863
+      },
+      {
+        "name": "M5 objects survive ZIP, GPU loss, journal recovery and invalid edits remain atomic",
+        "pass": true,
+        "ms": 3145.2999999998137
+      }
+    ]
+  },
+  "m6": {
+    "date": "2026-10-26T17:07:36.799Z",
+    "milestone": "M6",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "crossOriginIsolated": false,
+    "viewport": {
+      "width": 1280,
+      "height": 657,
+      "dpr": 1
+    },
+    "results": [
+      {
+        "name": "SVG paths / cubic and quadratic / even-odd and non-zero holes",
+        "pass": true,
+        "ms": 220.29999999981374
+      },
+      {
+        "name": "stroke caps / joins / translucent self-overlap uses coverage union",
+        "pass": true,
+        "ms": 202
+      },
+      {
+        "name": "editing control points / styles / transforms is reversible",
+        "pass": true,
+        "ms": 145.80000000074506
+      },
+      {
+        "name": "zoom levels -6 through 12 retain analytic curve contours across tile seams",
+        "pass": true,
+        "ms": 2027.5
+      },
+      {
+        "name": "vector masks / feather / raster mask intersection / canonical raster unchanged",
+        "pass": true,
+        "ms": 753.2000000001863
+      },
+      {
+        "name": "clipping paths on groups / adjustments / vector-mask intersection",
+        "pass": true,
+        "ms": 589.1999999992549
+      },
+      {
+        "name": "vector blur / layer clipping / mask moves with parent",
+        "pass": true,
+        "ms": 942.3999999994412
+      },
+      {
+        "name": "64x zoom keeps selected blur, backdrop blur and feather within ROI budgets",
+        "pass": true,
+        "ms": 2486.5999999996275
+      },
+      {
+        "name": "dense ordered paths survive edits, tile seams, effects, masks, ZIP and GPU rebuild",
+        "pass": true,
+        "ms": 2832.199999999255
+      },
+      {
+        "name": "mesh cache reuse / invalid vector edits reject atomically",
+        "pass": true,
+        "ms": 174.80000000074506
+      },
+      {
+        "name": "M6 ZIP / GPU loss / journal recovery retain paths, masks, clips and pixels",
+        "pass": true,
+        "ms": 3141.699999999255
+      }
+    ],
+    "metrics": {
+      "zoom": [
+        {
+          "level": -6,
+          "documentPixelsPerOutputPixel": 0.015625,
+          "checked": 260752,
+          "partial": 458
+        },
+        {
+          "level": -5,
+          "documentPixelsPerOutputPixel": 0.03125,
+          "checked": 260755,
+          "partial": 451
+        },
+        {
+          "level": -4,
+          "documentPixelsPerOutputPixel": 0.0625,
+          "checked": 260767,
+          "partial": 446
+        },
+        {
+          "level": -3,
+          "documentPixelsPerOutputPixel": 0.125,
+          "checked": 244497,
+          "partial": 408
+        },
+        {
+          "level": -2,
+          "documentPixelsPerOutputPixel": 0.25,
+          "checked": 181159,
+          "partial": 433
+        },
+        {
+          "level": -1,
+          "documentPixelsPerOutputPixel": 0.5,
+          "checked": 76696,
+          "partial": 212
+        },
+        {
+          "level": 0,
+          "documentPixelsPerOutputPixel": 1,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 1,
+          "documentPixelsPerOutputPixel": 2,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 2,
+          "documentPixelsPerOutputPixel": 4,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 3,
+          "documentPixelsPerOutputPixel": 8,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 4,
+          "documentPixelsPerOutputPixel": 16,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 5,
+          "documentPixelsPerOutputPixel": 32,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 6,
+          "documentPixelsPerOutputPixel": 64,
+          "checked": 19009,
+          "partial": 109
+        },
+        {
+          "level": 8,
+          "documentPixelsPerOutputPixel": 256,
+          "checked": 17016,
+          "partial": 97
+        },
+        {
+          "level": 10,
+          "documentPixelsPerOutputPixel": 1024,
+          "checked": 1064,
+          "partial": 24
+        },
+        {
+          "level": 12,
+          "documentPixelsPerOutputPixel": 4096,
+          "checked": 50,
+          "partial": 6
+        }
+      ],
+      "meshCache": {
+        "entries": 24,
+        "glyphAtlas": {
+          "atlasGlyphs": 0,
+          "entries": 0,
+          "evicted": 0,
+          "fallbackGlyphs": 0,
+          "hits": 0,
+          "rasterized": 0,
+          "resets": 0,
+          "shelves": 0,
+          "vectorRuns": 0
+        },
+        "gpuBytes": 414804,
+        "hits": 131,
+        "misses": 24
+      }
+    }
+  },
+  "m7": {
+    "date": "2026-10-26T17:07:41.440Z",
+    "milestone": "M7",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "crossOriginIsolated": false,
+    "viewport": {
+      "width": 1280,
+      "height": 657,
+      "dpr": 1
+    },
+    "results": [
+      {
+        "name": "font import / OS/2 fsType / vertical support / fallback order / placeholder",
+        "pass": true,
+        "ms": 89.90000000037253
+      },
+      {
+        "name": "vertical kuten / touten / brackets / long vowel sit where Japanese typesetting puts them",
+        "pass": true,
+        "ms": 82.79999999981374
+      },
+      {
+        "name": "tate-chu-yoko: automatic digits, explicit ranges compressed to one em, three digits rotate",
+        "pass": true,
+        "ms": 231.59999999962747
+      },
+      {
+        "name": "Latin runs rotate in vertical text and OpenType features change shaping",
+        "pass": true,
+        "ms": 95.90000000037253
+      },
+      {
+        "name": "selection: hit test / caret / rectangles / motion through layer transforms and surrogate pairs",
+        "pass": true,
+        "ms": 24.200000000186265
+      },
+      {
+        "name": "editing: replace / span style / tate-chu-yoko / Undo-Redo pixels",
+        "pass": true,
+        "ms": 204
+      },
+      {
+        "name": "small text: size-banded glyph atlas matches vector coverage, zoom switches back to vector, GPU loss rebuilds",
+        "pass": true,
+        "ms": 1505
+      },
+      {
+        "name": "zoomed text keeps exact outlines (levels -4 .. 2)",
+        "pass": true,
+        "ms": 68
+      },
+      {
+        "name": "ZIP / journal recovery / GPU loss keep fonts, text and pixels",
+        "pass": true,
+        "ms": 2334.9000000003725
+      }
+    ],
+    "metrics": {
+      "punctuation": {
+        "kuten": [
+          140,
+          156,
+          170,
+          187
+        ],
+        "touten": [
+          141,
+          356,
+          170,
+          383
+        ],
+        "open": [
+          102,
+          615,
+          173,
+          647
+        ],
+        "bar": [
+          119,
+          660,
+          129,
+          738
+        ],
+        "horizontalKuten": [
+          304,
+          139,
+          335,
+          169
+        ]
+      },
+      "tcy": {
+        "auto": [
+          183,
+          156,
+          271,
+          229
+        ],
+        "explicit": [
+          177,
+          256,
+          273,
+          330
+        ],
+        "rotated": [
+          185,
+          149,
+          259,
+          300
+        ]
+      },
+      "features": {
+        "plain": 500,
+        "palt": 341.5,
+        "fwid": 200
+      },
+      "glyphAtlas": {
+        "stats": {
+          "atlasGlyphs": 49,
+          "entries": 49,
+          "evicted": 0,
+          "fallbackGlyphs": 0,
+          "hits": 0,
+          "rasterized": 49,
+          "resets": 0,
+          "shelves": 3,
+          "vectorRuns": 81
+        },
+        "coverage": {
+          "horizontal": {
+            "ink": [
+              658.1607843137269,
+              649.4274509803915
+            ],
+            "ratio": 1.0134477428081479,
+            "overlap": 0.8559429582874145,
+            "meanDiff": 0.07381390374331619,
+            "box": {
+              "a": [
+                10,
+                27,
+                145,
+                87
+              ],
+              "v": [
+                10,
+                27,
+                145,
+                87
+              ]
+            },
+            "profiles": [
+              0.9983528517228921,
+              0.9974745420196756
+            ]
+          },
+          "vertical": {
+            "ink": [
+              192.91764705882412,
+              197.05098039215662
+            ],
+            "ratio": 0.9790240407578453,
+            "overlap": 0.7998552036199096,
+            "meanDiff": 0.08604108309990695,
+            "box": {
+              "a": [
+                227,
+                90,
+                238,
+                190
+              ],
+              "v": [
+                227,
+                90,
+                238,
+                190
+              ]
+            },
+            "profiles": [
+              0.9843844814724533,
+              0.9984316262815118
+            ]
+          },
+          "rotated": {
+            "ink": [
+              316.22352941176484,
+              318.0274509803917
+            ],
+            "ratio": 0.9943277803124673,
+            "overlap": 0.7639026731085933,
+            "meanDiff": 0.10585301452251798,
+            "box": {
+              "a": [
+                14,
+                124,
+                133,
+                198
+              ],
+              "v": [
+                14,
+                124,
+                133,
+                198
+              ]
+            },
+            "profiles": [
+              0.9834712159169886,
+              0.9802885344480086
+            ]
+          }
+        },
+        "rebuilt": {
+          "atlasGlyphs": 49,
+          "entries": 49,
+          "evicted": 0,
+          "fallbackGlyphs": 0,
+          "hits": 0,
+          "rasterized": 49,
+          "resets": 0,
+          "shelves": 3,
+          "vectorRuns": 4
+        }
+      },
+      "zoom": [
+        {
+          "level": -4,
+          "solid": 30324,
+          "partial": 396
+        },
+        {
+          "level": -2,
+          "solid": 11801,
+          "partial": 459
+        },
+        {
+          "level": 0,
+          "solid": 2652,
+          "partial": 296
+        },
+        {
+          "level": 2,
+          "solid": 62,
+          "partial": 211
+        }
+      ]
+    }
+  },
+  "m8": {
+    "date": "2026-10-26T17:07:42.286Z",
+    "milestone": "M8",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "crossOriginIsolated": false,
+    "viewport": {
+      "width": 1280,
+      "height": 657,
+      "dpr": 1
+    },
+    "results": [
+      {
+        "name": "commit / intent summary / log / status / empty commit refused",
+        "pass": true,
+        "ms": 93.70000000018626
+      },
+      {
+        "name": "semantic diff reads layer by layer (pixels, props, moves, text, assets)",
+        "pass": true,
+        "ms": 9.100000000558794
+      },
+      {
+        "name": "restore an earlier version as one undoable edit",
+        "pass": true,
+        "ms": 39.09999999962747
+      },
+      {
+        "name": ".alto keeps history; old versions restore after reopening",
+        "pass": true,
+        "ms": 48.30000000074506
+      },
+      {
+        "name": "folder form in OPFS: incremental save, manifest last, reopen, conflict detection",
+        "pass": true,
+        "ms": 104.5
+      },
+      {
+        "name": "commits survive a Worker crash (checkpoint) and journal recovery",
+        "pass": true,
+        "ms": 546.5
+      }
+    ],
+    "metrics": {
+      "diff": {
+        "v1v2": [
+          {
+            "fields": [
+              "opacity"
+            ],
+            "id": "01a1792e-a106-78cd-8166-245586d1d97b",
+            "name": "背景",
+            "type": "props_changed"
+          },
+          {
+            "bounds": {
+              "x0": 0,
+              "x1": 512,
+              "y0": 0,
+              "y1": 512
+            },
+            "document_bounds": {
+              "x0": 0,
+              "x1": 512,
+              "y0": 0,
+              "y1": 512
+            },
+            "id": "01a1792e-a106-7e62-9822-04fbb97d89f3",
+            "name": "線画",
+            "target": "content",
+            "tiles": 4,
+            "type": "pixels_changed"
+          }
+        ],
+        "working": [
+          {
+            "id": "01a1792e-a163-7358-a1fd-c716d11d6532",
+            "kind": "group",
+            "name": "人物",
+            "parent": "01a1792e-a104-73e1-9656-17e4b6952a13",
+            "type": "added"
+          },
+          {
+            "from": [
+              "01a1792e-a104-73e1-9656-17e4b6952a13",
+              1
+            ],
+            "id": "01a1792e-a106-7e62-9822-04fbb97d89f3",
+            "name": "線画",
+            "to": [
+              "01a1792e-a163-7358-a1fd-c716d11d6532",
+              0
+            ],
+            "type": "moved"
+          }
+        ]
+      },
+      "zipBytes": 19304,
+      "folder": {
+        "first": {
+          "written": 9,
+          "skipped": 0
+        },
+        "second": {
+          "written": 2,
+          "skipped": 9
+        },
+        "files": 11
+      }
+    }
+  },
+  "embed": {
+    "date": "2026-10-26T17:09:34.179Z",
+    "suite": "embed",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "results": [
+      {
+        "name": "64/128/256 MiB budgets reserve at most half and preserve brush pixels",
+        "pass": true,
+        "ms": 1711
+      },
+      {
+        "name": "bounded readback crosses 16/32 tile boundaries, preserves outside keys and one Undo",
+        "pass": true,
+        "ms": 2514.2999999998137
+      },
+      {
+        "name": "first/intermediate/final readback failure never commits partial tiles or history",
+        "pass": true,
+        "ms": 3154.100000000559
+      },
+      {
+        "name": "cancel during asynchronous finish discards the whole staged stroke",
+        "pass": true,
+        "ms": 1406.5999999996275
+      },
+      {
+        "name": "post-commit journal failure publishes the complete CPU edit and freezes storage",
+        "pass": true,
+        "ms": 557.5
+      },
+      {
+        "name": "presentation readiness, viewport holding and stroke coordinate transform stay consistent",
+        "pass": true,
+        "ms": 1037.5
+      },
+      {
+        "name": "low-budget display admits a complete coarser level without changing exact readback",
+        "pass": true,
+        "ms": 539.9000000003725
+      },
+      {
+        "name": "the browser is supported",
+        "pass": true,
+        "ms": 6.2999999998137355
+      },
+      {
+        "name": "viewport: screen and document points map both ways; zoomAt and fit",
+        "pass": true,
+        "ms": 29.299999999813735
+      },
+      {
+        "name": "a Worker restart keeps the container, document handle and view",
+        "pass": true,
+        "ms": 1446.5
+      },
+      {
+        "name": "a stroke cut by a Worker restart ends with WORKER_CRASHED; editing continues",
+        "pass": true,
+        "ms": 1017.2999999998137
+      },
+      {
+        "name": "the canvas follows the container's size, not the window's",
+        "pass": true,
+        "ms": 523.7999999998137
+      },
+      {
+        "name": "a container whose size flickers does not resize the canvas every frame",
+        "pass": true,
+        "ms": 1577.3999999994412
+      },
+      {
+        "name": "a frame held back for the GPU is presented once the GPU catches up",
+        "pass": true,
+        "ms": 834.3999999994412
+      },
+      {
+        "name": "an engine starts in a hidden container and draws once it is shown",
+        "pass": true,
+        "ms": 632.2999999998137
+      },
+      {
+        "name": "dispose during edits rejects the waiting calls; confirmed edits recover",
+        "pass": true,
+        "ms": 478.09999999962747
+      },
+      {
+        "name": "two engines with different namespaces run side by side; one crashing leaves the other",
+        "pass": true,
+        "ms": 1787.5999999996275
+      },
+      {
+        "name": "a namespace in use is refused; invalid namespaces are refused",
+        "pass": true,
+        "ms": 23.799999999813735
+      },
+      {
+        "name": "a waiting journal blocks new documents until restored or discarded",
+        "pass": true,
+        "ms": 896.2000000001863
+      },
+      {
+        "name": "an edit queued on the old handle cannot select the replacement document",
+        "pass": true,
+        "ms": 849.5999999996275
+      },
+      {
+        "name": "discard refuses a live document and preserves its confirmed recovery journal",
+        "pass": true,
+        "ms": 463.79999999981374
+      },
+      {
+        "name": "archive and folder opens reject edits queued on the replaced handle",
+        "pass": true,
+        "ms": 1441.2999999998137
+      },
+      {
+        "name": "the Worker rejects obsolete document epochs for edits, reads and durability",
+        "pass": true,
+        "ms": 515.8999999994412
+      },
+      {
+        "name": "document replacement finishes the stroke on the old document first",
+        "pass": true,
+        "ms": 984.7999999998137
+      },
+      {
+        "name": "restore and discard cannot race to delete the restored journal",
+        "pass": true,
+        "ms": 1036.5
+      },
+      {
+        "name": "journals are listed by namespace and deleted only when unused",
+        "pass": true,
+        "ms": 877.2000000001863
+      },
+      {
+        "name": "an engine without a journal writes nothing and shares no lock",
+        "pass": true,
+        "ms": 878.5
+      },
+      {
+        "name": "exportImage writes the displayed pixels, scaled and cropped",
+        "pass": true,
+        "ms": 543.7999999998137
+      },
+      {
+        "name": "a document saved to a blob target opens with the same content",
+        "pass": true,
+        "ms": 487.5
+      },
+      {
+        "name": "a replaced document handle refuses calls instead of editing the new document",
+        "pass": true,
+        "ms": 426.5
+      },
+      {
+        "name": "saving keeps unchanged nodes the same objects",
+        "pass": true,
+        "ms": 465.79999999981374
+      },
+      {
+        "name": "a stroke that cannot start reports its error once",
+        "pass": true,
+        "ms": 491.09999999962747
+      },
+      {
+        "name": "each edit notifies subscribers once",
+        "pass": true,
+        "ms": 445.19999999925494
+      },
+      {
+        "name": "zoom stays within what the renderer draws",
+        "pass": true,
+        "ms": 25.5
+      },
+      {
+        "name": "a reduced export reads the matching pyramid level",
+        "pass": true,
+        "ms": 905.7000000001863
+      },
+      {
+        "name": "the back/forward cache pauses a journaled engine and restores it",
+        "pass": true,
+        "ms": 809.9000000003725
+      },
+      {
+        "name": "returning from the cache to a namespace taken meanwhile fails, and retry recovers",
+        "pass": true,
+        "ms": 933.5999999996275
+      }
+    ]
+  }
+}

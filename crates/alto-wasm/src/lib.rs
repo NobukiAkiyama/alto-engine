@@ -3,14 +3,14 @@ mod spike;
 use alto_core::{Affine2, AssetId, ContentHash, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
-use alto_gpu::renderer::{Renderer, Viewport};
+use alto_gpu::renderer::{FinishControl, Renderer, Viewport};
 use alto_raster::{BrushConfig, StrokeSample, StrokeSampler, TileData, TileMap};
 use alto_scene::RenderScene;
 use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-const FRAME_FIELDS: [&str; 46] = [
+const FRAME_FIELDS: [&str; 72] = [
     "composed",
     "pending",
     "gpuBytes",
@@ -57,6 +57,32 @@ const FRAME_FIELDS: [&str; 46] = [
     "gpu.displayLayers",
     "gpu.overviewTiles",
     "gpu.overviewReady",
+    "gpu.readback",
+    "gpu.reserved",
+    "gpu.pendingAllocation",
+    "gpu.budgetUsed",
+    "gpu.budgetLimit",
+    "gpu.operationPeak",
+    "readback.capacity",
+    "readback.batches",
+    "readback.completed",
+    "readback.mapped",
+    "display.phase",
+    "display.generation",
+    "display.session",
+    "display.deviceEpoch",
+    "display.surface",
+    "display.requestedLevel",
+    "display.admittedLevel",
+    "display.stale",
+    "display.interactionReady",
+    "display.hasPresented",
+    "display.presentedGeneration",
+    "display.centerX",
+    "display.centerY",
+    "display.zoom",
+    "display.rotation",
+    "display.presentedViewVersion",
 ];
 /// Release builds abort on panic, which reaches JS only as "RuntimeError: unreachable".
 /// Keep the message and location where the Worker's error handler can report them.
@@ -125,6 +151,9 @@ struct Request {
 }
 #[wasm_bindgen]
 pub struct Runtime {
+    finish_control: FinishControl,
+    finish_journal_error: Option<String>,
+    finish_journal_fault: bool,
     engine: Engine,
     doc: DocHandle,
     renderer: Renderer,
@@ -149,7 +178,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        4
+        5
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
@@ -170,6 +199,9 @@ impl Runtime {
         let scene = engine.render_scene(doc).map_err(error)?;
         let saved = ContentHash::of(&engine.snapshot(doc).map_err(error)?);
         Ok(Self {
+            finish_control: FinishControl::default(),
+            finish_journal_error: None,
+            finish_journal_fault: false,
             engine,
             doc,
             renderer,
@@ -362,6 +394,10 @@ impl Runtime {
         self.canvas.set_height(h.max(1));
         self.renderer.resize(w, h);
     }
+    #[wasm_bindgen(js_name=setViewVersion)]
+    pub fn set_view_version(&mut self, version: u32) {
+        self.renderer.set_view_version(version);
+    }
     pub fn viewport(&mut self, x: f64, y: f64, zoom: f64, rotation: f64) -> Result<(), JsValue> {
         if ![x, y, zoom, rotation].iter().all(|n| n.is_finite()) || zoom <= 0.0 {
             return Err(error("INVALID_ARGUMENT: viewport"));
@@ -450,6 +486,38 @@ impl Runtime {
             r.gpu.display_layers as f64,
             r.gpu.overview_tiles as f64,
             r.gpu.overview_ready as f64,
+        ]);
+        let rb = self.renderer.readback_stats();
+        out.extend([
+            r.gpu.readback as f64,
+            r.gpu.reserved as f64,
+            r.gpu.pending_allocation as f64,
+            r.gpu.budget_used as f64,
+            r.gpu.budget_limit as f64,
+            r.gpu.operation_peak as f64,
+            rb.capacity as f64,
+            rb.batches as f64,
+            rb.completed as f64,
+            rb.mapped as f64,
+        ]);
+        let d = r.display;
+        out.extend([
+            d.phase as f64,
+            d.generation as f64,
+            d.session as f64,
+            d.device_epoch as f64,
+            d.surface as f64,
+            d.requested_level as f64,
+            d.admitted_level as f64,
+            u8::from(d.stale) as f64,
+            u8::from(d.interaction_ready) as f64,
+            u8::from(d.has_presented) as f64,
+            d.presented_generation as f64,
+            d.presented.center[0],
+            d.presented.center[1],
+            d.presented.zoom,
+            d.presented.rotation,
+            d.presented_view_version as f64,
         ]);
         debug_assert_eq!(out.len(), FRAME_FIELDS.len());
         Ok(out)
@@ -695,75 +763,136 @@ impl Runtime {
     #[wasm_bindgen(js_name=endBrush)]
     pub async fn end_brush(&mut self) -> Result<String, JsValue> {
         let layer = self.layer.ok_or_else(|| error("CONFLICT: no tool"))?;
-        let results = match self.renderer.finish_stroke().await {
-            Ok(results) => results,
-            Err(e) => {
-                // The stroke is gone either way; leaving the tool set would refuse
-                // every later edit with CONFLICT.
-                self.sampler = None;
-                self.layer = None;
-                self.renderer.invalidate(None);
-                return Err(error(e));
-            }
-        };
+        let control = self.finish_control.clone();
+        let mut reader = self
+            .renderer
+            .begin_finish_stroke(control.clone())
+            .map_err(error)?;
         let mut changes = vec![];
-        for (key, before, tile) in results {
-            let after = self.engine.put_tile(tile);
-            if before != after {
-                changes.push(TileChange { key, before, after });
+        let staged = self.engine.begin_tile_stage();
+        let result = async {
+            while let Some(batch) = reader.next_batch().await? {
+                for (key, before, tile) in batch {
+                    let after = self
+                        .engine
+                        .stage_tile(staged, tile)
+                        .map_err(|e| alto_gpu::RenderError::Internal(e.to_string()))?;
+                    if before != after {
+                        changes.push(TileChange { key, before, after });
+                    }
+                }
             }
+            if self.renderer.is_lost() {
+                return Err(alto_gpu::RenderError::GpuLost(
+                    "device lost while finishing stroke".into(),
+                ));
+            }
+            if !control.commit() {
+                return Err(alto_gpu::RenderError::Conflict(
+                    "stroke cancelled before commit".into(),
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        if let Some(d) = reader.damage {
+            self.renderer.invalidate(Some(d));
+        }
+        drop(reader);
+        if let Err(e) = result {
+            self.engine.release_staged_tiles(staged);
+            self.sampler = None;
+            self.layer = None;
+            self.renderer.invalidate(None);
+            return Err(error(e));
         }
         self.sampler = None;
         self.layer = None;
-        let edited = if !changes.is_empty() {
-            let ops = if self.mask {
-                let mut mask = self
+        let committed = (|| -> Result<alto_doc::ChangeSet, JsValue> {
+            let edited = if !changes.is_empty() {
+                let ops = if self.mask {
+                    let mut mask = self
+                        .engine
+                        .document(self.doc)
+                        .map_err(error)?
+                        .node(layer)
+                        .map_err(error)?
+                        .props
+                        .mask
+                        .clone()
+                        .ok_or_else(|| error("INVALID_ARGUMENT: no mask"))?;
+                    for c in &changes {
+                        if let Some(h) = c.after {
+                            mask.tiles.insert(c.key, h);
+                        } else {
+                            mask.tiles.remove(&c.key);
+                        }
+                    }
+                    vec![Op::SetMask {
+                        layer,
+                        mask: Some(mask),
+                    }]
+                } else {
+                    vec![Op::SetTiles { layer, changes }]
+                };
+                let rev = self.engine.document(self.doc).map_err(error)?.revision;
+                let edited = match self
                     .engine
-                    .document(self.doc)
-                    .map_err(error)?
-                    .node(layer)
-                    .map_err(error)?
-                    .props
-                    .mask
-                    .clone()
-                    .ok_or_else(|| error("INVALID_ARGUMENT: no mask"))?;
-                for c in &changes {
-                    if let Some(h) = c.after {
-                        mask.tiles.insert(c.key, h);
-                    } else {
-                        mask.tiles.remove(&c.key);
+                    .transact(self.doc, "brush.stroke", ops.clone(), rev)
+                {
+                    Ok(edited) => edited,
+                    Err(e) => {
+                        // The display may still show the stroke that was not committed.
+                        self.renderer.invalidate(None);
+                        return Err(error(e));
+                    }
+                };
+                if std::mem::take(&mut self.finish_journal_fault) {
+                    self.finish_journal_error = Some("injected failure after CPU commit".into());
+                } else {
+                    match self.engine.journal_record(
+                        self.doc,
+                        JournalKind::Transact,
+                        "brush.stroke",
+                        &ops,
+                    ) {
+                        Ok(record) => self.journal.push(record),
+                        Err(e) => self.finish_journal_error = Some(e.to_string()),
                     }
                 }
-                vec![Op::SetMask {
-                    layer,
-                    mask: Some(mask),
-                }]
+                edited
             } else {
-                vec![Op::SetTiles { layer, changes }]
+                alto_doc::ChangeSet::default()
             };
-            let rev = self.engine.document(self.doc).map_err(error)?.revision;
-            let edited = match self
-                .engine
-                .transact(self.doc, "brush.stroke", ops.clone(), rev)
-            {
-                Ok(edited) => edited,
-                Err(e) => {
-                    // The display may still show the stroke that was not committed.
-                    self.renderer.invalidate(None);
-                    return Err(error(e));
-                }
-            };
-            self.journal.push(
-                self.engine
-                    .journal_record(self.doc, JournalKind::Transact, "brush.stroke", &ops)
-                    .map_err(error)?,
-            );
-            edited
-        } else {
-            alto_doc::ChangeSet::default()
-        };
+            Ok(edited)
+        })();
+        self.engine.release_staged_tiles(staged);
+        let edited = committed?;
         self.refresh()?;
         self.patch_view(&edited)
+    }
+    #[wasm_bindgen(js_name=injectFinishJournalFailure)]
+    pub fn inject_finish_journal_failure(&mut self) {
+        self.finish_journal_fault = true;
+    }
+    #[wasm_bindgen(js_name=finishAbortHandle)]
+    pub fn finish_abort_handle(&self) -> FinishAbort {
+        FinishAbort {
+            inner: self.finish_control.clone(),
+        }
+    }
+    #[wasm_bindgen(js_name=takeFinishJournalError)]
+    pub fn take_finish_journal_error(&mut self) -> Option<String> {
+        self.finish_journal_error.take()
+    }
+    #[wasm_bindgen(js_name=readbackCapacity)]
+    pub fn readback_capacity(&self) -> u32 {
+        (self.renderer.readback_capacity() / 262144) as u32
+    }
+    #[wasm_bindgen(js_name=injectReadbackFailure)]
+    pub fn inject_readback_failure(&mut self, n: i32) {
+        self.renderer
+            .inject_readback_failure(if n < 0 { None } else { Some(n as u64) });
     }
     #[wasm_bindgen(js_name=cancelBrush)]
     pub fn cancel_brush(&mut self) {
@@ -1113,6 +1242,7 @@ impl Runtime {
     }
     /// After another document replaces the current one.
     fn reload(&mut self) -> Result<(), JsValue> {
+        self.renderer.reset_presentation();
         self.scene = self.engine.render_scene(self.doc).map_err(error)?;
         self.renderer.invalidate(None);
         Ok(())
@@ -1215,3 +1345,14 @@ impl Runtime {
 mod m78;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;
+
+#[wasm_bindgen]
+pub struct FinishAbort {
+    inner: FinishControl,
+}
+#[wasm_bindgen]
+impl FinishAbort {
+    pub fn cancel(&self) -> bool {
+        self.inner.cancel()
+    }
+}

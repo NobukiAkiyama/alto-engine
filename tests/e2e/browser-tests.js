@@ -149,7 +149,7 @@ export async function runTests(engine, benchmark, log) {
     await test("GPU memory categories sum without counting occupied slots twice", async () => {
       await engine.createDocument({width:64,height:64});
       const f=await settled(engine), g=f.gpu;
-      assert(g && f.gpuBytes === g.fixed+g.effects+g.stroke+g.vector,"GPU category total");
+      assert(g && f.gpuBytes === g.fixed+g.effects+g.stroke+g.vector+g.readback,"GPU category total");
       assert(g.liveFixed+g.retiredFixed <= g.fixed,"fixed subsets exceed reservation");
       assert(g.fixed-g.retiredFixed===(g.atlasLayers+g.displayLayers)*262144+1048576,`default cache reservation changed: ${JSON.stringify(g)}`);
     });
@@ -1121,7 +1121,9 @@ async function benches(engine, log, results) {
   }
   await full.flush();
   memory.push(await settled(engine));
+  const finishStarted=performance.now();
   await full.end();
+  const finishMs=performance.now()-finishStarted;
   const afterFullStroke = await settled(engine);
   memory.push(afterFullStroke);
   start = performance.now();
@@ -1155,6 +1157,9 @@ async function benches(engine, log, results) {
       gpu: peakGpu / 1048576,
       gpuBreakdown: memory.reduce((a, b) => a.gpuBytes >= b.gpuBytes ? a : b).gpu,
       afterStroke: afterFullStroke.gpu,
+      operationPeak: afterFullStroke.gpu.operationPeak / 1048576,
+      readback: afterFullStroke.readback,
+      finishMs,
       wasm: peakWasm / 1048576,
       decodePool: peakPool / 1048576,
       totalBound: (peakWasm + peakPool) / 1048576,

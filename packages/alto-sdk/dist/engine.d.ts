@@ -32,7 +32,29 @@ export interface EngineStatus {
     /** Why the engine is in `storage-failed` or `failed`. */
     readonly error: AltoError | null;
 }
+/** Logical canvas publication. This is not an OS scanout timestamp. */
+export interface PresentationSnapshot {
+    readonly phase: "preparing" | "holding" | "refining" | "ready";
+    readonly requestedViewVersion: number;
+    readonly presentedViewVersion: number | null;
+    readonly presentedViewport: Readonly<{
+        center: readonly [number, number];
+        zoom: number;
+        rotation: number;
+    }> | null;
+    readonly sceneGeneration: number;
+    readonly presentedGeneration: number;
+    readonly documentSession: number;
+    readonly deviceEpoch: number;
+    readonly surfaceGeneration: number;
+    readonly requestedLevel: number;
+    readonly admittedLevel: number;
+    readonly degradedByBudget: boolean;
+    readonly hasStaleFallback: boolean;
+    readonly interactionReady: boolean;
+}
 export interface EngineEvents {
+    presentation: PresentationSnapshot;
     status: EngineStatus;
     /** The open document changed to another one (open, create, restore) or closed. */
     document: DocumentHandle | null;
@@ -63,6 +85,7 @@ export interface Engine {
     readonly document: DocumentHandle | null;
     /** Where the canvas looks; zoom is in CSS pixels. */
     readonly viewport: ViewportControl;
+    readonly presentation: PresentationSnapshot;
     readonly recovery: {
         /** A journal from an earlier session is waiting. */
         readonly available: boolean;

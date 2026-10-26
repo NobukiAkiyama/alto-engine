@@ -17,7 +17,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 4;
+export const PROTOCOL = 5;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -53,6 +53,12 @@ export type FrameStats = Record<string, unknown> & {
     effects: number;
     stroke: number;
     vector: number;
+    readback: number;
+    reserved: number;
+    pendingAllocation: number;
+    budgetUsed: number;
+    budgetLimit: number;
+    operationPeak: number;
     retiredFixed: number;
     retired: number;
     effectsAllocations: number;
@@ -62,6 +68,8 @@ export type FrameStats = Record<string, unknown> & {
     overviewTiles: number;
     overviewReady: number;
   };
+  display: Record<string, number>;
+  documentEpoch?: number;
   /** Display tiles composited this frame. */
   composed: number;
   pending: number;
@@ -122,6 +130,8 @@ export interface Requests {
   parseVectorPath: Q<{ svg: string }, PathData>;
   vectorPathSvg: Q<{ data: PathData }, string>;
   exportImage: Q<{ region: Rect; scale: number; type: string }, Blob>;
+  injectFinishJournalFailure: Q<None, true>;
+  injectReadbackFailure: Q<{ after: number }, true>;
   // Diagnostics (unstable entry point).
   waitFrame: Q<None, FrameStats>;
   readTile: Q<{ x: number; y: number }, Uint8Array>;

@@ -103,6 +103,7 @@ async function fresh() {
 function bindInput(host) {
   host.onpointerdown = (e) => {
     if (!doc) return;
+    if (!(tool === "pan" || e.button === 1 || e.altKey) && !engine.presentation.interactionReady) return;
     host.setPointerCapture(e.pointerId);
     if (tool === "text" && e.button === 0 && !e.altKey) {
       gesture = { text: true };
@@ -404,6 +405,7 @@ try {
   engine = await createEngine({ container: $("#canvas-host") });
   engine.on("error", fail);
   engine.on("status", onStatus);
+  engine.on("presentation", ({phase}) => { if(phase!=="ready") status(phase==="preparing" ? "表示を準備中…" : "表示を更新中…"); });
   engine.on("document", (d) => d && attach(d));
   const diagnostics = unstable(engine);
   diagnostics.onDiagnostic((d) => (d.panic || d.message ? console.error("Worker diagnostic", d) : null));
@@ -411,7 +413,7 @@ try {
     (f) =>
       engine.status.state === "ready" &&
       status(
-        `${f.pending ? "合成中 " + f.pending + " タイル · " : ""}${f.cpuMs.toFixed(1)} ms · GPU ${(f.gpuBytes / 1048576).toFixed(0)} MiB (固定 ${(f.gpu.fixed / 1048576).toFixed(1)} / 効果 ${(f.gpu.effects / 1048576).toFixed(1)} / 筆 ${(f.gpu.stroke / 1048576).toFixed(1)} / 図形 ${(f.gpu.vector / 1048576).toFixed(1)}) · WASM ${(f.wasmBytes / 1048576).toFixed(0)} MiB`,
+        `${f.pending ? "合成中 " + f.pending + " タイル · " : ""}${f.cpuMs.toFixed(1)} ms · GPU ${(f.gpuBytes / 1048576).toFixed(0)} MiB (固定 ${(f.gpu.fixed / 1048576).toFixed(1)} / 効果 ${(f.gpu.effects / 1048576).toFixed(1)} / 筆 ${(f.gpu.stroke / 1048576).toFixed(1)} / 図形 ${(f.gpu.vector / 1048576).toFixed(1)} / 読戻 ${(f.gpu.readback / 1048576).toFixed(1)}) · WASM ${(f.wasmBytes / 1048576).toFixed(0)} MiB`,
       ),
   );
   diagnostics.onGpu((e) => status(e === "lost" ? "GPUを復旧しています…" : "GPUを復旧しました"));

@@ -111,6 +111,116 @@ export async function runEmbedTests(_playground, log) {
       catch(e){ rejected=String(e).includes("64 MiB"); }
       el.remove(); assert(rejected,"budget under 64 MiB was accepted");
     });
+    await test("bounded readback crosses 16/32 tile boundaries, preserves outside keys and one Undo", async () => {
+      for(const budget of [64,512]) {
+        const engine=await engineIn(container(128,128),{gpu:{memoryBudgetMB:budget},storage:{recovery:false}});
+        for(const count of budget===64 ? [1,16,17] : [31,32,33]) {
+          const doc=await engine.createDocument({width:256,height:256});
+          let layer;await doc.transact("layer",tx=>{layer=tx.addRaster();});
+          const before=await doc.snapshotHash(),history=doc.getSnapshot().history.undo;
+          const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1,spacing:0.2},color:[1,0,0,1]});
+          for(let i=0;i<count;i++) s.input({x:128+i*256,y:128,pressure:1});
+          await s.end();
+          const tiles=(await doc.nodeTiles(layer)).tiles;
+          assert(Object.keys(tiles).length===count,`lost canonical keys at ${count}: ${Object.keys(tiles)}`);
+          assert(doc.getSnapshot().history.undo===history+1,"not one transaction");
+          const f=await unstable(engine).settle(),capacity=budget===64?16:32;
+          assert(f.readback.capacity===capacity*262144,"pool capacity");
+          assert(f.readback.batches===Math.ceil(count/capacity),"batch count");
+          assert(f.readback.completed===count && f.readback.mapped===0,"readback ownership not released");
+          assert(f.gpu.readback===capacity*262144 && f.gpu.budgetUsed<=budget*1048576 && f.gpu.operationPeak<=budget*1048576,"quota exceeded");
+          await doc.undo();assert(await doc.snapshotHash()===before,"Undo mismatch");
+          await doc.redo();assert(JSON.stringify((await doc.nodeTiles(layer)).tiles)===JSON.stringify(tiles),"Redo hashes");
+        }
+        await cleanUp();
+      }
+    });
+    await test("first/intermediate/final readback failure never commits partial tiles or history", async () => {
+      const engine=await engineIn(container(),{storage:{recovery:false}});
+      for(const after of [0,32,64]) {
+        const doc=await engine.createDocument({width:256,height:256});let layer;
+        await doc.transact("layer",tx=>{layer=tx.addRaster();});
+        const before=await doc.snapshotHash(),snap=doc.getSnapshot();
+        const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1},color:[1,0,0,1]});
+        for(let i=0;i<65;i++) s.input({x:128+i*256,y:128});
+        await testing(engine).request("injectReadbackFailure",{after});
+        assert(await rejectsWith(s.end(),"INTERNAL"),"failure missing");
+        assert(await doc.snapshotHash()===before,"partial CPU commit");
+        const now=doc.getSnapshot();assert(now.revision===snap.revision && JSON.stringify(now.history)===JSON.stringify(snap.history),"history changed");
+        const f=await unstable(engine).settle();assert(f.gpu.stroke===0 && f.readback.mapped===0,"failed session leaked");
+        const retry=doc.tools.begin("brush",{layer});retry.input({x:32,y:32});await retry.end();
+        assert(doc.getSnapshot().revision===snap.revision+1,"tool did not recover");
+      }
+    });
+    await test("cancel during asynchronous finish discards the whole staged stroke", async () => {
+      const engine=await engineIn(container(),{storage:{recovery:false}});
+      const doc=await engine.createDocument({width:256,height:256});let layer;
+      await doc.transact("layer",tx=>{layer=tx.addRaster();});const before=await doc.snapshotHash();
+      const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1}});
+      for(let i=0;i<65;i++) s.input({x:128+i*256,y:128});
+      let cancel;
+      const off=unstable(engine).onDiagnostic(d=>{if(d.finishStage==="readback") {off();cancel=s.cancel();}});
+      const failed=await rejectsWith(s.end(),"CONFLICT");await cancel;
+      assert(failed,"cancel did not interrupt readback");assert(await doc.snapshotHash()===before,"cancel committed");
+      const f=await unstable(engine).settle();assert(f.gpu.stroke===0 && f.readback.mapped===0,"cancel leaked");
+    });
+    await test("post-commit journal failure publishes the complete CPU edit and freezes storage", async () => {
+      const engine=await engineIn(container());const doc=await engine.createDocument({width:256,height:256});let layer;
+      await doc.transact("layer",tx=>{layer=tx.addRaster();});await doc.durable();
+      const before=doc.getSnapshot(),s=doc.tools.begin("brush",{layer});s.input({x:32,y:32});
+      await testing(engine).request("injectFinishJournalFailure");await s.end();
+      assert(engine.status.state==="storage-failed","storage did not freeze");
+      assert(doc.getSnapshot().revision===before.revision+1 && doc.getSnapshot().history.undo===before.history.undo+1,"mirror lost committed edit");
+      const t=await unstable(engine).readTile(0,0);assert(t[(32*256+32)*4+3]>0,"CPU committed pixel missing");
+      assert((await engine.recovery.exportEmergency()).size>0,"emergency export failed");
+    });
+    await test("presentation readiness, viewport holding and stroke coordinate transform stay consistent", async () => {
+      const engine=await engineIn(container());const doc=await engine.createDocument({width:512,height:256});let layer;
+      await doc.transact("layer",tx=>{layer=tx.addRaster();});
+      await unstable(engine).resetRenderCache(true); // optional prefetch disabled
+      await unstable(engine).settle();
+      assert(engine.presentation.interactionReady && engine.presentation.phase==="ready","required work blocked by idle prefetch");
+      assert(Object.isFrozen(engine.presentation) && Object.isFrozen(engine.presentation.presentedViewport.center),"mutable snapshot");
+      const old=engine.presentation,view=engine.viewport.get();
+      const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1}});
+      const [x,y]=engine.viewport.documentToScreen(128,128);
+      s.input(new PointerEvent("pointermove",{clientX:x,clientY:y,pointerType:"mouse"}));
+      engine.viewport.set({center:[400,128],zoom:view.zoom*1.2,rotation:0.2});
+      assert(!engine.presentation.interactionReady && engine.presentation.phase==="holding","not holding requested view");
+      assert(engine.viewport.get().center[0]===400,"synchronous viewport contract changed");
+      s.input(new PointerEvent("pointermove",{clientX:x,clientY:y,pointerType:"mouse"}));
+      const held=await unstable(engine).settle();assert(held.viewVersion<engine.presentation.requestedViewVersion,"viewport was sent during stroke");
+      await s.end();await unstable(engine).settle();
+      assert(engine.presentation.interactionReady && engine.presentation.presentedViewVersion===engine.presentation.requestedViewVersion,"view did not catch up");
+      const tile=await unstable(engine).readTile(0,0);assert(tile[(128*256+128)*4+3]>0,"stroke transform moved");
+      engine.viewport.panBy(100,0);const blocked=doc.tools.begin("brush",{layer});let rejected=false;
+      try{blocked.input(new PointerEvent("pointerdown",{clientX:x,clientY:y}));}catch(e){rejected=e.code==="CONFLICT";}
+      await blocked.cancel();assert(rejected,"accepted pointer on unseen view");
+      await unstable(engine).settle();
+      const interrupted=doc.tools.begin("brush",{layer});
+      interrupted.input({x:32,y:32});await interrupted.flush();
+      engine.viewport.panBy(20,0);
+      const restored=new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{off();reject(Error("GPU recovery timed out"));},15000);
+        const off=unstable(engine).onGpu(e=>{if(e==="restored"){clearTimeout(timer);off();resolve();}});
+      });
+      await testing(engine).destroyGpu();await restored;await unstable(engine).settle();
+      assert(engine.presentation.interactionReady && engine.presentation.presentedViewVersion===engine.presentation.requestedViewVersion,"GPU restore stranded deferred viewport");
+      await engine.createDocument({width:256,height:256});assert(engine.presentation.phase==="preparing" && engine.presentation.presentedViewport===null,"cross-document fallback");
+      await unstable(engine).settle();assert(engine.presentation.documentSession!==old.documentSession,"document session did not change");
+    });
+    await test("low-budget display admits a complete coarser level without changing exact readback", async () => {
+      const engine=await engineIn(container(1024,1024),{gpu:{memoryBudgetMB:64},storage:{recovery:false}});
+      await engine.createDocument({width:8192,height:8192});
+      engine.viewport.set({center:[4096,4096],zoom:1/unstable(engine).pixelRatio(),rotation:0.3});
+      const frames=[];const off=unstable(engine).onFrame(f=>frames.push(f));
+      const f=await unstable(engine).settle();off();
+      assert(f.display.admittedLevel>f.display.requestedLevel && engine.presentation.degradedByBudget,"LOD admission missing");
+      assert(engine.presentation.interactionReady && f.pending===0,"coverage never ready");
+      assert(f.gpu.displayLayers===42 && f.gpu.budgetUsed<=64*1048576,"display allocation grew");
+      for(const frame of frames) if(frame.pending && !frame.gpu.overviewReady) assert(!frame.display.hasPresented,"partial first present");
+      const exact=await unstable(engine).readTileLevel(0,0,0);assert(exact.length===262144 && exact.every(x=>x===0),"exact readback degraded");
+    });
     await test("the browser is supported", async () => {
       const support = await isSupported();
       assert(support.ok, "isSupported: " + JSON.stringify(support));

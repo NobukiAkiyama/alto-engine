@@ -1,4 +1,4 @@
-import type { Args, FrameStats, RecoveryInfo, RequestMessage, StreamMessage, WireError } from "./protocol.js";
+import { PROTOCOL, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -439,16 +439,22 @@ async function writesIdle() {
 }
 // tick() returns numbers in the order frameFields() names them, fixed for the build.
 let frameFields: string[] = [];
+let finishAbort: ReturnType<Runtime["finishAbortHandle"]> | null = null;
 let adapterName = "";
 function decodeFrame(numbers: Float64Array): FrameStats {
   const pool = decodePoolBytes();
   // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
   const prefetch: Record<string, number> = {};
   const gpu: Record<string, number> = {};
+  const readback: Record<string, number> = {};
+  const display: Record<string, number> = {};
   const out: Record<string, unknown> & { profile: Record<string, number> | null; hasProfile?: number } = {
     adapter: adapterName,
     prefetch,
     gpu,
+    readback,
+    display,
+    documentEpoch,
     profile: null,
     decodeWorkerBytes: pool.workers,
     decodeTransitBytes: pool.transit,
@@ -460,14 +466,14 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   frameFields.forEach((name, i) => {
     const [group, key] = name.split(".");
     if (key === undefined) out[group] = numbers[i];
-    else (group === "profile" ? profile : group === "gpu" ? gpu : prefetch)[key] = numbers[i];
+    else (group === "profile" ? profile : group === "gpu" ? gpu : group === "readback" ? readback : group === "display" ? display : prefetch)[key] = numbers[i];
   });
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;
   return out as FrameStats;
 }
 /** Display tiles read back per GPU round trip. */
-const EXPORT_BATCH = 64;
+// Export requests follow the Rust pool capacity; Rust also validates every batch.
 /**
  * The document as an image file, from the same display tiles the canvas shows. A
  * reduced export reads the pyramid level at or above its scale: each level halves the
@@ -480,12 +486,19 @@ async function exportImage({ region, scale, type }: Args<"exportImage">) {
   const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
   const w = x1 - x0, h = y1 - y0;
   if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
+  // Includes the source/output arrays and bounded readback copies; external encoder
+  // allocations are not physical RAM telemetry.
+  const outputPixels = Math.max(1, Math.round((region.x1 - region.x0) * scale)) * Math.max(1, Math.round((region.y1 - region.y0) * scale));
+  const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3;
+  if (requestBytes > 512 * 1048576) throw Error("INVALID_ARGUMENT: export CPU operation exceeds 512 MiB");
   const pixels = new Uint8ClampedArray(w * h * 4);
   const tiles: [number, number][] = [];
   for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
     for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) tiles.push([tx, ty]);
-  for (let at = 0; at < tiles.length; at += EXPORT_BATCH) {
-    const batch = tiles.slice(at, at + EXPORT_BATCH);
+  for (let at = 0; at < tiles.length;) {
+    const count = Math.max(1, runtime.readbackCapacity());
+    const batch = tiles.slice(at, at + count);
+    at += batch.length;
     const bytes = await runtime.readTiles(level, Int32Array.from(batch.flat()));
     batch.forEach(([tx, ty], i) => {
       const tile = bytes.subarray(i * 262144, (i + 1) * 262144);
@@ -536,7 +549,7 @@ async function execute(m: Queued): Promise<unknown> {
   if (!readableAfterFailure.has(m.t)) await waitForRoom();
   switch (m.t) {
     case "init":
-      if (m.protocol !== 4) throw Error("CONFLICT: protocol mismatch");
+      if (m.protocol !== PROTOCOL) throw Error("CONFLICT: protocol mismatch");
       canvas = m.canvas;
       budget = m.budget;
       postMessage({ t: "diagnostic", value: { initPhase: "wasm-load" } });
@@ -544,15 +557,16 @@ async function execute(m: Queued): Promise<unknown> {
       postMessage({ t: "diagnostic", value: { initPhase: "runtime-create" } });
       runtime = await Runtime.create(canvas, budget);
       postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
+      finishAbort=runtime.finishAbortHandle();
       frameFields = runtime.frameFields();
       adapterName = runtime.adapterName();
       startDecoders();
-      if (runtime.protocolVersion?.() !== 4)
+      if (runtime.protocolVersion?.() !== PROTOCOL)
         throw Error("CONFLICT: SDK/WASM version mismatch");
       journaling = m.journal !== false;
       if (!journaling) {
         postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
-        return { protocol: 4, recovery: { available: false, records: 0, latestGeneration: 0 } };
+        return { protocol: PROTOCOL, recovery: { available: false, records: 0, latestGeneration: 0 } };
       }
       postMessage({ t: "diagnostic", value: { initPhase: "journal-configure" } });
       await io("configure", { namespace: m.namespace || "default" });
@@ -564,7 +578,7 @@ async function execute(m: Queued): Promise<unknown> {
       const info: RecoveryInfo = recovery;
       recoveryPending = recovery.available;
       postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
-      return { protocol: 4, recovery: info };
+      return { protocol: PROTOCOL, recovery: info };
     case "discardRecovery":
       if (!recoveryPending || documentEpoch !== 0)
         throw Error("CONFLICT: no-recovery: there is no waiting recovery journal");
@@ -614,11 +628,20 @@ async function execute(m: Queued): Promise<unknown> {
       runtime.brushInput(m.samples);
       return true;
     case "endBrush": {
+      postMessage({t:"diagnostic",value:{finishStage:"readback"}});
       const s = JSON.parse(await runtime.endBrush());
-      queueJournal();
+      const failure = runtime.takeFinishJournalError();
       postMessage({ t: "patch", value: s });
+      if (failure) freezeStorage(Error("STORAGE: committed stroke journal failed: " + failure));
+      else queueJournal();
       return s;
     }
+    case "injectFinishJournalFailure":
+      runtime.injectFinishJournalFailure();
+      return true;
+    case "injectReadbackFailure":
+      runtime.injectReadbackFailure(m.after);
+      return true;
     case "cancelBrush":
       runtime.cancelBrush();
       return true;
@@ -879,6 +902,7 @@ async function execute(m: Queued): Promise<unknown> {
       let frame;
       const profiles = diagnosticProfiles || [];
       do {
+        applyPendingView();
         pumpDecodes();
         frame = decodeFrame(runtime.tick(8));
         pumpDecodes();
@@ -894,12 +918,27 @@ async function execute(m: Queued): Promise<unknown> {
         frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
           [key, key === "maxStepMs" ? profiles.reduce((max, profile) => Math.max(max, profile[key]), 0) : profiles.reduce((sum, profile) => sum + profile[key], 0)]));
       }
-      return { ...frame, viewVersion };
+      const value = { ...frame, viewVersion };
+      postMessage({ t: "frame", value });
+      return value;
     }
     case "view":
       return JSON.parse(runtime.view());
     default:
       throw Error("INVALID_ARGUMENT: unknown request " + m.t);
+  }
+}
+function applyPendingView() {
+  if (runtime && pendingResize) {
+    runtime.resize(pendingResize.width, pendingResize.height);
+    pendingResize = null;
+  }
+  if (runtime && pendingViewport) {
+    const v = pendingViewport;
+    runtime.setViewVersion(v.version);
+    runtime.viewport(v.center[0], v.center[1], v.zoom, v.rotation);
+    viewVersion = v.version;
+    pendingViewport = null;
   }
 }
 async function drain() {
@@ -908,16 +947,7 @@ async function drain() {
   try {
     while (queue.length || wantTick || pendingViewport || pendingResize) {
       pumpDecodes();
-      if (runtime && pendingResize) {
-        runtime.resize(pendingResize.width, pendingResize.height);
-        pendingResize = null;
-      }
-      if (runtime && pendingViewport) {
-        const v = pendingViewport;
-        runtime.viewport(v.center[0], v.center[1], v.zoom, v.rotation);
-        viewVersion = v.version;
-        pendingViewport = null;
-      }
+      applyPendingView();
       if (queue.length) {
         const m = queue.shift()!;
         try {
@@ -953,6 +983,7 @@ async function drain() {
               postMessage({ t: "gpuLost" });
               try {
                 await runtime.recoverGpu();
+                runtime.setViewVersion(viewVersion);
                 adapterName = runtime.adapterName();
                 postMessage({ t: "gpuRestored" });
               } catch (e) {
@@ -969,6 +1000,7 @@ async function drain() {
 }
 
 self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage>) => {
+  if (m.t === "cancelBrush" && (m.documentEpoch === undefined || m.documentEpoch===documentEpoch)) finishAbort?.cancel();
   if (m.t === "durable") {
     try {
       checkDocument(m.documentEpoch);

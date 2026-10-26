@@ -91,36 +91,46 @@ struct Coverage {
     h: u32,
 }
 impl Coverage {
-    fn new(device: &wgpu::Device, w: u32, h: u32) -> Self {
+    fn new(device: &wgpu::Device, w: u32, h: u32) -> Result<Self> {
         let make = |samples, usage| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("R8 vector coverage"),
-                size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
+            super::memory::create_texture(
+                device,
+                &wgpu::TextureDescriptor {
+                    label: Some("R8 vector coverage"),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage,
+                    view_formats: &[],
                 },
-                mip_level_count: 1,
-                sample_count: samples,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage,
-                view_formats: &[],
-            })
+                super::Class::Vector,
+            )
         };
-        let multi = make(4, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let resolved = make(
+        let multi = make(4, wgpu::TextureUsages::RENDER_ATTACHMENT)?;
+        let resolved = match make(
             1,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        Self {
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                memory::destroy_texture(&multi, true);
+                return Err(e);
+            }
+        };
+        Ok(Self {
             multi_view: multi.create_view(&Default::default()),
             resolved_view: resolved.create_view(&Default::default()),
             multi,
             resolved,
             w,
             h,
-        }
+        })
     }
 }
 fn dense_candidate(paths: usize, groups: usize) -> bool {
@@ -519,28 +529,33 @@ impl VectorResources {
             if self.atlas.is_none() {
                 self.check_allocation(ATLAS_SIDE as u64 * ATLAS_SIDE as u64, budget)?;
             }
-            let atlas = self.atlas.get_or_insert_with(|| {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("R8 glyph atlas"),
-                    size: wgpu::Extent3d {
-                        width: ATLAS_SIDE,
-                        height: ATLAS_SIDE,
-                        depth_or_array_layers: 1,
+            if self.atlas.is_none() {
+                let texture = super::memory::create_texture(
+                    device,
+                    &wgpu::TextureDescriptor {
+                        label: Some("R8 glyph atlas"),
+                        size: wgpu::Extent3d {
+                            width: ATLAS_SIDE,
+                            height: ATLAS_SIDE,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
+                    super::Class::Vector,
+                )?;
                 let view = texture.create_view(&Default::default());
-                Atlas {
+                self.atlas = Some(Atlas {
                     alloc: GlyphAtlas::new(ATLAS_SIDE, ATLAS_SIDE),
                     texture,
                     view,
-                }
-            });
+                });
+            }
+            let atlas = self.atlas.as_mut().expect("created glyph atlas");
             atlas.alloc.begin(frame);
             for g in &run.glyphs {
                 if g.outline.is_empty() {
@@ -627,14 +642,14 @@ impl VectorResources {
             "glyph atlas config",
             &[[w as f32, h as f32, 0.0, 0.0]],
             wgpu::BufferUsages::UNIFORM,
-        );
+        )?;
         let glyphs = buffer(
             device,
             queue,
             "glyph instances",
             &instances,
             wgpu::BufferUsages::VERTEX,
-        );
+        )?;
         self.retired.buffer(&uniform);
         self.retired.buffer(&glyphs);
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -773,45 +788,57 @@ impl VectorResources {
             // Evicted objects still occupy memory until this encoder is submitted
             // and its completion callback reclaims their ledger entries.
             self.check_allocation(bytes, budget)?;
+            let checkpoint = memory::checkpoint(device);
             let batches = meshes
                 .into_iter()
                 .filter(|m| !m.indices.is_empty())
-                .map(|m| Batch {
-                    origin: m.origin,
-                    bounds: m.vertices.iter().fold(
-                        [
-                            f32::INFINITY,
-                            f32::INFINITY,
-                            f32::NEG_INFINITY,
-                            f32::NEG_INFINITY,
-                        ],
-                        |a, p| {
+                .map(|m| {
+                    Ok(Batch {
+                        origin: m.origin,
+                        bounds: m.vertices.iter().fold(
                             [
-                                a[0].min(p[0]),
-                                a[1].min(p[1]),
-                                a[2].max(p[0]),
-                                a[3].max(p[1]),
-                            ]
-                        },
-                    ),
-                    vertices: buffer(
-                        device,
-                        queue,
-                        "vector vertices",
-                        &m.vertices,
-                        wgpu::BufferUsages::VERTEX,
-                    ),
-                    indices: buffer(
-                        device,
-                        queue,
-                        "vector indices",
-                        &m.indices,
-                        wgpu::BufferUsages::INDEX,
-                    ),
-                    count: m.indices.len() as u32,
-                    color: m.color,
+                                f32::INFINITY,
+                                f32::INFINITY,
+                                f32::NEG_INFINITY,
+                                f32::NEG_INFINITY,
+                            ],
+                            |a, p| {
+                                [
+                                    a[0].min(p[0]),
+                                    a[1].min(p[1]),
+                                    a[2].max(p[0]),
+                                    a[3].max(p[1]),
+                                ]
+                            },
+                        ),
+                        vertices: buffer(
+                            device,
+                            queue,
+                            "vector vertices",
+                            &m.vertices,
+                            wgpu::BufferUsages::VERTEX,
+                        )?,
+                        indices: buffer(
+                            device,
+                            queue,
+                            "vector indices",
+                            &m.indices,
+                            wgpu::BufferUsages::INDEX,
+                        )?,
+                        count: m.indices.len() as u32,
+                        color: m.color,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>();
+            let batches = match batches {
+                Ok(b) => b,
+                Err(e) => {
+                    if let Some(c) = checkpoint {
+                        c.rollback(queue);
+                    }
+                    return Err(e);
+                }
+            };
             self.meshes.insert(
                 key,
                 CachedMesh {
@@ -847,7 +874,7 @@ impl VectorResources {
             if let Some(dense) = &mut self.dense {
                 dense.uniforms.invalidate_paint();
             }
-            self.coverage = Some(Coverage::new(device, w, h));
+            self.coverage = Some(Coverage::new(device, w, h)?);
         }
         let coverage = self
             .coverage
@@ -955,7 +982,7 @@ impl VectorResources {
                         color: b.color,
                     }],
                     wgpu::BufferUsages::UNIFORM,
-                );
+                )?;
                 self.retired.buffer(&uniform);
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("vector geometry"),
@@ -1246,17 +1273,6 @@ impl VectorResources {
             }
         }
         Ok(true)
-    }
-}
-impl Renderer {
-    pub(super) fn vector_bytes(&self) -> u64 {
-        self.vector.as_ref().map_or(0, |v| v.bytes())
-    }
-    pub(super) fn vector_mesh_bytes(&self) -> u64 {
-        self.vector.as_ref().map_or(0, |v| v.mesh_bytes())
-    }
-    pub(super) fn vector_fixed_bytes(&self) -> u64 {
-        self.vector_bytes().saturating_sub(self.vector_mesh_bytes())
     }
 }
 

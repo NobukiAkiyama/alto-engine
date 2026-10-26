@@ -78,12 +78,18 @@ impl<T: bytemuck::Pod> Arena<T> {
         let needed = end.div_ceil(SLOTS);
         self.stride = stride;
         while self.pages.len() < needed {
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("vector uniform arena"),
-                size: (SLOTS * stride) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let buffer = super::super::memory::create_buffer(
+                device,
+                &wgpu::BufferDescriptor {
+                    label: Some("vector uniform arena"),
+                    size: (SLOTS * stride) as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                },
+                super::super::Class::Vector,
+                false,
+            )
+            .ok()?;
             let geometry = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vector arena geometry"),
                 layout: geometry_layout,

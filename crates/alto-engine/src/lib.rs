@@ -65,6 +65,8 @@ pub struct Engine {
     imported: std::collections::BTreeSet<ContentHash>,
     /// Blobs stored by import and not yet referenced by a committed transaction.
     pending_blobs: std::collections::BTreeSet<ContentHash>,
+    staged_tiles: BTreeMap<u64, std::collections::BTreeSet<ContentHash>>,
+    next_stage: u64,
     versions: BTreeMap<DocHandle, versions::VersionStore>,
     empty_versions: versions::VersionStore,
     text: text::TextCache,
@@ -91,6 +93,8 @@ impl Engine {
             blobs: BTreeMap::new(),
             imported: std::collections::BTreeSet::new(),
             pending_blobs: std::collections::BTreeSet::new(),
+            staged_tiles: BTreeMap::new(),
+            next_stage: 0,
             versions: BTreeMap::new(),
             empty_versions: Default::default(),
             text: Default::default(),
@@ -132,6 +136,36 @@ impl Engine {
         }
     }
 
+    /// Encodes a pending stroke tile without growing the raw decoded cache.
+    /// The caller keeps this hash rooted until its one atomic transaction finishes.
+    pub fn begin_tile_stage(&mut self) -> u64 {
+        self.next_stage += 1;
+        self.staged_tiles
+            .insert(self.next_stage, Default::default());
+        self.next_stage
+    }
+    pub fn stage_tile(
+        &mut self,
+        stage: u64,
+        tile: TileData,
+    ) -> Result<Option<ContentHash>, EngineError> {
+        if !self.staged_tiles.contains_key(&stage) {
+            return Err(DocError::Invalid("tile stage expired".into()).into());
+        }
+        if tile.is_empty() {
+            return Ok(None);
+        }
+        let hash = self.tiles.insert_tile(&tile);
+        self.staged_tiles
+            .get_mut(&stage)
+            .expect("active tile stage")
+            .insert(hash);
+        Ok(Some(hash))
+    }
+    pub fn release_staged_tiles(&mut self, stage: u64) {
+        self.staged_tiles.remove(&stage);
+        self.maintain();
+    }
     pub fn tile(
         &self,
         hash: &ContentHash,
@@ -318,6 +352,33 @@ mod tests {
     use super::*;
     use alto_core::{PixelFormat, TILE, TileKey};
     use alto_doc::{Node, NodeKind, TileChange};
+
+    #[test]
+    fn staged_tiles_are_gc_roots_without_a_decoded_copy() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+        let before = e.snapshot(d).unwrap();
+        let stage = e.begin_tile_stage();
+        let mut pixels = vec![0; 262144];
+        pixels[..4].copy_from_slice(&[255, 0, 0, 255]);
+        let h = e
+            .stage_tile(stage, TileData::new(PixelFormat::Rgba8, pixels).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.decoded.borrow().bytes(), 0);
+        e.maintain();
+        assert!(e.tile(&h).unwrap().is_some());
+        assert_eq!(e.snapshot(d).unwrap(), before);
+        e.release_staged_tiles(stage);
+        assert!(e.tile(&h).unwrap().is_none());
+        assert!(
+            e.stage_tile(
+                stage,
+                TileData::new(PixelFormat::Rgba8, vec![0; 262144]).unwrap()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn engine_integrates_tiles_document_and_history() {
@@ -785,6 +846,10 @@ impl Engine {
         }
         current.extend(self.pending_blobs.iter().copied());
         reachable.extend(self.pending_blobs.iter().copied());
+        for stage in self.staged_tiles.values() {
+            reachable.extend(stage.iter().copied());
+            current.extend(stage.iter().copied());
+        }
         if self.backed {
             self.tiles.separate(&current, &reachable);
             self.decoded.get_mut().retain(|h| current.contains(h));

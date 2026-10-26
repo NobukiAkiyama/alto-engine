@@ -92,8 +92,8 @@ pub(super) struct Resources {
     pub(super) reuses: u64,
 }
 impl Resources {
-    fn new(device: &wgpu::Device) -> Self {
-        Self {
+    fn new(device: &wgpu::Device) -> Result<Self> {
+        Ok(Self {
             allocations: 0,
             reuses: 0,
             pipeline: compute(
@@ -107,30 +107,31 @@ impl Resources {
                 include_str!("../../shaders/effects-resolve.wgsl"),
             ),
             pool: vec![Pooled {
-                texture: device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("M5 transparent input"),
-                    size: wgpu::Extent3d {
-                        width: 1,
-                        height: 1,
-                        depth_or_array_layers: 1,
+                texture: memory::create_texture(
+                    device,
+                    &wgpu::TextureDescriptor {
+                        label: Some("M5 transparent input"),
+                        size: wgpu::Extent3d {
+                            width: 1,
+                            height: 1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::STORAGE_BINDING,
-                    view_formats: &[],
-                }),
+                    Class::Effects,
+                )?,
                 w: 1,
                 h: 1,
                 lease: Weak::new(),
                 used: 0,
             }],
-        }
-    }
-    pub(super) fn bytes(&self) -> u64 {
-        self.pool.iter().map(|p| p.w as u64 * p.h as u64 * 8).sum()
+        })
     }
     pub(super) fn expire(&mut self, frame: u64, retired: &mut Retired) {
         let mut kept = Vec::with_capacity(self.pool.len());
@@ -259,7 +260,7 @@ impl Context<'_> {
             index
         } else {
             let need = w as u64 * h as u64 * 8;
-            let used = self.r.gpu_bytes().total() + self.resources.bytes();
+            let used = self.r.gpu_bytes().budget_used;
             if used + need > self.r.budget_bytes {
                 // No premature destroy: unsubmitted targets are retained until the
                 // encoder is submitted or discarded, and still count in the ledger.
@@ -269,22 +270,26 @@ impl Context<'_> {
             }
             self.resources.allocations += 1;
             self.resources.pool.push(Pooled {
-                texture: self.r.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("M5 bucket target"),
-                    size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
+                texture: memory::create_texture(
+                    &self.r.device,
+                    &wgpu::TextureDescriptor {
+                        label: Some("M5 bucket target"),
+                        size: wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                }),
+                    Class::Effects,
+                )?,
                 w,
                 h,
                 lease: Weak::new(),
@@ -329,7 +334,7 @@ impl Context<'_> {
     ) -> Result<()> {
         let additional = (entries.len().max(1) * std::mem::size_of::<Entry>()
             + std::mem::size_of::<Params>()) as u64;
-        if self.r.gpu_bytes().total() + self.resources.bytes() + additional > self.r.budget_bytes {
+        if self.r.gpu_bytes().budget_used + additional > self.r.budget_bytes {
             return Err(RenderError::Budget(
                 "effect command buffers exceed GPU memory budget".into(),
             ));
@@ -361,14 +366,14 @@ impl Context<'_> {
             "M5 sparse tiles",
             entries,
             wgpu::BufferUsages::STORAGE,
-        );
+        )?;
         let uniform = buffer(
             &self.r.device,
             &self.r.queue,
             "M5 ROI",
             &[params],
             wgpu::BufferUsages::UNIFORM,
-        );
+        )?;
         self.r
             .retired
             .classified_buffer(&tiles, MemoryClass::Effects);
@@ -505,12 +510,11 @@ impl Context<'_> {
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
             super::vector::VectorResources::new(&self.r.device, wgpu::TextureFormat::Rgba16Float)
         });
-        let external = self.r.fixed_bytes()
-            + self.r.stroke_bytes()
-            + self.resources.bytes()
-            + self.r.ledger.bytes().total()
-            + self.r.retired.bytes().total();
-        let budget = self.r.budget_bytes.saturating_sub(external);
+        let usage = self.r.gpu_bytes();
+        let budget = self
+            .r
+            .budget_bytes
+            .saturating_sub(usage.budget_used - usage.vector);
         let roi = [
             roi.x as f64,
             roi.y as f64,
@@ -1103,10 +1107,10 @@ impl Renderer {
         slot: u32,
         store: &dyn TileStore,
     ) -> Result<()> {
-        let mut resources = self
-            .m5
-            .take()
-            .unwrap_or_else(|| Resources::new(&self.device));
+        let mut resources = match self.m5.take() {
+            Some(r) => r,
+            None => Resources::new(&self.device)?,
+        };
         resources.expire(self.frame, &mut self.retired);
         let mut previews = HashMap::new();
         let mut overrides = BTreeMap::new();
@@ -1162,7 +1166,7 @@ impl Renderer {
                     info: [slot, scene.canvas.y1 as u32, 0, 0],
                 }],
                 wgpu::BufferUsages::UNIFORM,
-            );
+            )?;
             cx.r.retired
                 .classified_buffer(&uniform, MemoryClass::Effects);
             let bg = cx.r.device.create_bind_group(&wgpu::BindGroupDescriptor {

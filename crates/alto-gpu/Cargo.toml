@@ -14,3 +14,7 @@ futures-channel = "0.3"
 
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"

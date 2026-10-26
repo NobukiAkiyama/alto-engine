@@ -72,10 +72,28 @@ export default defineConfig({
 - **Content-Security-Policy：** 次を許可してください。COOP / COEP（cross-origin isolation）は要りません。
   - `worker-src 'self'`（バンドラーが Worker を `blob:` にする設定なら `blob:` も）
   - `script-src 'self' 'wasm-unsafe-eval'`
-- **メモリの目安（4K・20 レイヤーの計測、B6）：**
-  - GPU：最大で約 485 MiB。既定の予算は 512 MB で、`gpu.memoryBudgetMB` で変えられます。
-  - WASM：エンジン本体と展開用の Worker を合わせて、上限は約 222 MiB。
-  - エンジンを複数置くと、そのぶん増えます。
+- **メモリ予算：** 既定は 512 MiB、最低 64 MiB。`gpu.memoryBudgetMB` で指定します。エンジンが要求する GPU buffer / texture の常駐・退役・確保中・予約を合計して制限します。ブラウザ・ドライバ・surface・pipeline を含む物理 VRAM の上限ではありません。
+- **読み戻し：** 1 device に 1 本、既定最大 8 MiB（32 タイル）、64 MiB 予算なら 4 MiB（16 タイル）。ストローク確定と export はこの Pool を共有し、バッチごとに処理します。CPU の操作用配列・確定用 staging も、確保前の 512 MiB 操作予算で拒否します。既存文書・JS/WASM ランタイム全体の物理 RAM 制限ではありません。
+- 計測値・試験条件は [表示保証と読み戻しの検証記録](../verification/PRESENTATION-READBACK-RESULTS-2026-10-27.md) を参照してください。複数エンジンの予算は別々です。
+
+### 表示準備と画面入力
+
+`engine.status.state === "ready"` は Worker が使えることを表します。画面を使う操作は `engine.presentation.interactionReady` を確認してください。初回や文書交換では `preparing`、要求 view をまだ表示できないときは `holding`、粗画像から詳細へ更新中は `refining` になります。`ready` は予算で受け入れた表示 LOD の完了で、`degradedByBudget` が true なら要求より粗い表示です。指定レベルの readback / export はこの表示判断で変更しません。
+
+```ts
+engine.on("presentation", p => {
+  loadingLabel.hidden = p.interactionReady;
+  loadingLabel.textContent = p.phase === "preparing" ? "表示を準備中…" : "表示を更新中…";
+});
+container.addEventListener("pointerdown", event => {
+  if (!engine.presentation.interactionReady) return;
+  // ストロークの開始、画面座標による hit test 等はここから行います。
+});
+```
+
+公開済みの `presentedViewport` / `presentedViewVersion` と要求中の version を別々に読めます。Snapshot と内部の center は読み取り専用です。GPU 完了による論理的な確認で、OS の scanout 時刻を表しません。`viewport.get()`・座標変換は従来通り要求中の view を同期的に使います。付属 pointer adapter は未準備の画面入力をエラーにし、ストローク中の viewport 送信を終了まで保留します。文書座標の `InputSample` やプログラマティックな編集 API は表示準備を待つ必要がありません。
+
+確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 5 になり、必ず同じ配布物を組み合わせます。
 
 ## 5. エンジンの状態
 

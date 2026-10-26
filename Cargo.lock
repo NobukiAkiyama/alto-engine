@@ -81,7 +81,9 @@ dependencies = [
  "alto-vector",
  "bytemuck",
  "futures-channel",
+ "js-sys",
  "naga",
+ "wasm-bindgen",
  "wgpu",
 ]
 
