@@ -470,6 +470,26 @@ fn cases() -> Vec<Case> {
             [0.1, 0.0, 0.0, 0.1, 4000.0, 0.0],
         )],
     });
+    // Scale 0.01 and a 84000px move invert to −8400000px. At tile 983 the
+    // rounded source Q8 is past ±2^23 px. Truncating it to i32 would wrap
+    // pixel (124, 0) onto ramp texel (34, 50). The integer path returns
+    // transparent instead, for every pixel of the tile.
+    out.push(Case {
+        name: "large-translation-out-of-range".into(),
+        w: 251_904,
+        h: 256,
+        level: 0,
+        tx: 983,
+        ty: 0,
+        lock: true,
+        nodes: vec![raster(
+            ramp(256, 256),
+            0,
+            1.0,
+            true,
+            [0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0],
+        )],
+    });
     out
 }
 
@@ -642,11 +662,15 @@ fn fetch_integer(
     x: i32,
     y: i32,
 ) -> [f32; 4] {
-    let q = source_q8(
-        inv,
-        pixel_q8(origin_px[0], x, scale),
-        pixel_q8(origin_px[1], y, scale),
-    );
+    let Some(px) = pixel_q8(origin_px[0], x, scale) else {
+        return [0.0; 4];
+    };
+    let Some(py) = pixel_q8(origin_px[1], y, scale) else {
+        return [0.0; 4];
+    };
+    let Some(q) = source_q8(inv, px, py) else {
+        return [0.0; 4];
+    };
     let (ix, fx) = floor_frac_q8(q[0]);
     let (iy, fy) = floor_frac_q8(q[1]);
     let a = sample_u8(tiles, ix, iy);
@@ -1311,6 +1335,35 @@ fn large_translation_is_exact_on_the_integer_path() {
     assert_eq!(pixel(&render(&case), 160, 0), [5, 5, 40, 255]);
     let overflow = pack_inverse([0.1, 0.0, 0.0, 0.1, 1.0e16, 0.0], RENDER_VERSION);
     assert_eq!(overflow.sample_mode, SAMPLE_F32);
+
+    // 0.01× moved 84000px. The inverse translation is −8400000px. Tile 983's
+    // source Q8 does not fit in i32; wrapping the low 32 bits would read the
+    // ramp. Every pixel is transparent, and a tile origin past ±2^23 px is too.
+    let far = [0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0];
+    let far_inv = Affine2(far).inverse().unwrap().0;
+    assert!((far_inv[4] + 8_400_000.0).abs() < 1e-3, "{far_inv:?}");
+    assert_eq!(
+        pack_inverse(far_inv, RENDER_VERSION).sample_mode,
+        SAMPLE_INTEGER
+    );
+    let far_q = integer_inverse(far_inv).unwrap();
+    let px = pixel_q8(983 * 256, 124, 1).unwrap();
+    let py = pixel_q8(0, 0, 1).unwrap();
+    assert!(
+        source_q8(&far_q, px, py).is_none(),
+        "source Q8 past ±2^23 px must not wrap into i32"
+    );
+    let far_case = cases()
+        .into_iter()
+        .find(|c| c.name == "large-translation-out-of-range")
+        .unwrap();
+    let tile = render(&far_case);
+    assert!(
+        tile.iter().all(|&b| b == 0),
+        "out-of-range source must be transparent, not a wrapped texel"
+    );
+    assert!(pixel_q8(8_388_608, 0, 1).is_none());
+    assert_eq!(pixel_q8(0, 0, 1), Some(128));
 }
 
 /// Documents saved on current main have no `render_version`. They load as version 1

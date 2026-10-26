@@ -181,6 +181,9 @@ export function parityCases() {
   base("rotation", [raster(ramp(256, 256), 0, 1, true, [c, s, -s, c, 32, 24])], { w: 512, h: 512 });
   // Inverse translation is -40000px, which does not fit in i32 Q16.
   base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
+  // Inverse translation is -8400000px. Tile 983's rounded source Q8 does not
+  // fit in i32; truncating it would wrap pixel (124, 0) onto ramp texel (34, 50).
+  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])], { w: 251904, h: 256, tx: 983 });
   return cases;
 }
 
@@ -264,18 +267,32 @@ function quantizeInverse(inv) {
   if (tx === null || ty === null) return null;
   return { m, tx, ty };
 }
+const I32_MIN = -2147483648;
+const I32_MAX = 2147483647;
+function fitsI32(v) {
+  return Number.isSafeInteger(v) && v >= I32_MIN && v <= I32_MAX;
+}
 function pixelQ8(origin, index, scale) {
-  return origin * 256 + (index * 256 + 128) * scale;
+  const term = index * 256 + 128;
+  const q = origin * 256 + term * scale;
+  return fitsI32(q) ? q : null;
 }
 function roundShr16(v) {
+  if (!Number.isSafeInteger(v)) return null;
   const adjusted = v >= 0 ? v + 32768 : v - 32768;
+  if (!Number.isSafeInteger(adjusted)) return null;
   return Math.floor(adjusted / 65536);
 }
+function sourceAxis(m0, px, m1, py, translation) {
+  const sum = m0 * px + m1 * py + translation * 256;
+  const q = roundShr16(sum);
+  return q !== null && fitsI32(q) ? q : null;
+}
 function sourceQ8(q, px, py) {
-  return [
-    roundShr16(q.m[0] * px + q.m[2] * py + q.tx * 256),
-    roundShr16(q.m[1] * px + q.m[3] * py + q.ty * 256),
-  ];
+  const x = sourceAxis(q.m[0], px, q.m[2], py, q.tx);
+  const y = sourceAxis(q.m[1], px, q.m[3], py, q.ty);
+  if (x === null || y === null) return null;
+  return [x, y];
 }
 function floorFracQ8(q) {
   const base = Math.floor(q / 256);
@@ -296,7 +313,12 @@ function bilinearByte(a, b, d, e, fx, fy) {
   return (ab * (256 - fy) + de * fy + 32768) >> 16;
 }
 function fetchInteger(tiles, q, originPx, scale, x, y) {
-  const pos = sourceQ8(q, pixelQ8(originPx[0], x, scale), pixelQ8(originPx[1], y, scale));
+  const clear = [f(0), f(0), f(0), f(0)];
+  const px = pixelQ8(originPx[0], x, scale);
+  const py = pixelQ8(originPx[1], y, scale);
+  if (px === null || py === null) return clear;
+  const pos = sourceQ8(q, px, py);
+  if (!pos) return clear;
   const [ix, fx] = floorFracQ8(pos[0]);
   const [iy, fy] = floorFracQ8(pos[1]);
   const a = sampleU8(tiles, ix, iy);

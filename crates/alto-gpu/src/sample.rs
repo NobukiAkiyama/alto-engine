@@ -18,10 +18,15 @@
 //!   a coefficient outside the `i32` range, does not take this path: the draw falls
 //!   back to the f32 fetch and a warning is logged. Nothing is clamped.
 //! * A pixel center is Q8 and exact, because the origin and the level scale are
-//!   integers: `p = origin * 256 + (i * 256 + 128) * scale`.
+//!   integers: `p = origin * 256 + (i * 256 + 128) * scale`. When that sum does
+//!   not fit in `i32` (a tile origin past ±2^23 px, or a large level scale), the
+//!   sample is transparent. The center is not wrapped.
 //! * `Q16 * Q8` is Q24. Translation is shifted from Q16 to Q24 (`<< 8`). The sum
 //!   is rounded half away from zero into Q8 (add or subtract `2^15`, then an
-//!   arithmetic `>> 16`).
+//!   arithmetic `>> 16`). When the rounded Q8 coordinate does not fit in `i32`
+//!   (source position past ±2^23 px), the sample is transparent. The low 32 bits
+//!   are not used. A 0.01× layer moved 84000px inverts to about −8.4M px, which
+//!   is past that limit.
 //! * The low 8 bits of that Q8 position are the bilinear weights `fx, fy` in
 //!   `0..=255`. Each channel is a byte:
 //!   `ab = a * (256 - fx) + b * fx`, likewise `de`, then
@@ -165,20 +170,34 @@ pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
 }
 
 /// Q8 source coordinate. `px` and `py` are Q8 pixel centers.
+/// `None` when the i64 sum overflows or the rounded coordinate does not fit in `i32`.
 #[cfg(test)]
-pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> [i32; 2] {
-    let x =
-        i64::from(inv.m[0]) * i64::from(px) + i64::from(inv.m[2]) * i64::from(py) + (inv.tx << 8);
-    let y =
-        i64::from(inv.m[1]) * i64::from(px) + i64::from(inv.m[3]) * i64::from(py) + (inv.ty << 8);
-    [round_shr16(x) as i32, round_shr16(y) as i32]
+pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> Option<[i32; 2]> {
+    Some([
+        source_axis(inv.m[0], px, inv.m[2], py, inv.tx)?,
+        source_axis(inv.m[1], px, inv.m[3], py, inv.ty)?,
+    ])
 }
 
 #[cfg(test)]
-fn round_shr16(v: i64) -> i64 {
+fn source_axis(m0: i32, px: i32, m1: i32, py: i32, translation: i64) -> Option<i32> {
+    let a = i64::from(m0).checked_mul(i64::from(px))?;
+    let b = i64::from(m1).checked_mul(i64::from(py))?;
+    let t = translation.checked_mul(256)?;
+    let sum = a.checked_add(b)?.checked_add(t)?;
+    i32::try_from(round_shr16(sum)?).ok()
+}
+
+/// Round half away from zero, then arithmetic `>> 16`. `None` when the half-step overflows `i64`.
+#[cfg(test)]
+fn round_shr16(v: i64) -> Option<i64> {
     let half = 1i64 << 15;
-    let adjusted = if v >= 0 { v + half } else { v - half };
-    adjusted >> 16
+    let adjusted = if v >= 0 {
+        v.checked_add(half)?
+    } else {
+        v.checked_sub(half)?
+    };
+    Some(adjusted >> 16)
 }
 
 /// Floor of a Q8 coordinate and its weight in `0..=255`.
@@ -189,9 +208,14 @@ pub fn floor_frac_q8(q: i32) -> (i32, i32) {
 }
 
 /// Q8 pixel center. `origin_px` is the tile origin in document pixels.
+/// `None` when the center does not fit in `i32`.
 #[cfg(test)]
-pub fn pixel_q8(origin_px: i32, index: i32, scale: i32) -> i32 {
-    origin_px * 256 + (index * 256 + 128) * scale
+pub fn pixel_q8(origin_px: i32, index: i32, scale: i32) -> Option<i32> {
+    let term = i64::from(index).checked_mul(256)?.checked_add(128)?;
+    let q = i64::from(origin_px)
+        .checked_mul(256)?
+        .checked_add(term.checked_mul(i64::from(scale))?)?;
+    i32::try_from(q).ok()
 }
 
 /// One channel of the 4-tap. `fx` and `fy` are `0..=255`.
