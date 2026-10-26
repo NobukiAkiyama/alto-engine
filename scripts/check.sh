@@ -25,11 +25,6 @@ fi
 pkg_out=$(mktemp -d)
 trap 'rm -rf "$pkg_out"' EXIT
 sh scripts/build-wasm-pkg.sh "$pkg_out"
-# Kept for the CI artifact upload while the recorded hashes catch up to this
-# rebuild. The upload step is temporary and is not part of the hash check.
-rm -rf target/wasm-release-pkg
-mkdir -p target/wasm-release-pkg
-cp -a "$pkg_out"/. target/wasm-release-pkg/
 sh scripts/verify-wasm-sums.sh release "$pkg_out"
 sh scripts/guard-pkg-replace.sh examples/browser-playground/pkg
 rm -rf examples/browser-playground/pkg

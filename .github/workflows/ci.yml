@@ -144,23 +144,12 @@ jobs:
         run: |
           sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed
           sh scripts/build-vector-comparison.sh
-          rm -rf target/wasm-vector-pkg
-          mkdir -p target/wasm-vector-pkg
-          cp -a examples/vector-comparison/pkg/. target/wasm-vector-pkg/
           node scripts/verify-browser.mjs --vector-optimization
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: wasm-rebuild
-          path: |
-            target/wasm-release-pkg
-            target/wasm-vector-pkg
           if-no-files-found: ignore
 
   gpu-lifecycle:
