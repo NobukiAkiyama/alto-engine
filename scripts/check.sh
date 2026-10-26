@@ -37,7 +37,7 @@ if grep -nE '(:|<|\|) *any\b' packages/alto-sdk/api/*.api.md; then
   echo "the public API must not use any" >&2
   exit 1
 fi
-node --test packages/alto-sdk/test/storage-session.test.js
+node --test packages/alto-sdk/test/*.test.js
 node scripts/check-build-metadata.mjs
 # SHA256SUMS must not name a gitignored path. verification/*.log matches *.log
 # and is not in the tree; listing it makes `sha256sum -c` fail on a clean checkout.

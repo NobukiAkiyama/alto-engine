@@ -121,6 +121,8 @@ export interface Requests {
   cpuReference: Q<{ config: BrushConfig; color: number[]; samples: number[] }, Uint8Array>;
   stallDecodeWorkers: Q<None, number>;
   destroyGpu: Q<None, true>;
+  /** Test hook: the next ticks look like an idle deferred present, until `limit` of them. */
+  stickPresent: Q<{ enabled: boolean; limit?: number }, true>;
   recoveryStore: Q<None, { latestGeneration: number; records: number; objects: number; packs: number }>;
   corruptJournalTail: Q<None, unknown>;
   corruptCheckpoint: Q<None, unknown>;

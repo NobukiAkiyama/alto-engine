@@ -148,7 +148,7 @@ fn mix_color(s: [f32; 3], d: [f32; 3], mode: u32) -> [f32; 3] {
 }
 
 /// `src.rgb` is straight. `dst` is premultiplied. Mirrors `fn blend` in blend.wgsl.
-fn blend(dst: [f32; 4], src: [f32; 4], mode: u32) -> [f32; 4] {
+pub(crate) fn blend(dst: [f32; 4], src: [f32; 4], mode: u32) -> [f32; 4] {
     let d = if dst[3] > 0.0 {
         [
             dst[0] / dst[3].max(0.000001),

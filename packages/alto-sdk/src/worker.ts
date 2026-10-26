@@ -9,6 +9,7 @@ const yieldTask = () => new Promise<void>((resolve) => {
   channel.port2.postMessage(null);
 });
 import init, { Runtime } from "./pkg/alto_wasm.js";
+import { PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
 /**
  * Waits for the frame in flight on the GPU, when a frame was held back for it. The
@@ -97,6 +98,9 @@ let runtime!: Runtime,
   pendingResize: Extract<StreamMessage, { t: "resize" }> | null = null,
   viewVersion = 0,
   frameSettled = false,
+  forceDeferred = false,
+  deferLimit = PRESENT_DEFER_LIMIT,
+  deferredWaits = 0,
   prefetchTimer: Timer | null = null,
   prefetchDisabled = false,
   prefetchSpentMs = 0,
@@ -452,6 +456,36 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;
   return out as FrameStats;
+}
+/**
+ * One tick. `stick` lets the test hook force an idle deferred present. Only
+ * `waitFrame` sticks: the drain loop keeps drawing, so the hook cannot trip
+ * the cap before the request that is supposed to observe it.
+ */
+function takeFrame(budget: number, stick: boolean): FrameStats {
+  const frame = decodeFrame(runtime.tick(budget));
+  if (stick && forceDeferred) {
+    frame.presentDeferred = 1;
+    frame.pending = 0;
+    frame.composed = 0;
+  }
+  return frame;
+}
+function noteDeferred(frame: FrameStats, where: "wait" | "drain") {
+  deferredWaits = nextDeferredStreak(deferredWaits, countsDeferredWait(frame, where), deferLimit);
+}
+/** Recreate the device from the document. The next tick draws it again. */
+async function recoverLostGpu() {
+  forceDeferred = false;
+  deferredWaits = 0;
+  postMessage({ t: "gpuLost" });
+  try {
+    await runtime.recoverGpu();
+    adapterName = runtime.adapterName();
+    postMessage({ t: "gpuRestored" });
+  } catch (error) {
+    postMessage({ t: "error", value: structured(error) });
+  }
 }
 /** Display tiles read back per GPU round trip. */
 const EXPORT_BATCH = 64;
@@ -810,6 +844,19 @@ async function execute(m: Queued): Promise<unknown> {
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
+    case "stickPresent": {
+      const enabled = !!m.enabled;
+      if (
+        enabled &&
+        m.limit !== undefined &&
+        (!Number.isInteger(m.limit) || m.limit < 1 || m.limit > PRESENT_DEFER_LIMIT)
+      )
+        throw Error("INVALID_ARGUMENT: present defer limit");
+      forceDeferred = enabled;
+      deferLimit = enabled && m.limit !== undefined ? m.limit : PRESENT_DEFER_LIMIT;
+      deferredWaits = 0;
+      return true;
+    }
     case "setDecodeWorkers":
       // Diagnostic: compare inline decoding with the pool. Enabling after the pool
       // stopped starts a new one; it is used once a Worker reports ready.
@@ -838,14 +885,22 @@ async function execute(m: Queued): Promise<unknown> {
     case "waitFrame": {
       let frame;
       const profiles = diagnosticProfiles || [];
-      do {
-        pumpDecodes();
-        frame = decodeFrame(runtime.tick(8));
-        pumpDecodes();
-        if (frame.profile) profiles.push(frame.profile);
-        if (frame.pending) await yieldTask();
-        else if (frame.presentDeferred) await presentSettled();
-      } while (frame.pending || frame.presentDeferred);
+      try {
+        do {
+          pumpDecodes();
+          frame = takeFrame(8, true);
+          pumpDecodes();
+          if (frame.profile) profiles.push(frame.profile);
+          noteDeferred(frame, "wait");
+          if (frame.pending) await yieldTask();
+          else if (frame.presentDeferred) await presentSettled();
+        } while (frame.pending || frame.presentDeferred);
+      } catch (error) {
+        // The drain loop's reply catch does not recreate the device. Do it here,
+        // then still fail the request so the caller sees GPU_LOST.
+        if (String(error).includes("GPU_LOST")) await recoverLostGpu();
+        throw error;
+      }
       await runtime.gpuIdle();
       diagnosticProfiles = null;
       frameSettled = true;
@@ -897,7 +952,7 @@ async function drain() {
         wantTick = false;
         if (runtime)
           try {
-            const value = { ...decodeFrame(runtime.tick(8)), viewVersion };
+            const value = { ...takeFrame(8, false), viewVersion };
             pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0 && !value.presentDeferred;
@@ -906,19 +961,13 @@ async function drain() {
             postMessage({ t: "frame", value });
             // A held-back frame with nothing new composed waits for the GPU instead of
             // spinning: on a software adapter, spinning takes the GPU's CPU time.
+            // The wait is capped: a device that never settles used to loop forever.
+            noteDeferred(value, "drain");
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {
-            if (String(error).includes("GPU_LOST")) {
-              postMessage({ t: "gpuLost" });
-              try {
-                await runtime.recoverGpu();
-                adapterName = runtime.adapterName();
-                postMessage({ t: "gpuRestored" });
-              } catch (e) {
-                postMessage({ t: "error", value: structured(e) });
-              }
-            } else postMessage({ t: "error", value: structured(error) });
+            if (String(error).includes("GPU_LOST")) await recoverLostGpu();
+            else postMessage({ t: "error", value: structured(error) });
           }
       }
     }
