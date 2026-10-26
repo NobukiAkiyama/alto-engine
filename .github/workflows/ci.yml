@@ -88,7 +88,6 @@ jobs:
       ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
       CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
       ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
-      ALTO_WASM_REBUILD_DIR: ${{ runner.temp }}/alto-wasm-rebuild
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -124,6 +123,8 @@ jobs:
           test "$(uname -m)" = arm64
           rustc -vV | grep -q '^host: aarch64-apple-darwin$'
       - run: sh scripts/check.sh
+        env:
+          ALTO_WASM_REBUILD_DIR: ${{ runner.temp }}/alto-wasm-rebuild
       - name: Run browser correctness suites
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
