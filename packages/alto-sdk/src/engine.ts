@@ -1,7 +1,7 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
-import { PROTOCOL, type Args, type RequestName, type Result, type StreamMessage, type WorkerMessage } from "./protocol.js";
+import { PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type WorkerMessage } from "./protocol.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { ToolHost, ToolSession } from "./tools.js";
@@ -81,7 +81,7 @@ export interface Engine {
     /** A journal from an earlier session is waiting. */
     readonly available: boolean;
     restore(): Promise<DocumentHandle>;
-    /** Deletes the waiting journal, so a new document can start. */
+    /** Deletes the waiting journal, so a new document can start. Refused when a document is open. */
     discard(): Promise<void>;
     /** The live document as a `.alto` archive, for use when storage has failed. */
     exportEmergency(): Promise<Blob>;
@@ -136,6 +136,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private sequence = 1;
   private pending = new Map<number, Pending>();
   private mutation: Promise<unknown> = Promise.resolve();
+  private nextDocumentEpoch = 0;
+  private documentEpoch = 0;
+  private readonly documentEpochs = new WeakMap<DocumentHandle, number>();
   private raf = 0;
   private disposed = false;
   private pixelRatio: number;
@@ -146,6 +149,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   /** Settles once the namespace lock is released, after `releaseLease`. */
   private leaseReleased: Promise<unknown> = Promise.resolve();
   private lastWorkerPanic: string | null = null;
+  private initPhase: string | null = null;
   private recoveryWaiting = false;
   private resizeObserver: ResizeObserver;
   private ratioQuery: MediaQueryList | null = null;
@@ -300,6 +304,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
 
   private async start() {
+    this.initPhase = null;
     // Written out literally so bundlers (Vite, webpack) see the Worker and bundle it.
     const worker = this.workerURL
       ? new Worker(this.workerURL, { type: "module" })
@@ -377,6 +382,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     } else if (data.t === "diagnostic") {
       const value = data.value;
       if (value?.panic) this.lastWorkerPanic = String(value.panic);
+      if (typeof value?.initPhase === "string") this.initPhase = value.initPhase;
       this.diagnostics.emit("diagnostic", value);
     } else if (data.t === "gpuLost") {
       this.document?.abortTool(new AltoError("GPU_LOST", "the GPU device was lost during the stroke"));
@@ -414,12 +420,27 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   requestRaw(t: string, payload: Record<string, unknown> = {}): Promise<unknown> {
     return this.requestCore(t as RequestName, payload as never, [], false);
   }
+  /** @internal Binds a request to this handle, including across a Worker round trip. */
+  requestForDocument<K extends RequestName>(
+    doc: DocumentHandle,
+    t: K,
+    ...rest: Record<string, never> extends Args<K>
+      ? [args?: Args<K>, transfer?: Transferable[]]
+      : [args: Args<K>, transfer?: Transferable[]]
+  ): Promise<Result<K>> {
+    const epoch = this.documentEpochs.get(doc);
+    if (doc !== this.document || epoch === undefined)
+      return Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
+    const [args, transfer = []] = rest;
+    return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false, 0, { documentEpoch: epoch }) as Promise<Result<K>>;
+  }
   private requestCore<K extends RequestName>(
     t: K,
     payload: Args<K>,
     transfer: Transferable[],
     internal: boolean,
     timeoutMs = 0,
+    scope: DocumentScope = {},
   ): Promise<unknown> {
     if (this.disposed) return Promise.reject(new AltoError("WORKER_UNAVAILABLE", "the engine was disposed"));
     const running = this.state.state === "ready" || this.state.state === "storage-failed";
@@ -435,13 +456,14 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       const timer = timeoutMs
         ? setTimeout(() => {
             this.pending.delete(id);
-            reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}`));
+            const stage = t === "init" && this.initPhase ? ` (last stage: ${this.initPhase})` : "";
+            reject(new AltoError("WORKER_TIMEOUT", `no reply to ${t}${stage}`));
           }, timeoutMs)
         : undefined;
       this.pending.set(id, { resolve, reject, timer });
       // Request fields come last so a payload can never replace the reply id.
       try {
-        worker.postMessage({ ...payload, t, id }, transfer);
+        worker.postMessage({ ...payload, ...scope, t, id }, transfer);
       } catch (error) {
         if (timer) clearTimeout(timer);
         this.pending.delete(id);
@@ -463,20 +485,27 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
   /** @internal Runs edits one at a time. */
   mutate<T>(fn: () => Promise<T>): Promise<T> {
-    const p = this.mutation.then(() => {
+    return this.serialize(async () => {
       if (this.state.state === "failed" && this.state.error) throw this.state.error;
       const failure = this.storageError();
       if (failure) throw failure;
       return fn();
     });
+  }
+  /** Document replacement and recovery decisions share the edit order. */
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const p = this.mutation.then(fn);
     this.mutation = p.catch(() => {});
     return p;
   }
   /** @internal */
   toolHost(doc: DocumentHandle): ToolHost {
     return {
-      request: this.request.bind(this) as EngineCore["request"],
-      stream: (m, transfer) => this.stream(m, transfer),
+      request: ((...args: Parameters<EngineCore["request"]>) => this.requestForDocument(doc, ...args)) as EngineCore["request"],
+      stream: (m, transfer) => {
+        if (doc !== this.document) return;
+        this.stream(m.t === "input" ? { ...m, documentEpoch: this.documentEpochs.get(doc) } : m, transfer);
+      },
       screenToDocument: (x, y) => this.viewport.screenToDocument(x, y),
       storageError: () => this.storageError(),
       ended: (session: ToolSession, state) => doc.toolEnded(session, state),
@@ -509,9 +538,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.stream({ t: "resize", width, height });
   }
 
-  private adopt(state: unknown, fit: boolean): DocumentHandle {
+  private adopt(state: unknown, fit: boolean, epoch: number): DocumentHandle {
     this.document?.close();
     this.document = new DocumentHandle(this, state as WireState);
+    this.documentEpoch = epoch;
+    this.documentEpochs.set(this.document, epoch);
     this.emit("document", this.document);
     if (fit) this.viewport.fit();
     else this.viewport.publish();
@@ -524,43 +555,58 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         reason: "recovery-pending",
       });
   }
-  private async replaceDocument(state: unknown): Promise<DocumentHandle> {
-    if (this.document) await this.document.endTool().catch(() => {});
-    return this.adopt(state, true);
+  private replaceDocument(load: (epoch: number) => Promise<unknown>): Promise<DocumentHandle> {
+    return this.serialize(async () => {
+      this.refuseWhileRecoveryWaits();
+      const reopening = this.storageError()?.code === "CORRUPT_DATA";
+      const epoch = ++this.nextDocumentEpoch;
+      const state = await load(epoch);
+      const doc = this.adopt(state, true, epoch);
+      if (reopening) this.setStatus("ready", null);
+      return doc;
+    });
+  }
+  private async requestReplacement<K extends "createDocument" | "open" | "openFolder" | "recover">(
+    t: K,
+    args: Args<K>,
+    epoch: number,
+    transfer: Transferable[] = [],
+  ): Promise<Result<K>> {
+    // Finish the old stroke before the Worker replaces its document, not after.
+    await this.document?.endTool();
+    return this.requestCore(t, args, transfer, false, 0, { nextDocumentEpoch: epoch }) as Promise<Result<K>>;
   }
   async createDocument(meta: { width: number; height: number }): Promise<DocumentHandle> {
-    this.refuseWhileRecoveryWaits();
-    return this.replaceDocument(await this.request("createDocument", meta));
+    return this.replaceDocument((epoch) => this.requestReplacement("createDocument", meta, epoch));
   }
   async open(source: Blob | ArchiveSource): Promise<DocumentHandle> {
-    this.refuseWhileRecoveryWaits();
-    const blob = source instanceof Blob ? source : await source.read();
-    const bytes = await blob.arrayBuffer();
-    const state = await this.request("open", { bytes }, [bytes]);
-    const reopening = this.storageError()?.code === "CORRUPT_DATA";
-    const doc = await this.replaceDocument(state);
-    if (reopening) this.setStatus("ready", null);
-    return doc;
+    return this.replaceDocument(async (epoch) => {
+      const blob = source instanceof Blob ? source : await source.read();
+      const bytes = await blob.arrayBuffer();
+      return this.requestReplacement("open", { bytes }, epoch, [bytes]);
+    });
   }
   async openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle> {
-    this.refuseWhileRecoveryWaits();
-    const manifest = await provider.readRef("manifest.json");
-    if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
-    const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
-    for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
-      const d = await provider.getObject(p);
-      if (d) entries.set(p, d);
-    }
-    const meta = frameEntries(entries);
-    const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer }, [meta.buffer]);
-    for (const p of plan) {
-      const d = await provider.getObject(p);
-      if (d) entries.set(p, d);
-    }
-    const all = frameEntries(entries);
-    const state = await this.request("openFolder", { bytes: all.buffer as ArrayBuffer }, [all.buffer]);
-    const doc = await this.replaceDocument(state);
-    doc.setFolder(provider, await sha256Hex(manifest));
+    let manifestHash = "";
+    const doc = await this.replaceDocument(async (epoch) => {
+      const manifest = await provider.readRef("manifest.json");
+      if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
+      manifestHash = await sha256Hex(manifest);
+      const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
+      for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
+        const d = await provider.getObject(p);
+        if (d) entries.set(p, d);
+      }
+      const meta = frameEntries(entries);
+      const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer }, [meta.buffer]);
+      for (const p of plan) {
+        const d = await provider.getObject(p);
+        if (d) entries.set(p, d);
+      }
+      const all = frameEntries(entries);
+      return this.requestReplacement("openFolder", { bytes: all.buffer as ArrayBuffer }, epoch, [all.buffer]);
+    });
+    doc.setFolder(provider, manifestHash);
     return doc;
   }
 
@@ -577,15 +623,23 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
     };
   }
-  private restoreRecovery = async (): Promise<DocumentHandle> => {
-    const state = await this.request("recover");
+  private restoreRecovery = (): Promise<DocumentHandle> => this.serialize(async () => {
+    if (!this.journaled) throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
+    this.requireWaitingRecovery();
+    const epoch = ++this.nextDocumentEpoch;
+    const state = await this.requestReplacement("recover", {}, epoch);
     this.recoveryWaiting = false;
-    return this.replaceDocument(state);
-  };
-  private discardRecovery = async (): Promise<void> => {
+    return this.adopt(state, true, epoch);
+  });
+  private discardRecovery = (): Promise<void> => this.serialize(async () => {
+    this.requireWaitingRecovery();
     await this.request("discardRecovery");
     this.recoveryWaiting = false;
-  };
+  });
+  private requireWaitingRecovery() {
+    if (!this.recoveryWaiting || this.document)
+      throw new AltoError("CONFLICT", "there is no waiting recovery journal", { reason: "no-recovery" });
+  }
   private exportEmergency = async (): Promise<Blob> =>
     new Blob([(await this.request("emergencyExport")) as Uint8Array<ArrayBuffer>]);
   private recoverAfterStorageFailure = async (): Promise<RecoveryReport> => {
@@ -675,14 +729,15 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       await this.start();
       if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
       if (this.document || this.recoveryWaiting) {
-        const state = await this.requestCore<"recover">("recover", {}, [], true, 30000);
+        const epoch = this.document ? this.documentEpoch : ++this.nextDocumentEpoch;
+        const state = await this.requestCore<"recover">("recover", {}, [], true, 30000, { nextDocumentEpoch: epoch });
         if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
         this.recoveryWaiting = false;
         // The same handle carries on; the host's references stay valid.
         if (this.document) {
           this.document.apply(state);
           this.viewport.publish();
-        } else this.adopt(state, true);
+        } else this.adopt(state, true, epoch);
       }
       this.setStatus("ready", null);
       this.startLoop();

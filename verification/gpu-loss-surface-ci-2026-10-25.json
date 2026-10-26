@@ -1,0 +1,3869 @@
+{
+  "scope": "Investigation evidence; a root cause or product fix is not established",
+  "runs": [
+    {
+      "run": 40174994494,
+      "condition": "verbose SDK recorder",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40174994494",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            3959
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40175264649,
+      "condition": "verbose SDK recorder",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175264649",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            6766
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40175290889,
+      "condition": "five fresh startup profiles",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175290889",
+      "startupResults": [
+        [
+          {
+            "name": "startup",
+            "ok": true,
+            "count": 1
+          }
+        ],
+        [
+          {
+            "name": "startup",
+            "ok": true,
+            "count": 1
+          }
+        ],
+        [
+          {
+            "name": "startup",
+            "ok": true,
+            "count": 1
+          }
+        ],
+        [
+          {
+            "name": "startup",
+            "ok": true,
+            "count": 1
+          }
+        ],
+        [
+          {
+            "name": "startup",
+            "ok": true,
+            "count": 1
+          }
+        ]
+      ]
+    },
+    {
+      "run": 40175344506,
+      "condition": "verbose SDK recorder",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175344506",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            1609
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40175618230,
+      "condition": "quiet SDK recorder, startup loss healed before all 93 tests",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175618230",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        }
+      ],
+      "unexpectedFaultDumps": 1,
+      "missingMailboxErrors": 15,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            1638
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": [
+        {
+          "line": 33,
+          "text": "[1638:8415:1025/081131.052249:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 35,
+          "text": "[1638:8415:1025/081131.053800:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 36,
+          "text": "[1638:8415:1025/081131.054253:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 37,
+          "text": "[1638:8415:1025/081131.054411:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        }
+      ],
+      "firstSurfaceFault": {
+        "cause": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n",
+        "events": [
+          {
+            "at": 1792915888453,
+            "time": 20.699999999982538,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "recorder-ready"
+          },
+          {
+            "at": 1792915888693,
+            "time": 260,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "request-device",
+            "adapter": 1
+          },
+          {
+            "at": 1792915888704,
+            "time": 271.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "device-ready",
+            "adapter": 1,
+            "device": 2,
+            "queue": 3
+          },
+          {
+            "at": 1792915888705,
+            "time": 272,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "configure",
+            "context": 4,
+            "canvas": 5,
+            "dimensions": [
+              1,
+              1
+            ],
+            "device": 2,
+            "format": "rgba16float"
+          },
+          {
+            "at": 1792915888706,
+            "time": 273.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "unconfigure",
+            "context": 4,
+            "canvas": 5
+          },
+          {
+            "at": 1792915888707,
+            "time": 273.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 300,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792915888707,
+            "time": 273.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 150,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792915888707,
+            "time": 273.79999999998836,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              300,
+              150
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792915888769,
+            "time": 336.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              300,
+              150
+            ],
+            "texture": 8,
+            "width": 300,
+            "height": 150,
+            "index": 1
+          },
+          {
+            "at": 1792915888773,
+            "time": 339.8999999999942,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 1
+          },
+          {
+            "at": 1792915888776,
+            "time": 342.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 970,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792915888776,
+            "time": 342.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 412,
+            "dimensions": [
+              970,
+              150
+            ]
+          },
+          {
+            "at": 1792915888776,
+            "time": 342.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792915888776,
+            "time": 342.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 412,
+            "to": 412,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792915888776,
+            "time": 342.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792915888784,
+            "time": 350.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 9,
+            "width": 970,
+            "height": 412,
+            "index": 2
+          },
+          {
+            "at": 1792915888784,
+            "time": 350.69999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 2
+          },
+          {
+            "at": 1792915888787,
+            "time": 353.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 3
+          },
+          {
+            "at": 1792915888787,
+            "time": 354.19999999998254,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 10,
+            "width": 970,
+            "height": 412,
+            "index": 3
+          },
+          {
+            "at": 1792915888787,
+            "time": 354.29999999998836,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 4
+          },
+          {
+            "at": 1792915890658,
+            "time": 2223.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 11,
+            "width": 970,
+            "height": 412,
+            "index": 4
+          },
+          {
+            "at": 1792915890658,
+            "time": 2223.7999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 5
+          },
+          {
+            "at": 1792915890672,
+            "time": 2237.6999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 12,
+            "width": 970,
+            "height": 412,
+            "index": 5
+          },
+          {
+            "at": 1792915890672,
+            "time": 2237.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 6
+          },
+          {
+            "at": 1792915890675,
+            "time": 2240.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 7
+          },
+          {
+            "at": 1792915890675,
+            "time": 2241.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 13,
+            "width": 970,
+            "height": 412,
+            "index": 6
+          },
+          {
+            "at": 1792915890676,
+            "time": 2241.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 8
+          },
+          {
+            "at": 1792915890676,
+            "time": 2242.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 9
+          },
+          {
+            "at": 1792915890676,
+            "time": 2242.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 14,
+            "width": 970,
+            "height": 412,
+            "index": 7
+          },
+          {
+            "at": 1792915890676,
+            "time": 2242.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 10
+          },
+          {
+            "at": 1792915890677,
+            "time": 2242.7999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 11
+          },
+          {
+            "at": 1792915890677,
+            "time": 2242.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 15,
+            "width": 970,
+            "height": 412,
+            "index": 8
+          },
+          {
+            "at": 1792915890677,
+            "time": 2242.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 12
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 13
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 16,
+            "width": 970,
+            "height": 412,
+            "index": 9
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 14
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 15
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 17,
+            "width": 970,
+            "height": 412,
+            "index": 10
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 16
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 17
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 18,
+            "width": 970,
+            "height": 412,
+            "index": 11
+          },
+          {
+            "at": 1792915890677,
+            "time": 2243.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 18
+          },
+          {
+            "at": 1792915890678,
+            "time": 2243.6999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 19
+          },
+          {
+            "at": 1792915890678,
+            "time": 2244.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 19,
+            "width": 970,
+            "height": 412,
+            "index": 12
+          },
+          {
+            "at": 1792915890678,
+            "time": 2244.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 20
+          },
+          {
+            "at": 1792915890678,
+            "time": 2244.399999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 21
+          },
+          {
+            "at": 1792915890678,
+            "time": 2244.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 20,
+            "width": 970,
+            "height": 412,
+            "index": 13
+          },
+          {
+            "at": 1792915890678,
+            "time": 2244.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 22
+          },
+          {
+            "at": 1792915890679,
+            "time": 2244.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 23
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 21,
+            "width": 970,
+            "height": 412,
+            "index": 14
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 24
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 25
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 22,
+            "width": 970,
+            "height": 412,
+            "index": 15
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 26
+          },
+          {
+            "at": 1792915890679,
+            "time": 2245.399999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 27
+          },
+          {
+            "at": 1792915890680,
+            "time": 2245.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 23,
+            "width": 970,
+            "height": 412,
+            "index": 16
+          },
+          {
+            "at": 1792915890680,
+            "time": 2246,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 28
+          },
+          {
+            "at": 1792915890681,
+            "time": 2246.7999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 29
+          },
+          {
+            "at": 1792915890681,
+            "time": 2247.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 24,
+            "width": 970,
+            "height": 412,
+            "index": 17
+          },
+          {
+            "at": 1792915890681,
+            "time": 2247.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 30
+          },
+          {
+            "at": 1792915890684,
+            "time": 2249.7999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 31
+          },
+          {
+            "at": 1792915890684,
+            "time": 2250,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 32
+          },
+          {
+            "at": 1792915890684,
+            "time": 2250.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 33
+          },
+          {
+            "at": 1792915890801,
+            "time": 2366.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 25,
+            "width": 970,
+            "height": 412,
+            "index": 18
+          },
+          {
+            "at": 1792915890801,
+            "time": 2367,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 34
+          },
+          {
+            "at": 1792915890802,
+            "time": 2367.5999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 35
+          },
+          {
+            "at": 1792915890803,
+            "time": 2369.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792915890803,
+            "time": 2369.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 412,
+            "to": 415,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792915890803,
+            "time": 2369.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792915890803,
+            "time": 2369.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 415,
+            "to": 415,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792915890803,
+            "time": 2369.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792915890804,
+            "time": 2369.7999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 26,
+            "width": 970,
+            "height": 415,
+            "index": 19
+          },
+          {
+            "at": 1792915890804,
+            "time": 2369.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 36
+          },
+          {
+            "at": 1792915890839,
+            "time": 2404.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 27,
+            "width": 970,
+            "height": 415,
+            "index": 20
+          },
+          {
+            "at": 1792915890839,
+            "time": 2405,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 37
+          },
+          {
+            "at": 1792915890844,
+            "time": 2410.399999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 28,
+            "width": 970,
+            "height": 415,
+            "index": 21
+          },
+          {
+            "at": 1792915890844,
+            "time": 2410.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 38
+          },
+          {
+            "at": 1792915890934,
+            "time": 2500.1999999999825,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 29,
+            "width": 970,
+            "height": 415,
+            "index": 22
+          },
+          {
+            "at": 1792915890934,
+            "time": 2500.2999999999884,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 39
+          },
+          {
+            "at": 1792915890980,
+            "time": 2545.899999999994,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 30,
+            "width": 970,
+            "height": 415,
+            "index": 23
+          },
+          {
+            "at": 1792915890980,
+            "time": 2546.0999999999767,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "submit",
+            "queue": 3,
+            "index": 40
+          },
+          {
+            "at": 1792915891054,
+            "time": 2619.5,
+            "realm": "http://127.0.0.1:49169/packages/alto-sdk/dist/worker.js",
+            "realmId": "fa29c42f-b2d1-4d6a-99c0-b962abbdb5ab",
+            "op": "validation",
+            "device": 2,
+            "message": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n"
+          }
+        ]
+      }
+    },
+    {
+      "run": 40175744288,
+      "condition": "quiet SDK recorder",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175744288",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            3041
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40175839138,
+      "condition": "unused raw surface present",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175839138",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": false,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "gpu-lifecycle unused-present",
+          "ok": true,
+          "count": 120
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            1222
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "gpu-lifecycle unused-present",
+          "pids": [
+            1222
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            1222
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40175840909,
+      "condition": "unused raw surface replacement",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40175840909",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": false,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "gpu-lifecycle unused-replace",
+          "ok": true,
+          "count": 120
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            7454
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "gpu-lifecycle unused-replace",
+          "pids": [
+            7454
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            7454
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40176071106,
+      "condition": "INVALID CONTROL: replay yielded between acquire and submit",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40176071106",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": false,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "gpu-lifecycle recorded-startup",
+          "ok": false,
+          "count": 8,
+          "error": "Error: Error: Destroyed texture [Texture (unlabeled 300x150 px, TextureFormat::BGRA8Unorm)] used in a submit.\n - While calling [Queue].Submit([[CommandBuffer]])\n"
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            4349
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "gpu-lifecycle recorded-startup",
+          "pids": [
+            4349
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            4349
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40176072928,
+      "condition": "quiet SDK recorder with failure gate",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40176072928",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": false,
+          "count": 21,
+          "error": "Uncaught (in promise) AltoError: GPU_LOST: device lost (Unknown: A valid external Instance reference no longer exists.) while reading 1 display tiles: Error occurred when trying to async map a buffer AltoError: GPU_LOST: device lost (Unknown: A valid external Instance reference no longer exists.) while reading 1 display tiles: Error occurred when trying to async map a buffer\n    at fromWorkerError (http://127.0.0.1:49168/packages/alto-sdk/dist/errors.js:31:12)\n    at EngineCore.onWorkerMessage (http://127.0.0.1:49168/packages/alto-sdk/dist/engine.js:258:26)\n    at worker.onmessage (http://127.0.0.1:49168/packages/alto-sdk/dist/engine.js:207:18)"
+        },
+        {
+          "name": "surface lifetime recording",
+          "ok": false,
+          "count": 1,
+          "error": "Unexpected GPU validation/loss was recorded; later automatic recovery does not make this run clean. See SURFACE-FAILURE in chrome-stderr.log."
+        }
+      ],
+      "unexpectedFaultDumps": 1,
+      "missingMailboxErrors": 2,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            2603
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            2603
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            2603
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": [
+        {
+          "line": 89,
+          "text": "[2603:11454:1025/081909.472576:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 97,
+          "text": "[2603:11454:1025/081909.476064:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 98,
+          "text": "[2603:11454:1025/081909.476193:ERROR:gpu/command_buffer/service/webgpu_decoder_impl.cc:1951] Error: 4 for Command kDissociateMailboxForPresent"
+        },
+        {
+          "line": 113,
+          "text": "[2590:11243:1025/081909.490822:INFO:CONSOLE:0] \"A valid external Instance reference no longer exists.\", source: http://127.0.0.1:49168/examples/browser-playground/ (0)"
+        }
+      ],
+      "firstSurfaceFault": {
+        "cause": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n",
+        "events": [
+          {
+            "at": 1792916347936,
+            "time": 8.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "recorder-ready"
+          },
+          {
+            "at": 1792916348129,
+            "time": 201,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "request-device",
+            "adapter": 1
+          },
+          {
+            "at": 1792916348132,
+            "time": 203.89999999999418,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "device-ready",
+            "adapter": 1,
+            "device": 2,
+            "queue": 3
+          },
+          {
+            "at": 1792916348132,
+            "time": 204.39999999999418,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "configure",
+            "context": 4,
+            "canvas": 5,
+            "dimensions": [
+              1,
+              1
+            ],
+            "device": 2,
+            "format": "rgba16float"
+          },
+          {
+            "at": 1792916348132,
+            "time": 204.39999999999418,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "unconfigure",
+            "context": 4,
+            "canvas": 5
+          },
+          {
+            "at": 1792916348132,
+            "time": 204.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 300,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792916348132,
+            "time": 204.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 150,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792916348132,
+            "time": 204.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              300,
+              150
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792916348164,
+            "time": 236.30000000001746,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 970,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792916348164,
+            "time": 236.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 314,
+            "dimensions": [
+              970,
+              150
+            ]
+          },
+          {
+            "at": 1792916348164,
+            "time": 236.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916348164,
+            "time": 236.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 314,
+            "to": 314,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916348165,
+            "time": 237,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792916348166,
+            "time": 238.10000000000582,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 8,
+            "width": 970,
+            "height": 314,
+            "index": 1
+          },
+          {
+            "at": 1792916348166,
+            "time": 238.39999999999418,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 1
+          },
+          {
+            "at": 1792916348167,
+            "time": 239.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916348167,
+            "time": 239.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 314,
+            "to": 314,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916349262,
+            "time": 1334,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 9,
+            "width": 970,
+            "height": 314,
+            "index": 2
+          },
+          {
+            "at": 1792916349262,
+            "time": 1334,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 2
+          },
+          {
+            "at": 1792916349263,
+            "time": 1335.6000000000058,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 3
+          },
+          {
+            "at": 1792916349264,
+            "time": 1335.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 4
+          },
+          {
+            "at": 1792916349264,
+            "time": 1335.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 10,
+            "width": 970,
+            "height": 314,
+            "index": 3
+          },
+          {
+            "at": 1792916349264,
+            "time": 1335.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 5
+          },
+          {
+            "at": 1792916349265,
+            "time": 1336.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 6
+          },
+          {
+            "at": 1792916349266,
+            "time": 1338.5,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 7
+          },
+          {
+            "at": 1792916349267,
+            "time": 1338.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 11,
+            "width": 970,
+            "height": 314,
+            "index": 4
+          },
+          {
+            "at": 1792916349267,
+            "time": 1339.1000000000058,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 8
+          },
+          {
+            "at": 1792916349268,
+            "time": 1340.3000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 9
+          },
+          {
+            "at": 1792916349277,
+            "time": 1349.1000000000058,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 12,
+            "width": 970,
+            "height": 314,
+            "index": 5
+          },
+          {
+            "at": 1792916349277,
+            "time": 1349.3000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 10
+          },
+          {
+            "at": 1792916349319,
+            "time": 1390.8000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              314
+            ],
+            "texture": 13,
+            "width": 970,
+            "height": 314,
+            "index": 6
+          },
+          {
+            "at": 1792916349319,
+            "time": 1390.8999999999942,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 11
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 314,
+            "to": 415,
+            "dimensions": [
+              970,
+              314
+            ]
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 415,
+            "to": 415,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392.2000000000116,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 14,
+            "width": 970,
+            "height": 415,
+            "index": 7
+          },
+          {
+            "at": 1792916349320,
+            "time": 1392.3000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 12
+          },
+          {
+            "at": 1792916349356,
+            "time": 1427.8000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "submit",
+            "queue": 3,
+            "index": 13
+          },
+          {
+            "at": 1792916349474,
+            "time": 1546.3000000000175,
+            "realm": "http://127.0.0.1:49168/packages/alto-sdk/dist/worker.js",
+            "realmId": "9aef780b-f3a1-41da-a556-d1ff83014d7a",
+            "op": "validation",
+            "device": 2,
+            "message": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n"
+          }
+        ]
+      }
+    },
+    {
+      "run": 40176279218,
+      "condition": "corrected raw call replay, 20 generations, 192 MiB allocated",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40176279218",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": false,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "gpu-lifecycle recorded-startup",
+          "ok": true,
+          "count": 20
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            2228
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "gpu-lifecycle recorded-startup",
+          "pids": [
+            2228
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            2228
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40176280677,
+      "condition": "GPU completion barrier before SDK resize",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40176280677",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": true,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        },
+        {
+          "name": "surface lifetime recording",
+          "ok": true,
+          "count": 1
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            14366
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40176322813,
+      "condition": "GPU completion barrier before SDK resize",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40176322813",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": true,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        },
+        {
+          "name": "surface lifetime recording",
+          "ok": true,
+          "count": 1
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            2084
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40186993317,
+      "condition": "GPU completion barrier before SDK resize",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40186993317",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": true,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        },
+        {
+          "name": "surface lifetime recording",
+          "ok": true,
+          "count": 1
+        }
+      ],
+      "unexpectedFaultDumps": 0,
+      "missingMailboxErrors": 0,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            7843
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": []
+    },
+    {
+      "run": 40186994727,
+      "condition": "quiet SDK recorder final control",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40186994727",
+      "browser": "Chrome/156.0.8078.47",
+      "surfaceRecording": true,
+      "resizeBarrier": false,
+      "artifacts": {
+        "packages/alto-sdk/dist/worker.js": "4f9abebcbfcb3ff77385c5e86a139853c0851030c0188b6f1c83e00b70c40573",
+        "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "15e82969ba684c500a7b27feaf8ee909d945b4a20ab994724fe9db9594197f2d"
+      },
+      "summary": [
+        {
+          "name": "functional",
+          "ok": true,
+          "count": 32
+        },
+        {
+          "name": "m5",
+          "ok": true,
+          "count": 8
+        },
+        {
+          "name": "m6",
+          "ok": true,
+          "count": 10
+        },
+        {
+          "name": "m7",
+          "ok": true,
+          "count": 9
+        },
+        {
+          "name": "m8",
+          "ok": true,
+          "count": 6
+        },
+        {
+          "name": "embed",
+          "ok": true,
+          "count": 28
+        },
+        {
+          "name": "surface lifetime recording",
+          "ok": false,
+          "count": 1,
+          "error": "Unexpected GPU validation/loss was recorded; later automatic recovery does not make this run clean. See SURFACE-FAILURE in chrome-stderr.log."
+        }
+      ],
+      "unexpectedFaultDumps": 1,
+      "missingMailboxErrors": 15,
+      "gpuProcesses": [
+        {
+          "label": "startup",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "functional",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m5",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m6",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m7",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "m8",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "embed",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        },
+        {
+          "label": "shutdown",
+          "pids": [
+            20348
+          ],
+          "crashes": 0,
+          "skia": "GraphiteDawnMetal"
+        }
+      ],
+      "firstErrors": [
+        {
+          "line": 33,
+          "text": "[20348:60226:1025/105952.130461:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 34,
+          "text": "[20348:60226:1025/105952.132645:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 35,
+          "text": "[20348:60226:1025/105952.132809:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        },
+        {
+          "line": 36,
+          "text": "[20348:60226:1025/105952.132926:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox."
+        }
+      ],
+      "firstSurfaceFault": {
+        "cause": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n",
+        "events": [
+          {
+            "at": 1792925988609,
+            "time": 47.300000000046566,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "recorder-ready"
+          },
+          {
+            "at": 1792925988889,
+            "time": 319.80000000004657,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "request-device",
+            "adapter": 1
+          },
+          {
+            "at": 1792925988903,
+            "time": 334.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "device-ready",
+            "adapter": 1,
+            "device": 2,
+            "queue": 3
+          },
+          {
+            "at": 1792925988904,
+            "time": 335.69999999995343,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "configure",
+            "context": 4,
+            "canvas": 5,
+            "dimensions": [
+              1,
+              1
+            ],
+            "device": 2,
+            "format": "rgba16float"
+          },
+          {
+            "at": 1792925988905,
+            "time": 336.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "unconfigure",
+            "context": 4,
+            "canvas": 5
+          },
+          {
+            "at": 1792925988906,
+            "time": 336.89999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 300,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792925988906,
+            "time": 337,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 150,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792925988906,
+            "time": 337.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              300,
+              150
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792925988980,
+            "time": 410.80000000004657,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              300,
+              150
+            ],
+            "texture": 8,
+            "width": 300,
+            "height": 150,
+            "index": 1
+          },
+          {
+            "at": 1792925988982,
+            "time": 413.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 1
+          },
+          {
+            "at": 1792925988986,
+            "time": 417.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 300,
+            "to": 970,
+            "dimensions": [
+              300,
+              150
+            ]
+          },
+          {
+            "at": 1792925988986,
+            "time": 417.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 150,
+            "to": 412,
+            "dimensions": [
+              970,
+              150
+            ]
+          },
+          {
+            "at": 1792925988986,
+            "time": 417.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792925988986,
+            "time": 417.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 412,
+            "to": 412,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792925988986,
+            "time": 417.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792925988994,
+            "time": 425.30000000004657,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 9,
+            "width": 970,
+            "height": 412,
+            "index": 2
+          },
+          {
+            "at": 1792925988994,
+            "time": 425.39999999990687,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 2
+          },
+          {
+            "at": 1792925988996,
+            "time": 427.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 3
+          },
+          {
+            "at": 1792925988996,
+            "time": 427.69999999995343,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 10,
+            "width": 970,
+            "height": 412,
+            "index": 3
+          },
+          {
+            "at": 1792925988997,
+            "time": 427.69999999995343,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 4
+          },
+          {
+            "at": 1792925991815,
+            "time": 3246.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 5
+          },
+          {
+            "at": 1792925991816,
+            "time": 3247,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 11,
+            "width": 970,
+            "height": 412,
+            "index": 4
+          },
+          {
+            "at": 1792925991816,
+            "time": 3247.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 6
+          },
+          {
+            "at": 1792925991831,
+            "time": 3262,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 12,
+            "width": 970,
+            "height": 412,
+            "index": 5
+          },
+          {
+            "at": 1792925991831,
+            "time": 3262.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 7
+          },
+          {
+            "at": 1792925991832,
+            "time": 3263.5999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 8
+          },
+          {
+            "at": 1792925991832,
+            "time": 3263.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 13,
+            "width": 970,
+            "height": 412,
+            "index": 6
+          },
+          {
+            "at": 1792925991833,
+            "time": 3263.8000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 9
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 10
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 14,
+            "width": 970,
+            "height": 412,
+            "index": 7
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.1999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 11
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.399999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 12
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.399999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 15,
+            "width": 970,
+            "height": 412,
+            "index": 8
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 13
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.5999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 14
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 16,
+            "width": 970,
+            "height": 412,
+            "index": 9
+          },
+          {
+            "at": 1792925991833,
+            "time": 3264.8000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 15
+          },
+          {
+            "at": 1792925991834,
+            "time": 3264.8000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 16
+          },
+          {
+            "at": 1792925991834,
+            "time": 3264.899999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 17,
+            "width": 970,
+            "height": 412,
+            "index": 10
+          },
+          {
+            "at": 1792925991834,
+            "time": 3264.899999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 17
+          },
+          {
+            "at": 1792925991836,
+            "time": 3266.8000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 18
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 18,
+            "width": 970,
+            "height": 412,
+            "index": 11
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 19
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 20
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 19,
+            "width": 970,
+            "height": 412,
+            "index": 12
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.399999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 21
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 22
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.5999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 20,
+            "width": 970,
+            "height": 412,
+            "index": 13
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.5999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 23
+          },
+          {
+            "at": 1792925991836,
+            "time": 3267.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 24
+          },
+          {
+            "at": 1792925991839,
+            "time": 3270.1999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 21,
+            "width": 970,
+            "height": 412,
+            "index": 14
+          },
+          {
+            "at": 1792925991839,
+            "time": 3270.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 25
+          },
+          {
+            "at": 1792925991839,
+            "time": 3270.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 26
+          },
+          {
+            "at": 1792925991840,
+            "time": 3271,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 22,
+            "width": 970,
+            "height": 412,
+            "index": 15
+          },
+          {
+            "at": 1792925991840,
+            "time": 3271,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 27
+          },
+          {
+            "at": 1792925991840,
+            "time": 3271.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 28
+          },
+          {
+            "at": 1792925991840,
+            "time": 3271.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 23,
+            "width": 970,
+            "height": 412,
+            "index": 16
+          },
+          {
+            "at": 1792925991840,
+            "time": 3271.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 29
+          },
+          {
+            "at": 1792925991841,
+            "time": 3271.899999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 30
+          },
+          {
+            "at": 1792925991841,
+            "time": 3272.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 24,
+            "width": 970,
+            "height": 412,
+            "index": 17
+          },
+          {
+            "at": 1792925991841,
+            "time": 3272.399999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 31
+          },
+          {
+            "at": 1792925991845,
+            "time": 3276,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 32
+          },
+          {
+            "at": 1792925991845,
+            "time": 3276.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 33
+          },
+          {
+            "at": 1792925991845,
+            "time": 3276.1999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 34
+          },
+          {
+            "at": 1792925991919,
+            "time": 3350.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              412
+            ],
+            "texture": 25,
+            "width": 970,
+            "height": 412,
+            "index": 18
+          },
+          {
+            "at": 1792925991919,
+            "time": 3350.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 35
+          },
+          {
+            "at": 1792925991920,
+            "time": 3351.3000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 36
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 412,
+            "to": 415,
+            "dimensions": [
+              970,
+              412
+            ]
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-width",
+            "canvas": 6,
+            "from": 970,
+            "to": 970,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "resize-height",
+            "canvas": 6,
+            "from": 415,
+            "to": 415,
+            "dimensions": [
+              970,
+              415
+            ]
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354.0999999998603,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "configure",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "device": 2,
+            "format": "bgra8unorm",
+            "usage": 16,
+            "alphaMode": "opaque"
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 26,
+            "width": 970,
+            "height": 415,
+            "index": 19
+          },
+          {
+            "at": 1792925991923,
+            "time": 3354.5,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 37
+          },
+          {
+            "at": 1792925991929,
+            "time": 3360.1999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 27,
+            "width": 970,
+            "height": 415,
+            "index": 20
+          },
+          {
+            "at": 1792925991929,
+            "time": 3360.399999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 38
+          },
+          {
+            "at": 1792925992003,
+            "time": 3433.8000000000466,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "acquire",
+            "context": 7,
+            "canvas": 6,
+            "dimensions": [
+              970,
+              415
+            ],
+            "texture": 28,
+            "width": 970,
+            "height": 415,
+            "index": 21
+          },
+          {
+            "at": 1792925992003,
+            "time": 3433.899999999907,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "submit",
+            "queue": 3,
+            "index": 39
+          },
+          {
+            "at": 1792925992138,
+            "time": 3569.6999999999534,
+            "realm": "http://127.0.0.1:49174/packages/alto-sdk/dist/worker.js",
+            "realmId": "984ec55c-5fb1-4f25-ba50-65c70413e84a",
+            "op": "validation",
+            "device": 2,
+            "message": "[Invalid Texture] is invalid due to a previous error.\n - While calling [Invalid Texture].CreateView([TextureViewDescriptor]).\n"
+          }
+        ]
+      }
+    }
+  ]
+}

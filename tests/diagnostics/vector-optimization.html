@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Vector optimization verification</title>
+<h1>Vector optimization verification</h1>
+<p id="status">Ready</p>
+<script type="module">
+window.runVectorOptimization = (frames = 100, reverse = false) => new Promise((resolve, reject) => {
+  const worker = new Worker('../../examples/vector-comparison/worker.js', { type: 'module' });
+  document.querySelector('#status').textContent = 'Running RGBA16F comparisons…';
+  worker.onmessage = ({ data }) => {
+    worker.terminate();
+    document.querySelector('#status').textContent = data.pass ? 'PASS' : 'FAIL';
+    resolve(data);
+  };
+  worker.onerror = (event) => { worker.terminate(); reject(Error(event.message)); };
+  worker.postMessage({ mode: 'optimization', frames, reverse });
+});
+</script>

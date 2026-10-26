@@ -34,6 +34,12 @@ export function fromWorkerError(error) {
 function conflictDetails(code, message = "") {
     if (code !== "CONFLICT")
         return undefined;
+    if (message.includes("document-closed"))
+        return { reason: "document-closed" };
+    if (message.includes("no-recovery"))
+        return { reason: "no-recovery" };
+    if (message.includes("recovery-pending"))
+        return { reason: "recovery-pending" };
     if (message.includes("active tool"))
         return { reason: "tool-active" };
     if (message.includes("revision"))

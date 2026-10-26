@@ -437,7 +437,13 @@ impl Context<'_> {
         };
         Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform))
     }
-    fn vector(&mut self, content: VectorContent, world: [f64; 6], roi: Roi) -> Result<Target> {
+    fn vector(
+        &mut self,
+        content: VectorContent,
+        world: [f64; 6],
+        roi: Roi,
+        batch: bool,
+    ) -> Result<Target> {
         let out = self.alloc(roi)?;
         let target = self.resources.pool[out.index].texture.clone();
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
@@ -459,7 +465,18 @@ impl Context<'_> {
             roi.h as f64,
         ];
         let result = match content {
-            VectorContent::Paths(paths) => resources.render(
+            VectorContent::Paths(paths) if batch => resources.render(
+                &self.r.device,
+                &self.r.queue,
+                &mut self.encoder,
+                &target,
+                &paths.iter().collect::<Vec<_>>(),
+                world,
+                roi,
+                self.r.frame,
+                budget,
+            ),
+            VectorContent::Paths(paths) => resources.render_legacy(
                 &self.r.device,
                 &self.r.queue,
                 &mut self.encoder,
@@ -511,6 +528,7 @@ impl Context<'_> {
             }]),
             world,
             input,
+            false,
         )?;
         let output = self.effects(coverage, &[effect], sample, world)?;
         self.crop(output, roi)
@@ -990,8 +1008,8 @@ impl Context<'_> {
                 self.dispatch(out, dummy, dummy, dummy, p, &entries);
                 out
             }
-            RContent::Mesh(paths) => self.vector(VectorContent::Paths(paths), world, roi)?,
-            RContent::Text(runs) => self.vector(VectorContent::Text(runs), world, roi)?,
+            RContent::Mesh(paths) => self.vector(VectorContent::Paths(paths), world, roi, true)?,
+            RContent::Text(runs) => self.vector(VectorContent::Text(runs), world, roi, false)?,
             RContent::Group { children, .. } => {
                 let blank = self.zero(roi)?;
                 self.children(children, blank, world, depth)?
@@ -1103,6 +1121,9 @@ impl Renderer {
             }
             cx.r.queue.submit(Some(cx.encoder.finish()));
             cx.r.retired.release();
+            if let Some(vector) = &mut cx.r.vector {
+                vector.after_submit();
+            }
             Ok(())
         })();
         self.m5 = Some(resources);

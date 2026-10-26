@@ -110,12 +110,16 @@ async function decodeFixture(engine) {
 }
 export async function runTests(engine, benchmark, log) {
   const results = [];
+  let activeTest = null;
   async function test(name, fn) {
+    activeTest = name;
+    log("RUN " + name);
     const start = performance.now();
     await fn();
     const r = { name, pass: true, ms: performance.now() - start };
     results.push(r);
     log("PASS " + name + " " + r.ms.toFixed(1) + " ms");
+    activeTest = null;
   }
   try {
     if (benchmark) {
@@ -901,7 +905,7 @@ export async function runTests(engine, benchmark, log) {
     });
     log("ALL " + results.length + " TESTS PASSED");
   } catch (e) {
-    results.push({ pass: false, error: String(e) });
+    results.push({ name: activeTest ?? "suite", pass: false, error: String(e) });
     log("FAIL " + e);
     throw e;
   } finally {

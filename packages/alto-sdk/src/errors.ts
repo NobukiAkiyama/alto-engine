@@ -21,6 +21,7 @@ export type ConflictReason =
   | "namespace-in-use"
   | "recovery-pending"
   | "not-failed"
+  | "no-recovery"
   | "revision"
   | "document-closed";
 
@@ -29,7 +30,7 @@ export type ConflictReason =
  * the code: `reason` for `CONFLICT` and `INVALID_ARGUMENT`, `node` for `NOT_FOUND`.
  */
 export interface ErrorDetails {
-  reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "no-recovery";
+  reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale";
   node?: string;
   namespace?: string;
 }
@@ -72,6 +73,9 @@ export function fromWorkerError(error: { code?: string; message?: string } | und
 /** Engine messages name some conflicts in their text; carry them as a reason. */
 function conflictDetails(code: ErrorCode, message = ""): ErrorDetails | undefined {
   if (code !== "CONFLICT") return undefined;
+  if (message.includes("document-closed")) return { reason: "document-closed" };
+  if (message.includes("no-recovery")) return { reason: "no-recovery" };
+  if (message.includes("recovery-pending")) return { reason: "recovery-pending" };
   if (message.includes("active tool")) return { reason: "tool-active" };
   if (message.includes("revision")) return { reason: "revision" };
   return undefined;

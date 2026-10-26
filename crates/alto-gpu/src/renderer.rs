@@ -2830,6 +2830,18 @@ mod shader_tests {
             ("effects", include_str!("../shaders/effects.wgsl")),
             ("vector", include_str!("../shaders/vector.wgsl")),
             ("vector-paint", include_str!("../shaders/vector-paint.wgsl")),
+            (
+                "vector-dense-coverage",
+                concat!(
+                    include_str!("../shaders/vector.wgsl"),
+                    "\n",
+                    include_str!("../shaders/vector-dense-coverage.wgsl")
+                ),
+            ),
+            (
+                "vector-dense-paint",
+                include_str!("../shaders/vector-dense-paint.wgsl"),
+            ),
             ("glyph-atlas", include_str!("../shaders/glyph-atlas.wgsl")),
             (
                 "effects resolve",
