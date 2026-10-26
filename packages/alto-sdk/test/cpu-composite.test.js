@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fnv64, parityCases, renderCase } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, fnv64, parityCases, renderCase } from "../../../tests/e2e/cpu-composite.js";
 
-test("the f32 port matches the Rust CPU reference hashes", () => {
+test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
     .split("\n")
     .filter((line) => line && !line.startsWith("#"));
@@ -12,6 +12,19 @@ test("the f32 port matches the Rust CPU reference hashes", () => {
   for (const line of lines) {
     const [name, , fnv] = line.split(" ");
     const tile = renderCase(cases.get(name));
+    assert.equal(fnv64(tile), fnv, name);
+  }
+});
+
+test("render version 1 matches the hashes recorded on main", () => {
+  const lines = readFileSync(new URL("../../../tests/parity/render-v1.txt", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => line && !line.startsWith("#"));
+  const cases = new Map(parityCases().map((item) => [item.name, item]));
+  assert.equal(lines.length, 34);
+  for (const line of lines) {
+    const [name, , fnv] = line.split(" ");
+    const tile = renderCase(cases.get(name), RENDER_VERSION_F32);
     assert.equal(fnv64(tile), fnv, name);
   }
 });

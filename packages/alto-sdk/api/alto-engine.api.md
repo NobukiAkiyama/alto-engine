@@ -324,6 +324,7 @@ export interface DocumentMeta {
     readonly format_version: number;
     // (undocumented)
     readonly height: number;
+    readonly render_version?: number;
     // (undocumented)
     readonly width: number;
 }

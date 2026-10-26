@@ -19,6 +19,20 @@ pub struct DocumentMeta {
     pub color: ColorSpace,
     pub depth: BitDepth,
     pub format_version: u32,
+    /// Which compositor samples this document. Absent in files written before
+    /// render version 2; those load as [`alto_core::RENDER_VERSION_F32`] and keep
+    /// the float bilinear path. New documents are [`alto_core::RENDER_VERSION`].
+    #[serde(
+        default = "legacy_render_version",
+        skip_serializing_if = "is_legacy_render"
+    )]
+    pub render_version: u32,
+}
+fn legacy_render_version() -> u32 {
+    alto_core::RENDER_VERSION_F32
+}
+fn is_legacy_render(version: &u32) -> bool {
+    *version == alto_core::RENDER_VERSION_F32
 }
 impl DocumentMeta {
     pub fn srgb_u8(width: u32, height: u32) -> Self {
@@ -28,6 +42,7 @@ impl DocumentMeta {
             color: ColorSpace::Srgb,
             depth: BitDepth::U8,
             format_version: 1,
+            render_version: alto_core::RENDER_VERSION,
         }
     }
     fn validate(&self) -> Result<(), DocError> {
@@ -38,6 +53,11 @@ impl DocumentMeta {
         }
         if self.format_version != 1 && self.format_version != 2 {
             return Err(DocError::Invalid("Unsupported document format".into()));
+        }
+        if self.render_version != alto_core::RENDER_VERSION_F32
+            && self.render_version != alto_core::RENDER_VERSION
+        {
+            return Err(DocError::Invalid("Unsupported render version".into()));
         }
         if self.color != ColorSpace::Srgb || self.depth != BitDepth::U8 {
             return Err(DocError::Invalid(

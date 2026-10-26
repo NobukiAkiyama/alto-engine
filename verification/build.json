@@ -4,15 +4,15 @@
   "milestone": "M8 + embedding API",
   "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4652158,
-  "gzipBytes": 1175849,
-  "wasmSha256": "f569bdd75c8ad88edc20795d601f7a90cd2db935d3c5551966938e670ed89797",
+  "wasmBytes": 4658473,
+  "gzipBytes": 1177638,
+  "wasmSha256": "2a6ee7030405888f2ab86eddcb5050cc6ed0012f1a866a33313881de7edeecaf",
   "comparisonWasm": {
     "bytes": 6396234,
     "gzipBytes": 1586062,
     "sha256": "e60141f7cf24f0bd55f5be85abc87fc1cffc7f3f57f2e8904f20be1a5fdf7a2b"
   },
-  "nativeTests": 130,
+  "nativeTests": 137,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"

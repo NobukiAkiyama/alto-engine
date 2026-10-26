@@ -4,6 +4,7 @@ pub use error::RenderError;
 mod error;
 pub mod glyph_atlas;
 pub mod renderer;
+mod sample;
 
 #[cfg(test)]
 mod blend_ref;

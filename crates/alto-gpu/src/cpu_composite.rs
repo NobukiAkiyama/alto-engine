@@ -1,10 +1,12 @@
 //! CPU reference for `shaders/composite.wgsl`, and a headless run of that shader.
 //!
 //! The reference is `#[cfg(test)]`, so the shipped WASM does not contain it. It follows
-//! the shader: f64 world matrices, f32 inverse components, straight source texels,
-//! premultiplied accumulation, and `rgba8unorm` ties-to-even quantization. It does not
-//! cull opaque layers; a correct cull leaves the same pixels, and a wrong one fails
-//! the browser suite, which reads production tiles.
+//! the shader: f64 world matrices, straight source texels, premultiplied accumulation,
+//! and `rgba8unorm` ties-to-even quantization. Render version 2 (the default here)
+//! filters bilinear and rotated samples with the integer 4-tap in `sample.rs`.
+//! Render version 1 keeps the f32 `mix` path. It does not cull opaque layers; a
+//! correct cull leaves the same pixels, and a wrong one fails the browser suite,
+//! which reads production tiles.
 //!
 //! Masks, clips, effects, vectors and text are not on this path. `composite.wgsl` never
 //! sees them (`plain_scene` is false, and the effect pass uses rgba16float). Those cases
@@ -12,8 +14,9 @@
 
 use crate::blend_ref::blend;
 use crate::damage::plain_scene;
+use crate::sample::{axis_unit, bilinear_byte, floor_frac_q8, pixel_q8, quantize_q16, source_q8};
 use crate::shader_with_blend;
-use alto_core::{Affine2, ContentHash, IRect, NodeId};
+use alto_core::{Affine2, ContentHash, IRect, NodeId, RENDER_VERSION, RENDER_VERSION_F32};
 use alto_scene::{
     RContent, REffect, REffectKind, RFeatures, RMask, RNode, RenderBlend, RenderScene,
 };
@@ -41,17 +44,6 @@ const BLENDS: [&str; 17] = [
     "add",
 ];
 
-/// Bilinear samples and rotations are not bit-exact on every native device. Lavapipe
-/// (Mesa 25.2.8) disagrees with this f32 reference by at most one 8-bit channel:
-/// `scale-bilinear` 4906 pixels, first pixel 15,0 gpu [8, 0, 25, 255] cpu
-/// [8, 0, 24, 255]; `rotation` 5 pixels, first pixel 43,156 gpu [50, 123, 177, 255]
-/// cpu [50, 123, 178, 255]. The mix is `a*(1-t)+b*t`, and GPU compilers may contract
-/// it. macOS Metal also misses both by at most 1/255 (`cargo test` on CI passed only
-/// with this list). SwiftShader matches the JS reference for rotation bit-exactly, so
-/// the browser suite requires that match and xfails only `scale-bilinear`. A device
-/// that matches a listed case exactly should drop it. A delta above 1/255 is a real miss.
-const ROUNDING_XFAIL: &[&str] = &["scale-bilinear", "rotation"];
-
 #[derive(Clone)]
 struct Image {
     w: u32,
@@ -72,7 +64,7 @@ enum Op {
         mode: u32,
     },
     Draw {
-        inv: [f32; 6],
+        inv: [f64; 6],
         opacity: f32,
         mode: u32,
         tiles: Vec<Tile>,
@@ -105,8 +97,7 @@ struct Case {
     level: i32,
     tx: i32,
     ty: i32,
-    /// Written to `tests/parity/cpu-reference.txt`. Rotation stays out of that file:
-    /// the browser compares it live, where an FMA difference becomes an explicit xfail.
+    /// Written to `tests/parity/cpu-reference.txt` (render version 2).
     lock: bool,
     nodes: Vec<Node>,
 }
@@ -450,7 +441,7 @@ fn cases() -> Vec<Case> {
         level: 0,
         tx: 0,
         ty: 0,
-        lock: false,
+        lock: true,
         nodes: vec![raster(
             ramp(256, 256),
             0,
@@ -543,9 +534,8 @@ fn walk(node: &Node, parent: [f64; 6], ops: &mut Vec<Op>) {
             let Some(inv) = Affine2(world).inverse() else {
                 return;
             };
-            let inv = inv.0.map(|v| v as f32);
             ops.push(Op::Draw {
-                inv,
+                inv: inv.0,
                 opacity,
                 mode: *mode,
                 tiles: split_tiles(image),
@@ -590,14 +580,12 @@ fn texel(tiles: &[Tile], q: [f32; 2]) -> [f32; 4] {
     ]
 }
 
-fn fetch(tiles: &[Tile], inv: [f32; 6], p: [f32; 2]) -> [f32; 4] {
+fn fetch_f32(tiles: &[Tile], inv: [f32; 6], p: [f32; 2]) -> [f32; 4] {
     let q = [
         inv[0] * p[0] + inv[2] * p[1] + inv[4],
         inv[1] * p[0] + inv[3] * p[1] + inv[5],
     ];
-    let axis = inv[1].abs() < 0.0001 && inv[2].abs() < 0.0001;
-    let unit = (inv[0].abs() - 1.0).abs() < 0.0001 && (inv[3].abs() - 1.0).abs() < 0.0001;
-    if axis && unit {
+    if axis_unit(inv) {
         return texel(tiles, q);
     }
     let base = [q[0].floor(), q[1].floor()];
@@ -613,6 +601,63 @@ fn fetch(tiles: &[Tile], inv: [f32; 6], p: [f32; 2]) -> [f32; 4] {
         out[i] = ab * (1.0 - f[1]) + de * f[1];
     }
     out
+}
+
+fn sample_u8(tiles: &[Tile], x: i32, y: i32) -> [u8; 4] {
+    let key = (x >> 8, y >> 8);
+    let Some(pixels) = lookup(tiles, key) else {
+        return [0; 4];
+    };
+    let local_x = (x - key.0 * 256).clamp(0, 255) as usize;
+    let local_y = (y - key.1 * 256).clamp(0, 255) as usize;
+    let i = (local_y * 256 + local_x) * 4;
+    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+}
+
+fn fetch_integer(
+    tiles: &[Tile],
+    inv: [f64; 6],
+    origin_px: [i32; 2],
+    scale: i32,
+    x: i32,
+    y: i32,
+) -> [f32; 4] {
+    let q16 = inv.map(quantize_q16);
+    let q = source_q8(
+        q16,
+        pixel_q8(origin_px[0], x, scale),
+        pixel_q8(origin_px[1], y, scale),
+    );
+    let (ix, fx) = floor_frac_q8(q[0]);
+    let (iy, fy) = floor_frac_q8(q[1]);
+    let a = sample_u8(tiles, ix, iy);
+    let b = sample_u8(tiles, ix + 1, iy);
+    let d = sample_u8(tiles, ix, iy + 1);
+    let e = sample_u8(tiles, ix + 1, iy + 1);
+    let mut out = [0.0; 4];
+    for channel in 0..4 {
+        let byte = bilinear_byte(a[channel], b[channel], d[channel], e[channel], fx, fy);
+        out[channel] = f32::from(byte) / 255.0;
+    }
+    out
+}
+
+/// Tile placement and which sampling path the document's render version selects.
+struct Frame {
+    origin: [f32; 2],
+    scale: f32,
+    origin_px: [i32; 2],
+    scale_i: i32,
+    version: u32,
+}
+
+fn fetch(tiles: &[Tile], inv: [f64; 6], p: [f32; 2], x: i32, y: i32, frame: &Frame) -> [f32; 4] {
+    let inv_f32 = inv.map(|v| v as f32);
+    if frame.version < RENDER_VERSION || axis_unit(inv_f32) {
+        fetch_f32(tiles, inv_f32, p)
+    } else {
+        fetch_integer(tiles, inv, frame.origin_px, frame.scale_i, x, y)
+    }
 }
 
 fn pop_src(accum: [f32; 4], opacity: f32) -> [f32; 4] {
@@ -632,15 +677,15 @@ fn quantize(pixel: [f32; 4]) -> [u8; 4] {
     pixel.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8)
 }
 
-fn composite(ops: &[Op], width: u32, height: u32, origin: [f32; 2], scale: f32) -> Vec<u8> {
+fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> Vec<u8> {
     let mut out = vec![0u8; 256 * 256 * 4];
     let width = width as f32;
     let height = height as f32;
     for y in 0..256u32 {
         for x in 0..256u32 {
             let p = [
-                origin[0] + (x as f32 + 0.5) * scale,
-                origin[1] + (y as f32 + 0.5) * scale,
+                frame.origin[0] + (x as f32 + 0.5) * frame.scale,
+                frame.origin[1] + (y as f32 + 0.5) * frame.scale,
             ];
             let mut stack = [[0.0f32; 4]; 32];
             let mut depth = 0usize;
@@ -664,7 +709,7 @@ fn composite(ops: &[Op], width: u32, height: u32, origin: [f32; 2], scale: f32) 
                             mode,
                             tiles,
                         } => {
-                            let s = fetch(tiles, *inv, p);
+                            let s = fetch(tiles, *inv, p, x as i32, y as i32, frame);
                             accum = blend(accum, [s[0], s[1], s[2], s[3] * opacity], *mode);
                         }
                     }
@@ -678,17 +723,32 @@ fn composite(ops: &[Op], width: u32, height: u32, origin: [f32; 2], scale: f32) 
     out
 }
 
-fn render(case: &Case) -> Vec<u8> {
+fn render_at(case: &Case, version: u32) -> Vec<u8> {
     let mut ops = Vec::new();
     for node in &case.nodes {
         walk(node, ident(), &mut ops);
     }
     let scale = 2f32.powi(case.level);
-    let origin = [
-        case.tx as f32 * 256.0 * scale,
-        case.ty as f32 * 256.0 * scale,
-    ];
-    composite(&ops, case.w, case.h, origin, scale)
+    let scale_i = 2i32.pow(case.level as u32);
+    composite(
+        &ops,
+        case.w,
+        case.h,
+        &Frame {
+            origin: [
+                case.tx as f32 * 256.0 * scale,
+                case.ty as f32 * 256.0 * scale,
+            ],
+            scale,
+            origin_px: [case.tx * 256 * scale_i, case.ty * 256 * scale_i],
+            scale_i,
+            version,
+        },
+    )
+}
+
+fn render(case: &Case) -> Vec<u8> {
+    render_at(case, RENDER_VERSION)
 }
 
 fn pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -707,7 +767,7 @@ fn fnv64(bytes: &[u8]) -> u64 {
 
 fn reference_text() -> String {
     let mut lines = vec![
-        "# CPU reference for composite.wgsl. Columns: name, blake3, fnv-1a 64. Regenerate with ALTO_WRITE_PARITY=1."
+        "# CPU reference for composite.wgsl render version 2 (integer 4-tap). Columns: name, blake3, fnv-1a 64. Regenerate with ALTO_WRITE_PARITY=1."
             .to_string(),
     ];
     for case in cases().into_iter().filter(|c| c.lock) {
@@ -726,31 +786,57 @@ fn reference_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/cpu-reference.txt")
 }
 
+fn render_v1_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/render-v1.txt")
+}
+
 fn diff_report(cpu: &[u8], gpu: &[u8]) -> String {
     let mut count = 0u32;
-    let mut first = None;
+    let mut at = None;
     let n = cpu.len().min(gpu.len()) / 4;
     for i in 0..n {
         let o = i * 4;
         if cpu[o..o + 4] != gpu[o..o + 4] {
             count += 1;
-            if first.is_none() {
-                first = Some(format!(
-                    "pixel {},{} gpu {:?} cpu {:?}",
-                    i % 256,
-                    i / 256,
-                    &gpu[o..o + 4],
-                    &cpu[o..o + 4]
-                ));
+            if at.is_none() {
+                at = Some((i % 256, i / 256, o));
             }
         }
     }
-    format!(
-        "{count} pixels differ; first {}; lengths cpu {} gpu {}",
-        first.unwrap_or_else(|| "none".into()),
-        cpu.len(),
-        gpu.len()
-    )
+    match at {
+        Some((x, y, o)) => format!(
+            "{count} pixels differ; first {x},{y}; gpu {},{},{},{}; cpu {},{},{},{}; lengths cpu {} gpu {}",
+            gpu[o],
+            gpu[o + 1],
+            gpu[o + 2],
+            gpu[o + 3],
+            cpu[o],
+            cpu[o + 1],
+            cpu[o + 2],
+            cpu[o + 3],
+            cpu.len(),
+            gpu.len()
+        ),
+        None => format!(
+            "0 pixels differ; first none; gpu none; cpu none; lengths cpu {} gpu {}",
+            cpu.len(),
+            gpu.len()
+        ),
+    }
+}
+
+fn parse_reference(text: &str) -> Vec<(String, String, String)> {
+    text.lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut parts = line.split(' ');
+            (
+                parts.next().unwrap().to_string(),
+                parts.next().unwrap().to_string(),
+                parts.next().unwrap().to_string(),
+            )
+        })
+        .collect()
 }
 
 fn scene(content: RContent, features: RFeatures) -> RenderScene {
@@ -762,6 +848,7 @@ fn scene(content: RContent, features: RFeatures) -> RenderScene {
             y1: 256,
         },
         root: 0,
+        render_version: RENDER_VERSION,
         nodes: vec![RNode {
             key: NodeId::new(),
             version: 0,
@@ -847,6 +934,11 @@ impl Gpu {
                 Ok(adapter) => adapter,
                 Err(_) => return Ok(None),
             };
+            let info = adapter.get_info();
+            println!(
+                "gpu pixel parity adapter: {} ({:?})",
+                info.name, info.backend
+            );
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor::default())
                 .await
@@ -909,10 +1001,16 @@ impl Gpu {
                             pad: 0,
                         });
                     }
+                    let packed = crate::sample::pack_inverse(*inv, RENDER_VERSION);
                     commands.push(GpuCommand {
-                        inv0: [inv[0], inv[1], inv[2], inv[3]],
-                        inv1: [inv[4], inv[5], *opacity, *mode as f32],
-                        info: [0, start, entries.len() as u32 - start, 0],
+                        inv0: packed.inv0,
+                        inv1: [
+                            packed.translation[0],
+                            packed.translation[1],
+                            *opacity,
+                            *mode as f32,
+                        ],
+                        info: [0, start, entries.len() as u32 - start, packed.sample_mode],
                     });
                 }
             }
@@ -1146,6 +1244,90 @@ fn level1_samples_pixel_centers() {
 }
 
 #[test]
+fn integer_filter_recovers_a_texel_and_rounds_half_up() {
+    assert_eq!(quantize_q16(0.5), 32_768);
+    assert_eq!(quantize_q16(-0.5), -32_768);
+    assert_eq!(quantize_q16(1.0), 65_536);
+    assert_eq!(bilinear_byte(7, 9, 7, 9, 0, 0), 7);
+    assert_eq!(bilinear_byte(0, 1, 0, 1, 128, 0), 1);
+    assert_eq!(floor_frac_q8(-1), (-1, 255));
+    for byte in 0..=255u8 {
+        let decoded = f32::from(byte) / 255.0;
+        let restored = (decoded * 255.0).round_ties_even() as u8;
+        assert_eq!(restored, byte, "unorm byte {byte} did not round-trip");
+    }
+}
+
+/// Documents saved on current main have no `render_version`. They load as version 1
+/// and the float sampler reproduces `tests/parity/render-v1.txt`, which is the
+/// hash file main recorded. Version 2 changes `scale-bilinear` and `rotation`
+/// only; every other locked case stays bit-exact, and re-saving a version 1
+/// document does not add the field.
+#[test]
+fn pre_bump_documents_match_the_recorded_main_hashes() {
+    let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
+    meta.render_version = RENDER_VERSION_F32;
+    let doc = alto_doc::Document::new(meta).unwrap();
+    let bytes = doc.snapshot_bytes().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(
+        !text.contains("render_version"),
+        "version 1 snapshots omit the field, which is how main saved them"
+    );
+    let loaded = alto_doc::Document::from_snapshot_bytes(&bytes).unwrap();
+    assert_eq!(loaded.meta.render_version, RENDER_VERSION_F32);
+    assert_eq!(
+        loaded.snapshot_bytes().unwrap(),
+        bytes,
+        "opening and saving a pre-bump document keeps its snapshot bytes"
+    );
+    let fresh = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+    assert_eq!(fresh.meta.render_version, RENDER_VERSION);
+    assert!(
+        String::from_utf8(fresh.snapshot_bytes().unwrap())
+            .unwrap()
+            .contains("\"render_version\": 2")
+    );
+
+    let recorded = std::fs::read_to_string(render_v1_path()).unwrap();
+    let expected = parse_reference(&recorded);
+    assert_eq!(
+        expected.len(),
+        34,
+        "main locked 34 cases and omitted rotation"
+    );
+    let catalog: std::collections::BTreeMap<_, _> = cases()
+        .into_iter()
+        .map(|case| (case.name.clone(), case))
+        .collect();
+    for (name, hash, fnv) in &expected {
+        let case = &catalog[name];
+        let tile = render_at(case, loaded.meta.render_version);
+        assert_eq!(ContentHash::of(&tile).hex(), *hash, "{name}");
+        assert_eq!(format!("{:016x}", fnv64(&tile)), *fnv, "{name}");
+        let version2 = render_at(case, RENDER_VERSION);
+        if name == "scale-bilinear" {
+            assert_ne!(
+                tile, version2,
+                "scale-bilinear is the output render version 2 is expected to change"
+            );
+        } else {
+            assert_eq!(
+                tile, version2,
+                "{name} stays bit-exact; only scale-bilinear and rotation change"
+            );
+        }
+    }
+    let rotation = catalog.get("rotation").unwrap();
+    let old = render_at(rotation, RENDER_VERSION_F32);
+    let new = render_at(rotation, RENDER_VERSION);
+    assert_ne!(
+        old, new,
+        "rotation is the other output render version 2 is expected to change"
+    );
+}
+
+#[test]
 fn cpu_reference_hashes_match_the_locked_file() {
     let path = reference_path();
     let text = reference_text();
@@ -1276,34 +1458,15 @@ fn gpu_shader_matches_cpu_reference() {
         let gpu_tile = match gpu.render(&case) {
             Ok(bytes) => bytes,
             Err(err) => {
+                println!("{}: GPU render failed: {err}", case.name);
                 failed.push(format!("{}: {err}", case.name));
                 continue;
             }
         };
-        let rounding = ROUNDING_XFAIL.contains(&case.name.as_str());
-        if cpu == gpu_tile {
-            if rounding {
-                failed.push(format!(
-                    "{} matched bit-exactly; remove it from ROUNDING_XFAIL",
-                    case.name
-                ));
-            }
-        } else if rounding {
-            let delta = cpu
-                .iter()
-                .zip(&gpu_tile)
-                .map(|(a, b)| a.abs_diff(*b))
-                .max()
-                .unwrap_or(0);
-            if delta > 1 {
-                failed.push(format!(
-                    "{}: rounding gap exceeded 1/255 (delta {delta}): {}",
-                    case.name,
-                    diff_report(&cpu, &gpu_tile)
-                ));
-            }
-        } else {
-            failed.push(format!("{}: {}", case.name, diff_report(&cpu, &gpu_tile)));
+        let report = diff_report(&cpu, &gpu_tile);
+        println!("{}: {report}", case.name);
+        if cpu != gpu_tile {
+            failed.push(format!("{}: {report}", case.name));
         }
     }
     assert!(

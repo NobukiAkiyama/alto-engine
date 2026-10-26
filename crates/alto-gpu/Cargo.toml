@@ -21,5 +21,6 @@ wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webg
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "std", "vulkan", "metal", "dx12"] }
 
 [dev-dependencies]
+alto-doc = { path = "../alto-doc" }
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 pollster = "0.4"
