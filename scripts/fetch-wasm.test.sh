@@ -224,10 +224,27 @@ cmp "$tmp/old-wasm" "$out/examples/browser-playground/pkg/alto_wasm_bg.wasm"
 # Stand-in GitHub API. Page 2 returns 500, so a second request fails the test.
 cat > "$tmp/api-server.py" << 'PY'
 import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+import sys
+import traceback
 
-port_path, hits_path, page1_path, page2_path = __import__("sys").argv[1:5]
+port_path, hits_path, page1_path, page2_path = sys.argv[1:5]
+try:
+    import socket
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+
+class BoundServer(ThreadingHTTPServer):
+    # HTTPServer.server_bind calls socket.getfqdn, which waits on a reverse
+    # DNS lookup. macos-15 runners often have no answer for 127.0.0.1.
+    def server_bind(self):
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -267,24 +284,34 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-Path(port_path).write_text(str(server.server_address[1]), encoding="utf-8")
+try:
+    server = BoundServer(("127.0.0.1", 0), Handler)
+    Path(port_path).write_text(str(server.server_address[1]), encoding="utf-8")
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
 server.serve_forever()
 PY
 
 start_api() {
-  rm -f "$tmp/port" "$tmp/hits"
+  rm -f "$tmp/port" "$tmp/hits" "$tmp/api.err"
   EXPECT_TOKEN="$1" SEND_NEXT="$2" PAGE2_FAIL="$3" \
-    python3 "$tmp/api-server.py" "$tmp/port" "$tmp/hits" "$4" "$5" &
+    python3 -u "$tmp/api-server.py" "$tmp/port" "$tmp/hits" "$4" "$5" > "$tmp/api.err" 2>&1 &
   echo $! > "$tmp/api.pid"
   i=0
   while [ ! -s "$tmp/port" ]; do
-    i=$((i + 1))
-    if [ "$i" -gt 50 ]; then
-      echo "API stand-in did not start" >&2
+    if ! kill -0 "$(cat "$tmp/api.pid")" 2>/dev/null; then
+      echo "API stand-in exited before listening" >&2
+      cat "$tmp/api.err" >&2 || true
       exit 1
     fi
-    sleep 0.05
+    i=$((i + 1))
+    if [ "$i" -gt 200 ]; then
+      echo "API stand-in did not start" >&2
+      cat "$tmp/api.err" >&2 || true
+      exit 1
+    fi
+    sleep 0.1
   done
 }
 stop_api() {
