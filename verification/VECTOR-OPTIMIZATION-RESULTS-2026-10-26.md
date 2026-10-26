@@ -1,5 +1,8 @@
 # ベクター描画改善の実装・検証結果
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-26 JST。対象は `35be75a` と既存の SDK 修正を含む作業ツリー。これはベクター描画の P1 / P2a の検証であり、Canvas の間欠的な GPU 喪失を解決したという報告ではない。
 
 後続の [密集ベクター MRT8 の結果](DENSE-VECTOR-RESULTS-2026-10-26.md)を追加した。以下の数値・CI は先行する disjoint batching の記録であり、後続実装の数値で上書きしない。
@@ -32,17 +35,17 @@ Chrome 155.0.8059.84、Apple M5 / Metal、512×512、RGBA16F、4x MSAA。独立�
 
 密集条件では5種類の同じ形状を反復配置し、メッシュキャッシュ済みの描画費用を測った。1,000種類の異なる形状のコールド準備性能を示す値ではない。
 
-生データ、全100サンプル、初回描画、初期化、CPU encode、p95、WASM hash は [Metal の記録](vector-optimization-metal-2026-10-26.json)に保存した。初回値は方式の順序や shader / pipeline の状態に影響されるため、warm の倍率をそのままコールド表示の改善率にはしない。変形など他の5条件は性能採用の100フレーム対象ではなく、画素検査用である。
+生データ、全100サンプル、初回描画、初期化、CPU encode、p95、WASM hash は Metal の記録（`vector-optimization-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）に保存した。初回値は方式の順序や shader / pipeline の状態に影響されるため、warm の倍率をそのままコールド表示の改善率にはしない。変形など他の5条件は性能採用の100フレーム対象ではなく、画素検査用である。
 
 ## 正しさ・配布の確認
 
 - 8条件で Legacy / Pooled / Batched の **RGBA16F 全バイト一致**。離れた形、半透明の重なり、回転・shear・ROI、1,000パス、反射・拡大、stroke-only / cap / join、穴・接触・自己交差、大きな座標を含む。Metal の5プロファイルおよび SwiftShader で差分0。
 - 同じ encoder に2回の描画を入れる検査、GPU 完了を待たず連続 submit する検査、arena の予算不足で旧経路に戻す検査を通過した。
 - `scripts/check.sh` 成功。Rust 122件、Clippy の native / WASM 検査、SDK build / API check、Node 7件、配布 WASM 2箇所と fresh release build の完全一致、build metadata、SHA256SUMS の照合を含む。任意 `vello-probe` feature も WASM Clippy を通過。
-- SwiftShader の既存ブラウザ回帰93件成功：functional32、M5 8、M6 10、M7 9、M8 6、embed28。保存障害・復旧、Undo/Redo、text / mask / effects の既存検査も含む。[回帰記録](vector-regression-swiftshader-2026-10-26.json)、[追加の画素検査](vector-optimization-swiftshader-2026-10-26.json)。
-- Apple Metal でも同じ93件を成功した。[Metal の回帰記録](vector-regression-metal-2026-10-26.json)。
+- SwiftShader の既存ブラウザ回帰93件成功：functional32、M5 8、M6 10、M7 9、M8 6、embed28。保存障害・復旧、Undo/Redo、text / mask / effects の既存検査も含む。回帰記録（`vector-regression-swiftshader-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、追加の画素検査（`vector-optimization-swiftshader-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
+- Apple Metal でも同じ93件を成功した。Metal の回帰記録（`vector-regression-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 - Vite でビルドした `minimal-embed` / `react-embed` の2例も SwiftShader 上で成功。描画、Undo/Redo、PNG export、保存・再読込を実行した。
-- 編集全体の既存 C2 / C3・B1〜B8 は変更前後とも13条件を通過した。[前後の記録](vector-editor-regression-metal-2026-10-26.json)。これは各1プロファイルの回帰確認であり、統計的な速度向上の根拠にはしない。ラスター主体の経路なので、今回のベクター改善によるコールド表示高速化を示すものでもない。
+- 編集全体の既存 C2 / C3・B1〜B8 は変更前後とも13条件を通過した。前後の記録（`vector-editor-regression-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。これは各1プロファイルの回帰確認であり、統計的な速度向上の根拠にはしない。ラスター主体の経路なので、今回のベクター改善によるコールド表示高速化を示すものでもない。
 - 配布用 WASM を2箇所とも再生成した。4,580,315 bytes、SHA-256 `3455925b0e967e94d286d193b2dc47b6c1252110befa0fffff2128c0d20e2dec`。比較用 WASM は6,310,241 bytes、SHA-256 `5f15ea38425114fe22a2642aa41191115bb2cb79cfdef8ad2c6fca3053bf9881`。vello は通常配布ビルドに追加していない。
 
 ## 再現
@@ -51,7 +54,7 @@ Chrome 155.0.8059.84、Apple M5 / Metal、512×512、RGBA16F、4x MSAA。独立�
 
 [最初の CI 実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40215938259)は Rust / WASM / 配布物検査と functional32件を通過した後、M5 の stroke readback 中の `GPU_LOST` で失敗した。Chrome 156.0.8078.47 / SwiftShader。`SharedImageManager::ProduceSkia` の non-existent mailbox、Invalid Texture、`DissociateMailboxForPresent` error4、external Instance reference の消失という既存調査と同じ列が記録された。今回の変更との独立性や Chromium 側の根本原因をこのログだけで断定しない。
 
-この失敗は再試行で上書きせず、[CI の記録](vector-optimization-ci-2026-10-26.json)に保存した。新設した Canvas を使わないベクター画素検査は、先行 suite が失敗しても実行するよう変更した。先行 step の失敗は引き続き job 全体を失敗にする。ローカルの93件成功を、CI 全体の成功と取り違えない。
+この失敗は再試行で上書きせず、CI の記録（`vector-optimization-ci-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）に保存した。新設した Canvas を使わないベクター画素検査は、先行 suite が失敗しても実行するよう変更した。先行 step の失敗は引き続き job 全体を失敗にする。ローカルの93件成功を、CI 全体の成功と取り違えない。
 
 [更新後の CI 実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40216325393)は、commit `16e4ce0994ec8fb17546afc7d68236c3b4c489d5` で全ての必須 step を成功した。Rust / WASM / 配布物検査、通常回帰93件、埋め込み2例、追加の8画素条件＋3寿命・予算条件を含む。Chrome 156.0.8078.47 / SwiftShader。配布 WASM hash はローカルと同じ `3455925b...20e2dec`。比較用 WASM は CI 上でソースから再ビルドされ、実行した hash は `af746acf...b04389` と記録した。比較ビルドは通常配布の exact-byte 再現ビルドと異なりビルダーのパスを含み、ローカル測定用の hash とは区別する。
 

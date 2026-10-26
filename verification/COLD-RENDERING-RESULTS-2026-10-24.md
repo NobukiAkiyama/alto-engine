@@ -1,5 +1,8 @@
 # 中断可能なコールド可視描画の実装と検証
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-24。[設計](../COLD-RENDERING-DESIGN.md)の通常ラスタ向けP1/P2とC2/C3計測を実装した。可視ジョブの最大同期ステップを短縮する変更であり、コールド完全描画250 msは未達。派生OPFSキャッシュ、M5機能のジョブ化、C1/C4/C5の起動・検証・復旧内部の詳細時刻は未実装。
 
 ## 実装
@@ -27,7 +30,7 @@ Rustテスト94件、native/wasm32 Clippy（警告をエラー扱い）、SDKビ
 
 派生ディスクキャッシュは初めて表示する文書に効かず、GPU読戻し・OPFS保存・再検証の費用も未測定なので今回有効化していない。B7の完全描画は既存目標内にある。M5を含む文書の同期停止時間は今回の改善範囲外。別GPU、長時間編集後、実制作文書での性能は未検証。
 
-開発中の別試行でB7 2062.3 msの失敗も観測した。[記録](cold-render-trial-outlier-2026-10-24.json)を残す。この試行時はビルドとSwiftShader検証が並行していた。以下の正式比較はそれらの終了後に実行した5回すべてであり、結果の良い回だけを抽出していない。
+開発中の別試行でB7 2062.3 msの失敗も観測した。記録（`cold-render-trial-outlier-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）を残す。この試行時はビルドとSwiftShader検証が並行していた。以下の正式比較はそれらの終了後に実行した5回すべてであり、結果の良い回だけを抽出していない。
 
 ## 最終配布WASMとMetal 5回比較
 
@@ -35,11 +38,11 @@ Rustテスト94件、native/wasm32 Clippy（警告をエラー扱い）、SDKビ
 
 | 回 | C3 同期参照 | C3 新経路 | 同期参照の最長ステップ | 新経路の最長ステップ | B2 | B7 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| [1](cold-render-metal-run1-2026-10-24.json) | 396.4 ms | 453.5 ms | 13.5 ms | 2.1 ms | 2.9 ms | 1320.4 ms |
-| [2](cold-render-metal-run2-2026-10-24.json) | 416.9 ms | 466.0 ms | 14.8 ms | 2.1 ms | 2.5 ms | 1408.4 ms |
-| [3](cold-render-metal-run3-2026-10-24.json) | 457.4 ms | 411.9 ms | 16.4 ms | 2.1 ms | 2.8 ms | 1278.7 ms |
-| [4](cold-render-metal-run4-2026-10-24.json) | 406.0 ms | 413.7 ms | 14.3 ms | 2.1 ms | 2.7 ms | 1299.6 ms |
-| [5](cold-render-metal-run5-2026-10-24.json) | 404.2 ms | 408.1 ms | 13.4 ms | 2.1 ms | 3.1 ms | 1275.6 ms |
+| 1（`cold-render-metal-run1-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 396.4 ms | 453.5 ms | 13.5 ms | 2.1 ms | 2.9 ms | 1320.4 ms |
+| 2（`cold-render-metal-run2-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 416.9 ms | 466.0 ms | 14.8 ms | 2.1 ms | 2.5 ms | 1408.4 ms |
+| 3（`cold-render-metal-run3-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 457.4 ms | 411.9 ms | 16.4 ms | 2.1 ms | 2.8 ms | 1278.7 ms |
+| 4（`cold-render-metal-run4-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 406.0 ms | 413.7 ms | 14.3 ms | 2.1 ms | 2.7 ms | 1299.6 ms |
+| 5（`cold-render-metal-run5-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 404.2 ms | 408.1 ms | 13.4 ms | 2.1 ms | 3.1 ms | 1275.6 ms |
 
 C3中央値は同期参照406.0 ms、新経路413.7 ms。完全描画時間の明確な短縮は確認できず、主な改善は長い同期処理を分割した点にある。250 msは未達。`maxStepMs`は合成ジョブ1ステップの時間で、Workerのtick全体や入力メッセージ応答時間の厳密な上限ではない。
 
@@ -50,6 +53,6 @@ C3中央値は同期参照406.0 ms、新経路413.7 ms。完全描画時間の�
 
 5回とも既存B1–B7の基準を満たし、ズーム前の親は35/35。GPU計上値484.75/512 MiB、WASMは各JSONのB6を参照。コールドC2/C3は診断値であり、JSONの`pass:true`は試験が完了した意味で、250 ms達成を意味しない。
 
-[SwiftShader集計](cold-render-swiftshader-summary-2026-10-24.json)。
+SwiftShader集計（`cold-render-swiftshader-summary-2026-10-24.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 CIのChrome 152では、参照画像の取得前に別倍率の自動描画が入ることで、参照側だけ完成子タイルからの縮小を使う試験の競合を検出した。参照側も対象倍率を指定してからGPUキャッシュを破棄する手順へ修正し、変形端の縮小と直接サンプリングを混同しないようにした。

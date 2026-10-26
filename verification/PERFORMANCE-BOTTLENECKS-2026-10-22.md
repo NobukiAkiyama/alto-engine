@@ -1,6 +1,9 @@
 # 4K 半透明レイヤーの性能ボトルネック（2026-10-22）
 
-対象: `026ff48`、Chrome 155 headless、Apple Metal WebGPU、3840×2160 のラスターレイヤー。通常ベンチマークは 20 層。比較のため同じシーン生成ループを一時的に 10 層にし、計測後に元へ戻した。Worker / SDK に加えた一時的な時計計測も元へ戻した。記録は [20 層](profile-translucent-20-layers-2026-10-22.json) と [10 層](profile-translucent-10-layers-2026-10-22.json)。各条件 1 回の診断ランであり、細かい差を評価するための統計試験ではない。
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
+対象: `026ff48`、Chrome 155 headless、Apple Metal WebGPU、3840×2160 のラスターレイヤー。通常ベンチマークは 20 層。比較のため同じシーン生成ループを一時的に 10 層にし、計測後に元へ戻した。Worker / SDK に加えた一時的な時計計測も元へ戻した。記録は 20 層（`profile-translucent-20-layers-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） と 10 層（`profile-translucent-10-layers-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。各条件 1 回の診断ランであり、細かい差を評価するための統計試験ではない。
 
 | 計測箇所 | 10 層 | 20 層 | 読み取り |
 | --- | ---: | ---: | --- |

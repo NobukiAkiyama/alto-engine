@@ -1,14 +1,17 @@
 # 中断可能な低倍率親タイル先読み: 実装と検証
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-23。配布WASM SHA-256: `65d988114c677d07806a7251c315ee33653c4ad7e8d12b3b9adcc8e07e37ea6c`。Chrome 155、Apple Metal WebGPU、1093×827 CSS viewport、DPR 2、1566×1284物理キャンバス、3840×2160・半透明ラスター20層。各回は新規ブラウザプロファイルで、120フレーム連続パン直後に待機せず物理倍率0.5へズームした。B2はズーム要求から完全描画とGPU完了まで。変更前の同条件結果は[同期先読みの5回測定](LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)にある。
 
 | 回 | B1 p95 | B2 | B3 p95 | B7 | ズーム前の親 | 最大同期ステップ | 先読みCPU合計 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| [1](resumable-low-zoom-metal-run1-2026-10-23.json) | 4.2 ms | 2.1 ms | 10.4 ms | 1421.2 ms | 35/35 | 2.2 ms | 459.5 ms |
-| [2](resumable-low-zoom-metal-run2-2026-10-23.json) | 4.0 ms | 1.8 ms | 18.0 ms | 1397.7 ms | 35/35 | 2.2 ms | 483.0 ms |
-| [3](resumable-low-zoom-metal-run3-2026-10-23.json) | 3.3 ms | 2.9 ms | 16.0 ms | 1404.3 ms | 35/35 | 2.1 ms | 468.0 ms |
-| [4](resumable-low-zoom-metal-run4-2026-10-23.json) | 3.8 ms | 3.5 ms | 20.7 ms | 1391.0 ms | 35/35 | 2.2 ms | 480.6 ms |
-| [5](resumable-low-zoom-metal-run5-2026-10-23.json) | 3.9 ms | 2.1 ms | 15.7 ms | 1415.0 ms | 35/35 | 2.3 ms | 434.3 ms |
+| 1（`resumable-low-zoom-metal-run1-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 4.2 ms | 2.1 ms | 10.4 ms | 1421.2 ms | 35/35 | 2.2 ms | 459.5 ms |
+| 2（`resumable-low-zoom-metal-run2-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 4.0 ms | 1.8 ms | 18.0 ms | 1397.7 ms | 35/35 | 2.2 ms | 483.0 ms |
+| 3（`resumable-low-zoom-metal-run3-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 3.3 ms | 2.9 ms | 16.0 ms | 1404.3 ms | 35/35 | 2.1 ms | 468.0 ms |
+| 4（`resumable-low-zoom-metal-run4-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 3.8 ms | 3.5 ms | 20.7 ms | 1391.0 ms | 35/35 | 2.2 ms | 480.6 ms |
+| 5（`resumable-low-zoom-metal-run5-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | 3.9 ms | 2.1 ms | 15.7 ms | 1415.0 ms | 35/35 | 2.3 ms | 434.3 ms |
 | 中央値 | 3.9 ms | 2.1 ms | 16.0 ms | 1404.3 ms | 35/35 | 2.2 ms | 468.0 ms |
 
 B1 ≤16.7 ms、B2 ≤250 ms、B3 ≤33.4 ms、B7 ≤1500 msを5回とも満たした。GPU計上値は各回484.75/512 MiB、WASMは241.06–241.56/1024 MiB。GPU値はエンジンの割当推定であり、wgpu内部の一時転送やOSのVRAM実使用量を厳密に含まない。性能はこのMacのMetal実測であり、SwiftShaderを性能判定に使っていない。
@@ -23,7 +26,7 @@ B1 ≤16.7 ms、B2 ≤250 ms、B3 ≤33.4 ms、B7 ≤1500 msを5回とも満た�
 
 最大の原子操作は入力取得1.3 ms、RGBA変換0.1 ms、書込み0.6 ms、GPU提出0.2 msだった。最大同期ステップは同期版の14.5–15.6 msから2.1–2.3 msへ短縮したが、**2.0 ms以下の目標は厳密には未達**。この超過は主にバッチ終了判定と呼出しの事務処理を含む。先読みCPU合計は同期版336.3–357.9 msから434.3–483.0 msへ、元タイル転送は550,502,400 bytesから604,241,920–616,824,832 bytesへ増えた。中断・再検証の費用として明示する。
 
-Rust `cargo test --workspace --locked` は94件、native/wasm32 Clippy `-D warnings`、SDKビルドが成功。SwiftShaderの[集計](resumable-low-zoom-swiftshader-summary-2026-10-23.json)は機能21、M5 8、M6 10、M7 9、M8 6の計54件で失敗0。[画素試験](resumable-low-zoom-swiftshader-functional-2026-10-23.json)には512×512全面と300×300透明端で、直接合成と先読み親タイルの一致を含む。
+Rust `cargo test --workspace --locked` は94件、native/wasm32 Clippy `-D warnings`、SDKビルドが成功。SwiftShaderの集計（`resumable-low-zoom-swiftshader-summary-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）は機能21、M5 8、M6 10、M7 9、M8 6の計54件で失敗0。画素試験（`resumable-low-zoom-swiftshader-functional-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）には512×512全面と300×300透明端で、直接合成と先読み親タイルの一致を含む。
 
 ## 残る境界
 

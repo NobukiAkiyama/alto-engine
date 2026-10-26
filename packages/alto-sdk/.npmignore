@@ -1,0 +1,7 @@
+# The repo .gitignore keeps dist/pkg/*.wasm out of git. This file makes npm
+# pack that package with its own rules so those binaries stay in the tarball
+# after build.mjs copies them into dist/pkg.
+src/
+*.ts
+!dist/**/*.d.ts
+temp/

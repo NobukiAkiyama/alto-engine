@@ -1,5 +1,8 @@
 # GPU 喪失の追加切り分け（2026-10-25）
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 結論
 
 **元の macOS CI と同じ SharedImage / present の異常を再現した。さらに、起動直後・最初の機能テストより前にも発生し、自動復旧の後で 93 件すべてが成功するケースを確認した。**
@@ -8,7 +11,7 @@
 
 **mailbox が消える最下層の原因、対応する Chromium の不具合番号、Alto の特定のコード行までは特定できていない。** 単純な Canvas 操作・資源の確保だけでは macOS の障害を再現できなかった。Alto がブラウザの資源寿命の問題を誘発している可能性も残る。
 
-これは追加調査の結果であり、GPU 喪失を修正したという報告ではない。前回の証拠は [GPU-LOSS-INVESTIGATION-2026-10-25.md](GPU-LOSS-INVESTIGATION-2026-10-25.md)。今回の数値・プロセス情報・エラー行の抜粋は [gpu-loss-isolation-ci-2026-10-25.json](gpu-loss-isolation-ci-2026-10-25.json)。
+これは追加調査の結果であり、GPU 喪失を修正したという報告ではない。前回の証拠は [GPU-LOSS-INVESTIGATION-2026-10-25.md](GPU-LOSS-INVESTIGATION-2026-10-25.md)。今回の数値・プロセス情報・エラー行の抜粋は `gpu-loss-isolation-ci-2026-10-25.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 ## 1. 起動中の喪失が、合格結果の裏で起きていた
 
