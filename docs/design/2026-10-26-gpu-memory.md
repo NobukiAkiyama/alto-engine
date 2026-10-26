@@ -3,7 +3,7 @@
 作成日：2026-10-26
 状態：設計のみ。この PR は文書を足すだけで、コードは変えない。
 
-対象は `crates/alto-gpu` のテクスチャ予約、M5 の中間ターゲット、表示タイルの退避、予算に対する確保量、スロットの再利用である。B6（[verification/EMBEDDING-API-RESULTS-2026-10-25.md](../../verification/EMBEDDING-API-RESULTS-2026-10-25.md)）が Metal で GPU 484.8 / 512 MiB と報告している。この数字を下げ、内訳を見えるようにする。
+対象は `crates/alto-gpu` のテクスチャ予約、M5 の中間ターゲット、表示タイルの退避、予算に対する確保量、スロットの再利用である。B6（[verification/EMBEDDING-API-RESULTS-2026-10-25.md](../../verification/EMBEDDING-API-RESULTS-2026-10-25.md)）が Metal で GPU 484.8 / 512 MiB と報告している。内訳を見えるようにし、小さい予算での過大予約と効果付き文書の中間確保を減らす。既定の 512 MiB における B6 の削減量は、下記の正規データ保持条件を満たす別方式を検証するまで未確定とする。
 
 ## コードで確かめた内訳
 
@@ -26,11 +26,12 @@ B6 のピーク 484.75 MiB（表の 484.8 は小数 1 桁への丸め）は、�
 
 M5 の中間は `Rgba16Float`（1 テクセル 8 バイト）で、ROI の幅か高さが変わると作り直す（`crates/alto-gpu/src/renderer/m5.rs` 245–278 行）。ベクターはメッシュに加え、カバレッジが `幅×高さ×5`（4x MSAA の R8 と解決後の R8、`renderer/vector.rs` 206–215 行、558–588 行）。いずれも B6 の 484.75 には入っていない。効果付きの文書ではここに乗る。
 
-WebGPU では `Drop` が GPU オブジェクトを解放しない（[wgpu #4092](https://github.com/gfx-rs/wgpu/issues/4092)）。`StrokeTile::destroy`（`renderer.rs` 211–220 行）と `Retired`（327–355 行）が、送信の直後に `destroy()` している。
+WebGPU バックエンドでは `Drop` だけでの実解放に依存しない（[wgpu #4092](https://github.com/gfx-rs/wgpu/issues/4092)）。`StrokeTile::destroy`（`renderer.rs` 211–220 行）と `Retired`（327–355 行）は送信後に `destroy()` を呼ぶ。この順序は提出済みの利用を保護する。native の `wgpu::Texture::destroy()` も最終 submission に基づいて実破棄を遅延する（[wgpu-core 30.0.1 の実装](https://docs.rs/wgpu-core/30.0.1/src/wgpu_core/resource.rs.html#1683-1687)）。CPU が GPU 完了を確認することを、すべての破棄・再利用の前提にはしない。
 
 ## 制約
 
 - 画素が変わる変更（中間を 8 ビットにする、MSAA の段数、縮小の式）は範囲外。入れるなら描画バージョンを新しくし、ハッシュの回帰を付ける。この設計は画素をビット単位で保つ。文書の `format_version`（`crates/alto-doc/src/lib.rs` 21–40 行）はファイル形式で、描画バージョンではない。描画バージョンは、画素を変える変更を入れるとき初めて足す。
+- 正規の描画データは現在のキャンバス境界で削除しない。現在見えないタイルも、後のレイヤー移動で見える。表示用 GPU 資源の削減と、正規タイルの生成・保存は分けて設計する。
 - CI は SwiftShader（`scripts/verify-browser.mjs`）。性能とメモリの合否に Metal の絶対値は使わない。main との相対差か、エンジンの計上値で見る。SwiftShader のベンチは「GPU budget too small for one display tile」で落ちる既存の制約があり、B6 のゲートは Metal の手動計測のままにする。
 - 別の進行中の変更が、GPU と CPU の画素一致テストの既存本体、GPU 待ちの上限（`packages/alto-sdk/src/worker.ts` の `presentSettled`、50 ms）、README、LICENSE に触れている。実装でもそこを同時に書き換えない。ぼかしの再利用を見るテストは、既存テストの隣に新しい関数として足す。
 
@@ -44,11 +45,11 @@ WebGPU では `Drop` が GPU オブジェクトを解放しない（[wgpu #4092]
 
 ### 設計
 
-4 区分の和が、今の `gpu_bytes` と一致する。5 個目の `live_fixed` は和に入れない。空の層が予約と最低必要量の差である。
+初期導入では4区分の和を現行の `gpu_bytes` と一致させる。5個目の `live_fixed` は和に入れない。5節で退役台帳を加えた後は、未解放分も元の区分に一度だけ計上する。その段階で現行式より上限が増える差は、別の計上改善として記録する。
 
 ```rust
-/// Physical bytes the renderer has reserved or allocated.
-/// `fixed + effects + stroke + vector` is today's `gpu_bytes`.
+/// Managed reserved/allocated byte estimates, not total driver VRAM.
+/// The initial rollout matches today's `gpu_bytes`; section 5 adds retired bytes.
 /// `live_fixed` is the occupied part of `fixed` and is not added again.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct GpuBytes {
@@ -56,7 +57,7 @@ pub struct GpuBytes {
     /// whether or not a slot holds a tile.
     pub fixed: u64,
     /// Occupied atlas slots + occupied display slots + scratch.
-    /// `fixed - live_fixed` is empty reservation.
+    /// With retired fixed allocations: empty = fixed - live_fixed - retired_fixed.
     pub live_fixed: u64,
     /// M5 pool, physical size (bucket, not the logical ROI). Includes the 1×1 dummy.
     pub effects: u64,
@@ -123,20 +124,22 @@ B6 は合計の最大値に加え、その最大値を出したフレームの `
 
 Playground の 1 行表示（`examples/browser-playground/main.js` 414 行）も、合計の横に 4 区分を出す。
 
-### この計測で先に削るもの（ストロークをキャンバスで切る）
+### キャンバス外の正規データを保持する
 
-484.75 を動かしているのは固定予約ではなく、キャンバス外のストロークタイル 254 枚である。変形後の矩形がキャンバスと交わるタイルだけを作る。`GpuStroke.world` はレイヤーから文書への変換（`renderer.rs` 231–232 行）なので、タイル座標のまま切らない。文書座標に写してから `scene` のキャンバスと比べる。キャンバスの幅と高さは `brush_input` が既に持っている（`crates/alto-wasm/src/lib.rs` 660–662 行、選択があるときだけ `[width, height]` を渡している）。選択の有無と別に渡す。
+B6 のキャンバス外 254 枚・190.5 MiB は削減候補の調査対象であり、そのまま不要と判断できるメモリではない。`finish_stroke` → `endBrush` は、そのタイルも `Op::SetTiles` としてレイヤーに保存する（`crates/alto-wasm/src/lib.rs` 670–719 行）。表示シェーダが現在のキャンバス外を描かないことと、文書がその画素を必要としないことは別である。
 
-交わりの判定は包含ではなく交差である。端のタイルは残す。合成シェーダはキャンバスの外を書かない（`renderer.rs` 1175–1176 行）。キャンバス外のプレビューはサンプルされないので、画素は変わらない。
+現行 head `f0d1a9` の配布 WASM を Chrome 155 / Apple Metal で確認した。64×64 の文書でブラシを `(32,32)` から `(-384,32)` まで動かすと、正規タイル `(-2,0)` が残る。レイヤーを右へ 416 px 移動すると、キャンバス内の `(32,32)` は `[255,0,0,255]` になる。元のキャンバスと全く交わらないタイルが、編集後には表示に必要となる例である。
 
-B6 のこの配置（レイヤーの変形なし）では 190.5 MiB 減り、ピークは 294.25 MiB（固定 193 + キャンバス内 135 枚 × 0.75 MiB）になる。
+したがって、この計画では `stamp` にキャンバス交差判定を入れて正規タイルの生成を省かない。B6 の 389 枚を 135 枚だけにする変更と、「画素を変えずに 190.5 MiB 削減する」という採用見積もりは外す。既定の予算では、この B6 のピークが 484.75 MiB のままでも、この計画の実装失敗とはしない。
+
+表示用 GPU 常駐量だけを減らす後続案には、例えば、元の下地・選択・変形・ダブ順序を保持し、キャンバス外も同じ GPU カーネルで小さいバッチに分けて生成・読み戻す方式がある。ただし、この PR ではその方式を採用しない。正規タイルのハッシュ、ストローク確定の原子性、WASM 側の保持量、確定時間と退役待ちを含む GPU ピークを別途検証してから設計する。CPU 方式へ移す場合も、既存カーネルとの画素一致が条件になる。別方式で保持したデータを失ったまま GPU 常駐分だけを計上から消してはならない。
 
 ### 触るファイル
 
-- `crates/alto-gpu/src/renderer.rs`：`GpuBytes`、`FrameReport`、`frame_report`、`stamp` の予算式、タイル生成のキャンバス交差。
+- `crates/alto-gpu/src/renderer.rs`：`GpuBytes`、`FrameReport`、`frame_report`、`stamp` の予算式。正規ストロークタイルの生成範囲は変えない。
 - `crates/alto-gpu/src/renderer/m5.rs`：`alloc` の固定分を同じ式にする。`bytes` は物理サイズ。
 - `crates/alto-gpu/src/renderer/vector.rs`：`bytes` を `vector` 区分へ。計上以外は変えない。
-- `crates/alto-wasm/src/lib.rs`：`FRAME_FIELDS` と `tick`。`brush_input` がキャンバス寸法を渡す。
+- `crates/alto-wasm/src/lib.rs`：`FRAME_FIELDS` と `tick`。`brush_input` / `endBrush` の正規データ生成は現行のまま。
 - `packages/alto-sdk/src/worker.ts`：`decodeFrame` だけ。`packages/alto-sdk/src/protocol.ts`：`FrameStats`。
 - `tests/e2e/browser-tests.js`：B6 の記録。ゲートは合計 ≤ 512 MiB のまま。
 - `examples/browser-playground/main.js`：表示。
@@ -144,13 +147,14 @@ B6 のこの配置（レイヤーの変形なし）では 190.5 MiB 減り、ピ
 ### リスク
 
 - `gpu_bytes` の意味を合計のままにしておかないと、B6 の比較が切れる。
-- レイヤーが回転しているとき、タイル座標で切るとキャンバス上の画素が欠ける。文書座標で交差を見る。
+- 現在のキャンバスと交わらないという理由で正規タイルを捨てると、後のレイヤー移動で画素が欠ける。ストロークの全変更キーと保存内容を保持する。
 - `live_fixed` を合計に足すと二重計上になる。和は 4 区分だけ。
 
 ### テスト
 
 - ホストの単体テストで、空の描画器相当の数（アトラス層、表示層、scratch）から `total()` が今の式と一致すること。scratch を M5 側の式にも含むこと。
-- キャンバス外のダブがタイルを足さないこと、端に掛かるダブは足すこと、回転した `world` では文書座標で残ること。CPU の参照ストロークと、キャンバス内のタイルが一致すること。
+- 64×64 の文書で `(32,32)` から `(-384,32)` へ描き、正規タイル `(-2,0)` を保持すること。レイヤーを右へ 416 px 動かした後の `(32,32)` が `[255,0,0,255]` になること。境界に触れるだけのタイルに依存しない再現条件とする。
+- 同じ描画・移動を main と比較し、全正規タイルのキーとハッシュを一致させること。変形、選択、Undo/Redo、保存・再読込を挟んでも、後から見える画素が一致すること。
 - SwiftShader の既存機能テストが画素を変えないこと。Metal の B6 は、ピークのフレームの 4 区分と、終了後のフレームを結果の表に書く。CI は絶対値の 484.8 で合否を見ない。
 
 ## 2. M5 中間テクスチャのプール
@@ -175,9 +179,9 @@ fn bucket(n: u32) -> u32 {
 
 1×1 の透明入力はバケットに入れない。ぼかしがそれと実ターゲットを共有すると、前の中身を読む。
 
-フレームをまたいで保持し、未使用が `POOL_IDLE_FRAMES`（8）に達したら `Retired` へ渡す。タイル毎の `drain` はやめる。破棄は 5 節の送信番号が完了してから `destroy()` する。`truncate` で `Drop` に任せない。
+フレームをまたいで保持し、未使用が `POOL_IDLE_FRAMES`（8）に達したら `Retired` へ渡す。タイル毎の `drain` はやめる。全 consumer の submit 後に `destroy()` し、実解放の計上は 5 節の退役台帳で追う。`truncate` で `Drop` に任せない。
 
-寿命が重ならない中間は、同じ物理テクスチャを共有する。レンダーグラフのエイリアシング（[Render Graph Aliasing](https://matthewberger.dev/nightshade-book/render-graph-aliasing.html)）と同じ考え方である。今のコードは即時モードなので、グラフを二度歩くのではなく、最後の読み出しをエンコードし終えた `Target` をフリーリストへ返す。1 つのコマンドエンコーダの中では順序が保たれる。占有者 A の読み出しを全部書いてから、消して、占有者 B の書き込みを書く。
+寿命が重ならない中間は、同じ物理テクスチャを共有する。レンダーグラフのエイリアシング（[Render Graph Aliasing](https://matthewberger.dev/nightshade-book/render-graph-aliasing.html)）と同じ考え方である。今のコードは即時モードなので、グラフを二度歩くのではなく、最後の読み出しをエンコードし終えた `Target` をフリーリストへ返す。1 つのコマンドエンコーダの中では順序が保たれる。占有者 A の最後の読み出し、全体 clear、占有者 B の書き込みを、この順で GPU コマンドとして記録する。同じ pass の入出力へ同一 texture を束ねない。`queue.write_texture` などの queue 書き込みをこの並びへ挟むことはできず、その場合の未提出参照は 5 節の pin で保護する。
 
 同時に生きる枚数は、1 回のディスパッチが束ねる枚数と、まだ読み終えていない祖先である。ノードの数だけ `Rgba16Float` を持たない。シェーダは入力 3 枚と出力 1 枚を束ねる（`effects.wgsl` 4–7 行）。
 
@@ -323,7 +327,7 @@ fn cache_layers(budget_bytes: u64, max_array_layers: u32) -> (u32, u32) {
 
 視界が確保した表示層数を超えたら、今の「256 枚を超える」エラー（1916–1919 行）を、実際の層数で出す。層を後から増やして予算を超えない。
 
-`fixed` の計上はこの層数を使う。空の層は `fixed - live_fixed` に出る。
+`fixed` の計上はこの層数を使う。未解放の固定配列が無いとき、空の層は `fixed - live_fixed` に出る。切替時の退役分は5節の `retired_fixed` も引く。
 
 ### 触るファイル
 
@@ -331,7 +335,7 @@ fn cache_layers(budget_bytes: u64, max_array_layers: u32) -> (u32, u32) {
 
 ### 削減の見込み
 
-既定の 512 MiB では固定は 193 MiB のまま。B6 の低下は 1 節のストローク切り（約 190 MiB）が担う。この節は、小さい予算で固定が予算の半分を超えないようにする。128 MiB では約 65 MiB 減り、予算内に収まる。
+既定の 512 MiB では固定は 193 MiB のままで、この B6 に対する削減は約束しない。1 節のキャンバス外の正規データを保持した別方式が未設計・未検証のためである。この節は、小さい予算で固定が予算の半分を超えないようにする。128 MiB では約 65 MiB 減り、予算内に収まる。
 
 ### リスク
 
@@ -345,67 +349,81 @@ fn cache_layers(budget_bytes: u64, max_array_layers: u32) -> (u32, u32) {
 - 512 MiB では層数が今と同じ 512 と 256 であること。
 - SwiftShader で、小さいキャンバスの機能テストが通ること。広いビューポートが層数を超えたとき、既存の予算エラーになること。
 
-## 5. 空いたスロットを、GPU が終わってから使う
+## 5. submit 境界と未提出の参照を区別する
 
-### 問題
+### 契約と問題
 
-表示層とアトラス層は破棄せず、同じ層へ上書きする。`destroy()` が送信済みの作業が終わるまで解放を遅らせる、という WebGPU の性質は、上書きには効かない。
+この描画器は、同じ device の同じ queue に処理を提出する。`submit(A)` で旧内容を読み、その後に `write_texture(B)` と `submit(C)` で新内容を使うと、旧読み出しと後続書き込みの依存は queue 順で保たれる。CPU が `on_submitted_work_done` を観測するまで上書きを止める必要はない（[wgpu の説明](https://github.com/gfx-rs/wgpu/discussions/3458)）。前の present が飛行中であることだけを、後の submit のスロット再利用禁止理由にしない。
 
-`render` は、前のフレームの present が終わったかを見る前に、表示キャッシュへ合成を書く（1943–2028 行）。`present_in_flight`（254–257 行、2148–2151 行）は present を 1 枚に抑えるだけで、その present がサンプルしている層への書き込みは止めない。合成はタイルごとにその場で `submit` する（1553–1554 行）。完了コールバックは、ネイティブでは `poll` で走り、WebGPU ではイベントループまで走らない（2020–2021 行のコメント）。
+危険なのは、encoder に旧内容を読むコマンドを記録したが、まだ submit していない場合である。その間の `queue.write_texture` / `write_buffer` は次の submit のコマンドより先に実行され、旧内容を上書きし得る。GPU 完了番号が 0 のままでも、この未提出参照は存在する。完了番号だけで再利用を判定してはならない。
 
-M5 の作り直しとストロークの `destroy()` は、送信の直後に呼んでいる。WebGPU はそこで実体の解放を遅らせる。ネイティブで、使用中のテクスチャをすぐ破棄すると、使用中の資源を壊す。待ちに `poll(Wait)` を使うと Worker が止まる。
+同じ encoder の内部では、A の最終読み出し → clear → B の書き込み、という GPU コマンドの順序で物理 texture を共有できる。これは 2 節の M5 プールに適用する。各 pass の入出力が同時に alias しないことと、A の後続 consumer が残っていないことが条件である。
+
+`wgpu::Texture::destroy()` と、生の native / HAL handle の直接破棄も区別する。このコードが使う高水準の `wgpu` API は、提出済みの最終利用まで実体を保持する。WebGPU でも、全 consumer の submit 後なら明示的な `destroy()` を呼べる。未提出の consumer が残る間は呼ばない。
 
 ### 設計
 
-送信ごとに `u64` の番号を 1 増やす。`on_submitted_work_done` がその番号を `AtomicU64` の完了番号へ書く。`present_in_flight` のブール値を、この番号に一般化する。コールバックは描画器を借用しない。番号だけを書く。
+再利用可否は、次の三つに分ける。
+
+| 状態 | 再利用・破棄の条件 |
+|---|---|
+| 未提出の encoder が旧内容を参照する | queue 書き込みによる再利用と `destroy()` を禁止する。参照を pin し、その encoder の submit または破棄まで保持する |
+| encoder 内で旧内容の最後の読み出しを記録済み | 後続の clear と新しい書き込みを同じ encoder に記録して再利用できる。CPU の queue 書き込みは使わない |
+| 旧内容の全 consumer を提出済み | 同じ queue に後続の書き込み・submit を並べて再利用できる。CPU の完了確認は不要。用途を終えたオブジェクトは `destroy()` できる |
+
+`cache_slot` と `free_atlas_slot` は、この未提出 pin と既存の可視・最粗・合成中の pin を守る。完了待ちの callback がまだ走っていないという理由で、提出済みの層を再利用不可にしない。空いた層を同じ queue で上書きするときに `destroy()` は呼ばない。
+
+`Retired` は、未提出の consumer を持つ texture / buffer を保持し、**全 consumer の submit 後に** `destroy()` する。実体が GPU 上で保持されている間は、退役台帳に分類・推定バイト数・最終 submission を残す。新しい資源の確保に使う予算は、この未解放上限も含める。実装の初期段階では、1 節の4区分の和を現行式と一致させ、その後に未解放分を元の区分へ一度だけ加える。固定配列を作り替えた際の未解放分は `retired_fixed` として区別し、その期間の空予約は `fixed - live_fixed - retired_fixed` とする。退役済みの実体を空の層として表示せず、active と退役で二重計上もしない。
+
+送信番号と完了番号は、この台帳の回収・上限計上のために使う。完了 callback は描画器を借用せず、device epoch ごとの完了番号を単調に進める。同じ queue 上の再利用を一律に止める fence には使わない。
 
 ```rust
 struct GpuTimeline {
     next: u64,
-    completed: Arc<AtomicU64>,
+    completed: Arc<AtomicU64>, // retirement accounting, not a reuse fence
 }
 ```
 
-層とプールテクスチャは、最後に読まれたか書かれた送信番号を持つ。次の占有者に渡してよいのは、完了番号がその番号以上のときだけである。`render` の先頭で `device.poll(Poll)` を 1 回呼び、完了番号を進める。`Poll` は待たない。WebGPU ではコールバックがフレームの途中で進まないので、同じ `render` 呼び出しの中で送った層は、その呼び出しの中では再利用しない。
+native で callback の進行が必要なら `device.poll(Poll)` を使う。WebGPU ではイベントループへ戻して回収する。追加の GPU 完了待ちや `poll(Wait)` を通常の再利用経路に入れない。`Blocked` / 遅延は、未提出 pin のために使える層が無い場合か、未解放分を含めると新規確保の予算が足りない場合に限る。既存の present pacing と Worker の 50 ms 制限は変えない。
 
-再利用できる層が無いときは、合成を `Blocked` にするか、今の `present_deferred` と同じようにフレームを返す。`poll(Wait)` は呼ばない。50 ms の `presentSettled` も変えない。
+CPU への readback / map は従来どおり対応する完了を待つ。他 queue や外部 API の所有権移譲を将来扱う場合も、それぞれの同期契約が必要になる。この設計はその保証を追加しない。
 
-破棄するオブジェクト（ストロークの終了、プールからの追い出し、作り替えたカバレッジ）は、番号を付けて `Retired` に置き、完了番号が追いついてから `destroy()` する。`Drop` では解放しない。追いつくまでのあいだ、その実体はピークに残る。1 フレーム分の遅れで、Worker は止まらない。上書きする層には `destroy()` を呼ばない。
-
-アトラスへの `write_texture`（1115 行）も同じ番号で止める。合成中にピンした層は、今の `pinned` に加え、番号が完了するまで追い出し対象にしない。
+デバイス喪失時は、その device epoch の資源と台帳を破棄して作り直す。失われた queue の完了通知を待ち続けず、旧 epoch の callback が新しい epoch の完了番号を進めないよう、完了状態も epoch ごとに分ける。
 
 ### 触るファイル
 
-- `crates/alto-gpu/src/renderer.rs`：`Retired`、`submit_composite`、`render` の poll と present、`upload_timed`、`cache_slot`。
-- `crates/alto-gpu/src/renderer/m5.rs`：プールへ返すときと、追い出すときの番号。
-- `crates/alto-gpu/src/renderer/vector.rs`：カバレッジを捨てるとき（558–562 行）の番号。
+- `crates/alto-gpu/src/renderer.rs`：`Retired`、未提出 pin、`submit_composite`、`upload_timed`、`cache_slot`、退役バイト数の計上。
+- `crates/alto-gpu/src/renderer/m5.rs`：Target の最後の参照と、encoder 内再利用の clear / 書き込み順序。
+- `crates/alto-gpu/src/renderer/vector.rs`：カバレッジの退役を consumer の submit 境界へ結び付ける。
 
-`submittedWorkDone`（`alto-wasm/src/lib.rs` 1127–1137 行）と Worker の 50 ms 制限は、別の変更が触っている。ここからは呼ばない。タイムラインは描画器の中の `on_submitted_work_done` だけを使う。
+`submittedWorkDone`（`alto-wasm/src/lib.rs` 1127–1137 行）と Worker の 50 ms 制限は別の変更の対象である。この計画からは変更せず、台帳は描画器の既存 queue を追跡する。
 
-### 削減の見込み
+### 削減の見込みとリスク
 
-バイト数は減らない。使用中のテクスチャを壊さずに、小さい予算とプールの再利用をできるようにする前提である。
+この節だけで B6 のバイト数が減るとは約束しない。未解放分の計上によって、報告する上限が従来値より大きくなる場合もある。目的は、未提出参照を壊さず、同じ queue で順序付けられる再利用に不要な停止を加えずに、予算と寿命を管理することである。
 
-### リスク
-
-- 完了を待たずに上書きすると、前の present の画素が次のタイルに変わる。番号の比較を、書き込みの前に置く。
-- 完了待ちを `Wait` にすると、フレーム予算の 8 ms を GPU 待ちが食う。`Poll` と、再利用できなければ遅延、に限る。
-- 破棄を完了まで遅らせると、ピークが 1 フレーム分高くなる。`effects` と `stroke` の計上に、`Retired` でまだ `destroy` していない実体を含める。含めないと、予算の下で実体が残る。
+- 未提出参照を queue 書き込みで上書きすると、複数の読み出しが最後の値を見る。pin の対象と解除する submit を対応させる。
+- GPU コマンドによる encoder 内再利用に queue 書き込みを混ぜると、期待した順序にならない。
+- 未解放の実体を台帳から早く外すと、新規確保が予算を超える。逆に、完了待ちをすべての再利用へ適用すると、CPU / GPU の並行性を失う。
 
 ### テスト
 
-- 番号が完了していない層へ書き込まないこと。完了した層は書き込めること。全部が使用中なら、待ちに入らず `deferred` か `Blocked` を返すこと。
-- 前の present が飛行中に、その present が参照している表示層の画素が変わらないこと。読み戻しで見る。
-- プールのテクスチャを、完了前に `destroy` していないこと。デバイス喪失のあとは、今どおり資源をまとめて捨てて作り直す。
+- 未提出 encoder が A を読む間、同じ層への queue 書き込みと `destroy()` を行わないこと。submit または encoder 破棄で pin を解除すること。
+- 同じ queue で「赤を書き込む → copy A を submit → 緑で上書き → copy B を submit」とし、CPU が完了を観測する前でも結果が赤・緑の順になること。全 copy の submit 後に `destroy()` しても結果が保たれること。Chrome 155 / Metal のレビュー時の再現でも、この結果を確認した。
+- M5 の同じ encoder で「A を読む → 全体 clear → B を書く → B を読む」を記録し、旧 A と新 B の参照結果が一致すること。同じ pass の入出力を alias させないこと。
+- native の安全な `wgpu` API でも submit 後の `destroy()` と読み戻しを検査すること。未提出の利用を destroy してよいというテストにはしない。
+- 退役待ちの上限を予算に含み、完了通知後に一度だけ減算すること。CPU の完了確認が未了でも、追加確保しない同一 queue の再利用は進められること。
+- デバイス喪失後の再作成が旧 callback に影響されないこと。永遠に完了しない旧 queue を理由に回復を止めないこと。
 
 ## 実装の順序
 
-1. **計測（1 節の型と API）。** 挙動は変えない。合計が今の `gpu_bytes` と一致することを先に固定する。B6 の表をこの形で取り、以降の差を区分で見る。
-2. **ストロークをキャンバスとの交差で切る。** 画素は変えない。この B6 では約 190 MiB 減り、ピークは約 294 MiB になる。484.8 を実際に下げるのはここである。
-3. **送信番号（5 節）。** 退避とプールが上書きを始める前に入れる。
-4. **予算に合わせた層数（4 節）。** 512 MiB では固定は 193 MiB のまま。128 MiB と 256 MiB の超過と過大予約をやめる。
-5. **退避の箱と最粗のピン（3 節）。** 層数が予算で頭を持つようになってから、どれを残すかが効く。
-6. **M5 のプール（2 節）。** 番号と、新しい画素テストが揃ってから。B6 の数字は動かない。
+1. **計測（1 節の型と API）。** 初期導入では合計を現行の `gpu_bytes` と一致させる。キャンバス外を含む正規ストロークタイルを維持した状態で B6 の基準を記録する。
+2. **submit 境界と退役台帳（5 節）。** 未提出 pin、提出済みの同一 queue の再利用、未解放上限の計上を分ける。全再利用を GPU 完了待ちにしない。
+3. **予算に合わせた層数（4 節）。** 512 MiB の固定は 193 MiB のまま。128 MiB と 256 MiB の超過と過大予約をやめる。
+4. **退避の箱と最粗のピン（3 節）。** 正規の内容を捨てず、作り直せる表示キャッシュの退避を選ぶ。
+5. **M5 のプール（2 節）。** encoder 内の寿命と、ぼかしの画素検査が揃ってから。同じ queue の提出済み利用には完了待ちを足さない。この B6 に効果は無い。
+
+キャンバス外ストロークの GPU 常駐量削減は、正規データ保持と確定処理を別方式で保証できてからの独立した設計とする。190.5 MiB は今後調べる内訳であり、この実装順序による達成済み・保証済みの削減量ではない。
 
 各段階で、Rust のテスト、clippy、SwiftShader の機能テストを通す。Metal の B6 は区分付きで記録し、CI の合否には使わない。
 
@@ -416,7 +434,9 @@ struct GpuTimeline {
 - CI を Metal の絶対値（484.8 MiB など）で落とすこと。CI は SwiftShader で、合否は計上値の一致と、main に対する画素と機能の相対比較にする。
 - `clear_texture`。wgpu の WebGPU バックエンドには無い。空のレンダーパスの `LoadOp::Clear` を使う。
 - 退避タイルの CPU 側圧縮保持。最初の実装には入れない。WASM の 1024 MiB 枠を使うためである。
-- スパーステクスチャでアトラスの空層を物理的に外すこと。このコードが使う WebGPU の範囲では、層ごとのレジデンシーは使えない。空層は計上の `fixed - live_fixed` で見えるようにする。
+- スパーステクスチャでアトラスの空層を物理的に外すこと。このコードが使う WebGPU の範囲では、層ごとのレジデンシーは使えない。空層は `fixed - live_fixed - retired_fixed` で区別する（退役分が無ければ `fixed - live_fixed`）。
 - ベクターのカバレッジを M5 のプールへ載せること。計上は `vector` に入れる。プールの共有は、M5 が安定してからの候補にする。
 - 進行中の別変更が触る、GPU と CPU の画素一致テストの既存本体、`presentSettled` の 50 ms、README、LICENSE。ぼかしの再利用テストは新しい関数として隣に足す。
-- `Drop` に解放を任せること。WebGPU では解放されない。`destroy()` を、送信番号の完了のあとで明示的に呼ぶ。
+- 正規ストロークタイルを現在のキャンバス境界で切り捨てること。後の移動や保存再読込で必要になるデータを維持する。
+- `Drop` だけに解放を任せること。全 consumer の submit 後に明示的な `destroy()` を行い、実解放の上限計上は完了通知で回収する。
+- 同じ queue の提出済み処理にも CPU の GPU 完了確認を一律に要求すること。未提出 pin と退役の計上を分ける。

@@ -356,3 +356,4 @@ c7f782c6561660c596537ab3d4946292ba66a897be73ba9509e3c698a7b34ddc  verification/s
 cc829996a9797979b172c68b57e3dcd6c67f8fd521c020ca035d8e9cc16ff6c3  verification/translucent-benchmark-2026-10-22-3.json
 ae8b091333c32e91542f3be312409f451a2e405faf3713ffea3d06c90e2ecc01  verification/worker-resilience-functional-2026-10-22.json
 cf934f589ace68ae5aa5f931a530e22251045ccdf1b117535bfafbeb43765f33  verification/worker-resilience-summary-2026-10-22.json
+8817fa6103ead9793964c37dd22e0ff3b584245b513fdbc340c07563df131af2  docs/design/2026-10-26-gpu-memory.md
