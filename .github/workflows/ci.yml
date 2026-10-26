@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -71,17 +72,46 @@ on:
         default: true
         type: boolean
 
+# One run per PR (or per ref, for main and workflow_dispatch). A new push
+# cancels the older run instead of letting both finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  check:
+  native:
+    if: ${{ !inputs.gpu_lifecycle }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      # ~/.cargo registry and git, plus this job's native target/.
+      # cache-bin is off: installed binaries are not part of that set.
+      # shared-key keeps this entry off the wasm job's registry-only cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+          cache-bin: "false"
+          shared-key: native
+      - name: Host rustfmt, tests, and clippy
+        run: sh scripts/check.sh native
+
+  wasm:
     if: ${{ !inputs.gpu_lifecycle }}
     # wasm/SHA256SUMS is the arm64 macOS release build. Rebuild and hash-check
     # on that same host; other hosts do not reproduce those bytes.
     runs-on: macos-15
     timeout-minutes: 60
     env:
+      # Fresh directory every job. rust-cache below does not save or restore
+      # target directories, and the build scripts prefer this path over target/.
+      ALTO_WASM_TARGET_DIR: ${{ runner.temp }}/alto-wasm-target
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
@@ -92,7 +122,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
-          components: rustfmt, clippy
+          components: clippy
           targets: wasm32-unknown-unknown
       - uses: pnpm/action-setup@v6
         with:
@@ -104,7 +134,21 @@ jobs:
           cache-dependency-path: |
             packages/alto-sdk/pnpm-lock.yaml
             examples/*/pnpm-lock.yaml
+      # ~/.cargo registry and git only. No target/ restore, and no ~/.cargo/bin.
+      # The hash-checked release build uses ALTO_WASM_TARGET_DIR under runner
+      # temp, which this action does not see and never saves.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+          cache-bin: "false"
+          shared-key: wasm-registry
+      - name: WASM cargo target is outside the cached native target
+        run: |
+          case "$ALTO_WASM_TARGET_DIR" in
+            "$RUNNER_TEMP"/*) ;;
+            *) echo "ALTO_WASM_TARGET_DIR must live under RUNNER_TEMP" >&2; exit 1 ;;
+          esac
+          echo "uncached wasm target: $ALTO_WASM_TARGET_DIR"
       - name: Install pinned Chrome for Testing
         shell: bash
         run: |
@@ -122,7 +166,11 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           rustc -vV | grep -q '^host: aarch64-apple-darwin$'
-      - run: sh scripts/check.sh
+      - run: sh scripts/check.sh wasm
+      - name: Release WASM was built outside target/
+        run: |
+          test -d "$ALTO_WASM_TARGET_DIR/wasm32-unknown-unknown/release"
+          test ! -e target/wasm32-unknown-unknown
       - name: Run browser correctness suites
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
@@ -145,12 +193,50 @@ jobs:
           sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed
           sh scripts/build-vector-comparison.sh
           node scripts/verify-browser.mjs --vector-optimization
+      - name: Vector WASM stayed outside target/
+        if: ${{ !cancelled() }}
+        run: test ! -e target/wasm32-unknown-unknown
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
+
+  gpu-parity:
+    if: ${{ !inputs.gpu_lifecycle }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      # ~/.cargo registry and git, plus this job's native test target/.
+      # The cache key includes the OS, so the macOS native target is not restored.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+          cache-bin: "false"
+          shared-key: gpu-parity
+      - name: Install lavapipe and pin its ICD
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers
+          icd=$(find /usr/share/vulkan /usr/lib -name 'lvp_icd*.json' 2>/dev/null | head -n 1)
+          if [ -z "$icd" ]; then
+            echo "lavapipe ICD not found" >&2
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          echo "pinned lavapipe ICD: $icd"
+      - name: GPU versus CPU parity on lavapipe
+        env:
+          ALTO_REQUIRE_GPU_PARITY: "1"
+          ALTO_REQUIRE_LAVAPIPE: "1"
+        run: cargo test -p alto-gpu --locked --lib cpu_composite::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1
 
   gpu-lifecycle:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}

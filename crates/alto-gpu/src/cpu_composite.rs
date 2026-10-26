@@ -990,6 +990,7 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    adapter_name: String,
 }
 
 impl Gpu {
@@ -1033,6 +1034,7 @@ impl Gpu {
                 device,
                 queue,
                 pipeline,
+                adapter_name: info.name,
             }))
         })
     }
@@ -1672,21 +1674,40 @@ fn plain_scene_gaps_are_explicit() {
     assert_eq!(gap(&unsupported), Some("unsupported"));
 }
 
+fn is_lavapipe_adapter(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("llvmpipe") || name.contains("lavapipe")
+}
+
+#[test]
+fn lavapipe_adapter_names() {
+    assert!(is_lavapipe_adapter("llvmpipe (LLVM 20.1.2, 256 bits)"));
+    assert!(is_lavapipe_adapter("Lavapipe"));
+    assert!(!is_lavapipe_adapter("Apple M4"));
+}
+
 #[test]
 fn gpu_shader_matches_cpu_reference() {
     let gpu = match Gpu::new() {
         Ok(Some(gpu)) => gpu,
         Ok(None) => {
-            if cfg!(target_os = "macos") {
-                panic!(
-                    "macOS CI must expose a Metal, Vulkan, or DX12 adapter for GPU pixel parity"
-                );
+            // macOS CI always has Metal. ALTO_REQUIRE_GPU_PARITY makes a missing
+            // adapter a failure on lavapipe CI too, instead of a skip.
+            if std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_some() || cfg!(target_os = "macos") {
+                panic!("GPU pixel parity requires a Metal, Vulkan, or DX12 adapter");
             }
             eprintln!("gpu pixel parity skipped: no Metal, Vulkan, or DX12 adapter");
             return;
         }
         Err(err) => panic!("GPU pixel parity could not start: {err}"),
     };
+    if std::env::var_os("ALTO_REQUIRE_LAVAPIPE").is_some() {
+        assert!(
+            is_lavapipe_adapter(&gpu.adapter_name),
+            "ALTO_REQUIRE_LAVAPIPE=1 but the adapter is {}",
+            gpu.adapter_name
+        );
+    }
     let mut failed = Vec::new();
     for case in cases() {
         let cpu = render(&case);
@@ -1700,6 +1721,7 @@ fn gpu_shader_matches_cpu_reference() {
         };
         let report = diff_report(&cpu, &gpu_tile);
         println!("{}: {report}", case.name);
+        // No allowlist: a single non-matching pixel fails the test.
         if cpu != gpu_tile {
             failed.push(format!("{}: {report}", case.name));
         }

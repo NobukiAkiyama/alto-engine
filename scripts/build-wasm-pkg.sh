@@ -3,7 +3,9 @@
 # check.sh rebuilds into a temp directory and requires wasm/SHA256SUMS to match.
 set -eu
 cd "$(dirname "$0")/.."
-export CARGO_TARGET_DIR="${ALTO_TARGET_DIR:-target}"
+# Prefer the uncached CI directory. A restored native target must not supply
+# these release artifacts: wasm/SHA256SUMS is a from-scratch byte check.
+export CARGO_TARGET_DIR="${ALTO_WASM_TARGET_DIR:-${ALTO_TARGET_DIR:-target}}"
 out=${1:?usage: build-wasm-pkg.sh OUT_DIR}
 # shellcheck disable=SC1091
 . ./scripts/wasm-repro-env.sh
