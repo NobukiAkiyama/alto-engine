@@ -23,7 +23,7 @@
 
 ### 2.1 コールド描画の半分はタイルの展開
 
-`verification/cold-render-metal-run1-2026-10-24.json`（4K・半透明 20 レイヤー、ズーム 0.5）の内訳：
+`cold-render-metal-run1-2026-10-24.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`。4K・半透明 20 レイヤー、ズーム 0.5）の内訳：
 
 | | 時間 |
 |---|---|

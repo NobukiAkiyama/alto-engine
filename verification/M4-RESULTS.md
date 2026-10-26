@@ -1,5 +1,8 @@
 # 最終検証結果
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-18、同梱ビルドをこのMac上で実行しました。
 
 ## 機能
@@ -10,7 +13,7 @@
 - Chromeで最終版の通常再読み込みと復旧案内を確認。OPFS同期ハンドルは各書き込み後に閉じ、pagehideでWorkerと作業領域のロックを解放します。
 - `sample.alto` は別のネイティブEngineで保存→読み込みし、スナップショット一致とZIP CRCを確認。ブラウザでも読み込みと表示を確認。
 
-生データ： [Chrome機能](chrome-functional.json)、[Chromium機能](browser-functional.json)、[Chrome性能](chrome-benchmark.json)、[Chromium性能](browser-benchmark.json)、[Rust/SDKログ](rust-and-sdk.log)。
+生データ： Chrome機能（`chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium機能（`browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chrome性能（`chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium性能（`browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](rust-and-sdk.log)。
 
 ## B1〜B7
 

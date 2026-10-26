@@ -26,6 +26,7 @@
   ],
   "scripts": {
     "build": "node build.mjs",
+    "prepack": "node build.mjs",
     "api": "api-extractor run --local && api-extractor run --local -c api-extractor.browser.json",
     "api:check": "api-extractor run && api-extractor run -c api-extractor.browser.json"
   },

@@ -1,8 +1,10 @@
 # M7・M8 検証結果
 
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 2026-10-26：整数 4 タップで双一次と回転を確定
 
-描画バージョンを文書に足した。`format_version` はファイル形式のままである。`render_version` が無い保存（main までの文書）はバージョン 1 として開き、従来の f32 `mix` を使う。スナップショットにフィールドは書き戻さないので、保存し直してもバイト列は変わらない。新規文書はバージョン 2 で、双一次と回転だけ整数 4 タップになる。係数は Q16 で、半整数は 0 から遠い側へ丸める。位置は Q8、重みは 8 ビット、チャネルは `(acc + 32768) >> 16`（半整数を切り上げ。項は非負なので 0 から遠い側と同じ）である。軸平行で倍率が 1 の最近傍はそのままなので、ロック済み 34 件のうち `scale-bilinear` 以外はバージョン 1 のハッシュと一致する。`rotation` はバージョン 2 で初めてハッシュファイルに入る。バージョン 1 の記録は `tests/parity/render-v1.txt`（main の `cpu-reference.txt`）。この Linux の lavapipe（llvmpipe, Mesa 25.2.8）ではバージョン 2 の 35 件がすべて 0 画素差で、`scale-bilinear` と `rotation` を含む。不一致数と最初の座標は合格時も各件で表示する。
+描画バージョンを文書に足した。`render_version` が無い保存（main までの文書）はバージョン 1 として開き、従来の f32 `mix` を使う。スナップショットにそのフィールドは書き戻さないので、バージョン 1 の保存し直しはバイト列が変わらない。新規文書はバージョン 2 で、双一次と回転が整数 4 タップになる。係数は Q16 で、半整数は 0 から遠い側へ丸める。平行移動は 64 ビットの Q16 で、i32 に収まらない値を黙って切り詰めない。位置は Q8、重みは 8 ビット、チャネルは `(acc + 32768) >> 16`（半整数を切り上げ。項は非負なので 0 から遠い側と同じ）である。軸平行で倍率が 1 の最近傍はそのままなので、ロック済み 34 件のうち `scale-bilinear` 以外はバージョン 1 のハッシュと一致する。`rotation` はバージョン 2 で初めてハッシュファイルに入る。バージョン 1 の記録は `tests/parity/render-v1.txt`（main の `cpu-reference.txt`）。バージョン 2 の保存は `format_version` を 3 にする。1 と 2 だけを知るビルドはそれを拒否するので、知らない `render_version` を読み飛ばして f32 で描くことはない。
 
 ## 2026-10-26：GPUとCPUの画素一致
 
@@ -15,6 +17,8 @@ plain scene の `composite.wgsl` を、f32 の CPU 参照および lavapipe（Me
 - フレーム待ちはアイドルな遅延表示が 40 回（約 2 秒）を超えると `GPU_LOST` で終わり、デバイスとサーフェスを作り直して次のフレームで文書から再表示する。
 
 `cargo test --workspace --locked` は **123 件**（変更前の記録は 118 件、追加は alto-gpu の 5 件）。Node の SDK テストは 7 件から **11 件**（待ち上限 2 件、CPU 参照のロックステップ 2 件）。ブラウザの parity スイートは 41 件。macos-15 SwiftShader の push 実行では失敗 0（ビット一致 34、丸め xfail は `scale-bilinear` の 1 件、別経路 xfail 5、フレーム待ち 1）。同じコミットの pull_request 実行は、embed の往復キャッシュ試験が Playground のエンジンを再起動している途中に parity が始まり、41 件とも `the engine is restarting` で落ちた。各スイートの前に Playground が `ready` になるまで待つ。機能スイートの他は functional 32、M5 8、M6 10、M7 9、M8 6、embed 24。この Linux の SwiftShader は main の配布 SDK でも表示タイルの読み戻しでデバイスが破棄される。最新のブラウザ計測は [フレームペーシング](FRAME-PACING-RESULTS-2026-10-26.md) と [組み込み API](EMBEDDING-API-RESULTS-2026-10-25.md) を参照。
+
+parity スイートの生JSONはコミットしない。`scripts/verify-browser.mjs` が他のスイートと同じ出力先へ書く。CI は artifact `alto-browser-reports` の `parity.json`、ローカルで `ALTO_BROWSER_REPORT_DIR` を省略したときは gitignore した `verification/out/rebuild-parity.json`。
 
 ## 2026-10-23：現在の配布版
 
@@ -38,7 +42,7 @@ WASMは4,281,045 bytes、gzip 1,088,734 bytes、SHA-256 `9e73147b63eacbc17d5bbcf
 
 ## 2026-10-22：半透明20層の負荷テスト
 
-各層の全面塗りをalpha 0.5に変更し、模様はalpha 0.45で重ねました。これにより下位層も合成される条件で、同じ4K・20層のB1〜B7をこのMacのHeadless Chrome 155 / Metal（1280×657、DPR 1）で3回実行しました。[1回目](translucent-benchmark-2026-10-22-1.json)・[2回目](translucent-benchmark-2026-10-22-2.json)・[3回目](translucent-benchmark-2026-10-22-3.json)の生JSONを保存しています。
+各層の全面塗りをalpha 0.5に変更し、模様はalpha 0.45で重ねました。これにより下位層も合成される条件で、同じ4K・20層のB1〜B7をこのMacのHeadless Chrome 155 / Metal（1280×657、DPR 1）で3回実行しました。1回目（`translucent-benchmark-2026-10-22-1.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）・2回目（`translucent-benchmark-2026-10-22-2.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）・3回目（`translucent-benchmark-2026-10-22-3.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）の生JSONを保存しています。
 
 | 指標 | 3回の結果 | 目標 | 判定 |
 |---|---:|---:|---|
@@ -66,19 +70,19 @@ B6はエンジンが計上する割当量を描画時にサンプリングした
 
 | 検証 | 結果 |
 |---|---|
-| 機能 11項目 | [JSON](rebuild-functional.json) |
-| M5 8項目 | [JSON](rebuild-m5.json) |
-| M6 10項目 | [JSON](rebuild-m6.json) |
-| M7 9項目 | [JSON](rebuild-m7.json) |
-| M8 6項目 | [JSON](rebuild-m8.json) |
-| B1〜B7 | [JSON](rebuild-benchmark.json) |
+| 機能 11項目 | JSON（`rebuild-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M5 8項目 | JSON（`rebuild-m5.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M6 10項目 | JSON（`rebuild-m6.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M7 9項目 | JSON（`rebuild-m7.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M8 6項目 | JSON（`rebuild-m8.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| B1〜B7 | JSON（`rebuild-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 | `alto-git` の実行記録 | [テキスト](m8-git-transcript.txt) |
 
 2026-10-19 の内蔵 Chromium 152 の JSON は、その日の別バイナリ（SHA-256 `68b14862c40be81523462ad90fbb86acd876b1bcff5548055a2125c971b0481d`）の記録として残しています。M6までの経緯は [M6](M6-RESULTS.md)・[M5](M5-RESULTS.md)・[M4](M4-RESULTS.md)。
 
 ## M7の検証内容
 
-完了条件「日本語の縦組みで約物と縦中横が正しく配置される」を、GPUで描いた表示タイルの画素で確認しました（100pxの文字、列の幅150px・中心から右が右半分）。下表の座標は 2026-10-19 の計測です。2026-10-21 のビルドでは同じ9項目が成功し、合否は [rebuild-m7.json](rebuild-m7.json) にあります。
+完了条件「日本語の縦組みで約物と縦中横が正しく配置される」を、GPUで描いた表示タイルの画素で確認しました（100pxの文字、列の幅150px・中心から右が右半分）。下表の座標は 2026-10-19 の計測です。2026-10-21 のビルドでは同じ9項目が成功し、合否は `rebuild-m7.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`） にあります。
 
 | 対象 | インクの範囲（セル内の座標） | 判定 |
 |---|---|---|
@@ -138,7 +142,7 @@ PlaygroundのUIでも、テキストツールのドラッグ選択→入力→Ba
 | B6 GPU / WASM (MiB) | 483.75 / 240.81 | 512 / 1024 | PASS |
 | B7 復旧と初回表示 (ms) | 1094.9 | 1500 | PASS |
 
-条件はM6と同じ（3840×2160、不透明な20ラスターレイヤー、SharedArrayBufferなし、一回の実測）。ビューポートは1280×657 CSS px・DPR 1です。テキストや多数の版を含む文書の性能を示す結果ではありません。2026-10-19 の内蔵 Chromium 152 での数値は、別バイナリの [記録](m78-browser-benchmark.json) です。
+条件はM6と同じ（3840×2160、不透明な20ラスターレイヤー、SharedArrayBufferなし、一回の実測）。ビューポートは1280×657 CSS px・DPR 1です。テキストや多数の版を含む文書の性能を示す結果ではありません。2026-10-19 の内蔵 Chromium 152 での数値は、別バイナリの 記録（`m78-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） です。
 
 ## 検証中に見つけて直したこと
 

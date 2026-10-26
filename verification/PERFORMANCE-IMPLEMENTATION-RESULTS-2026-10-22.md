@@ -1,5 +1,8 @@
 # 縮小表示・復旧高速化の実装結果
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 基準は `026ff48` の [ボトルネック測定](PERFORMANCE-BOTTLENECKS-2026-10-22.md)。3840×2160、半透明ラスターレイヤー20層、Chrome 155 / Apple Metal WebGPU、各回新しいChromeプロファイルで測定した。B2はズーム操作からGPU完了まで、B7はWorker再起動から最初の完全描画までを測る。単位はms。
 
 | 指標 | 変更前 | 実装後1 | 実装後2 | 実装後3 | 目標 |
@@ -11,7 +14,7 @@
 | B6 GPU推定 MiB | — | 483.75 | 483.75 | 483.75 | ≤512 |
 | B6 WASM MiB | — | 241.13 | 241.19 | 241.00 | ≤1024 |
 
-生データ: [run 1](benchmark-implementation-run-1-2026-10-22.json)、[run 2](benchmark-implementation-run-2-2026-10-22.json)、[run 3](benchmark-implementation-run-3-2026-10-22.json)。3回ともB1–B7は全件合格。B5の外部 `.alto` 保存・読込は約278–279/864–867 msで、厳密検証を維持した。B7の改善幅は約37–38%で、B2は約47–48%。
+生データ: run 1（`benchmark-implementation-run-1-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、run 2（`benchmark-implementation-run-2-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、run 3（`benchmark-implementation-run-3-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。3回ともB1–B7は全件合格。B5の外部 `.alto` 保存・読込は約278–279/864–867 msで、厳密検証を維持した。B7の改善幅は約37–38%で、B2は約47–48%。
 
 ## 実装
 
@@ -22,6 +25,6 @@
 
 ## 検証範囲と残る課題
 
-Rustテスト94件、ブラウザ機能テスト17件、M5/M6/M7/M8の既存機能テスト33件を実行した。実OPFSでV1→V2移行、最新世代のCRC/SHA破損から前世代への復帰、両世代破損時の編集停止と外部ファイルからの再開、不完全な末尾、追加記録の再生を確認した。SwiftShaderのCI相当テストは[集計](swiftshader-implementation-summary-2026-10-22.json)で全件合格。実際のGitHub Actions結果は別に確認する。
+Rustテスト94件、ブラウザ機能テスト17件、M5/M6/M7/M8の既存機能テスト33件を実行した。実OPFSでV1→V2移行、最新世代のCRC/SHA破損から前世代への復帰、両世代破損時の編集停止と外部ファイルからの再開、不完全な末尾、追加記録の再生を確認した。SwiftShaderのCI相当テストは集計（`swiftshader-implementation-summary-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）で全件合格。実際のGitHub Actions結果は別に確認する。
 
 設計書の可視タイルバッチ化、シーン索引、先読みジョブは未実装。B2/B7と入力遅延が目標を満たしたため、GPU容量や描画順のリスクを伴う変更は今回の実装範囲から外した。復旧内部の段階別時刻とGPU timestamp queryも未実装で、B7の全体時間のみ実測済み。長時間の実制作での体感・電力・巨大な実ファイルの検証は今後必要。

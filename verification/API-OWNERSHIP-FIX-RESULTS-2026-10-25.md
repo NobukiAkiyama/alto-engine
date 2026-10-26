@@ -1,5 +1,8 @@
 # 文書の所有と復旧記録の破棄：修正と検証（2026-10-25）
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 ## 対象
 
 `35be75a` を土台に、組み込み API の次の 2 件を修正した。Rust と WASM のプロトコル番号は変えていない。SDK と同梱 Worker の間に文書の世代を追加した。
@@ -30,7 +33,7 @@
 
 ## 実行結果
 
-Chrome 155 / SwiftShader で、既存 65 件（機能 32、M5 8、M6 10、M7 9、M8 6）と組み込み 28 件が成功した。組み込みの生の記録は [api-ownership-swiftshader-embed-2026-10-25.json](api-ownership-swiftshader-embed-2026-10-25.json)。
+Chrome 155 / SwiftShader で、既存 65 件（機能 32、M5 8、M6 10、M7 9、M8 6）と組み込み 28 件が成功した。組み込みの生の記録は `api-ownership-swiftshader-embed-2026-10-25.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 SDK・Worker の TypeScript ビルド、公開 API の照合、保存セッションの Node テスト 7 件も成功した。性能の再計測はしていない。
 

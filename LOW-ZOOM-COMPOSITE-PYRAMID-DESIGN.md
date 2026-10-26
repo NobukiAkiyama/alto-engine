@@ -4,7 +4,7 @@
 
 ## 1. 解く問題と測定上の境界
 
-3840×2160、半透明ラスタ20層、1566×1284物理ピクセル、物理倍率0.5では可視文書が3132×2568になる。B2のGPU完了までが428.8 ms（目標250 ms）、入力タイルのアップロードが1,960回・513.8 MB、`commandsMs`が304.7 ms、`getMs`が161.9 ms、`writeMs`が129.4 ms、`pyramidHits`が6だった。GPU推定は483.75/512 MiB、WASMは241.44/1024 MiB。これは**1回の測定**であり、時間内訳は重なるため足し算しない。[生データ](verification/dpr2-same-physical-zoom-2026-10-22.json)。
+3840×2160、半透明ラスタ20層、1566×1284物理ピクセル、物理倍率0.5では可視文書が3132×2568になる。B2のGPU完了までが428.8 ms（目標250 ms）、入力タイルのアップロードが1,960回・513.8 MB、`commandsMs`が304.7 ms、`getMs`が161.9 ms、`writeMs`が129.4 ms、`pyramidHits`が6だった。GPU推定は483.75/512 MiB、WASMは241.44/1024 MiB。これは**1回の測定**であり、時間内訳は重なるため足し算しない。生データ（`dpr2-same-physical-zoom-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 同じCSS上の見た目でDPR 2を測るとB2は104.7 ms、可視文書は1566×1284だった。したがって今回の主題はDPR単体の遅さではなく、**一度に広い文書領域を表示する際の入力タイル取得・転送・合成の重複**である。現行`Renderer::downsample_cached`は完成済みの子合成タイルがそろったときだけ親を作る。`compose`は子が欠ければ20層の元タイルを直接取得・転送し、M5機能のあるsceneでは縮小経路を使わない。[Renderer](crates/alto-gpu/src/renderer.rs)。
 

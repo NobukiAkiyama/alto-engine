@@ -5,6 +5,13 @@ import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
 const metadata = JSON.parse(readFileSync("verification/build.json", "utf8"));
+const sums = readFileSync("wasm/SHA256SUMS", "utf8");
+const recorded = (name) => {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = sums.match(new RegExp(`^([0-9a-f]{64})  ${escaped}$`, "m"));
+  assert.ok(match, `wasm/SHA256SUMS is missing ${name}`);
+  return match[1];
+};
 const playground = readFileSync("examples/browser-playground/pkg/alto_wasm_bg.wasm");
 const sdk = readFileSync("packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm");
 const hash = createHash("sha256").update(playground).digest("hex");
@@ -15,6 +22,12 @@ assert.equal(metadata.buildHost, buildHost, "build.json buildHost differs from t
 assert.deepEqual(sdk, playground, "the two shipped WASM copies differ");
 assert.equal(metadata.wasmBytes, playground.length, "build.json wasmBytes is stale");
 assert.equal(metadata.wasmSha256, hash, "build.json wasmSha256 is stale");
+assert.equal(recorded("release/alto_wasm_bg.wasm"), hash, "wasm/SHA256SUMS release hash is stale");
+assert.equal(
+  recorded("vector-comparison/alto_wasm_bg.wasm"),
+  metadata.comparisonWasm.sha256,
+  "wasm/SHA256SUMS comparison hash does not match build.json",
+);
 assert.equal(
   metadata.gzipBytes,
   gzipSync(playground).length,
