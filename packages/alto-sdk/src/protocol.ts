@@ -45,6 +45,23 @@ export interface ImportedFontRecord {
   warnings: { code: string; details: Record<string, string> }[];
 }
 export type FrameStats = Record<string, unknown> & {
+  /** Engine-managed allocation estimates, not browser/driver VRAM. */
+  gpuBytes: number;
+  gpu: {
+    fixed: number;
+    liveFixed: number;
+    effects: number;
+    stroke: number;
+    vector: number;
+    retiredFixed: number;
+    retired: number;
+    effectsAllocations: number;
+    effectsReuses: number;
+    atlasLayers: number;
+    displayLayers: number;
+    overviewTiles: number;
+    overviewReady: number;
+  };
   /** Display tiles composited this frame. */
   composed: number;
   pending: number;

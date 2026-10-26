@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-const FRAME_FIELDS: [&str; 33] = [
+const FRAME_FIELDS: [&str; 46] = [
     "composed",
     "pending",
     "gpuBytes",
@@ -44,6 +44,19 @@ const FRAME_FIELDS: [&str; 33] = [
     "profile.uniqueInputs",
     "profile.atlasEvictions",
     "presentDeferred",
+    "gpu.fixed",
+    "gpu.liveFixed",
+    "gpu.effects",
+    "gpu.stroke",
+    "gpu.vector",
+    "gpu.retiredFixed",
+    "gpu.retired",
+    "gpu.effectsAllocations",
+    "gpu.effectsReuses",
+    "gpu.atlasLayers",
+    "gpu.displayLayers",
+    "gpu.overviewTiles",
+    "gpu.overviewReady",
 ];
 /// Release builds abort on panic, which reaches JS only as "RuntimeError: unreachable".
 /// Keep the message and location where the Worker's error handler can report them.
@@ -423,10 +436,25 @@ impl Runtime {
             q.atlas_evictions as f64,
         ]);
         out.push(f64::from(u8::from(r.deferred)));
+        out.extend([
+            r.gpu.fixed as f64,
+            r.gpu.live_fixed as f64,
+            r.gpu.effects as f64,
+            r.gpu.stroke as f64,
+            r.gpu.vector as f64,
+            r.gpu.retired_fixed as f64,
+            r.gpu.retired as f64,
+            r.gpu.effects_allocations as f64,
+            r.gpu.effects_reuses as f64,
+            r.gpu.atlas_layers as f64,
+            r.gpu.display_layers as f64,
+            r.gpu.overview_tiles as f64,
+            r.gpu.overview_ready as f64,
+        ]);
         debug_assert_eq!(out.len(), FRAME_FIELDS.len());
         Ok(out)
     }
-    /// Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+    /// Names for `tick`'s numbers, in order. A `prefetch.`, `gpu.` or `profile.` prefix
     /// nests the field; `profile.*` is present only when `hasProfile` is 1.
     /// Whether resumable jobs leave input decoding to the Worker's decode pool.
     #[wasm_bindgen(js_name=setDecodeWorkers)]

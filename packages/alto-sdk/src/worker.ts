@@ -444,9 +444,11 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   const pool = decodePoolBytes();
   // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
   const prefetch: Record<string, number> = {};
+  const gpu: Record<string, number> = {};
   const out: Record<string, unknown> & { profile: Record<string, number> | null; hasProfile?: number } = {
     adapter: adapterName,
     prefetch,
+    gpu,
     profile: null,
     decodeWorkerBytes: pool.workers,
     decodeTransitBytes: pool.transit,
@@ -458,7 +460,7 @@ function decodeFrame(numbers: Float64Array): FrameStats {
   frameFields.forEach((name, i) => {
     const [group, key] = name.split(".");
     if (key === undefined) out[group] = numbers[i];
-    else (group === "profile" ? profile : prefetch)[key] = numbers[i];
+    else (group === "profile" ? profile : group === "gpu" ? gpu : prefetch)[key] = numbers[i];
   });
   if (out.hasProfile) out.profile = profile;
   delete out.hasProfile;

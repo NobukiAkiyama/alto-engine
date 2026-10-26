@@ -191,7 +191,19 @@ impl Dense {
             return false;
         };
         let bytes = first.w as u64 * first.h as u64 * 5 * (LANES - 1) as u64;
-        if bytes + arena_bytes > budget {
+        let old_coverage = if self
+            .coverage
+            .first()
+            .is_some_and(|c| c.w != first.w || c.h != first.h)
+        {
+            self.coverage
+                .iter()
+                .map(|c| c.w as u64 * c.h as u64 * 5)
+                .sum::<u64>()
+        } else {
+            0
+        };
+        if bytes + arena_bytes + old_coverage > budget {
             return false;
         }
         if self

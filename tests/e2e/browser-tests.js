@@ -127,6 +127,53 @@ export async function runTests(engine, benchmark, log) {
       return;
     }
     let doc, lower, upper, assetRed, assetBlue;
+    await test("queue-ordered reuse and destroy preserve earlier copies without a CPU fence", async () => {
+      const adapter=await navigator.gpu.requestAdapter(), device=await adapter.requestDevice();
+      device.pushErrorScope("validation");
+      const texture=device.createTexture({size:[1,1],format:"rgba8unorm",usage:GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT});
+      const reads=Array.from({length:4},()=>device.createBuffer({size:256,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
+      const write=color=>device.queue.writeTexture({texture},new Uint8Array(color),{bytesPerRow:4},[1,1]);
+      const copy=(encoder,buf)=>encoder.copyTextureToBuffer({texture},{buffer:buf,bytesPerRow:256},[1,1]);
+      write([255,0,0,255]); let encoder=device.createCommandEncoder(); copy(encoder,reads[0]); device.queue.submit([encoder.finish()]);
+      let completed=false; const done=device.queue.onSubmittedWorkDone().then(()=>completed=true);
+      write([0,255,0,255]); encoder=device.createCommandEncoder(); copy(encoder,reads[1]); device.queue.submit([encoder.finish()]);
+      assert(!completed,"test yielded before queue reuse");
+      encoder=device.createCommandEncoder(); copy(encoder,reads[2]);
+      encoder.beginRenderPass({colorAttachments:[{view:texture.createView(),loadOp:"clear",storeOp:"store",clearValue:[0,0,1,1]}]}).end();
+      copy(encoder,reads[3]); device.queue.submit([encoder.finish()]); texture.destroy();
+      await Promise.all(reads.map(b=>b.mapAsync(GPUMapMode.READ)));
+      const expected=[[255,0,0,255],[0,255,0,255],[0,255,0,255],[0,0,255,255]];
+      reads.forEach((b,i)=>{assert(Array.from(new Uint8Array(b.getMappedRange()).slice(0,4)).join()===expected[i].join(),`copy ${i} changed after reuse`);b.unmap();b.destroy();});
+      await done; const error=await device.popErrorScope(); device.destroy(); assert(!error, String(error?.message));
+    });
+    await test("GPU memory categories sum without counting occupied slots twice", async () => {
+      await engine.createDocument({width:64,height:64});
+      const f=await settled(engine), g=f.gpu;
+      assert(g && f.gpuBytes === g.fixed+g.effects+g.stroke+g.vector,"GPU category total");
+      assert(g.liveFixed+g.retiredFixed <= g.fixed,"fixed subsets exceed reservation");
+      assert(g.fixed-g.retiredFixed===(g.atlasLayers+g.displayLayers)*262144+1048576,`default cache reservation changed: ${JSON.stringify(g)}`);
+    });
+    await test("off-canvas brush tiles survive movement, history, save and GPU recovery", async () => {
+      doc=await engine.createDocument({width:64,height:64});
+      let layer;
+      await doc.transact("layer",tx=>{layer=tx.addRaster();});
+      const stroke=doc.tools.begin("brush",{layer,tip:{size:32,hardness:1,spacing:0.15},color:[1,0,0,1]});
+      for(let x=32;x>=-384;x-=32) stroke.input({x,y:32,pressure:1});
+      await stroke.end();
+      const canonical=JSON.stringify(await doc.nodeTiles(layer));
+      assert(Boolean(JSON.parse(canonical).tiles["-2,0"]),"wholly outside canonical tile was lost");
+      await doc.transact("move",tx=>tx.setTransform(layer,{x:416,y:0,scaleX:1,scaleY:1,rotation:0}));
+      const red=async()=>{
+        const t=await unstable(engine).readTile(0,0), i=(32*256+32)*4;
+        assert(Array.from(t.slice(i,i+4)).join() === "255,0,0,255","moved outside pixel");
+        assert(JSON.stringify(await doc.nodeTiles(layer))===canonical,"canonical tile hashes changed");
+      };
+      await red(); await doc.undo(); await doc.redo(); await red();
+      const bytes=await testing(engine).saveBytes();
+      doc=await engine.open(new Blob([bytes])); await red();
+      const restored=new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{off();reject(Error("GPU recovery timeout"));},15000); const off=unstable(engine).onGpu(g=>{if(g==="restored"){clearTimeout(timer);off();resolve();}}); });
+      await testing(engine).destroyGpu(); await restored; await red();
+    });
     await test("empty scene GPU validation / Normal / Multiply / Screen / opacity / visibility", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await testing(engine).request("validateFrame");
@@ -381,6 +428,28 @@ export async function runTests(engine, benchmark, log) {
       const tile = await unstable(engine).readTileLevel(1, 0, 0);
       assert(pixel(tile)[3] > 0, "full cache lost the visible tile");
       await testing(engine).request("enablePrefetch");
+    });
+    await test("cache pressure builds and pins an overview through pan and rotation", async () => {
+      doc=await engine.createDocument({width:1024,height:1024});
+      const a=await image(engine,"rgba(40,120,210,.6)",1024,1024);
+      await doc.transact("overview input",tx=>tx.addRasterFromAsset(a));
+      engine.viewport.set({center:[128,128],zoom:1,rotation:0.2});
+      await testing(engine).request("resetRenderCache",{cpu:false});
+      await settled(engine);
+      for(let x=1000;x<1256;x++) await unstable(engine).readTile(x,0);
+      await testing(engine).request("enablePrefetch");
+      let frame;
+      for(let i=0;i<150;i++) {
+        await delay(20); frame=await settled(engine);
+        if(frame.gpu.overviewReady===frame.gpu.overviewTiles && frame.gpu.overviewTiles>0) break;
+      }
+      assert(frame.gpu.overviewTiles===1 && frame.gpu.overviewReady===1,"pressure did not build overview");
+      const before=await unstable(engine).readTileLevel(2,0,0);
+      for(let x=1256;x<1512;x++) await unstable(engine).readTile(x,0);
+      engine.viewport.set({center:[800,800],zoom:0.25,rotation:-0.4});
+      frame=await settled(engine);
+      assert(frame.gpu.overviewReady===1,"overview was evicted");
+      assert(same(before,await unstable(engine).readTileLevel(2,0,0)),"overview pixels changed");
     });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
@@ -1053,7 +1122,8 @@ async function benches(engine, log, results) {
   await full.flush();
   memory.push(await settled(engine));
   await full.end();
-  memory.push(await settled(engine));
+  const afterFullStroke = await settled(engine);
+  memory.push(afterFullStroke);
   start = performance.now();
   await doc.undo();
   const undo = performance.now() - start;
@@ -1083,6 +1153,8 @@ async function benches(engine, log, results) {
     "B6 sampled peak memory MiB",
     {
       gpu: peakGpu / 1048576,
+      gpuBreakdown: memory.reduce((a, b) => a.gpuBytes >= b.gpuBytes ? a : b).gpu,
+      afterStroke: afterFullStroke.gpu,
       wasm: peakWasm / 1048576,
       decodePool: peakPool / 1048576,
       totalBound: (peakWasm + peakPool) / 1048576,

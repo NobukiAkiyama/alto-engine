@@ -420,9 +420,11 @@ function decodeFrame(numbers) {
     const pool = decodePoolBytes();
     // wasmBytes is the engine runtime alone; the decode pool is reported beside it.
     const prefetch = {};
+    const gpu = {};
     const out = {
         adapter: adapterName,
         prefetch,
+        gpu,
         profile: null,
         decodeWorkerBytes: pool.workers,
         decodeTransitBytes: pool.transit,
@@ -436,7 +438,7 @@ function decodeFrame(numbers) {
         if (key === undefined)
             out[group] = numbers[i];
         else
-            (group === "profile" ? profile : prefetch)[key] = numbers[i];
+            (group === "profile" ? profile : group === "gpu" ? gpu : prefetch)[key] = numbers[i];
     });
     if (out.hasProfile)
         out.profile = profile;

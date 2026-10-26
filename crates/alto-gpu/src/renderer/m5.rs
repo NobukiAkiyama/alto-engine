@@ -1,6 +1,11 @@
 //! General M5 tile renderer. Back-propagated ROIs provide the halo for every blur stage.
 //! Temporary targets are pooled and reused in queue order, including between display tiles.
 use super::*;
+use std::rc::{Rc, Weak};
+const POOL_IDLE_FRAMES: u64 = 8;
+fn bucket(n: u32) -> u32 {
+    n.max(1).next_multiple_of(64)
+}
 use crate::{REffect, REffectKind, RMask, RNode};
 use alto_vector::{FillRule, StyledPath};
 #[derive(Clone, Copy, Debug)]
@@ -63,25 +68,34 @@ struct Params {
     info: [u32; 4],
     extra: [f32; 4],
     curve: [f32; 64],
+    sizes: [u32; 4],
+    output_clip: [u32; 4],
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Target {
     index: usize,
     roi: Roi,
+    _lease: Rc<()>,
 }
 struct Pooled {
     texture: wgpu::Texture,
     w: u32,
     h: u32,
+    lease: Weak<()>,
+    used: u64,
 }
 pub(super) struct Resources {
     pipeline: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     pool: Vec<Pooled>,
+    pub(super) allocations: u64,
+    pub(super) reuses: u64,
 }
 impl Resources {
     fn new(device: &wgpu::Device) -> Self {
         Self {
+            allocations: 0,
+            reuses: 0,
             pipeline: compute(
                 device,
                 "M5 effects",
@@ -110,16 +124,32 @@ impl Resources {
                 }),
                 w: 1,
                 h: 1,
+                lease: Weak::new(),
+                used: 0,
             }],
         }
     }
     pub(super) fn bytes(&self) -> u64 {
         self.pool.iter().map(|p| p.w as u64 * p.h as u64 * 8).sum()
     }
+    pub(super) fn expire(&mut self, frame: u64, retired: &mut Retired) {
+        let mut kept = Vec::with_capacity(self.pool.len());
+        for (i, p) in self.pool.drain(..).enumerate() {
+            if i != 0
+                && p.lease.strong_count() == 0
+                && frame.saturating_sub(p.used) >= POOL_IDLE_FRAMES
+            {
+                retired.effect_texture(p.texture);
+            } else {
+                kept.push(p);
+            }
+        }
+        self.pool = kept;
+    }
     /// Hands every target to `retired`, for when these resources are discarded.
     pub(super) fn retire(self, retired: &mut super::Retired) {
         for p in self.pool {
-            retired.texture(p.texture);
+            retired.effect_texture(p.texture);
         }
     }
 }
@@ -142,7 +172,6 @@ struct Context<'a> {
     scene: &'a RenderScene,
     store: &'a dyn TileStore,
     encoder: wgpu::CommandEncoder,
-    next: usize,
     pinned: HashSet<u32>,
     previews: HashMap<ContentHash, wgpu::Texture>,
     overrides: BTreeMap<(NodeId, TileKey), ContentHash>,
@@ -152,6 +181,7 @@ impl Context<'_> {
     fn dummy(&self) -> Target {
         Target {
             index: 0,
+            _lease: Rc::new(()),
             roi: Roi {
                 x: 0.0,
                 y: 0.0,
@@ -165,13 +195,13 @@ impl Context<'_> {
         let out = self.alloc(roi)?;
         let d = self.dummy();
         self.dispatch(
-            out,
-            d,
-            d,
-            d,
+            &out,
+            &d,
+            &d,
+            &d,
             Self::params(6, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
             &[],
-        );
+        )?;
         Ok(out)
     }
     fn crop(&mut self, input: Target, roi: Roi) -> Result<Target> {
@@ -185,13 +215,13 @@ impl Context<'_> {
         }
         let out = self.alloc(roi)?;
         self.dispatch(
-            out,
-            input,
-            input,
-            input,
+            &out,
+            &input,
+            &input,
+            &input,
             Self::params(8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
             &[],
-        );
+        )?;
         Ok(out)
     }
     fn alloc(&mut self, roi: Roi) -> Result<Target> {
@@ -204,94 +234,115 @@ impl Context<'_> {
                 "effect ROI exceeds texture limits".into(),
             ));
         }
-        let index = self.next;
-        self.next += 1;
-        let old = self
+        let w = bucket(roi.w);
+        let h = bucket(roi.h);
+        if w > self.r.device.limits().max_texture_dimension_2d
+            || h > self.r.device.limits().max_texture_dimension_2d
+        {
+            return Err(RenderError::InvalidArgument(
+                "effect bucket exceeds texture limits".into(),
+            ));
+        }
+        let lease = Rc::new(());
+        // Weak leases track every retained ancestor and clipping backdrop. A slot is
+        // reused only after its last CPU owner has encoded its last read.
+        let reuse = self
             .resources
             .pool
-            .get(index)
-            .map_or(0, |p| p.w as u64 * p.h as u64 * 8);
-        let need = roi.w as u64 * roi.h as u64 * 8;
-        let used = self.r.vector_bytes()
-            + (self.r.atlas_slots.len() as u64 + 256) * 262144
-            + self.resources.bytes()
-            - old
-            + need
-            + self
-                .r
-                .stroke
-                .as_ref()
-                .map_or(0, |s| s.tiles.len() as u64 * 1048576);
-        if used > self.r.budget_bytes {
-            self.resources.pool.truncate(index);
-            if let Some(vector) = self.r.vector.as_mut() {
-                vector.discard_meshes();
-            }
-            let frame = self.resources.bytes()
-                + need
-                + self
-                    .r
-                    .stroke
-                    .as_ref()
-                    .map_or(0, |s| s.tiles.len() as u64 * 1048576);
-            let fixed =
-                (self.r.atlas_slots.len() as u64 + 256) * 262144 + self.r.vector_fixed_bytes();
-            if crate::cache_allowance(self.r.budget_bytes, frame, fixed).is_none() {
-                return Err(RenderError::InvalidArgument(
-                    "effects exceed GPU memory budget".into(),
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, p)| p.w == w && p.h == h && p.lease.strong_count() == 0)
+            .map(|(i, _)| i);
+        let index = if let Some(index) = reuse {
+            self.resources.reuses += 1;
+            index
+        } else {
+            let need = w as u64 * h as u64 * 8;
+            let used = self.r.gpu_bytes().total() + self.resources.bytes();
+            if used + need > self.r.budget_bytes {
+                // No premature destroy: unsubmitted targets are retained until the
+                // encoder is submitted or discarded, and still count in the ledger.
+                return Err(RenderError::Budget(
+                    "effects exceed GPU memory budget (including retired allocations)".into(),
                 ));
             }
-        }
-        if self
-            .resources
-            .pool
-            .get(index)
-            .is_none_or(|p| p.w != roi.w || p.h != roi.h)
-        {
-            let texture = self.r.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("M5 ROI target"),
-                size: wgpu::Extent3d {
-                    width: roi.w,
-                    height: roi.h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
+            self.resources.allocations += 1;
+            self.resources.pool.push(Pooled {
+                texture: self.r.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("M5 bucket target"),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                }),
+                w,
+                h,
+                lease: Weak::new(),
+                used: self.r.frame,
             });
-            let p = Pooled {
-                texture,
-                w: roi.w,
-                h: roi.h,
-            };
-            if index == self.resources.pool.len() {
-                self.resources.pool.push(p);
-            } else {
-                // Commands already recorded may still read the old target.
-                let old = std::mem::replace(&mut self.resources.pool[index], p);
-                self.r.retired.texture(old.texture);
-            }
-        }
-        Ok(Target { index, roi })
+            self.resources.pool.len() - 1
+        };
+        let pooled = &mut self.resources.pool[index];
+        pooled.lease = Rc::downgrade(&lease);
+        pooled.used = self.r.frame;
+        let view = pooled.texture.create_view(&Default::default());
+        // This GPU clear follows all old reads in this encoder. Queue writes here
+        // would run ahead of those reads and corrupt the old owner.
+        drop(self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear whole M5 bucket"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        }));
+        Ok(Target {
+            index,
+            roi,
+            _lease: lease,
+        })
     }
+
     fn dispatch(
         &mut self,
-        output: Target,
-        a: Target,
-        b: Target,
-        clip: Target,
+        output: &Target,
+        a: &Target,
+        b: &Target,
+        clip: &Target,
         mut params: Params,
         entries: &[Entry],
-    ) {
+    ) -> Result<()> {
+        let additional = (entries.len().max(1) * std::mem::size_of::<Entry>()
+            + std::mem::size_of::<Params>()) as u64;
+        if self.r.gpu_bytes().total() + self.resources.bytes() + additional > self.r.budget_bytes {
+            return Err(RenderError::Budget(
+                "effect command buffers exceed GPU memory budget".into(),
+            ));
+        }
         params.out_region = output.roi.uniform();
         params.region_a = a.roi.uniform();
         params.region_b = b.roi.uniform();
         params.info[2] = entries.len() as u32;
+        params.sizes = [a.roi.w, a.roi.h, b.roi.w, b.roi.h];
+        params.output_clip = [output.roi.w, output.roi.h, clip.roi.w, clip.roi.h];
+        debug_assert!(
+            output.index != a.index && output.index != b.index && output.index != clip.index
+        );
         let av = self.resources.pool[a.index]
             .texture
             .create_view(&Default::default());
@@ -318,8 +369,12 @@ impl Context<'_> {
             &[params],
             wgpu::BufferUsages::UNIFORM,
         );
-        self.r.retired.buffer(&tiles);
-        self.r.retired.buffer(&uniform);
+        self.r
+            .retired
+            .classified_buffer(&tiles, MemoryClass::Effects);
+        self.r
+            .retired
+            .classified_buffer(&uniform, MemoryClass::Effects);
         let bg = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("M5 stage"),
             layout: &self.resources.pipeline.get_bind_group_layout(0),
@@ -358,6 +413,7 @@ impl Context<'_> {
         pass.set_pipeline(&self.resources.pipeline);
         pass.set_bind_group(0, &bg, &[]);
         pass.dispatch_workgroups(output.roi.w.div_ceil(16), output.roi.h.div_ceil(16), 1);
+        Ok(())
     }
     fn entries(
         &mut self,
@@ -449,13 +505,11 @@ impl Context<'_> {
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
             super::vector::VectorResources::new(&self.r.device, wgpu::TextureFormat::Rgba16Float)
         });
-        let external = (self.r.atlas_slots.len() as u64 + 256) * 262144
+        let external = self.r.fixed_bytes()
+            + self.r.stroke_bytes()
             + self.resources.bytes()
-            + self
-                .r
-                .stroke
-                .as_ref()
-                .map_or(0, |s| s.tiles.len() as u64 * 1048576);
+            + self.r.ledger.bytes().total()
+            + self.r.retired.bytes().total();
         let budget = self.r.budget_bytes.saturating_sub(external);
         let roi = [
             roi.x as f64,
@@ -559,7 +613,7 @@ impl Context<'_> {
             )?;
             if let Some(mask) = result {
                 let out = self.alloc(roi)?;
-                self.dispatch(out, mask, coverage, mask, Self::params(11, world), &[]);
+                self.dispatch(&out, &mask, &coverage, &mask, Self::params(11, world), &[])?;
                 result = Some(out);
             } else {
                 result = Some(coverage);
@@ -594,10 +648,10 @@ impl Context<'_> {
             p = Self::params(4, transform);
             p.settings = [node.opacity, 1.0, 0.0, 0.0];
         }
-        self.dispatch(out, source, source, source, p, &entries);
+        self.dispatch(&out, &source, &source, &source, p, &entries)?;
         if let Some(mask) = self.vector_coverage(node, world, source.roi)? {
             let masked = self.alloc(source.roi)?;
-            self.dispatch(masked, out, mask, out, Self::params(11, world), &[]);
+            self.dispatch(&masked, &out, &mask, &out, Self::params(11, world), &[])?;
             Ok(masked)
         } else {
             Ok(out)
@@ -613,14 +667,14 @@ impl Context<'_> {
         let out = self.alloc(dst.roi)?;
         let mut p = Self::params(1, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         p.settings = [1.0, mode(node.blend), f32::from(clip.is_some()), 0.0];
-        self.dispatch(out, dst, src, clip.unwrap_or(dst), p, &[]);
+        self.dispatch(&out, &dst, &src, clip.as_ref().unwrap_or(&dst), p, &[])?;
         Ok(out)
     }
     fn clip_blend(&mut self, base: Target, source: Target, node: &RNode) -> Result<Target> {
         let out = self.alloc(base.roi)?;
         let mut p = Self::params(9, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         p.settings[1] = mode(node.blend);
-        self.dispatch(out, base, source, base, p, &[]);
+        self.dispatch(&out, &base, &source, &base, p, &[])?;
         Ok(out)
     }
     fn stage(
@@ -634,15 +688,15 @@ impl Context<'_> {
             REffectKind::GaussianBlur { radius } => {
                 let r = (radius / roi.scale).ceil() as u32;
                 if r == 0 {
-                    input
+                    input.clone()
                 } else {
                     let middle = self.alloc(roi.expand(0, r))?;
                     let mut p = Self::params(2, world);
                     p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
-                    self.dispatch(middle, input, input, input, p, &[]);
+                    self.dispatch(&middle, &input, &input, &input, p, &[])?;
                     let out = self.alloc(roi)?;
                     p.info[3] = 1;
-                    self.dispatch(out, middle, middle, middle, p, &[]);
+                    self.dispatch(&out, &middle, &middle, &middle, p, &[])?;
                     out
                 }
             }
@@ -654,7 +708,7 @@ impl Context<'_> {
                 let out = self.alloc(roi)?;
                 let mut p = Self::params(3, world);
                 p.settings = [brightness, contrast, saturation, 0.0];
-                self.dispatch(out, input, input, input, p, &[]);
+                self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Levels {
@@ -668,7 +722,7 @@ impl Context<'_> {
                 let mut p = Self::params(13, world);
                 p.settings = [in_black, in_white, gamma, out_black];
                 p.extra[0] = out_white;
-                self.dispatch(out, input, input, input, p, &[]);
+                self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::HueSaturation {
@@ -679,13 +733,13 @@ impl Context<'_> {
                 let out = self.alloc(roi)?;
                 let mut p = Self::params(15, world);
                 p.settings = [hue, saturation, lightness, 0.0];
-                self.dispatch(out, input, input, input, p, &[]);
+                self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Invert => {
                 let out = self.alloc(roi)?;
                 let p = Self::params(14, world);
-                self.dispatch(out, input, input, input, p, &[]);
+                self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Curves { ref points } => {
@@ -696,7 +750,7 @@ impl Context<'_> {
                     p.curve[i * 4 + 1] = *y;
                 }
                 p.extra[0] = points.len().min(16) as f32;
-                self.dispatch(out, input, input, input, p, &[]);
+                self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
         };
@@ -704,7 +758,7 @@ impl Context<'_> {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
             let p = Self::params(5, transform);
-            self.dispatch(out, input, filtered, input, p, &entries);
+            self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
             Ok(out)
         } else {
             Ok(filtered)
@@ -773,13 +827,13 @@ impl Context<'_> {
                 let out = self.alloc(desired)?;
                 let (entries, transform) = self.mask_entries(mask, world, desired, None)?;
                 self.dispatch(
-                    out,
-                    original,
-                    filtered,
-                    original,
+                    &out,
+                    &original,
+                    &filtered,
+                    &original,
                     Self::params(5, transform),
                     &entries,
-                );
+                )?;
                 Ok(out)
             } else {
                 Ok(filtered)
@@ -851,9 +905,9 @@ impl Context<'_> {
                         transform,
                     )?
                 } else {
-                    self.effects(input, &stack, desired, transform)?
+                    self.effects(input.clone(), &stack, desired, transform)?
                 };
-                let mut mixed = filtered;
+                let mut mixed = filtered.clone();
                 if node.features.mask.is_some()
                     || node.opacity != 1.0
                     || node.features.clip
@@ -880,20 +934,36 @@ impl Context<'_> {
                     }
                     p.settings[2] = 0.0;
                     p.settings[3] = mode(node.blend);
-                    self.dispatch(out, input, filtered, input, p, &entries);
+                    self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
                     mixed = out;
                 }
                 if let Some(mask) = self.vector_coverage(&node, transform, desired)? {
                     let out = self.alloc(desired)?;
-                    self.dispatch(out, input, mixed, mask, Self::params(12, transform), &[]);
+                    self.dispatch(
+                        &out,
+                        &input,
+                        &mixed,
+                        &mask,
+                        Self::params(12, transform),
+                        &[],
+                    )?;
                     mixed = out;
                 }
                 if node.features.clip {
                     let out = self.alloc(desired)?;
-                    self.dispatch(out, input, mixed, input, Self::params(10, transform), &[]);
-                    base = Some(out);
+                    self.dispatch(
+                        &out,
+                        &input,
+                        &mixed,
+                        &input,
+                        Self::params(10, transform),
+                        &[],
+                    )?;
+                    base = Some(out.clone());
                     accum = self.blend(
-                        base_background.ok_or(RenderError::Internal("clipping backdrop".into()))?,
+                        base_background
+                            .clone()
+                            .ok_or(RenderError::Internal("clipping backdrop".into()))?,
                         out,
                         base_node
                             .as_ref()
@@ -938,9 +1008,11 @@ impl Context<'_> {
             if node.features.clip {
                 if let Some(current) = base {
                     let clipped = self.clip_blend(current, src, &node)?;
-                    base = Some(clipped);
+                    base = Some(clipped.clone());
                     accum = self.blend(
-                        base_background.ok_or(RenderError::Internal("clipping backdrop".into()))?,
+                        base_background
+                            .clone()
+                            .ok_or(RenderError::Internal("clipping backdrop".into()))?,
                         clipped,
                         base_node
                             .as_ref()
@@ -950,9 +1022,9 @@ impl Context<'_> {
                 }
             } else {
                 base_position = position;
-                base_background = Some(accum);
+                base_background = Some(accum.clone());
                 base_node = Some(node.clone());
-                base = Some(src);
+                base = Some(src.clone());
                 accum = self.blend(accum, src, &node, None)?;
             }
         }
@@ -1005,7 +1077,7 @@ impl Context<'_> {
                 )?;
                 let p = Self::params(0, world);
                 let dummy = self.dummy();
-                self.dispatch(out, dummy, dummy, dummy, p, &entries);
+                self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
                 out
             }
             RContent::Mesh(paths) => self.vector(VectorContent::Paths(paths), world, roi, true)?,
@@ -1035,6 +1107,7 @@ impl Renderer {
             .m5
             .take()
             .unwrap_or_else(|| Resources::new(&self.device));
+        resources.expire(self.frame, &mut self.retired);
         let mut previews = HashMap::new();
         let mut overrides = BTreeMap::new();
         if let Some(stroke) = &self.stroke {
@@ -1063,7 +1136,6 @@ impl Renderer {
                 scene,
                 store,
                 encoder,
-                next: 1,
                 pinned: HashSet::new(),
                 previews,
                 overrides,
@@ -1091,7 +1163,8 @@ impl Renderer {
                 }],
                 wgpu::BufferUsages::UNIFORM,
             );
-            cx.r.retired.buffer(&uniform);
+            cx.r.retired
+                .classified_buffer(&uniform, MemoryClass::Effects);
             let bg = cx.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("M5 resolve"),
                 layout: &cx.resources.resolve.get_bind_group_layout(0),
@@ -1116,17 +1189,49 @@ impl Renderer {
                 pass.set_bind_group(0, &bg, &[]);
                 pass.dispatch_workgroups(16, 16, 1);
             }
-            for unused in cx.resources.pool.drain(cx.next..) {
-                cx.r.retired.texture(unused.texture);
-            }
             cx.r.queue.submit(Some(cx.encoder.finish()));
-            cx.r.retired.release();
+            cx.r.release_retired();
             if let Some(vector) = &mut cx.r.vector {
                 vector.after_submit();
             }
             Ok(())
         })();
+        if result.is_err() {
+            self.queue.submit(std::iter::empty());
+            if let Some(vector) = &mut self.vector {
+                self.retired.take(&mut vector.retired);
+                vector.after_submit();
+            }
+            self.release_retired();
+        }
         self.m5 = Some(resources);
         result
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+    #[test]
+    fn buckets_bound_padding_and_leases_hold_ancestors() {
+        assert_eq!(bucket(256), 256);
+        assert_eq!(bucket(280), 320);
+        assert_eq!(bucket(1), 64);
+        let owner = Rc::new(());
+        let lease = Rc::downgrade(&owner);
+        let ancestor = owner.clone();
+        drop(owner);
+        assert_eq!(lease.strong_count(), 1);
+        drop(ancestor);
+        assert_eq!(lease.strong_count(), 0);
+    }
+    #[test]
+    fn shader_bounds_every_logical_input_and_output() {
+        let s = include_str!("../../shaders/effects.wgsl");
+        assert!(s.contains("vec2i(c.sizes.xy)"));
+        assert!(s.contains("vec2i(c.sizes.zw)"));
+        assert!(s.contains("id.xy>=c.output_clip.xy"));
+        assert!(s.contains("vec2i(c.output_clip.zw)"));
+        assert!(!s.contains("textureDimensions("));
     }
 }

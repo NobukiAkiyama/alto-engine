@@ -87,7 +87,7 @@ export class Runtime {
     select(spec: string): string;
     selectionOutline(): string;
     /**
-     * Names for `tick`'s numbers, in order. A `prefetch.` or `profile.` prefix
+     * Names for `tick`'s numbers, in order. A `prefetch.`, `gpu.` or `profile.` prefix
      * nests the field; `profile.*` is present only when `hasProfile` is 1.
      * Whether resumable jobs leave input decoding to the Worker's decode pool.
      */
@@ -104,6 +104,12 @@ export class Runtime {
      * The hash of the snapshot bytes a save would write. Edits do not compute it.
      */
     snapshotHash(): string;
+    /**
+     * Resolves once the GPU work submitted so far completes, or when the device can
+     * no longer report it. Unlike `gpuIdle` it holds no borrow of the Runtime while
+     * it waits, so the Worker may give up waiting and call `tick` again.
+     */
+    submittedWorkDone(): Promise<any>;
     /**
      * Up to `max` decode requests: u32 count, then per tile a 32-byte hash, pixel
      * format tag (1 R8, 4 RGBA8), check flag, u32 length and the LZ4 bytes.
@@ -212,6 +218,7 @@ export interface InitOutput {
     readonly runtime_setProfiling: (a: number, b: number) => void;
     readonly runtime_setVisibleTileJobs: (a: number, b: number) => void;
     readonly runtime_snapshotHash: (a: number) => [number, number, number, number];
+    readonly runtime_submittedWorkDone: (a: number) => any;
     readonly runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -242,8 +249,8 @@ export interface InitOutput {
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__84: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__85: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__86: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

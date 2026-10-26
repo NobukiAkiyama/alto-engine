@@ -33,7 +33,7 @@ function container(width = 320, height = 240) {
 }
 const started = [];
 async function engineIn(el, options = {}) {
-  const engine = await createEngine({ container: el, storage: { namespace: name("engine"), ...options.storage } });
+  const engine = await createEngine({ container: el, gpu: options.gpu, storage: { namespace: name("engine"), ...options.storage } });
   started.push({ engine, el });
   return engine;
 }
@@ -91,6 +91,26 @@ export async function runEmbedTests(_playground, log) {
     log("PASS " + label);
   };
   try {
+    await test("64/128/256 MiB budgets reserve at most half and preserve brush pixels", async () => {
+      for (const [budget, fixed] of [[64,32],[128,64],[256,128]]) {
+        const engine=await engineIn(container(128,128),{gpu:{memoryBudgetMB:budget}});
+        const doc=await engine.createDocument({width:64,height:64});
+        let layer; await doc.transact("layer",tx=>{layer=tx.addRaster();});
+        const stroke=doc.tools.begin("brush",{layer,color:[1,0,0,1],tip:{size:16,hardness:1}});
+        stroke.input({x:32,y:32,pressure:1}); await stroke.end();
+        const tile=await unstable(engine).readTile(0,0), i=(32*256+32)*4;
+        assert(Array.from(tile.slice(i,i+4)).join()==="255,0,0,255",`brush at ${budget}`);
+        const frame=await unstable(engine).settle();
+        assert(frame.gpu.fixed-frame.gpu.retiredFixed===fixed*1048576,`reservation at ${budget}: ${frame.gpu.fixed}`);
+        assert(frame.gpuBytes<=budget*1048576,"GPU budget exceeded");
+        await cleanUp();
+      }
+      const el=container();
+      let rejected=false;
+      try { const bad=await createEngine({container:el,gpu:{memoryBudgetMB:63},storage:{namespace:name("too-small")}}); await bad.dispose(); }
+      catch(e){ rejected=String(e).includes("64 MiB"); }
+      el.remove(); assert(rejected,"budget under 64 MiB was accepted");
+    });
     await test("the browser is supported", async () => {
       const support = await isSupported();
       assert(support.ok, "isSupported: " + JSON.stringify(support));

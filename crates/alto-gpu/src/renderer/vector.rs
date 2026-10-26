@@ -396,6 +396,19 @@ impl VectorResources {
         self.retire(&mut retired);
         retired.release();
     }
+    fn check_allocation(&self, additional: u64, budget: u64) -> Result<()> {
+        if self
+            .bytes()
+            .saturating_add(self.retired.bytes().total())
+            .saturating_add(additional)
+            > budget
+        {
+            return Err(RenderError::Budget(
+                "vector allocation exceeds GPU budget (including retired allocations)".into(),
+            ));
+        }
+        Ok(())
+    }
     pub fn arena_bytes(&self) -> u64 {
         self.uniforms.bytes() + self.dense.as_ref().map_or(0, |d| d.uniforms.bytes())
     }
@@ -503,6 +516,9 @@ impl VectorResources {
                 self.glyph_stats.vector_runs += 1;
                 continue;
             }
+            if self.atlas.is_none() {
+                self.check_allocation(ATLAS_SIDE as u64 * ATLAS_SIDE as u64, budget)?;
+            }
             let atlas = self.atlas.get_or_insert_with(|| {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("R8 glyph atlas"),
@@ -601,6 +617,10 @@ impl VectorResources {
         let Some(atlas) = self.atlas.as_ref().filter(|_| !instances.is_empty()) else {
             return Ok(());
         };
+        self.check_allocation(
+            16 + (instances.len().max(1) * std::mem::size_of::<GlyphInstance>()) as u64,
+            budget,
+        )?;
         let uniform = buffer(
             device,
             queue,
@@ -750,6 +770,9 @@ impl VectorResources {
                     mesh.retire(&mut self.retired);
                 }
             }
+            // Evicted objects still occupy memory until this encoder is submitted
+            // and its completion callback reclaims their ledger entries.
+            self.check_allocation(bytes, budget)?;
             let batches = meshes
                 .into_iter()
                 .filter(|m| !m.indices.is_empty())
@@ -815,6 +838,7 @@ impl VectorResources {
             }
         }
         if self.coverage.as_ref().is_none_or(|c| c.w != w || c.h != h) {
+            self.check_allocation(coverage_bytes, budget)?;
             if let Some(old) = self.coverage.take() {
                 self.retired.texture(old.multi);
                 self.retired.texture(old.resolved);
@@ -910,6 +934,7 @@ impl VectorResources {
                 self.counters.upload_bytes += std::mem::size_of::<Uniform>() as u64;
                 self.counters.clear_pixels += w as u64 * h as u64;
                 self.counters.resolve_pixels += w as u64 * h as u64;
+                self.check_allocation(std::mem::size_of::<Uniform>() as u64, budget)?;
                 let uniform = buffer(
                     device,
                     queue,
@@ -1092,7 +1117,8 @@ impl VectorResources {
             rects.push(rect);
         }
         let coverage = self.coverage.as_ref().unwrap();
-        let fixed = self.mesh_bytes()
+        let fixed = self.retired.bytes().total()
+            + self.mesh_bytes()
             + w as u64 * h as u64 * 5
             + self.atlas.as_ref().map_or(0, |a| {
                 let (w, h) = a.alloc.size();
