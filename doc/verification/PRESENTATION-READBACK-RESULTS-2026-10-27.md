@@ -63,6 +63,6 @@ Chrome 155 / Apple Metal、4K・20 レイヤー、970×472 の surface、physica
 
 ## CI と配布物
 
-配布物の bytes / gzip / SHA-256 は [build.json](../../verification/build.json)、全対象ファイルは [SHA256SUMS](../../SHA256SUMS) で照合する。実装コミット `65204531b4c502dafdd43470cab82b30a47ecc00` の [push CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366219457) と [PR CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366266348) はともに成功した。Chrome 156.0.8078.47 / SwiftShader で機能 108、Vite 2 例、画素比較 10 シーンが成功。CI 成果物に記録された製品 WASM と Worker の SHA-256 は、ローカルの配布物と一致した。
+配布物の bytes / gzip / SHA-256 は [build.json](../../verification/build.json)、全対象ファイルは [SHA256SUMS](../../wasm/SHA256SUMS) で照合する。実装コミット `65204531b4c502dafdd43470cab82b30a47ecc00` の [push CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366219457) と [PR CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366266348) はともに成功した。Chrome 156.0.8078.47 / SwiftShader で機能 108、Vite 2 例、画素比較 10 シーンが成功。CI 成果物に記録された製品 WASM と Worker の SHA-256 は、ローカルの配布物と一致した。
 
 [CI 成果物の集計](../../verification/presentation-readback-ci-2026-10-27.json)。この CI 追記と集計はローカルの検証記録であり、実装コミットを再ビルドしたものではない。同じ結果のリンクは [PR #7](https://github.com/NobukiAkiyama/alto-engine/pull/7) の説明にも記載した。

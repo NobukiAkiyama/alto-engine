@@ -66,8 +66,8 @@ B6はエンジンが計上する割当量を描画時にサンプリングした
 
 ## 合否
 
-- **Rust 68件成功、失敗 0。** `alto-core` 3、`alto-doc` 11、`alto-engine` 16、`alto-git` 1、`alto-gpu` 10、`alto-raster` 2、`alto-store` 3、`alto-text` 20（単体 4 と `tests/layout.rs` 16）、`alto-vector` 2。[ログ](../../verification/rebuild-rust.log)
-- `cargo fmt --all -- --check`、native と wasm32 の Clippy `-D warnings`、SDK の TypeScript ビルドを通過。2026-10-19 の記録は [ログ](../../verification/m78-rust-and-sdk.log)。
+- **Rust 68件成功、失敗 0。** `alto-core` 3、`alto-doc` 11、`alto-engine` 16、`alto-git` 1、`alto-gpu` 10、`alto-raster` 2、`alto-store` 3、`alto-text` 20（単体 4 と `tests/layout.rs` 16）、`alto-vector` 2。ログ（`rebuild-rust.log`）はリポジトリに残していない。
+- `cargo fmt --all -- --check`、native と wasm32 の Clippy `-D warnings`、SDK の TypeScript ビルドを通過。2026-10-19 のログ（`m78-rust-and-sdk.log`）はリポジトリに残していない。
 - **Headless Chrome 155.0.8059.84：機能 11項目、M5 8項目、M6 10項目、M7 9項目、M8 6項目、B1〜B7、すべて成功。** `node scripts/verify-browser.mjs` が、配布している WASM を配信する Playground に対して実行しました。
 
 | 検証 | 結果 |

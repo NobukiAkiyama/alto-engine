@@ -90,6 +90,10 @@ Additional raw controls selected through `lifecycle_mode`:
   run the same code: one frame in flight, the main thread, a light load. Run with
   `node scripts/verify-browser.mjs --behind-resize` (`ALTO_BEHIND_SECONDS`,
   `ALTO_BEHIND_CONFIGS`), or the manual CI input `lifecycle_implementation=chrome-repro`
-  with `behind_configs`. A lost device is reported as data; only a broken harness
-  fails the job. On SwiftShader CI it has not reproduced the loss:
+  with `behind_configs`. Only a broken harness fails the job, so the summary entry
+  `behind-resize harness` stays `ok: true` when the run finishes. **A green job does
+  not mean the device-loss bug failed to reproduce.** The reproduction result is
+  `reproduced` plus the per-config `reproduction` list in that summary object (also
+  printed as `BEHIND-RESIZE harness finished ...` and written to `summary.json`).
+  Read those fields. On SwiftShader CI the loss has not reproduced:
   `doc/verification/CHROME-BUG-557281760-2026-10-25.md`.

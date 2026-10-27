@@ -17,7 +17,7 @@
 - UI上で選択範囲のドラッグ、既存ぼかし半径12→19、Undoで12へ復元、M5サンプルの読み込みを確認しました。
 - **外部Chrome 154では、途中ビルドのM5 8項目が成功**。最終ビルドの再検証は途中まで確認しましたが、Macの画面ロックで結果JSONを書き出せませんでした。外部ChromeのJSONは途中ビルドの記録です。最終版の合否は内蔵Chromiumの記録を参照してください。
 
-生データ：M5機能（`m5-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、既存機能の回帰（`m5-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、性能（`m5-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、UI（`m5-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](../../verification/m5-rust-and-sdk.log)、Chrome途中ビルド（`m5-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
+生データ：M5機能（`m5-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、既存機能の回帰（`m5-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、性能（`m5-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、UI（`m5-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Rust/SDKログ（`m5-rust-and-sdk.log`、リポジトリには残していない）、Chrome途中ビルド（`m5-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
 
 ## B1〜B7（最終ビルド・内蔵Chromium）
 

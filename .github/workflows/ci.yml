@@ -361,6 +361,8 @@ jobs:
           fi
           if [[ "$ALTO_GPU_LIFECYCLE_IMPLEMENTATION" == chrome-repro ]]; then
             # Plain WebGPU after crbug.com/557281760 (tests/diagnostics/behind-resize.html).
+            # Exit 0 means the harness ran. It does not mean the loss failed to reproduce;
+            # read summary `reproduced` / `reproduction`, not the green check.
             ALTO_BEHIND_SECONDS=90 ALTO_BEHIND_CONFIGS="${ALTO_BEHIND_CONFIGS:-worker-raf,worker-raf-inflight1,main-raf,worker-raf-light}" \
               ALTO_BROWSER_REPORT_DIR="$RUNNER_TEMP/lifecycle/behind" node scripts/verify-browser.mjs --behind-resize
             exit

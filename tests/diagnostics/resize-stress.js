@@ -68,7 +68,7 @@ export async function runResizeStress(engine, log) {
       if (reached !== null) latencies.push(reached - start);
       await U.settle();
     }
-    const pass = losses === 0 && latencies.length === STEPS;
+    const pass = losses === 0 && latencies.length === STEPS && strokeErrors === 0;
     results.push({
       name: "resize stress",
       pass,
@@ -79,7 +79,7 @@ export async function runResizeStress(engine, log) {
         ? { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95), max: Math.max(...latencies) }
         : null,
     });
-    log(`${pass ? "PASS" : "FAIL"} resize stress: ${losses} device losses, ${latencies.length}/${STEPS} resizes reached the canvas`);
+    log(`${pass ? "PASS" : "FAIL"} resize stress: ${losses} device losses, ${strokeErrors} stroke.end errors, ${latencies.length}/${STEPS} resizes reached the canvas`);
   } catch (error) {
     results.push({ name: "resize stress: " + String(error.stack || error), pass: false, losses });
     log("FAIL " + error);

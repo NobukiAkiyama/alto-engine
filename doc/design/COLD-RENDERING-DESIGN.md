@@ -11,7 +11,7 @@
 | 親がない低倍率表示 | **現行WASMの反復測定なし** | 旧実装の1回測定は428.8 ms、1960回・513.8 MB転送、`commandsMs` 304.7 ms。現行の予測値に転用しない。旧測定（`dpr2-same-physical-zoom-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 | メモリ | 現行測定はGPU計上値484.75/512 MiB、WASM 241.06–241.56/1024 MiB | GPU計上値は内部ステージングや実VRAM量の完全な測定ではない。[結果](../verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
 
-現行の`Renderer::render`は可視キーを列挙し、欠けたキーごとに`compose()`を同期実行する。時間予算を超えても最初の1枚は完了させる。ラスタの`compose()`は完成済み子4枚があれば`downsample_cached()`を使うが、子が欠けると`commands()`から元タイルを取得・転送する。`prefetch_step()`は短いジョブに分割済みだが、可視描画には使われない。したがって、先読みの成功と初回表示の応答性は別問題である。[Renderer](../../crates/alto-gpu/src/renderer.rs)、[Worker](../../packages/alto-sdk/src/worker.js)。
+現行の`Renderer::render`は可視キーを列挙し、欠けたキーごとに`compose()`を同期実行する。時間予算を超えても最初の1枚は完了させる。ラスタの`compose()`は完成済み子4枚があれば`downsample_cached()`を使うが、子が欠けると`commands()`から元タイルを取得・転送する。`prefetch_step()`は短いジョブに分割済みだが、可視描画には使われない。したがって、先読みの成功と初回表示の応答性は別問題である。[Renderer](../../crates/alto-gpu/src/renderer.rs)、[Worker](../../packages/alto-sdk/src/worker.ts)。
 
 ## 2. 守る契約と成功の定義
 
@@ -89,7 +89,7 @@ OPFSは容量制限・削除の対象であり、派生キャッシュを復旧�
 
 | 段階 | 主な場所 | 成果と止める条件 |
 | --- | --- | --- |
-| P0 診断 | `crates/alto-gpu/src/renderer.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/worker.js`、`tests/e2e/browser-tests.js` | C1–C5の現在値、段階別時刻、単一ステップ最長を記録。ここでボトルネックを確定する |
+| P0 診断 | `crates/alto-gpu/src/renderer.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/worker.ts`、`tests/e2e/browser-tests.js` | C1–C5の現在値、段階別時刻、単一ステップ最長を記録。ここでボトルネックを確定する |
 | P1 索引とジョブ共通化 | `crates/alto-gpu/src/renderer.rs`とscene構築箇所 | 可視と先読みが同じラスタ計画器を使う。既存画素とB1/B3、メモリを保つ。M5は現行経路 |
 | P2 コールド可視処理 | Renderer、WASMの進捗API、Workerの`tick`処理 | 中断可能な可視ジョブ、入力共有、中央優先、完成/previewの区別。C1–C3のCPU停止時間と完全描画を比較 |
 | P3 派生ディスクキャッシュ | 新規Cache Worker、SDK、必要ならRendererの完成RGBA出力 | C4で命中時の短縮を実測。容量不足・破損・ジャーナル障害から独立して安全に戻る |

@@ -354,7 +354,29 @@ try {
       await writeFile(join(reportDir, "behind-resize.json"), JSON.stringify(results, null, 2) + "\n");
     }
     // The outcome is data, not a pass/fail of the engine: only a broken harness fails the job.
-    summary.push({ name: "behind-resize harness", ok: true, count: results.length });
+    // `ok: true` means the harness finished. It does not mean the device-loss bug
+    // failed to reproduce. `reproduced` and `reproduction` are that result.
+    const reproduction = results.map((result) => ({
+      name: result.name,
+      lost: !!result.stats?.lost,
+      lostAtMs: result.stats?.lost?.atMs ?? null,
+      reason: result.stats?.lost?.reason ?? null,
+      mailboxLines: result.gpuLog?.length ?? 0,
+      frames: result.stats?.frames ?? null,
+      resizes: result.stats?.resizes ?? null,
+    }));
+    const reproduced = reproduction.some((row) => row.lost);
+    console.log(
+      `BEHIND-RESIZE harness finished ok=true reproduced=${reproduced}. A green job does not mean the device-loss bug failed to reproduce.`,
+    );
+    summary.push({
+      name: "behind-resize harness",
+      ok: true,
+      count: results.length,
+      reproduced,
+      reproduction,
+      note: "ok means the harness ran. It does not mean crbug.com/557281760 failed to reproduce. Read reproduced and reproduction.",
+    });
   } else if (lifecycleOnly) {
     await send("Page.navigate", { url: pageUrl }, 30000);
     let ready = false;
@@ -475,7 +497,11 @@ try {
   }
 } catch (error) {
   console.error("Browser verification failed:", error);
-  summary.push({ name: vectorOnly ? "vector optimization harness" : lifecycleOnly ? "gpu-lifecycle harness" : "startup", ok: false, error: String(error) });
+  summary.push({
+    name: vectorOnly ? "vector optimization harness" : lifecycleOnly ? "gpu-lifecycle harness" : behindOnly ? "behind-resize harness" : "startup",
+    ok: false,
+    error: String(error),
+  });
 } finally {
   if (traceStarted) {
     try {
