@@ -251,7 +251,13 @@ async function init() {
   directory = await root.getDirectoryHandle(namespaceFolder(namespace), { create: true });
   objectsDirectory = await directory.getDirectoryHandle("objects", { create: true });
   packsDirectory = await directory.getDirectoryHandle("packs", { create: true });
-  await scan();
+  try {
+    await scan();
+  } catch (e) {
+    // Every later request scans again instead of using a store it never read.
+    directory = null;
+    throw e;
+  }
 }
 /**
  * Reads both journals and keeps the valid checkpoints. Objects are not listed here:
@@ -261,15 +267,23 @@ async function init() {
 async function scan() {
   const found: Candidate[] = [];
   const seenGenerations: number[] = [];
-  for (const name of ["journal-a.bin", "journal-b.bin"])
+  for (const name of ["journal-a.bin", "journal-b.bin"]) {
+    let f: FileSystemFileHandle;
     try {
-      const f = await directory!.getFileHandle(name);
-      const bytes = new Uint8Array(await (await f.getFile()).arrayBuffer());
-      if (bytes.length >= 12 && MAGIC.every((b, i) => bytes[i] === b))
-        seenGenerations.push(new DataView(bytes.buffer, bytes.byteOffset + 8, 4).getUint32(0, true));
-      const parsed = parse(bytes);
-      if (parsed) found.push({ name, file: f, recordCount: 0, ...parsed });
-    } catch {}
+      f = await directory!.getFileHandle(name);
+    } catch (e) {
+      // Not written yet. Any other failure fails the store: a journal it cannot read
+      // taken as absent would offer an older checkpoint, collect the newer one's packs
+      // as garbage and write the next checkpoint over it.
+      if ((e as DOMException).name === "NotFoundError") continue;
+      throw e;
+    }
+    const bytes = new Uint8Array(await (await f.getFile()).arrayBuffer());
+    if (bytes.length >= 12 && MAGIC.every((b, i) => bytes[i] === b))
+      seenGenerations.push(new DataView(bytes.buffer, bytes.byteOffset + 8, 4).getUint32(0, true));
+    const parsed = parse(bytes);
+    if (parsed) found.push({ name, file: f, recordCount: 0, ...parsed });
+  }
   generation = Math.max(0, ...seenGenerations);
   candidates = [];
   for (const candidate of found)
