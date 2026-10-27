@@ -26,7 +26,7 @@ CPU 参照は Rust（`crates/alto-gpu/src/cpu_composite.rs`、テストのみ）
 
 3. 既存出力は変えない。バージョン 1 と 2 の式と、`tests/parity/render-v1.txt` および `tests/parity/cpu-reference.txt` の記録済みハッシュは触らない。新規文書の `render_version` は 2 のままである。バージョン 3 の文書を保存すると `format_version` は 4 になる。`validate` が受け付ける `render_version` は 1、2、3 だけで、それ以外は拒否する。1 から 2 への更新は今のままである。3 へ自動では上がらない。
 
-   parity はこの勾配と 20 通りを、native（macOS Metal 上の `cargo test`）、gpu-parity（Ubuntu lavapipe）、wasm（macOS の Chrome for Testing、`ALTO_BROWSER_GPU=swiftshader`、`node scripts/verify-browser.mjs --functional`。アダプタの architecture に `swiftshader` が含まれること）で全画素比べる。SwiftShader がこのケースを実行するのは wasm ジョブの parity スイートである。ブラウザは `tests/fixtures/render-v3-empty.alto` を開く。`createDocument` はバージョン 2 のままで、wasm にバージョンを書くメソッドは足していない。端点を足す前の CI [40569829479](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40569829479) では 3 ジョブとも成功し、当時の 12 通りは全画素一致した。SwiftShader の parity レポートは `color-adjust` が `12 settings, 0 pixels differ` だった。20 通りの結果は、この変更を実行した CI が成功したあとでこの節に書く。その一致は Metal、lavapipe、SwiftShader についての観測であり、仕様の保証ではない。
+   parity はこの勾配と 20 通りを、native（macOS Metal 上の `cargo test`）、gpu-parity（Ubuntu lavapipe）、wasm（macOS の Chrome for Testing、`ALTO_BROWSER_GPU=swiftshader`、`node scripts/verify-browser.mjs --functional`。アダプタの architecture に `swiftshader` が含まれること）で全画素比べる。SwiftShader がこのケースを実行するのは wasm ジョブの parity スイートである。ブラウザは `tests/fixtures/render-v3-empty.alto` を開く。`createDocument` はバージョン 2 のままで、wasm にバージョンを書くメソッドは足していない。CI [40583663336](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40583663336) では 3 ジョブとも成功し、20 通りは全画素一致した。SwiftShader の parity レポートは `color-adjust` が `20 settings, 0 pixels differ` である。アダプタは `{"vendor":"google","architecture":"swiftshader"}` だった。この一致は Metal、lavapipe、SwiftShader についての観測であり、仕様の保証ではない。
 
 ## mask
 
