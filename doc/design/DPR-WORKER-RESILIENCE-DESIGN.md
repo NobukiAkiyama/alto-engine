@@ -1,6 +1,6 @@
 # 高DPI表示とWorker障害復旧の設計
 
-状態: D0の比較条件とR1のWorker状態・再試行を実装。同じ文書範囲でのDPR 2測定がB2目標を満たしたためD2の転送変更は保留した。**より広い文書範囲を表示するDPR 2・物理倍率0.5の未達には、[低倍率合成タイル階層設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)の可視タイル保護と親タイル先読みを実装した。**[先読みの結果](verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。分割ジョブと網羅的な障害注入は未実装。以前の[追加実装結果](verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)と[縮小表示・復旧高速化設計](PERFORMANCE-RECOVERY-DESIGN.md)は当時の判断を記録している。以下には当初の設計案も含まれ、実装内容との差は各結果報告で示す。
+状態: D0の比較条件とR1のWorker状態・再試行を実装。同じ文書範囲でのDPR 2測定がB2目標を満たしたためD2の転送変更は保留した。**より広い文書範囲を表示するDPR 2・物理倍率0.5の未達には、[低倍率合成タイル階層設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)の可視タイル保護と親タイル先読みを実装した。**[先読みの結果](../verification/LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)を参照。分割ジョブと網羅的な障害注入は未実装。以前の[追加実装結果](../verification/DPR-WORKER-RESILIENCE-RESULTS-2026-10-22.md)と[縮小表示・復旧高速化設計](PERFORMANCE-RECOVERY-DESIGN.md)は当時の判断を記録している。以下には当初の設計案も含まれ、実装内容との差は各結果報告で示す。
 
 ## 1. 判断の根拠と未確定な点
 
@@ -11,7 +11,7 @@
 | `Renderer::downsample_cached`は必要な子表示タイルが1つでも欠けると使用できない。表示キャッシュは256スロット、アトラスは最大512スロット、20層ベンチのGPU推定使用量は約484/512 MiB。 | 親タイルを保持する余地と退避順を測る。アトラスや表示キャッシュを単純に増やす方針は採らない。 |
 | 以前のB7で`{"error":"undefined"}`が出た。Workerスクリプト404の最小再現で同じ文字列を確認し、サーバー再起動後の新しいページではB7が通った。 | 当時の個別の失敗ファイルは記録されていない。サーバー停止・古いタブが最も整合するが確定原因とは呼ばない。継続的な性能問題とWorker読み込み障害を分ける。 |
 
-現行SDKの`resize()`はCSS寸法に最大2のDPRを掛け、`screenToDocument()`も同じ係数を使う。`viewport.zoom`をそのままWorkerへ送り、Rendererは物理キャンバス幅を`zoom`で割って可視文書範囲を決める。[SDK](packages/alto-sdk/src/index.ts)、[Renderer](crates/alto-gpu/src/renderer.rs)、[B2](tests/e2e/browser-tests.js)。この単位は正しく比較するための設計上の前提である。
+現行SDKの`resize()`はCSS寸法に最大2のDPRを掛け、`screenToDocument()`も同じ係数を使う。`viewport.zoom`をそのままWorkerへ送り、Rendererは物理キャンバス幅を`zoom`で割って可視文書範囲を決める。[SDK](../../packages/alto-sdk/src/index.ts)、[Renderer](../../crates/alto-gpu/src/renderer.rs)、[B2](../../tests/e2e/browser-tests.js)。この単位は正しく比較するための設計上の前提である。
 
 ## 2. 守る契約
 

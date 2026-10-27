@@ -2,11 +2,11 @@
 
 作成日：2026-10-27（Asia/Tokyo）
 
-状態：設計時点の基準と受入条件を記した文書。2026-10-27 に実装を追加した。実装済みの範囲・実行した検証・未検証の故障条件は [実装と検証記録](../../verification/PRESENTATION-READBACK-RESULTS-2026-10-27.md) を参照する。下記の受入表全件を実測済みという意味ではない。
+状態：設計時点の基準と受入条件を記した文書。2026-10-27 に実装を追加した。実装済みの範囲・実行した検証・未検証の故障条件は [実装と検証記録](../verification/PRESENTATION-READBACK-RESULTS-2026-10-27.md) を参照する。下記の受入表全件を実測済みという意味ではない。
 
 基準実装：PR #6 の head adf3c342e743d105c7ee1fb89082053f41a18bc1。main への統合は 1f16c8094bdb847ddd18fa8ffdf7ab24621b80f4。手元の実装ファイルを読んで設計した。行番号は変化するため、参照はファイルと関数名を基準とする。
 
-関連：[GPU メモリ設計](2026-10-26-gpu-memory.md)、[その実装・検証記録](../../verification/GPU-MEMORY-RESULTS-2026-10-26.md)、[コールド表示設計](../../COLD-RENDERING-DESIGN.md)、[再開可能な低倍率先読み設計](../../RESUMABLE-LOW-ZOOM-PREFETCH-DESIGN.md)。
+関連：[GPU メモリ設計](2026-10-26-gpu-memory.md)、[その実装・検証記録](../verification/GPU-MEMORY-RESULTS-2026-10-26.md)、[コールド表示設計](COLD-RENDERING-DESIGN.md)、[再開可能な低倍率先読み設計](RESUMABLE-LOW-ZOOM-PREFETCH-DESIGN.md)。
 
 ## 1. 採用する方針
 
@@ -466,4 +466,4 @@ P2 を実装しただけでストローク確定の原子性まで完成と扱�
 - [GPUBuffer API reference](https://gpuweb.github.io/types/interfaces/GPUBuffer.html)：map/unmap/destroyと、bufferごとの完了通知の範囲。
 - [GPUSupportedLimits](https://developer.mozilla.org/en-US/docs/Web/API/GPUSupportedLimits)：公開される個別上限。総物理VRAM予算と解釈しない。
 - [固定版 wgpu 30.0.1 Device API](https://docs.rs/wgpu/30.0.1/wgpu/struct.Device.html)：実装時に使用する版。ErrorScopeGuard/popおよびSend条件は手元の30.0.1ソースでも確認した。
-- [GPU メモリの現行検証記録](../../verification/GPU-MEMORY-RESULTS-2026-10-26.md)：本書の基準。ここにある旧テスト成功と、本書の未実装部分の受入完了を区別する。
+- [GPU メモリの現行検証記録](../verification/GPU-MEMORY-RESULTS-2026-10-26.md)：本書の基準。ここにある旧テスト成功と、本書の未実装部分の受入完了を区別する。

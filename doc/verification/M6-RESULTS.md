@@ -25,7 +25,7 @@
 | M4回帰11項目 | JSON（`m6-chrome-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 | B1〜B7 | JSON（`m6-chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 
-[Rust/SDKログ](m6-rust-and-sdk.log) / [比較用Clippy](m6-comparison-clippy.log) （M6時点のWASMの値は下の「配布物」）。以前の結果は [M5](M5-RESULTS.md)・[M4](M4-RESULTS.md) に保存しています。
+[Rust/SDKログ](../../verification/m6-rust-and-sdk.log) / [比較用Clippy](../../verification/m6-comparison-clippy.log) （M6時点のWASMの値は下の「配布物」）。以前の結果は [M5](M5-RESULTS.md)・[M4](M4-RESULTS.md) に保存しています。
 
 ## M6の検証内容
 
@@ -72,9 +72,9 @@ lyon / velloを同じ100本のパスで実測しました。このwarm描画で�
 
 本体WASM 2,532,853 bytes / gzip 599,840 bytes。SDK distとPlaygroundのWASMはバイト一致。SHA-256：`771594873a466c975548563ff083d45163708b055d136cd3380b0b18a45a5409`。
 
-[編集可能なM6サンプル](sample-m6.alto)（960×640）、ソース、ビルド済みSDK/WASM、比較ページ、検証JSON、ライセンス通知を同梱しています。
+[編集可能なM6サンプル](../../verification/sample-m6.alto)（960×640）、ソース、ビルド済みSDK/WASM、比較ページ、検証JSON、ライセンス通知を同梱しています。
 
-![M6 Playground](playground-m6.png)
+![M6 Playground](../../verification/playground-m6.png)
 
 ## 範囲と制限
 

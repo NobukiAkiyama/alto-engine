@@ -1,9 +1,9 @@
 # GPU メモリの内訳と制御
 
 作成日：2026-10-26
-状態：実装済み。実装と検証の詳細は [GPU-MEMORY-RESULTS-2026-10-26.md](../../verification/GPU-MEMORY-RESULTS-2026-10-26.md)。以下の原設計に対する具体化・制約は末尾の「実装上の決定」を参照。
+状態：実装済み。実装と検証の詳細は [GPU-MEMORY-RESULTS-2026-10-26.md](../verification/GPU-MEMORY-RESULTS-2026-10-26.md)。以下の原設計に対する具体化・制約は末尾の「実装上の決定」を参照。
 
-対象は `crates/alto-gpu` のテクスチャ予約、M5 の中間ターゲット、表示タイルの退避、予算に対する確保量、スロットの再利用である。B6（[verification/EMBEDDING-API-RESULTS-2026-10-25.md](../../verification/EMBEDDING-API-RESULTS-2026-10-25.md)）が Metal で GPU 484.8 / 512 MiB と報告している。内訳を見えるようにし、小さい予算での過大予約と効果付き文書の中間確保を減らす。既定の 512 MiB における B6 の削減量は、下記の正規データ保持条件を満たす別方式を検証するまで未確定とする。
+対象は `crates/alto-gpu` のテクスチャ予約、M5 の中間ターゲット、表示タイルの退避、予算に対する確保量、スロットの再利用である。B6（[doc/verification/EMBEDDING-API-RESULTS-2026-10-25.md](../verification/EMBEDDING-API-RESULTS-2026-10-25.md)）が Metal で GPU 484.8 / 512 MiB と報告している。内訳を見えるようにし、小さい予算での過大予約と効果付き文書の中間確保を減らす。既定の 512 MiB における B6 の削減量は、下記の正規データ保持条件を満たす別方式を検証するまで未確定とする。
 
 ## コードで確かめた内訳
 

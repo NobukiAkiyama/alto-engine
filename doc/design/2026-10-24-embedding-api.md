@@ -356,7 +356,7 @@ interface Requests {
 
 ## 7. 手引きと例
 
-- **`docs/embedding.md`（手引き）。** 次のことを書く。
+- **`doc/embedding.md`（手引き）。** 次のことを書く。
   - 導入
   - バンドラーの設定（Vite、webpack、バンドラーなし）
   - CSP

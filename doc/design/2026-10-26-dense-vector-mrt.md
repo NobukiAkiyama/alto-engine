@@ -1,6 +1,6 @@
 # 密集ベクターの順序を保つ MRT 描画
 
-2026-10-26。対象は先行する uniform arena / disjoint batching 実装。実装結果は [検証レポート](../../verification/DENSE-VECTOR-RESULTS-2026-10-26.md)に分ける。
+2026-10-26。対象は先行する uniform arena / disjoint batching 実装。実装結果は [検証レポート](../verification/DENSE-VECTOR-RESULTS-2026-10-26.md)に分ける。
 
 ## 問題
 
@@ -54,4 +54,4 @@ pass 終了時に各 R8 coverage を resolve し、一つの paint pass でバ�
 - [wgpu 30.0.1 ColorTargetState](https://docs.rs/wgpu/30.0.1/wgpu/struct.ColorTargetState.html)：write mask と attachment format の契約。
 - [同版 RenderPassColorAttachment](https://docs.rs/wgpu/30.0.1/wgpu/struct.RenderPassColorAttachment.html)：MSAA の resolve target。
 - [WebGPU correspondence](https://gpuweb.github.io/gpuweb/correspondence/)：MRT 数と attachment bytes / sample の実装上の上限。
-- [先行実装の結果](../../verification/VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md)：離れたパスの改善と、密集時に残った費用。
+- [先行実装の結果](../verification/VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md)：離れたパスの改善と、密集時に残った費用。

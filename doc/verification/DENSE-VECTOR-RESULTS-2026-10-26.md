@@ -3,7 +3,7 @@
 
 生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
 
-2026-10-26 JST。対象は `16e4ce0` と、先行 SDK 修正を保持した密集ベクターの作業ツリー。[設計](../docs/design/2026-10-26-dense-vector-mrt.md)。Canvas / compositor の間欠的 GPU 喪失を修正したという報告ではない。
+2026-10-26 JST。対象は `16e4ce0` と、先行 SDK 修正を保持した密集ベクターの作業ツリー。[設計](../design/2026-10-26-dense-vector-mrt.md)。Canvas / compositor の間欠的 GPU 喪失を修正したという報告ではない。
 
 ## 変更
 
@@ -61,7 +61,7 @@ SDK には1レイヤー128パスの既存上限がある。単体 renderer の1,
 
 ## GitHub CI
 
-[CI run 40220872493](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40220872493) は commit `ba52f250db253f2ad77683822ed8b7366592d747` の通常 check job を全て成功した。Chrome 156.0.8078.47 / SwiftShader。Rust / WASM / 配布物、回帰94件、埋め込み2例、10画素条件×5方式と寿命・予算の検査を含む。[CI の記録](dense-vector-ci-2026-10-26.json)。手動の gpu-lifecycle 調査 job は通常 push のため未実行。
+[CI run 40220872493](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40220872493) は commit `ba52f250db253f2ad77683822ed8b7366592d747` の通常 check job を全て成功した。Chrome 156.0.8078.47 / SwiftShader。Rust / WASM / 配布物、回帰94件、埋め込み2例、10画素条件×5方式と寿命・予算の検査を含む。[CI の記録](../../verification/dense-vector-ci-2026-10-26.json)。手動の gpu-lifecycle 調査 job は通常 push のため未実行。
 
 CI の配布 WASM はローカルと同じ `b3a7df52...da45314`。比較専用 WASM も CI 上でソースから再ビルドし、実行 hash は `e94aae6e...eaea826` と記録した。比較ビルドには通常配布のパス固定処理を適用していないため、実行した hash をローカルと区別する。CI を通ったソースと配布物が主作業ツリーと一致することも照合した。
 

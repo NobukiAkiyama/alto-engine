@@ -1,6 +1,6 @@
 # エンジン再設計 第 1 段階：検証結果（2026-10-24）
 
-設計：[docs/design/2026-10-24-engine-redesign.md](../docs/design/2026-10-24-engine-redesign.md)
+設計：[doc/design/2026-10-24-engine-redesign.md](../design/2026-10-24-engine-redesign.md)
 
 ## 機能テスト
 
@@ -41,7 +41,7 @@ Rust のテストは 110 件すべて成功。`scripts/check.sh` 一式も成功
 
 # 第 2 段階 A・E（2026-10-24）
 
-設計：[docs/design/2026-10-24-engine-redesign-phase2.md](../docs/design/2026-10-24-engine-redesign-phase2.md)
+設計：[doc/design/2026-10-24-engine-redesign-phase2.md](../design/2026-10-24-engine-redesign-phase2.md)
 
 新しい計測 B8 は、表示済みの 4K・20 レイヤーで、小さなストローク（直径 24px）を確定してから描画が落ち着くまでの時間の中央値（10 回）。ズーム 1（表示タイル十数枚）と、キャンバス全体が見えるズーム 0.5 の 2 条件で測る。
 

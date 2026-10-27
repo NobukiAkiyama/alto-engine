@@ -1,6 +1,6 @@
 # ベクター描画の改善設計
 
-作成日：2026-10-26。状態：**比較基盤、P1、P2a を実装・検証済み。** P2b / P3 は今回は採用しない。以下の設計時の見積もりと目標値に対する実測・検証範囲は、[実装結果](../../verification/VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md)を参照。
+作成日：2026-10-26。状態：**比較基盤、P1、P2a を実装・検証済み。** P2b / P3 は今回は採用しない。以下の設計時の見積もりと目標値に対する実測・検証範囲は、[実装結果](../verification/VECTOR-OPTIMIZATION-RESULTS-2026-10-26.md)を参照。
 
 後続の密集ベクター改善は [順序を保つ MRT8 の設計](2026-10-26-dense-vector-mrt.md)へ分けた。本書と以下の先行測定は disjoint batching 段階の記録として保持する。
 
@@ -31,7 +31,7 @@
 
 10月18日の保存済み比較は、lyon＋Alto の warm 中央値 25.9 ms、vello 0.11.0 は 0.8 ms。AA は前者が 4x MSAA、後者が Area。現行版の再測定でも、同じ画素結果の比較でもない。倍率をそのまま今回の期待値にしない。
 
-参照：[`verification/VECTOR-COMPARISON.md`](../../verification/VECTOR-COMPARISON.md)。
+参照：[`doc/verification/VECTOR-COMPARISON.md`](../verification/VECTOR-COMPARISON.md)。
 
 ## 3. 計測を先に揃える（P0）
 
@@ -248,7 +248,7 @@ P2 が必要性能を満たせば、P3 は採用しなくてよい。各段階�
 - [同版の公開ソース](https://docs.rs/vello/0.11.0/src/vello/lib.rs.html)：出力形式と recording の実行を確認する参照先。
 - [WebGPU の render pass](https://gpuweb.github.io/gpuweb/#render-pass-encoder)：attachment の clear / load と resource usage の契約。scissor を小さくしても attachment の LoadOp::Clear がその矩形だけになると仮定しない。
 - [WebGPU queue の完了待ち](https://gpuweb.github.io/gpuweb/#dom-gpuqueue-onsubmittedworkdone)：提出済みの queue 処理を待つ。compositor の表示完了や GPU 喪失の解消を保証する API と解釈しない。
-- [`verification/VECTOR-COMPARISON.md`](../../verification/VECTOR-COMPARISON.md)：古い単体比較の範囲と画素差。
-- [`verification/GPU-LOSS-SURFACE-RECORDING-2026-10-25.md`](../../verification/GPU-LOSS-SURFACE-RECORDING-2026-10-25.md)：独立して残る GPU 喪失の調査。
+- [`doc/verification/VECTOR-COMPARISON.md`](../verification/VECTOR-COMPARISON.md)：古い単体比較の範囲と画素差。
+- [`doc/verification/GPU-LOSS-SURFACE-RECORDING-2026-10-25.md`](../verification/GPU-LOSS-SURFACE-RECORDING-2026-10-25.md)：独立して残る GPU 喪失の調査。
 
 **実装では lyon / MSAA / RGBA16F を保った P1・P2a を採用した。vello の本体統合や paint の instancing は、今回の目標を満たすために追加しない。** 完了した検査と測っていない範囲は実装結果に分けて記録する。

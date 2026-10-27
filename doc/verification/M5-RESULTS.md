@@ -17,7 +17,7 @@
 - UI上で選択範囲のドラッグ、既存ぼかし半径12→19、Undoで12へ復元、M5サンプルの読み込みを確認しました。
 - **外部Chrome 154では、途中ビルドのM5 8項目が成功**。最終ビルドの再検証は途中まで確認しましたが、Macの画面ロックで結果JSONを書き出せませんでした。外部ChromeのJSONは途中ビルドの記録です。最終版の合否は内蔵Chromiumの記録を参照してください。
 
-生データ：M5機能（`m5-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、既存機能の回帰（`m5-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、性能（`m5-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、UI（`m5-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](m5-rust-and-sdk.log)、Chrome途中ビルド（`m5-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
+生データ：M5機能（`m5-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、既存機能の回帰（`m5-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、性能（`m5-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、UI（`m5-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](../../verification/m5-rust-and-sdk.log)、Chrome途中ビルド（`m5-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。M4時点の結果は [M4-RESULTS.md](M4-RESULTS.md) に保存しています。
 
 ## B1〜B7（最終ビルド・内蔵Chromium）
 
@@ -53,9 +53,9 @@ WASM：2,073,545 bytes、gzip：481,754 bytes（wasm-opt未適用）。SDK v0.2.
 
 SHA-256：`da78f8df464f45a64b0ff53dffb2fe5db6e707d5d01e18ac8e61d26a44bb135b`
 
-[`sample-m5.alto`](sample-m5.alto) は768×512、選択範囲、ぼかし付きグループ、クリップしたストライプ、マスク付きペイント、右半分の色調整のサンプルです。新しいネイティブEngineで保存→読込のスナップショット一致を確認し、Playgroundの「M5サンプルを開く」でも表示を確認しました。生成元は `crates/alto-engine/examples/create-m5-sample.rs` です。
+[`sample-m5.alto`](../../verification/sample-m5.alto) は768×512、選択範囲、ぼかし付きグループ、クリップしたストライプ、マスク付きペイント、右半分の色調整のサンプルです。新しいネイティブEngineで保存→読込のスナップショット一致を確認し、Playgroundの「M5サンプルを開く」でも表示を確認しました。生成元は `crates/alto-engine/examples/create-m5-sample.rs` です。
 
-![M5 Playground](playground-m5.png)
+![M5 Playground](../../verification/playground-m5.png)
 
 ## 範囲と制限
 
