@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -65,6 +65,65 @@ async function gpuTile(engine, testCase) {
     : await unstable(engine).readTile(testCase.tx, testCase.ty);
   return new Uint8Array(raw);
 }
+function sourcesAt(testCase, x, y) {
+  const scale = 2 ** (testCase.level || 0);
+  const docX = testCase.tx * 256 * scale + x * scale;
+  const docY = testCase.ty * 256 * scale + y * scale;
+  const sources = [];
+  const walk = (node) => {
+    if (node.type === "group") {
+      node.children.forEach(walk);
+      return;
+    }
+    const image = node.image;
+    if (docX >= 0 && docY >= 0 && docX < image.w && docY < image.h) {
+      const i = (docY * image.w + docX) * 4;
+      sources.push([image.pixels[i], image.pixels[i + 1], image.pixels[i + 2], image.pixels[i + 3]]);
+    }
+  };
+  testCase.nodes.forEach(walk);
+  return sources;
+}
+function measureRow(testCase, cpu, gpu) {
+  let count = 0;
+  const maxAbs = [0, 0, 0, 0];
+  const mismatches = [];
+  const n = Math.min(cpu.length, gpu.length) / 4;
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    if (cpu[o] === gpu[o] && cpu[o + 1] === gpu[o + 1] && cpu[o + 2] === gpu[o + 2] && cpu[o + 3] === gpu[o + 3]) continue;
+    count++;
+    for (let channel = 0; channel < 4; channel++) {
+      maxAbs[channel] = Math.max(maxAbs[channel], Math.abs(cpu[o + channel] - gpu[o + channel]));
+    }
+    if (mismatches.length < 5) {
+      const x = i % 256;
+      const y = (i / 256) | 0;
+      mismatches.push({
+        x,
+        y,
+        sources: sourcesAt(testCase, x, y),
+        gpu: [gpu[o], gpu[o + 1], gpu[o + 2], gpu[o + 3]],
+        cpu: [cpu[o], cpu[o + 1], cpu[o + 2], cpu[o + 3]],
+      });
+    }
+  }
+  return {
+    name: testCase.name,
+    enforced: false,
+    count,
+    maxAbs,
+    mismatches,
+    lengths: { cpu: cpu.length, gpu: gpu.length },
+  };
+}
+function formatMeasure(row) {
+  const pixels = row.mismatches.map((pixel) => {
+    const sources = pixel.sources.length ? pixel.sources.map((px) => px.join(",")).join(" | ") : "none";
+    return `pixel ${pixel.x},${pixel.y} source ${sources} gpu ${pixel.gpu.join(",")} cpu ${pixel.cpu.join(",")}`;
+  });
+  return `${row.count} pixels differ; max abs ${row.maxAbs.join(",")}${pixels.length ? "; " + pixels.join("; ") : ""}`;
+}
 function square() {
   const image = solid(256, 256, [0, 0, 0, 0]);
   for (let y = 80; y < 180; y++) for (let x = 80; x < 180; x++) image.pixels.set([255, 0, 0, 255], (y * 256 + x) * 4);
@@ -101,6 +160,7 @@ export async function runParityTests(engine, log) {
       log(`FAIL ${name} ${error}`);
     }
   };
+  const alphaMeasure = [];
   try {
     for (const testCase of parityCases()) {
       await test(testCase.name, async () => {
@@ -113,6 +173,40 @@ export async function runParityTests(engine, log) {
         assert(same(cpu, gpu), gap);
         return gap;
       });
+    }
+    for (const testCase of alphaMeasureCases()) {
+      const start = performance.now();
+      try {
+        const doc = await engine.createDocument({ width: testCase.w, height: testCase.h });
+        for (const node of testCase.nodes) await addNode(doc, engine, node);
+        const cpu = renderCase(testCase);
+        const gpu = await gpuTile(engine, testCase);
+        const row = measureRow(testCase, cpu, gpu);
+        alphaMeasure.push(row);
+        const detail = formatMeasure(row);
+        results.push({
+          name: testCase.name,
+          pass: true,
+          measure: true,
+          enforced: false,
+          ms: performance.now() - start,
+          detail,
+          count: row.count,
+          maxAbs: row.maxAbs,
+          mismatches: row.mismatches,
+        });
+        log(`MEASURED-NOT-ENFORCED ${testCase.name}: ${detail}`);
+      } catch (error) {
+        results.push({
+          name: testCase.name,
+          pass: false,
+          measure: true,
+          enforced: false,
+          error: String(error),
+          ms: performance.now() - start,
+        });
+        log(`FAIL ${testCase.name} ${error}`);
+      }
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
@@ -244,6 +338,8 @@ export async function runParityTests(engine, log) {
       date: new Date().toISOString(),
       milestone: "gpu-cpu-parity",
       userAgent: navigator.userAgent,
+      alphaMeasureLabel: "measured-not-enforced",
+      alphaMeasure,
       results,
     });
   }

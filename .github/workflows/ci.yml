@@ -106,7 +106,21 @@ jobs:
           cache-bin: "false"
           shared-key: native
       - name: Host rustfmt, tests, and clippy
+        env:
+          ALTO_ALPHA_MEASURE_OUT: ${{ runner.temp }}/alto-alpha-measure
         run: sh scripts/check.sh native
+      - name: Record Metal semi-transparent parity
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" ]; then
+            cat "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alpha-measure-metal
+          path: ${{ runner.temp }}/alto-alpha-measure
+          if-no-files-found: ignore
 
   wasm:
     if: ${{ !inputs.gpu_lifecycle }}
@@ -184,6 +198,24 @@ jobs:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
           ALTO_BROWSER_GPU: swiftshader
         run: node scripts/verify-browser.mjs --functional
+      - name: Record SwiftShader semi-transparent parity
+        if: always()
+        env:
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
+        run: |
+          if [ -f "$ALTO_BROWSER_REPORT_DIR/parity.json" ]; then
+            node scripts/alpha-measure-summary.mjs swiftshader \
+              "$ALTO_BROWSER_REPORT_DIR/parity.json" \
+              "$RUNNER_TEMP/alto-alpha-measure"
+          else
+            echo "parity.json missing; semi-transparent measurement was not recorded" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alpha-measure-swiftshader
+          path: ${{ runner.temp }}/alto-alpha-measure
+          if-no-files-found: ignore
       - name: Build the embedding examples with Vite and run them
         env:
           ALTO_BROWSER_GPU: swiftshader
@@ -260,6 +292,7 @@ jobs:
         env:
           ALTO_REQUIRE_GPU_PARITY: "1"
           ALTO_REQUIRE_LAVAPIPE: "1"
+          ALTO_ALPHA_MEASURE_OUT: ${{ runner.temp }}/alto-gpu-parity
         run: |
           log="$RUNNER_TEMP/alto-gpu-parity/parity.log"
           set +e
@@ -277,6 +310,9 @@ jobs:
             echo "- Adapter: \`$adapter\`"
             echo "- Test exit: \`$status\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" ]; then
+            cat "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           exit "$status"
       - uses: actions/upload-artifact@v7
         if: always()

@@ -190,6 +190,37 @@ export function parityCases() {
   return cases;
 }
 
+const ALPHA_SWEEP = [0, 1, 128, 254];
+
+/** Straight RGBA. R, G, and B each cover 0..255. Alpha cycles 0, 1, 128, 254. */
+export function alphaSweep(w, h) {
+  const pixels = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    pixels[i] = x & 255;
+    pixels[i + 1] = y & 255;
+    pixels[i + 2] = (x * 3 + y * 5) & 255;
+    pixels[i + 3] = ALPHA_SWEEP[(x + y) % 4];
+  }
+  return { w, h, pixels };
+}
+
+function withAlphaSweep(node) {
+  if (node.type === "group") return { ...node, children: node.children.map(withAlphaSweep) };
+  return { ...node, image: alphaSweep(node.image.w, node.image.h) };
+}
+
+/** Same geometry as parityCases. Measured, not enforced, and not a locked hash. */
+export function alphaMeasureCases() {
+  return parityCases().map((testCase) => ({
+    ...testCase,
+    name: `${testCase.name}-alpha-measure`,
+    lock: false,
+    measure: true,
+    nodes: testCase.nodes.map(withAlphaSweep),
+  }));
+}
+
 function splitTiles(image) {
   const tiles = [];
   const nx = Math.ceil(image.w / 256);
