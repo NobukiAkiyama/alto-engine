@@ -4,7 +4,7 @@
 
 状態：設計のみ。この文書は実装しない。描画バージョン 3 は、ここにある整数合成が入り、Metal・lavapipe・SwiftShader で一致するまで不安定なオプトインのままである。描画バージョン 2 の式と、ロック済みハッシュは凍結したままである。
 
-関連：[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)、PR [#22](https://github.com/NobukiAkiyama/alto-engine/pull/22)（未マージ。ブランチ `cursor/exact-color-adjust-f4d6`）。
+関連：[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)。PR [#22](https://github.com/NobukiAkiyama/alto-engine/pull/22) は main の `adf70b3` に入っている。
 
 ## 前提
 
@@ -14,31 +14,31 @@ GPU の unorm ストア変換は、API 仕様が誤差を許している。WebGP
 
 v3 は量子化をすべて自分の整数式で行う。書き込み先は `rgba8uint` か、パックした u32 のストレージだけである。float または unorm のターゲットへ合成結果を書き、ハードウェアに丸めさせる経路は一本もない。
 
-計測は [半透明合成の計測](../verification/semi-transparent-composite-parity.md) にある。v2 では、事前量子化の f32 が CPU とビット一致しても、`rgba8unorm` のストアが ±1 になる。P2P ではその ±1 がタイルハッシュの分岐になり、同じ文書がピアによって違う。v2 はその既知の非決定性を持ったまま凍結する。既存文書の対処は `render.upgrade`（`upgrade_render_version` / `upgradeRenderVersion`）で、将来の `render_version` 3 の整数合成へ上げることである。この設計が入るまで、その更新が届く先は PR #22 の color-adjust であり、合成そのものは v2 の float `blend` のままである。
+計測は [半透明合成の計測](../verification/semi-transparent-composite-parity.md) にある。v2 では、事前量子化の f32 が CPU とビット一致しても、`rgba8unorm` のストアが ±1 になる。P2P ではその ±1 がタイルハッシュの分岐になり、同じ文書がピアによって違う。v2 はその既知の非決定性を持ったまま凍結する。既存文書の対処は `render.upgrade`（`upgrade_render_version` / `upgradeRenderVersion`）で、将来の `render_version` 3 の整数合成へ上げることである。この設計が入るまで、その更新が届く先は main の color-adjust であり、合成そのものは v2 の float `blend` のままである。
 
-## PR #22 の Q14 を使う
+## main の Q14 を使う
 
-Q14 の 1.0 は 16384 である。PR #22 が導入する次の名前を、合成もそのまま使う。式の本体はここに写さない。
+Q14 の 1.0 は 16384 である。次の名前は main にある。合成もそのまま使う。式の本体はここに写さない。
 
 | 名前 | 場所 | 役割 |
 | --- | --- | --- |
-| `div_q_i64` | Rust の CPU 参照 | `d > 0` の `(abs(n) + d/2) / d`。符号は結びを 0 から遠い側へ送る |
-| `div_q` | WGSL `effects.wgsl` | 同じ丸めの i32 除算 |
-| `wide_div_q14` | WGSL `Wide` | 16384 で割る。絶対値に 8192 を足してからシフトする。負数の算術シフトは使わない |
-| `divQBig` | JS の BigInt | 同じ丸め |
-| `Wide` / `checked_mul` + `checked_add` | WGSL の 64 ビット対、Rust の i64、JS の BigInt | i32 に乗らない積。対の形は `composite.wgsl` の `Wide` と同じ |
-| `byte_q14` / `premul_byte_q14` | 三実装 | unorm バイトから Q14 へ入る。不透明 255 は 1 のまま |
-| 輝度の重み 3483, 11718, 1183 | 三実装 | 和は 16384 |
-| `color_adjust_q14` | Rust `renderer` | 設定値を半整数で 0 から遠い側へ量子化する |
-| `color_adjust_q14_mix_does_not_overflow` | Rust テスト | `checked_mul` / `checked_add` が溢れたら失敗する |
+| `div_q_i64` | `crates/alto-gpu/src/cpu_composite.rs` の `div_q_i64` | `d > 0` の `(abs(n) + d/2) / d`。符号は結びを 0 から遠い側へ送る |
+| `div_q` | `crates/alto-gpu/shaders/effects.wgsl` の `div_q` | 同じ丸めの i32 除算 |
+| `wide_div_q14` | 同ファイルの `wide_div_q14` | `Wide` を 16384 で割る。絶対値に 8192 を足してからシフトする。負数の算術シフトは使わない |
+| `divQBig` | `tests/e2e/cpu-composite.js` の `divQBig` | 同じ丸めの BigInt 除算 |
+| `Wide` | `effects.wgsl` の `struct Wide`（`lo: u32, hi: u32`）。形は `crates/alto-gpu/shaders/composite.wgsl` の `struct Wide` と同じ | i32 に乗らない積。Rust は i64 の `checked_mul` / `checked_add`、JS は BigInt |
+| `byte_q14` / `premul_byte_q14` | WGSL `effects.wgsl` と Rust `cpu_composite.rs`。JS は `byteQ14` / `premulByteQ14` | unorm バイトから Q14 へ入る。不透明 255 は 1 のまま |
+| 輝度の重み 3483, 11718, 1183 | Rust と JS の `Q14_LUMA`。WGSL は `effects.wgsl` のリテラル | 和は 16384 |
+| `color_adjust_q14` | `crates/alto-gpu/src/renderer.rs` の `color_adjust_q14` | 設定値を半整数で 0 から遠い側へ量子化する |
+| `color_adjust_q14_mix_does_not_overflow` | `cpu_composite.rs` の同名テスト | `checked_mul` / `checked_add` が溢れたら失敗する |
 
 丸め規則はこれ一つである。結びは 0 から遠い側へ行く。合成の中に `round_ties_even` は置かない。ハードウェアの unorm 丸めも置かない。
 
-PR #22 の color-adjust は、ストレート化を切り捨て除算 `(q << 14) / alpha` で行っている。合成の除算は、ストレート化を含めて全部 `div_q` / `wide_div_q14` / `div_q_i64` である。切り捨て除算を合成へコピーしない。color-adjust 側の式は変えない。
+color-adjust のストレート化は `effects.wgsl` の `(u32(q) << 14u) / u32(alpha)` で、切り捨てである。合成の除算は、ストレート化を含めて全部 `div_q` / `wide_div_q14` / `div_q_i64` である。切り捨て除算を合成へコピーしない。color-adjust 側の式は変えない。
 
-PR #22 の color-adjust は、段のあいだを f16 で書き、最後を unorm の偶数丸めで解決する。その解決は color-adjust の範囲であり、この合成はそれを入力の float テクスチャとして読まない。両方が入ったあとの受け渡しは、Q14 の整数か `rgba8uint` のバイトである。モード 19 が「背面が正確な 0 で normal のとき f16 をコピーする」のは color-adjust の記述のまま残す。合成経路が整数になったとき、空の背面への normal は Q14 のコピーになる。color-adjust の式はここで再定義しない。
+color-adjust は、段のあいだを f16 で書き、最後を unorm の偶数丸めで解決する。その解決は color-adjust の範囲であり、この合成はそれを入力の float テクスチャとして読まない。両方が入ったあとの受け渡しは、Q14 の整数か `rgba8uint` のバイトである。モード 19 が「背面が正確な 0 で normal のとき f16 をコピーする」のは color-adjust の記述のまま残す。合成経路が整数になったとき、空の背面への normal は Q14 のコピーになる。color-adjust の式はここで再定義しない。
 
-v3 を既定の新規文書にはしない。PR #22 のゲートを維持する。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ 3 への更新を受ける。JS は `{ unstableRenderV3: true }` で、出荷定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書はバージョン 2 のままである。`DocumentMeta::validate` が受ける `render_version` は 1、2、3 だけ、という PR #22 の制約も維持する。
+v3 を既定の新規文書にはしない。main の不安定ゲートを維持する。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ 3 への更新を受ける。JS は `{ unstableRenderV3: true }` で、出荷定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書はバージョン 2 のままである。`DocumentMeta::validate` が受ける `render_version` は 1、2、3 だけ、という main の制約も維持する。
 
 ## 値の置き場
 
@@ -67,7 +67,7 @@ v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_
 
 ## ストレートとプレマルチプライ
 
-バイトの入口は PR #22 の関数である。
+バイトの入口は main の `premul_byte_q14` と `byte_q14` である。
 
 - 不透明でない色のプレマルチプライは `premul_byte_q14(color, alpha)`。
 - ストレートのアルファは `byte_q14(alpha)`。
@@ -77,7 +77,7 @@ v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_
 
 不透明度が 1 のとき、`div_q(q * 16384, 16384)` は q そのものなので、バイト入口は `premul_byte_q14` のままである。不透明度が 1 でないときは、その Q14 を一度だけ掛ける。`div_q(premul_byte_q14(color, alpha) * opacity_q, 16384)` と、`div_q(byte_q14(alpha) * opacity_q, 16384)` である。
 
-アキュムレータのストレート化は、アルファが 0 なら 0、そうでなければ `clamp(div_q(premul * 16384, alpha), 0, 16384)` である。PR #22 の切り捨て `(q << 14) / alpha` は使わない。
+アキュムレータのストレート化は、アルファが 0 なら 0、そうでなければ `clamp(div_q(premul * 16384, alpha), 0, 16384)` である。color-adjust の切り捨て `(q << 14) / alpha` は使わない。
 
 ## グループ
 
@@ -161,7 +161,7 @@ out_a   = div_q(src_a * 16384 + dst_a * (16384 - src_a), 16384)
 
 **exclusion（11）。** `B = clamp(dst + src - div_q(2 * dst * src, 16384), 0, 16384)`。`2 * 16384²` は i32 に入る。計算は i64 で揃える。
 
-**hue（12）/ saturation（13）/ color（14）/ luminosity（15）。** 輝度は PR #22 の重みで `div_q(r * 3483 + g * 11718 + b * 1183, 16384)` である。ストレートが 0..=16384 のとき、この積の和は 16384² で i32 に入る。彩度は `max - min`。
+**hue（12）/ saturation（13）/ color（14）/ luminosity（15）。** 輝度は `Q14_LUMA`（3483, 11718, 1183）で `div_q(r * 3483 + g * 11718 + b * 1183, 16384)` である。ストレートが 0..=16384 のとき、この積の和は 16384² で i32 に入る。彩度は `max - min`。
 
 `set_sat(c, s)` は `max == min` なら 0。そうでなければチャネルごとに `div_q((c - min) * s, max - min)`。結果は 0..=s である。
 
@@ -199,7 +199,7 @@ normal 以外は、宛先をストレート化して `B` を求め、上の三�
 - soft-light の多項式は `d` の 0..=4096 を全数、checked で計算する。標本にしない。`16 * d * d * d` が `1_099_511_627_776` を超えたら失敗する。
 - `clip` はチャネルの端点 `{−16384, −1, 0, 1, 8192, 16384, 16385, 32768}` の直積で checked し、`(c - l) * l` の絶対値が `1_610_612_736` を超えたら失敗する。結果は 0..=16384 に切る。
 
-color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は PR #22 のテストが持つ。ここには再掲しない。
+color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は `color_adjust_q14_mix_does_not_overflow` が持つ。ここには再掲しない。
 
 ## 検証
 
@@ -213,4 +213,4 @@ color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は PR #22
 
 特に、SwiftShader の v2 `blend-color-alpha-measure` が 1 画素だけ違った点を、v3 では一致させる。画素 (181, 82)、ソース `181,82,185,254 | 99,202,198,128`、v2 の SwiftShader は GPU `105,107,157,255`、CPU `105,107,156,255` だった。Metal の `opacity-half-alpha-measure` と `nested-groups-alpha-measure`（各 4098 画素、アルファが 0.5/255 の結びで GPU が 1、CPU が 0）も、v3 では一致させる。あれは unorm ストアの差なので、整数の最終バイトでは起きない。
 
-v3 を既定にする変更は、この一致のあとである。この設計の実装ステップには含めない。一致するまでは、バージョン 3 へ上げる操作と format 4 の保存は PR #22 のオプトインが要る。v2 の式は凍結したまま、既存文書の対処は `render.upgrade` である。
+v3 を既定にする変更は、この一致のあとである。この設計の実装ステップには含めない。一致するまでは、バージョン 3 へ上げる操作と format 4 の保存は main の不安定オプトインが要る。v2 の式は凍結したまま、既存文書の対処は `render.upgrade` である。
