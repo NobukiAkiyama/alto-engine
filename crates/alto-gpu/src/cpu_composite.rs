@@ -97,6 +97,7 @@ enum Node {
     },
 }
 
+#[derive(Clone)]
 struct Case {
     name: String,
     w: u32,
@@ -106,6 +107,8 @@ struct Case {
     ty: i32,
     /// Written to `tests/parity/cpu-reference.txt` (render version 2).
     lock: bool,
+    /// Semi-transparent coverage. Printed and saved, and a mismatch does not fail.
+    measure: bool,
     nodes: Vec<Node>,
 }
 
@@ -181,6 +184,7 @@ fn cases() -> Vec<Case> {
             tx: 0,
             ty: 0,
             lock: true,
+            measure: false,
             nodes: vec![
                 raster(blue.clone(), 0, 1.0, true, ident()),
                 raster(red_half.clone(), mode as u32, 1.0, true, ident()),
@@ -195,6 +199,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             raster(solid(256, 256, [255, 0, 0, 255]), 0, 0.5, true, ident()),
@@ -208,6 +213,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             raster(solid(256, 256, [255, 0, 0, 255]), 0, 0.0, true, ident()),
@@ -221,6 +227,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             raster(solid(256, 256, [255, 0, 0, 255]), 0, 1.0, false, ident()),
@@ -238,6 +245,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             group(true, 1.0, stacked.clone()),
@@ -251,6 +259,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             group(false, 1.0, stacked),
@@ -264,6 +273,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             group(
@@ -299,6 +309,7 @@ fn cases() -> Vec<Case> {
             tx,
             ty: 0,
             lock: true,
+            measure: false,
             nodes: moved.clone(),
         });
     }
@@ -310,6 +321,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(
             ramp(256, 256),
             0,
@@ -326,6 +338,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(
             ramp(256, 256),
             0,
@@ -342,6 +355,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(
             checker(256, 256, [0, 0, 0, 255], [255, 255, 255, 255]),
             0,
@@ -358,6 +372,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(blue.clone(), 0, 1.0, true, ident()),
             raster(
@@ -377,6 +392,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![
             raster(solid(256, 256, [0, 0, 255, 200]), 0, 1.0, true, ident()),
             raster(solid(256, 256, [255, 0, 0, 100]), 0, 1.0, true, ident()),
@@ -409,6 +425,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: layers,
     });
     let odd = vec![raster(
@@ -427,6 +444,7 @@ fn cases() -> Vec<Case> {
             tx,
             ty: 0,
             lock: true,
+            measure: false,
             nodes: odd.clone(),
         });
     }
@@ -438,6 +456,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(ramp(512, 512), 0, 1.0, true, ident())],
     });
     let angle = 0.3f64;
@@ -450,6 +469,7 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(
             ramp(256, 256),
             0,
@@ -468,6 +488,7 @@ fn cases() -> Vec<Case> {
         tx: 15,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![raster(
             ramp(256, 256),
             0,
@@ -506,9 +527,79 @@ fn cases() -> Vec<Case> {
         tx: 0,
         ty: 0,
         lock: true,
+        measure: false,
         nodes: vec![far],
     });
+    // Measured, not enforced, and omitted from the locked CPU reference.
+    // Each layer gets its own straight sweep: alpha phase offset by the layer
+    // index, and RGB rotated and shifted so neighboring layers are not copies.
+    let enforced = out.len();
+    for index in 0..enforced {
+        let mut variant = out[index].clone();
+        variant.name = format!("{}-alpha-measure", variant.name);
+        variant.lock = false;
+        variant.measure = true;
+        paint_alpha_sweep(&mut variant.nodes);
+        out.push(variant);
+    }
     out
+}
+
+/// Straight RGBA for one layer in paint order.
+///
+/// Layer 0 keeps R = `x & 255`, G = `y & 255`, B = `(3x+5y) & 255`. Layer `i`
+/// rotates those channels by `i % 3` and adds `17*i`, so two layers never share
+/// an RGB triple. Alpha is one of 0, 1, 128, 254. Even layers step with `x+y`,
+/// odd layers step with `x` only, and both add the layer index as a phase.
+/// Layers 0 and 1 therefore hit every pair of those four alphas.
+fn alpha_sweep(w: u32, h: u32, layer: u32) -> Image {
+    const ALPHAS: [u8; 4] = [0, 1, 128, 254];
+    let rot = (layer % 3) as usize;
+    let shift = ((layer * 17) & 255) as u8;
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let base = [
+                (x & 255) as u8,
+                (y & 255) as u8,
+                (x.wrapping_mul(3).wrapping_add(y.wrapping_mul(5)) & 255) as u8,
+            ];
+            let i = ((y * w + x) * 4) as usize;
+            pixels[i] = base[rot].wrapping_add(shift);
+            pixels[i + 1] = base[(1 + rot) % 3].wrapping_add(shift);
+            pixels[i + 2] = base[(2 + rot) % 3].wrapping_add(shift);
+            let phase = if layer.is_multiple_of(2) {
+                x + y + layer
+            } else {
+                x + layer
+            };
+            pixels[i + 3] = ALPHAS[(phase % 4) as usize];
+        }
+    }
+    Image { w, h, pixels }
+}
+
+fn paint_alpha_sweep(nodes: &mut [Node]) {
+    let mut layer = 0u32;
+    paint_alpha_sweep_at(nodes, &mut layer);
+}
+
+fn paint_alpha_sweep_at(nodes: &mut [Node], layer: &mut u32) {
+    for node in nodes {
+        match node {
+            Node::Raster {
+                image, extra_tiles, ..
+            } => {
+                let index = *layer;
+                *layer += 1;
+                *image = alpha_sweep(image.w, image.h, index);
+                for tile in extra_tiles {
+                    tile.pixels = alpha_sweep(256, 256, index).pixels;
+                }
+            }
+            Node::Group { children, .. } => paint_alpha_sweep_at(children, layer),
+        }
+    }
 }
 
 fn split_tiles(image: &Image) -> Vec<Tile> {
@@ -748,8 +839,9 @@ fn quantize(pixel: [f32; 4]) -> [u8; 4] {
     pixel.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8)
 }
 
-fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> Vec<u8> {
+fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
     let mut out = vec![0u8; 256 * 256 * 4];
+    let mut prequant = vec![0f32; 256 * 256 * 4];
     let width = width as f32;
     let height = height as f32;
     for y in 0..256u32 {
@@ -786,15 +878,16 @@ fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> Vec<u8> {
                     }
                 }
             }
-            let q = quantize(accum);
             let i = ((y * 256 + x) * 4) as usize;
+            prequant[i..i + 4].copy_from_slice(&accum);
+            let q = quantize(accum);
             out[i..i + 4].copy_from_slice(&q);
         }
     }
-    out
+    (out, prequant)
 }
 
-fn render_at(case: &Case, version: u32) -> Vec<u8> {
+fn render_pair(case: &Case, version: u32) -> (Vec<u8>, Vec<f32>) {
     let mut ops = Vec::new();
     for node in &case.nodes {
         walk(node, ident(), &mut ops);
@@ -818,8 +911,17 @@ fn render_at(case: &Case, version: u32) -> Vec<u8> {
     )
 }
 
+fn render_at(case: &Case, version: u32) -> Vec<u8> {
+    render_pair(case, version).0
+}
+
 fn render(case: &Case) -> Vec<u8> {
     render_at(case, RENDER_VERSION)
+}
+
+/// CPU bytes plus the f32 accumulator immediately before `quantize`.
+fn render_prequant(case: &Case) -> (Vec<u8>, Vec<f32>) {
+    render_pair(case, RENDER_VERSION)
 }
 
 fn pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -859,6 +961,454 @@ fn reference_path() -> PathBuf {
 
 fn render_v1_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/render-v1.txt")
+}
+
+struct MeasuredPixel {
+    x: u32,
+    y: u32,
+    sources: Vec<[u8; 4]>,
+    gpu: [u8; 4],
+    cpu: [u8; 4],
+    /// Accumulator f32 on each side, immediately before quantization.
+    gpu_pre: [f32; 4],
+    cpu_pre: [f32; 4],
+}
+
+struct MeasuredCase {
+    name: String,
+    count: u32,
+    max_abs: [u32; 4],
+    mismatches: Vec<MeasuredPixel>,
+    length_note: String,
+    /// Shader operations this case actually runs. Not a diagnosis.
+    ops: String,
+}
+
+fn rgba(bytes: &[u8], offset: usize) -> [u8; 4] {
+    bytes[offset..offset + 4].try_into().unwrap()
+}
+
+fn push_sources(node: &Node, doc_x: i32, doc_y: i32, out: &mut Vec<[u8; 4]>) {
+    match node {
+        Node::Raster { image, .. } => {
+            if doc_x >= 0 && doc_y >= 0 && (doc_x as u32) < image.w && (doc_y as u32) < image.h {
+                let i = ((doc_y as u32 * image.w + doc_x as u32) * 4) as usize;
+                out.push(rgba(&image.pixels, i));
+            }
+        }
+        Node::Group { children, .. } => {
+            for child in children {
+                push_sources(child, doc_x, doc_y, out);
+            }
+        }
+    }
+}
+
+/// Straight image texels at the output pixel's document position. Identity
+/// layers use this texel. A transformed layer samples somewhere else.
+fn sources_at(case: &Case, x: u32, y: u32) -> Vec<[u8; 4]> {
+    let scale = 1i32 << case.level.max(0);
+    let doc_x = case.tx * 256 * scale + x as i32 * scale;
+    let doc_y = case.ty * 256 * scale + y as i32 * scale;
+    let mut sources = Vec::new();
+    for node in &case.nodes {
+        push_sources(node, doc_x, doc_y, &mut sources);
+    }
+    sources
+}
+
+fn fmt_rgba(px: [u8; 4]) -> String {
+    format!("{},{},{},{}", px[0], px[1], px[2], px[3])
+}
+
+fn fmt_sources(sources: &[[u8; 4]]) -> String {
+    if sources.is_empty() {
+        return "none".into();
+    }
+    sources
+        .iter()
+        .map(|px| fmt_rgba(*px))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn pre_at(values: &[f32], pixel: usize) -> [f32; 4] {
+    let o = pixel * 4;
+    if o + 4 <= values.len() {
+        [values[o], values[o + 1], values[o + 2], values[o + 3]]
+    } else {
+        [f32::NAN; 4]
+    }
+}
+
+fn measure_case(
+    case: &Case,
+    cpu: &[u8],
+    gpu: &[u8],
+    cpu_pre: &[f32],
+    gpu_pre: &[f32],
+) -> MeasuredCase {
+    let mut count = 0u32;
+    let mut max_abs = [0u32; 4];
+    let mut mismatches = Vec::new();
+    let n = cpu.len().min(gpu.len()) / 4;
+    for i in 0..n {
+        let o = i * 4;
+        if cpu[o..o + 4] == gpu[o..o + 4] {
+            continue;
+        }
+        count += 1;
+        for channel in 0..4 {
+            max_abs[channel] =
+                max_abs[channel].max(u32::from(cpu[o + channel].abs_diff(gpu[o + channel])));
+        }
+        let x = (i % 256) as u32;
+        let y = (i / 256) as u32;
+        mismatches.push(MeasuredPixel {
+            x,
+            y,
+            sources: sources_at(case, x, y),
+            gpu: rgba(gpu, o),
+            cpu: rgba(cpu, o),
+            gpu_pre: pre_at(gpu_pre, i),
+            cpu_pre: pre_at(cpu_pre, i),
+        });
+    }
+    let length_note = if cpu.len() == gpu.len() {
+        String::new()
+    } else {
+        format!(" lengths cpu {} gpu {}", cpu.len(), gpu.len())
+    };
+    MeasuredCase {
+        name: case.name.clone(),
+        count,
+        max_abs,
+        mismatches,
+        length_note,
+        ops: shader_ops(case),
+    }
+}
+
+fn shader_ops(case: &Case) -> String {
+    let mut parts = Vec::new();
+    fn walk(nodes: &[Node], parts: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Node::Raster { mode, .. } => {
+                    let name = BLENDS.get(*mode as usize).copied().unwrap_or("unknown");
+                    parts.push(format!(
+                        "draw blend {name}: unpremultiply dst (rgb/max(a, 0.000001)) when dst.a > 0, mix_color, three-term sum"
+                    ));
+                }
+                Node::Group {
+                    isolated, children, ..
+                } => {
+                    let kind = if *isolated {
+                        "isolated"
+                    } else {
+                        "pass-through"
+                    };
+                    parts.push(format!(
+                        "{kind} group pop: unpremultiply child accum (rgb/max(a, 0.000001)) when a > 0, scale alpha, then blend"
+                    ));
+                    walk(children, parts);
+                }
+            }
+        }
+    }
+    walk(&case.nodes, &mut parts);
+    parts.join("; ")
+}
+
+/// Distance in byte space from `v * 255` to the nearest `n + 0.5` boundary.
+fn dist_to_half(v: f32) -> f32 {
+    if !v.is_finite() {
+        return f32::NAN;
+    }
+    let scaled = v.clamp(0.0, 1.0) * 255.0;
+    let shifted = scaled - 0.5;
+    (shifted - shifted.round()).abs()
+}
+
+fn json_f32(v: f32) -> String {
+    if v.is_finite() {
+        format!("{v:.8e}")
+    } else {
+        "null".into()
+    }
+}
+
+fn measure_line(row: &MeasuredCase) -> String {
+    let pixels = row
+        .mismatches
+        .iter()
+        .take(5)
+        .map(|pixel| {
+            format!(
+                "pixel {},{} source {} gpu {} cpu {}",
+                pixel.x,
+                pixel.y,
+                fmt_sources(&pixel.sources),
+                fmt_rgba(pixel.gpu),
+                fmt_rgba(pixel.cpu)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let pixels = if pixels.is_empty() {
+        String::new()
+    } else {
+        format!("; {pixels}")
+    };
+    format!(
+        "MEASURED-NOT-ENFORCED {}: {} pixels differ; max abs {},{},{},{}{}{}",
+        row.name,
+        row.count,
+        row.max_abs[0],
+        row.max_abs[1],
+        row.max_abs[2],
+        row.max_abs[3],
+        pixels,
+        row.length_note
+    )
+}
+
+fn json_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
+    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create alpha measure directory");
+    let mut json = format!(
+        "{{\n  \"label\": \"measured-not-enforced\",\n  \"backend\": \"{}\",\n  \"cases\": [\n",
+        json_escape(adapter)
+    );
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            json.push_str(",\n");
+        }
+        json.push_str(&format!(
+            "    {{\"name\": \"{}\", \"enforced\": false, \"count\": {}, \"maxAbs\": [{},{},{},{}], \"mismatches\": [",
+            json_escape(&row.name),
+            row.count,
+            row.max_abs[0],
+            row.max_abs[1],
+            row.max_abs[2],
+            row.max_abs[3]
+        ));
+        for (pixel_index, pixel) in row.mismatches.iter().enumerate() {
+            if pixel_index > 0 {
+                json.push_str(", ");
+            }
+            let sources = pixel
+                .sources
+                .iter()
+                .map(|px| format!("[{},{},{},{}]", px[0], px[1], px[2], px[3]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            json.push_str(&format!(
+                "{{\"x\": {}, \"y\": {}, \"sources\": [{sources}], \"gpu\": [{},{},{},{}], \"cpu\": [{},{},{},{}]}}",
+                pixel.x,
+                pixel.y,
+                pixel.gpu[0],
+                pixel.gpu[1],
+                pixel.gpu[2],
+                pixel.gpu[3],
+                pixel.cpu[0],
+                pixel.cpu[1],
+                pixel.cpu[2],
+                pixel.cpu[3]
+            ));
+        }
+        json.push_str("]}");
+    }
+    json.push_str("\n  ]\n}\n");
+    let mut markdown = format!(
+        "### Semi-transparent parity ({})\n\nThese cases are **measured-not-enforced**. A mismatch does not fail the job.\n\nBackend: `{adapter}`\n\n| case | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | ---: | --- | --- |\n",
+        json_escape(adapter)
+    );
+    for row in rows {
+        let shown = row
+            .mismatches
+            .iter()
+            .take(3)
+            .map(|pixel| {
+                format!(
+                    "({},{}) source {} gpu {} cpu {}",
+                    pixel.x,
+                    pixel.y,
+                    fmt_sources(&pixel.sources),
+                    fmt_rgba(pixel.gpu),
+                    fmt_rgba(pixel.cpu)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let shown = if shown.is_empty() {
+            "none".into()
+        } else {
+            shown
+        };
+        markdown.push_str(&format!(
+            "| {} | {} | {},{},{},{} | {}{} |\n",
+            row.name,
+            row.count,
+            row.max_abs[0],
+            row.max_abs[1],
+            row.max_abs[2],
+            row.max_abs[3],
+            shown,
+            row.length_note
+        ));
+    }
+    std::fs::write(dir.join("alpha-measure.json"), json).expect("write alpha measure json");
+    std::fs::write(dir.join("alpha-measure.md"), markdown).expect("write alpha measure markdown");
+    write_prequant(&dir, adapter, rows);
+}
+
+/// Every mismatching channel: pre-quantization f32 on both sides, and the
+/// distance of each from the nearest `n+0.5` boundary. Epsilon is 1e-3 in
+/// byte space (`channel * 255`).
+fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
+    const EPS: f32 = 1.0e-3;
+    const TIGHTER: f32 = 1.0e-4;
+    let channels = ["r", "g", "b", "a"];
+    let mut differing = 0u32;
+    let mut on_boundary = 0u32;
+    let mut on_boundary_tight = 0u32;
+    let mut floats_within = 0u32;
+    let mut floats_apart = 0u32;
+    let mut bit_identical = 0u32;
+    let mut max_delta = 0f32;
+    let mut lines = Vec::new();
+    for row in rows {
+        for pixel in &row.mismatches {
+            for (index, name) in channels.iter().enumerate() {
+                if pixel.gpu[index] == pixel.cpu[index] {
+                    continue;
+                }
+                differing += 1;
+                let gpu_v = pixel.gpu_pre[index];
+                let cpu_v = pixel.cpu_pre[index];
+                let gpu_dist = dist_to_half(gpu_v);
+                let cpu_dist = dist_to_half(cpu_v);
+                let nearer = gpu_dist.min(cpu_dist);
+                let delta = ((gpu_v.clamp(0.0, 1.0) - cpu_v.clamp(0.0, 1.0)) * 255.0).abs();
+                if nearer <= EPS {
+                    on_boundary += 1;
+                }
+                if nearer <= TIGHTER {
+                    on_boundary_tight += 1;
+                }
+                if delta <= EPS {
+                    floats_within += 1;
+                } else {
+                    floats_apart += 1;
+                }
+                if gpu_v.to_bits() == cpu_v.to_bits() {
+                    bit_identical += 1;
+                }
+                max_delta = max_delta.max(delta);
+                lines.push(format!(
+                    "    {{\"case\": \"{}\", \"x\": {}, \"y\": {}, \"channel\": \"{name}\", \"gpuByte\": {}, \"cpuByte\": {}, \"gpu\": {}, \"cpu\": {}, \"gpuBits\": {}, \"cpuBits\": {}, \"gpuDistToHalf\": {}, \"cpuDistToHalf\": {}, \"absScaledDelta\": {}, \"ops\": \"{}\"}}",
+                    json_escape(&row.name),
+                    pixel.x,
+                    pixel.y,
+                    pixel.gpu[index],
+                    pixel.cpu[index],
+                    json_f32(gpu_v),
+                    json_f32(cpu_v),
+                    gpu_v.to_bits(),
+                    cpu_v.to_bits(),
+                    json_f32(gpu_dist),
+                    json_f32(cpu_dist),
+                    json_f32(delta),
+                    json_escape(&row.ops),
+                ));
+            }
+        }
+    }
+    let body = if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join(",\n")
+    };
+    let json = format!(
+        "{{\n  \"backend\": \"{}\",\n  \"epsilonScaled\": {EPS:.0e},\n  \"tighterEpsilonScaled\": {TIGHTER:.0e},\n  \"differingChannels\": {differing},\n  \"withinEpsilonOfHalf\": {on_boundary},\n  \"withinTighterEpsilonOfHalf\": {on_boundary_tight},\n  \"prequantAbsDeltaWithinEpsilon\": {floats_within},\n  \"prequantAbsDeltaBeyondEpsilon\": {floats_apart},\n  \"bitIdenticalChannels\": {bit_identical},\n  \"maxAbsScaledDelta\": {},\n  \"channels\": [\n{body}\n  ]\n}}\n",
+        json_escape(adapter),
+        json_f32(max_delta)
+    );
+    let mut markdown = format!(
+        "### Pre-quantization dump ({})\n\n\
+         Copied from the f32 accumulator immediately before quantization. \
+         GPU values are `accum` stored to a debug buffer before the same `textureStore` into `rgba8unorm`. \
+         CPU values are the same accumulator before `round_ties_even`. \
+         The v2 formula is unchanged. Distance is `|channel * 255 - nearest n+0.5|` in byte space. \
+         Epsilon is {EPS:.0e}. A tighter count uses {TIGHTER:.0e}.\n\n\
+         - Differing channels: {differing}\n\
+         - Within {EPS:.0e} of an n+0.5 boundary: {on_boundary}\n\
+         - Within {TIGHTER:.0e} of an n+0.5 boundary: {on_boundary_tight}\n\
+         - `|GPU - CPU| * 255` within {EPS:.0e}: {floats_within}\n\
+         - `|GPU - CPU| * 255` beyond {EPS:.0e}: {floats_apart}\n\
+         - Bit-identical pre-quant channels: {bit_identical}\n\
+         - Max `|GPU - CPU| * 255`: {}\n\n",
+        json_escape(adapter),
+        json_f32(max_delta)
+    );
+    if floats_apart == 0 && differing > 0 && bit_identical == differing {
+        markdown.push_str(
+            "Every differing channel has bit-identical pre-quantization floats on an n+0.5 boundary. The ±1 is the `rgba8unorm` store versus CPU `round_ties_even`.\n\n",
+        );
+    } else if floats_apart == 0 && differing > 0 {
+        markdown.push_str(&format!(
+            "{bit_identical} of {differing} pre-quant channels are bit-identical. {on_boundary_tight} of {differing} are within {TIGHTER:.0e} of an n+0.5 boundary, and {on_boundary} of {differing} are within {EPS:.0e}. Max `|GPU - CPU| * 255` is {}. Where a channel sits on that boundary, the stored ±1 is the gap crossing it. The f32 ops in the mismatching cases are unpremultiply division and the blend FMAs. This dump does not separate those ops.\n\n",
+            json_f32(max_delta)
+        ));
+    } else if floats_apart > 0 {
+        markdown.push_str(
+            "Some pre-quantization floats already differ by more than 1e-3 byte. Those pixels ran the f32 ops listed below (unpremultiply division and blend FMAs). This dump does not separate those two ops.\n\n",
+        );
+    }
+    markdown.push_str("| case | channel pixels | on boundary | floats differ | ops |\n| --- | ---: | ---: | ---: | --- |\n");
+    for row in rows {
+        if row.count == 0 {
+            continue;
+        }
+        let mut row_channels = 0u32;
+        let mut row_boundary = 0u32;
+        let mut row_apart = 0u32;
+        for pixel in &row.mismatches {
+            for index in 0..4 {
+                if pixel.gpu[index] == pixel.cpu[index] {
+                    continue;
+                }
+                row_channels += 1;
+                let nearer =
+                    dist_to_half(pixel.gpu_pre[index]).min(dist_to_half(pixel.cpu_pre[index]));
+                let delta = ((pixel.gpu_pre[index].clamp(0.0, 1.0)
+                    - pixel.cpu_pre[index].clamp(0.0, 1.0))
+                    * 255.0)
+                    .abs();
+                if nearer <= EPS {
+                    row_boundary += 1;
+                }
+                if delta > EPS {
+                    row_apart += 1;
+                }
+            }
+        }
+        markdown.push_str(&format!(
+            "| {} | {row_channels} | {row_boundary} | {row_apart} | {} |\n",
+            row.name,
+            json_escape(&row.ops)
+        ));
+    }
+    std::fs::write(dir.join("prequant.json"), json).expect("write prequant json");
+    std::fs::write(dir.join("prequant.md"), markdown).expect("write prequant markdown");
 }
 
 fn diff_report(cpu: &[u8], gpu: &[u8]) -> String {
@@ -986,6 +1536,25 @@ struct GpuConfig {
     info: [u32; 4],
 }
 
+/// Parity-harness shader. The production `composite.wgsl` source is unchanged.
+/// `pre_quant` copies `accum` before the same `textureStore` into `rgba8unorm`.
+fn parity_shader() -> String {
+    let src = shader_with_blend(include_str!("../shaders/composite.wgsl"));
+    let decl = "@group(0) @binding(4) var<uniform> config: Config;";
+    let with_decl = format!(
+        "{decl}\n@group(0) @binding(5) var<storage, read_write> pre_quant: array<vec4<f32>>;"
+    );
+    let src = src.replacen(decl, &with_decl, 1);
+    let store = "textureStore(output,vec2i(id.xy),i32(config.info.y),accum);";
+    let patched = "pre_quant[id.y * 256u + id.x] = accum;\n  textureStore(output,vec2i(id.xy),i32(config.info.y),accum);";
+    let src = src.replacen(store, patched, 1);
+    assert!(
+        src.contains("var<storage, read_write> pre_quant") && src.contains(store),
+        "parity shader did not keep the production textureStore"
+    );
+    src
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1018,9 +1587,7 @@ impl Gpu {
                 .map_err(|e| format!("request_device: {e}"))?;
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("composite parity"),
-                source: wgpu::ShaderSource::Wgsl(
-                    shader_with_blend(include_str!("../shaders/composite.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(parity_shader().into()),
             });
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("composite parity"),
@@ -1039,7 +1606,7 @@ impl Gpu {
         })
     }
 
-    fn render(&self, case: &Case) -> Result<Vec<u8>, String> {
+    fn render(&self, case: &Case) -> Result<(Vec<u8>, Vec<f32>), String> {
         let mut ops = Vec::new();
         for node in &case.nodes {
             walk(node, ident(), &mut ops);
@@ -1161,6 +1728,13 @@ impl Gpu {
             upload_buffer(device, &self.queue, &commands, wgpu::BufferUsages::STORAGE);
         let tiles_buf = upload_buffer(device, &self.queue, &entries, wgpu::BufferUsages::STORAGE);
         let config_buf = upload_buffer(device, &self.queue, &config, wgpu::BufferUsages::UNIFORM);
+        let pre_bytes = 256 * 256 * 16;
+        let pre_quant = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("parity prequant"),
+            size: pre_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1192,6 +1766,10 @@ impl Gpu {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: config_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: pre_quant.as_entire_binding(),
                 },
             ],
         });
@@ -1234,6 +1812,13 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
+        let pre_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("parity prequant readback"),
+            size: pre_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&pre_quant, 0, &pre_read, 0, pre_bytes);
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.queue.submit(Some(encoder.finish()));
         map_readback(device, &read)?;
@@ -1246,7 +1831,15 @@ impl Gpu {
             .map_err(|e| e.to_string())?
             .to_vec();
         read.unmap();
-        Ok(bytes)
+        map_readback(device, &pre_read)?;
+        let pre_raw = pre_read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        pre_read.unmap();
+        let prequant = bytemuck::cast_slice(&pre_raw).to_vec();
+        Ok((bytes, prequant))
     }
 }
 
@@ -1687,6 +2280,139 @@ fn lavapipe_adapter_names() {
 }
 
 #[test]
+fn alpha_measure_cases_are_not_enforced() {
+    let all = cases();
+    let measured: Vec<_> = all.iter().filter(|case| case.measure).collect();
+    let enforced: Vec<_> = all.iter().filter(|case| !case.measure).collect();
+    assert_eq!(measured.len(), enforced.len());
+    assert!(measured.iter().all(|case| !case.lock));
+    assert!(
+        measured
+            .iter()
+            .all(|case| case.name.ends_with("-alpha-measure"))
+    );
+    let case = measured
+        .iter()
+        .find(|case| case.name == "extremes-alpha-measure")
+        .expect("extremes variant");
+    let image = match &case.nodes[0] {
+        Node::Raster { image, .. } => image,
+        Node::Group { .. } => panic!("extremes variant is a raster"),
+    };
+    let mut alphas = [false; 256];
+    let mut reds = [false; 256];
+    let mut greens = [false; 256];
+    let mut blues = [false; 256];
+    for y in 0..image.h {
+        for x in 0..image.w {
+            let i = ((y * image.w + x) * 4) as usize;
+            reds[image.pixels[i] as usize] = true;
+            greens[image.pixels[i + 1] as usize] = true;
+            blues[image.pixels[i + 2] as usize] = true;
+            alphas[image.pixels[i + 3] as usize] = true;
+        }
+    }
+    assert!(alphas[0] && alphas[1] && alphas[128] && alphas[254]);
+    assert!(
+        reds.iter().all(|hit| *hit)
+            && greens.iter().all(|hit| *hit)
+            && blues.iter().all(|hit| *hit)
+    );
+    let locked = std::fs::read_to_string(reference_path()).unwrap();
+    assert!(!locked.contains("-alpha-measure"));
+    assert_blend_layers_cover_alpha_pairs(&measured);
+}
+
+fn rasters_in_paint_order<'a>(nodes: &'a [Node], out: &mut Vec<&'a Image>) {
+    for node in nodes {
+        match node {
+            Node::Raster { image, .. } => out.push(image),
+            Node::Group { children, .. } => rasters_in_paint_order(children, out),
+        }
+    }
+}
+
+/// Blend, two-partial, and eight-layer sweeps must not paint src as a copy of
+/// dst. Every consecutive pair covers all 16 alpha combinations, and RGB differs
+/// at every pixel of that pair.
+fn assert_blend_layers_cover_alpha_pairs(measured: &[&Case]) {
+    const ALPHAS: [u8; 4] = [0, 1, 128, 254];
+    let mut checked = 0u32;
+    for case in measured {
+        let stacked = case.name.starts_with("blend-")
+            || case.name.starts_with("two-partial")
+            || case.name.starts_with("eight-layers")
+            || case.name.starts_with("alpha-extremes");
+        if !stacked {
+            continue;
+        }
+        let mut images = Vec::new();
+        rasters_in_paint_order(&case.nodes, &mut images);
+        assert!(
+            images.len() >= 2,
+            "{} should stack at least two layers",
+            case.name
+        );
+        for pair in images.windows(2) {
+            let dst = pair[0];
+            let src = pair[1];
+            assert_eq!(dst.w, src.w, "{}", case.name);
+            assert_eq!(dst.h, src.h, "{}", case.name);
+            let mut pairs = std::collections::HashSet::new();
+            let mut rgb_same = 0u32;
+            for i in (0..dst.pixels.len()).step_by(4) {
+                pairs.insert((dst.pixels[i + 3], src.pixels[i + 3]));
+                if dst.pixels[i..i + 3] == src.pixels[i..i + 3] {
+                    rgb_same += 1;
+                }
+            }
+            assert_eq!(
+                rgb_same, 0,
+                "{} has pixels where src RGB equals dst",
+                case.name
+            );
+            assert_eq!(pairs.len(), 16, "{} alpha pairs", case.name);
+            for &dst_a in &ALPHAS {
+                for &src_a in &ALPHAS {
+                    assert!(
+                        pairs.contains(&(dst_a, src_a)),
+                        "{} missing dst alpha {dst_a}, src alpha {src_a}",
+                        case.name
+                    );
+                }
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked >= 16, "blend sweeps were not checked");
+}
+
+#[test]
+fn existing_v1_and_v2_hashes_are_unchanged() {
+    let v2 = std::fs::read_to_string(reference_path()).unwrap();
+    let v2_before = include_str!("fixtures/cpu-reference-v2-before-alpha.txt");
+    assert!(
+        v2.starts_with(v2_before),
+        "an existing v2 hash line changed by at least one character"
+    );
+    for line in v2[v2_before.len()..]
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        assert!(
+            line.contains("-alpha-measure "),
+            "new hash line is not an alpha-measure case: {line}"
+        );
+    }
+    let v1 = std::fs::read_to_string(render_v1_path()).unwrap();
+    let v1_before = include_str!("fixtures/render-v1-before-alpha.txt");
+    assert_eq!(
+        v1, v1_before,
+        "an existing v1 hash changed by at least one character"
+    );
+}
+
+#[test]
 fn gpu_shader_matches_cpu_reference() {
     let gpu = match Gpu::new() {
         Ok(Some(gpu)) => gpu,
@@ -1709,23 +2435,31 @@ fn gpu_shader_matches_cpu_reference() {
         );
     }
     let mut failed = Vec::new();
+    let mut measured = Vec::new();
     for case in cases() {
-        let cpu = render(&case);
-        let gpu_tile = match gpu.render(&case) {
-            Ok(bytes) => bytes,
+        let (cpu, cpu_pre) = render_prequant(&case);
+        let (gpu_tile, gpu_pre) = match gpu.render(&case) {
+            Ok(pair) => pair,
             Err(err) => {
                 println!("{}: GPU render failed: {err}", case.name);
                 failed.push(format!("{}: {err}", case.name));
                 continue;
             }
         };
+        if case.measure {
+            let row = measure_case(&case, &cpu, &gpu_tile, &cpu_pre, &gpu_pre);
+            println!("{}", measure_line(&row));
+            measured.push(row);
+            continue;
+        }
         let report = diff_report(&cpu, &gpu_tile);
         println!("{}: {report}", case.name);
-        // No allowlist: a single non-matching pixel fails the test.
+        // Enforced cases have no allowlist. Measured cases are skipped above.
         if cpu != gpu_tile {
             failed.push(format!("{}: {report}", case.name));
         }
     }
+    write_alpha_measure(&gpu.adapter_name, &measured);
     assert!(
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",

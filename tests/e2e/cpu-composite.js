@@ -190,6 +190,93 @@ export function parityCases() {
   return cases;
 }
 
+const ALPHA_SWEEP = [0, 1, 128, 254];
+
+/**
+ * Straight RGBA for one layer in paint order. Matches `alpha_sweep` in
+ * crates/alto-gpu/src/cpu_composite.rs. Layer 0 is R = x&255, G = y&255,
+ * B = (3x+5y)&255. Layer i rotates those channels by i%3 and adds 17*i.
+ * Even layers step alpha with x+y; odd layers step with x. Both add the
+ * layer index. Layers 0 and 1 cover all 16 pairs of {0, 1, 128, 254}.
+ */
+export function alphaSweep(w, h, layer = 0) {
+  const pixels = new Uint8Array(w * h * 4);
+  const rot = layer % 3;
+  const shift = (layer * 17) & 255;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const base = [x & 255, y & 255, (x * 3 + y * 5) & 255];
+    const i = (y * w + x) * 4;
+    pixels[i] = (base[rot % 3] + shift) & 255;
+    pixels[i + 1] = (base[(1 + rot) % 3] + shift) & 255;
+    pixels[i + 2] = (base[(2 + rot) % 3] + shift) & 255;
+    const phase = layer % 2 === 0 ? (x + y + layer) : (x + layer);
+    pixels[i + 3] = ALPHA_SWEEP[phase % 4];
+  }
+  return { w, h, pixels };
+}
+
+function paintAlphaSweep(nodes) {
+  let layer = 0;
+  const walk = (node) => {
+    if (node.type === "group") return { ...node, children: node.children.map(walk) };
+    const image = alphaSweep(node.image.w, node.image.h, layer);
+    layer += 1;
+    return { ...node, image };
+  };
+  return nodes.map(walk);
+}
+
+/** Blend stacks must cover all 16 alpha pairs and differ in RGB at every pixel. */
+export function assertDistinctAlphaLayers(cases = alphaMeasureCases()) {
+  const alphas = [0, 1, 128, 254];
+  const want = alphas.flatMap((dst) => alphas.map((src) => `${dst},${src}`));
+  let checked = 0;
+  const walk = (nodes, images) => {
+    for (const node of nodes) {
+      if (node.type === "group") walk(node.children, images);
+      else images.push(node.image);
+    }
+  };
+  for (const testCase of cases) {
+    const stacked = ["blend-", "two-partial", "eight-layers", "alpha-extremes"]
+      .some((prefix) => testCase.name.startsWith(prefix));
+    if (!stacked) continue;
+    const images = [];
+    walk(testCase.nodes, images);
+    if (images.length < 2) throw new Error(`${testCase.name} should stack at least two layers`);
+    for (let n = 0; n < images.length - 1; n++) {
+      const dst = images[n];
+      const src = images[n + 1];
+      if (dst.w !== src.w || dst.h !== src.h) throw new Error(`${testCase.name} layer size differs`);
+      const pairs = new Set();
+      let same = 0;
+      for (let i = 0; i < dst.pixels.length; i += 4) {
+        if (dst.pixels[i] === src.pixels[i]
+          && dst.pixels[i + 1] === src.pixels[i + 1]
+          && dst.pixels[i + 2] === src.pixels[i + 2]) same += 1;
+        pairs.add(`${dst.pixels[i + 3]},${src.pixels[i + 3]}`);
+      }
+      if (same !== 0) throw new Error(`${testCase.name} has pixels where src RGB equals dst`);
+      for (const key of want) {
+        if (!pairs.has(key)) throw new Error(`${testCase.name} missing dst,src alpha ${key}`);
+      }
+    }
+    checked += 1;
+  }
+  if (checked < 16) throw new Error("blend sweeps were not checked");
+}
+
+/** Same geometry as parityCases. Measured, not enforced, and not a locked hash. */
+export function alphaMeasureCases() {
+  return parityCases().map((testCase) => ({
+    ...testCase,
+    name: `${testCase.name}-alpha-measure`,
+    lock: false,
+    measure: true,
+    nodes: paintAlphaSweep(testCase.nodes),
+  }));
+}
+
 function splitTiles(image) {
   const tiles = [];
   const nx = Math.ceil(image.w / 256);
