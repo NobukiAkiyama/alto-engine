@@ -136,7 +136,8 @@ export interface Requests {
   // Diagnostics (unstable entry point).
   waitFrame: Q<None, FrameStats>;
   readTile: Q<{ x: number; y: number }, Uint8Array>;
-  readTileLevel: Q<{ level: number; x: number; y: number }, Uint8Array>;
+  /** `fresh` empties the render caches first, in the same Worker step. */
+  readTileLevel: Q<{ level: number; x: number; y: number; fresh?: boolean }, Uint8Array>;
   vectorStats: Q<None, Record<string, number>>;
   setGlyphAtlas: Q<{ enabled: boolean }, true>;
   setVisibleTileJobs: Q<{ enabled: boolean }, true>;

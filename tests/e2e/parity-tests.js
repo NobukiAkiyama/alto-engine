@@ -57,9 +57,11 @@ async function addNode(doc, engine, node, parent) {
   });
 }
 async function gpuTile(engine, testCase) {
-  if (testCase.level) await testing(engine).request("resetRenderCache", { cpu: true });
+  // The CPU reference composites a level tile directly. `fresh` empties the caches in
+  // the Worker step that reads it: a frame drawn after a separate reset could cache the
+  // level-0 children first, and the tile would be read as their downsample.
   const raw = testCase.level
-    ? await unstable(engine).readTileLevel(testCase.level, testCase.tx, testCase.ty)
+    ? await testing(engine).request("readTileLevel", { level: testCase.level, x: testCase.tx, y: testCase.ty, fresh: true })
     : await unstable(engine).readTile(testCase.tx, testCase.ty);
   return new Uint8Array(raw);
 }

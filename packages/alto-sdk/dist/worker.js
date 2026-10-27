@@ -873,7 +873,13 @@ async function execute(m) {
         case "setGlyphAtlas":
             runtime.setGlyphAtlas(!!m.enabled);
             return true;
-        case "readTileLevel": return await runtime.readTileLevel(m.level, m.x, m.y);
+        case "readTileLevel":
+            // `fresh` empties the caches in this same step. As a separate request, a frame
+            // drawn before the read could cache the tile's children, and the tile would be
+            // their 2x2 average instead of a direct composite.
+            if (m.fresh)
+                resetRenderCache(true);
+            return await runtime.readTileLevel(m.level, m.x, m.y);
         case "readTile":
             return await runtime.readTile(m.x, m.y);
         case "exportImage":
@@ -909,9 +915,7 @@ async function execute(m) {
             runtime.setVisibleTileJobs(!!m.enabled);
             return true;
         case "resetRenderCache":
-            prefetchDisabled = true;
-            runtime.resetRenderCache(!!m.cpu);
-            diagnosticProfiles = [];
+            resetRenderCache(!!m.cpu);
             return true;
         case "enablePrefetch":
             prefetchDisabled = false;
@@ -960,6 +964,12 @@ async function execute(m) {
         default:
             throw Error("INVALID_ARGUMENT: unknown request " + m.t);
     }
+}
+/** Empties the display caches (and the CPU tile cache with `cpu`); pauses prefetching. */
+function resetRenderCache(cpu) {
+    prefetchDisabled = true;
+    runtime.resetRenderCache(cpu);
+    diagnosticProfiles = [];
 }
 function applyPendingView() {
     if (runtime && pendingResize) {
