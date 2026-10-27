@@ -76,3 +76,20 @@ Additional raw controls selected through `lifecycle_mode`:
   the texture and create a test-fixture error. CI uses 20 generations, and 192 MiB
   can be allocated through the existing input. This is a partial replay, not an
   equivalent reproduction of the complete engine workload.
+
+## Resize and frame pacing (2026-10)
+
+- `resize-stress.js`: forty real container resizes, each held past the SDK's 100 ms
+  debounce, while the view pans and a stroke draws over eight translucent layers.
+  It counts unexpected device losses and how long each size takes to reach the
+  drawing buffer. Run with `--suite=resize-stress`, or the manual CI input
+  `lifecycle_implementation=resize-stress`.
+- `behind-resize.html` with `behind-resize-render.js` and `behind-resize-worker.js`:
+  plain WebGPU after crbug.com/557281760. It presents every animation frame while
+  the GPU is behind and resizes the canvas between frames. The report's controls
+  run the same code: one frame in flight, the main thread, a light load. Run with
+  `node scripts/verify-browser.mjs --behind-resize` (`ALTO_BEHIND_SECONDS`,
+  `ALTO_BEHIND_CONFIGS`), or the manual CI input `lifecycle_implementation=chrome-repro`
+  with `behind_configs`. A lost device is reported as data; only a broken harness
+  fails the job. On SwiftShader CI it has not reproduced the loss:
+  `verification/CHROME-BUG-557281760-2026-10-25.md`.

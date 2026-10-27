@@ -288,7 +288,7 @@ jobs:
   gpu-lifecycle:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_lifecycle }}
     runs-on: ${{ inputs.diagnostic_runner || 'macos-15' }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
@@ -329,6 +329,25 @@ jobs:
           printf 'abi <abi/4.0>,\nprofile alto-cft "%s" flags=(unconfined) { userns, }\n' \
             "$RUNNER_TEMP/chrome/chrome-linux64/chrome" | sudo tee /etc/apparmor.d/alto-cft
           sudo apparmor_parser -r /etc/apparmor.d/alto-cft
+      # The WASM packages are not stored in git; the SDK suites and the Runtime
+      # probes need them. Built here like scripts/check.sh does, on this runner.
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+          cache-bin: "false"
+          shared-key: wasm-registry
+      - name: Build the WASM packages
+        shell: bash
+        run: |
+          export ALTO_WASM_TARGET_DIR="$RUNNER_TEMP/alto-wasm-target"
+          version=$(sed -n 's/^wasm-bindgen *= *"=\([0-9][0-9.]*\)".*/\1/p' crates/alto-wasm/Cargo.toml)
+          if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen $version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked
+          fi
+          sh scripts/build-m0.sh
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |
