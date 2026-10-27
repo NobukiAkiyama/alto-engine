@@ -264,10 +264,10 @@ export class DocumentHandle {
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
     redo(): Promise<void>;
-    save(target: ArchiveTarget): Promise<void>;
+    save(target: ArchiveTarget, options?: UnstableRenderV3Options): Promise<void>;
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
-    }): Promise<{
+    } & UnstableRenderV3Options): Promise<{
         written: number;
         skipped: number;
     }>;
@@ -296,7 +296,7 @@ export class DocumentHandle {
     };
     transact<T>(intent: Intent, build: (tx: Transaction) => T): Promise<T>;
     undo(): Promise<void>;
-    upgradeRenderVersion(): Promise<void>;
+    upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void>;
     readonly vectors: {
         set: (id: NodeId, paths: StyledPath[]) => Promise<void>;
         setMask: (id: NodeId, mask: VectorMask | null) => Promise<void>;
@@ -855,6 +855,9 @@ export interface Rect {
 }
 
 // @public
+export function renderVersionUpgrade(options?: UnstableRenderV3Options, buildEnabled?: boolean): "stable" | "unstable" | "rejected";
+
+// @public
 export function replaceText(content: TextContent, start: number, end: number, insert: string): TextContent;
 
 // @public (undocumented)
@@ -1057,6 +1060,14 @@ export class Transaction {
     setVector(id: NodeId, paths: StyledPath[]): void;
     // (undocumented)
     setVectorMask(id: NodeId, mask: VectorMask | null): void;
+}
+
+// @public
+export const UNSTABLE_RENDER_V3 = false;
+
+// @public
+export interface UnstableRenderV3Options {
+    unstableRenderV3?: boolean;
 }
 
 // @public

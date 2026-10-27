@@ -8,7 +8,7 @@
 
 記録してあるハッシュは動かさない。`tests/parity/render-v1.txt` の全行と、`tests/parity/cpu-reference.txt` の既存行は再生成しない。新しいケースを足すときは行の追加だけにする。
 
-描画バージョン 1 と 2 の画素は変えない。バージョン 3 の式は `render_version` が 3 の文書だけが使う。バージョン 1 と 2 の式はコードに残す。バージョン 3 を既定の新規文書にする変更は、ロック済み合成ケースの画素がバージョン 2 と一致することを確認してからにする。一致しないあいだ、parity の新ケースだけがバージョン 3 を名指しで使う。バージョン 3 の文書を保存すると `format_version` は 4 になる。4 を知らないビルドはファイルを拒否する。`DocumentMeta::validate` が受け付ける `render_version` は 1、2、3 だけである。それ以外は拒否する。未知の値を読み飛ばして古い式で描くことはしない。
+描画バージョン 1 と 2 の画素は変えない。バージョン 3 の式は `render_version` が 3 の文書だけが使う。バージョン 1 と 2 の式はコードに残す。バージョン 3 を既定の新規文書にする変更は、ロック済み合成ケースの画素がバージョン 2 と一致することを確認してからにする。一致しないあいだ、parity の新ケースだけがバージョン 3 を名指しで使う。整数合成が入るまで描画バージョン 3 は不安定である。3 へ上げる操作（`upgrade_render_version` / `upgradeRenderVersion`）と、format 4 のパッケージ保存（単一ファイル、フォルダ、履歴を切った保存）は明示のオプトインが要る。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ要求を受ける。既定はオフで、リリースビルドは要求を無視する。JS は `{ unstableRenderV3: true }` で、出荷する定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書と、引数なしの更新はバージョン 2 のままである。既にバージョン 3 / format 4 のファイルはオプトインなしで開ける。`tests/fixtures/render-v3-empty.alto` も読み込める。開いた文書のビュー、スナップショットハッシュ、復旧チェックポイントは、その文書を format 4 として直列化する。これは利用者が選ぶ保存ではない。オプトインがあるとき、バージョン 3 の文書の保存は `format_version` 4 になる。4 を知らないビルドはファイルを拒否する。`DocumentMeta::validate` が受け付ける `render_version` は 1、2、3 だけである。それ以外は拒否する。未知の値を読み飛ばして古い式で描くことはしない。
 
 CPU 参照は Rust（`crates/alto-gpu/src/cpu_composite.rs`、テストのみ）と JS（`tests/e2e/cpu-composite.js`）に同じ式で置く。WGSL はその式を実行する。段と段のあいだの RGBA16F ストアと、最後の RGBA8 unorm ストアは、どちらも半整数を偶数側へ丸める。
 
@@ -24,7 +24,7 @@ CPU 参照は Rust（`crates/alto-gpu/src/cpu_composite.rs`、テストのみ）
 
    unorm からバイトを戻す段は、変換の誤差が半バイト（約 0.002）より小さければ同じバイトになる。WGSL の f32 除算が最大 2.5 ULP ずれても、その誤差は半バイトよりずっと小さい。バイトを戻したあとの加減乗除は整数で、仕様で一意である。3 実装が全画素一致しても、それは Metal、lavapipe、SwiftShader についての観測であり、仕様があらゆる実装の unorm 変換をその範囲に収めるとは書いていない。
 
-3. 既存出力は変えない。バージョン 1 と 2 の式と、`tests/parity/render-v1.txt` および `tests/parity/cpu-reference.txt` の記録済みハッシュは触らない。新規文書の `render_version` は 2 のままである。バージョン 3 の文書を保存すると `format_version` は 4 になる。`validate` が受け付ける `render_version` は 1、2、3 だけで、それ以外は拒否する。1 から 2 への更新は今のままである。3 へ自動では上がらない。
+3. 既存出力は変えない。バージョン 1 と 2 の式と、`tests/parity/render-v1.txt` および `tests/parity/cpu-reference.txt` の記録済みハッシュは触らない。新規文書の `render_version` は 2 のままである。1 から 2 への更新は今のままである。3 へは、不安定オプトインがあるときだけ上がる。オプトインがない保存は format 4 を書かない。`validate` が受け付ける `render_version` は 1、2、3 だけで、それ以外は拒否する。いまのバージョン 3 で記録したハッシュは最終ではない。バージョン 3 の color-adjust は、宛先が空でないときと normal 以外のブレンドではバージョン 2 の float 合成に戻る。バージョン 3 の整数合成が入ると、その出力は変わる。
 
    parity はこの勾配と 20 通りを、native（macOS Metal 上の `cargo test`）、gpu-parity（Ubuntu lavapipe）、wasm（macOS の Chrome for Testing、`ALTO_BROWSER_GPU=swiftshader`、`node scripts/verify-browser.mjs --functional`。アダプタの architecture に `swiftshader` が含まれること）で全画素比べる。SwiftShader がこのケースを実行するのは wasm ジョブの parity スイートである。ブラウザは `tests/fixtures/render-v3-empty.alto` を開く。`createDocument` はバージョン 2 のままで、wasm にバージョンを書くメソッドは足していない。CI [40583663336](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40583663336) では 3 ジョブとも成功し、20 通りは全画素一致した。SwiftShader の parity レポートは `color-adjust` が `20 settings, 0 pixels differ` である。アダプタは `{"vendor":"google","architecture":"swiftshader"}` だった。この一致は Metal、lavapipe、SwiftShader についての観測であり、仕様の保証ではない。
 

@@ -1,7 +1,8 @@
 //! Canvas geometry, fills, and 1:1 reads. New hashes are stored before the transaction.
 use super::*;
 use alto_core::{
-    Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, RENDER_VERSION, RENDER_VERSION_F32, TileKey,
+    Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, RENDER_VERSION, RENDER_VERSION_EXACT,
+    RENDER_VERSION_F32, TileKey,
 };
 use alto_doc::{Document, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_raster::{TileData, TileMap};
@@ -1322,7 +1323,8 @@ impl Engine {
     /// pixels change, so this is never applied by load or save. The live
     /// `format_version` becomes 3, which is what a snapshot of version 2 writes,
     /// so the journal digest matches a document opened from that snapshot.
-    /// A document already on version 2 is rejected and the history is unchanged.
+    /// A document already on version 2 or 3 is rejected and the history is unchanged.
+    /// This method does not move a document onto render version 3.
     pub fn upgrade_render_version(&mut self, handle: DocHandle) -> Result<ChangeSet, EngineError> {
         let ops = self.render_upgrade_ops(handle)?;
         let revision = self.document(handle)?.revision;
@@ -1330,7 +1332,8 @@ impl Engine {
     }
 
     /// The single `SetMeta` of [`Self::upgrade_render_version`]. The WASM command
-    /// applies this through the same journal path as other edits.
+    /// applies this through the same journal path as other edits. It never
+    /// selects render version 3.
     pub fn render_upgrade_ops(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
         let doc = self.document(handle)?;
         if doc.meta.render_version != RENDER_VERSION_F32 {
@@ -1339,6 +1342,34 @@ impl Engine {
         let mut meta = doc.meta.clone();
         meta.render_version = RENDER_VERSION;
         meta.format_version = 3;
+        Ok(vec![Op::SetMeta { meta }])
+    }
+
+    /// One undoable edit onto render version 3. Refused unless
+    /// [`crate::unstable_render::set_unstable_render_v3`] accepted the request.
+    /// Release builds never accept it. A document already on version 3 is rejected
+    /// and the history is unchanged.
+    pub fn upgrade_render_version_unstable(
+        &mut self,
+        handle: DocHandle,
+    ) -> Result<ChangeSet, EngineError> {
+        let ops = self.render_upgrade_ops_unstable(handle)?;
+        let revision = self.document(handle)?.revision;
+        self.transact(handle, "render.upgrade", ops, revision)
+    }
+
+    /// The single `SetMeta` of [`Self::upgrade_render_version_unstable`].
+    pub fn render_upgrade_ops_unstable(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
+        if !crate::unstable_render::unstable_render_v3_enabled() {
+            return Err(bad(crate::unstable_render::UNSTABLE_RENDER_V3_OFF));
+        }
+        let doc = self.document(handle)?;
+        if doc.meta.render_version >= RENDER_VERSION_EXACT {
+            return Err(bad("Render version is already current"));
+        }
+        let mut meta = doc.meta.clone();
+        meta.render_version = RENDER_VERSION_EXACT;
+        meta.format_version = 4;
         Ok(vec![Op::SetMeta { meta }])
     }
 }

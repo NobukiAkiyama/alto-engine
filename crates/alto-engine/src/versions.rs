@@ -450,6 +450,7 @@ impl Engine {
     }
 
     pub fn folder_entries(&self, h: DocHandle) -> Result<BTreeMap<String, Vec<u8>>, EngineError> {
+        self.require_stable_package(h)?;
         Ok(alto_store::folder_entries(&self.package_parts(h)?)?)
     }
 
@@ -460,6 +461,7 @@ impl Engine {
         h: DocHandle,
         ancestors: u32,
     ) -> Result<Vec<u8>, EngineError> {
+        self.require_stable_package(h)?;
         let doc = self.document(h)?;
         let current = doc.snapshot_bytes()?;
         let current_hash = ContentHash::of(&current);
