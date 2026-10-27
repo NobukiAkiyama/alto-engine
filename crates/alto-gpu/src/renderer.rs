@@ -477,6 +477,18 @@ fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
 fn mode(m: RenderBlend) -> f32 {
     m as u32 as f32
 }
+
+/// Q14 quantize of a color-adjust setting. 1.0 is 16384. The value is clamped
+/// to [-1, 4], multiplied by 16384 in f32, and rounded half away from zero.
+/// Render version 3 stores these bits in the mode 17 uniform.
+pub(crate) fn color_adjust_q14(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let x = value.clamp(-1.0, 4.0) * 16384.0;
+    let adj = if x.is_sign_negative() { -0.5 } else { 0.5 };
+    (x + adj) as i32
+}
 // The renderer keeps raw matrices in its hot loops; the math is `Affine2`'s.
 pub(crate) fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
     alto_core::Affine2(a).concat(alto_core::Affine2(b)).0

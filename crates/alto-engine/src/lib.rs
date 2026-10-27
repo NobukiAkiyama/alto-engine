@@ -1432,6 +1432,26 @@ mod package_tests {
 }
 
 #[cfg(test)]
+mod render_v3_fixture {
+    use super::*;
+    use alto_core::RENDER_VERSION_EXACT;
+
+    #[test]
+    fn render_v3_empty_fixture_opens_at_format_four() {
+        let bytes = include_bytes!("../../../tests/fixtures/render-v3-empty.alto");
+        let mut engine = Engine::new();
+        let (opened, warnings) = engine.open_package(bytes).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let loaded = engine.document(opened).unwrap();
+        assert_eq!(loaded.meta.render_version, RENDER_VERSION_EXACT);
+        assert_eq!(loaded.meta.format_version, 4);
+        assert_eq!((loaded.meta.width, loaded.meta.height), (256, 256));
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(engine.save_package(opened).unwrap(), bytes);
+    }
+}
+
+#[cfg(test)]
 mod m6_tests;
 
 #[cfg(test)]

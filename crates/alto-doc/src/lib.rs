@@ -53,11 +53,16 @@ impl DocumentMeta {
                 "Canvas dimensions must be positive".into(),
             ));
         }
-        if self.format_version != 1 && self.format_version != 2 && self.format_version != 3 {
+        if self.format_version != 1
+            && self.format_version != 2
+            && self.format_version != 3
+            && self.format_version != 4
+        {
             return Err(DocError::Invalid("Unsupported document format".into()));
         }
         if self.render_version != alto_core::RENDER_VERSION_F32
             && self.render_version != alto_core::RENDER_VERSION
+            && self.render_version != alto_core::RENDER_VERSION_EXACT
         {
             return Err(DocError::Invalid("Unsupported render version".into()));
         }
@@ -1404,7 +1409,11 @@ impl Document {
         // Render version 2 changes pixels. Writing it as format 3 makes a build
         // that only accepts 1 and 2 refuse the file, instead of skipping the
         // unknown `render_version` field and compositing the f32 path.
-        meta.format_version = if meta.render_version >= alto_core::RENDER_VERSION {
+        // Render version 3 changes color-adjust. Writing it as format 4 makes a
+        // build that only accepts 1, 2 and 3 refuse the file.
+        meta.format_version = if meta.render_version >= alto_core::RENDER_VERSION_EXACT {
+            4
+        } else if meta.render_version >= alto_core::RENDER_VERSION {
             3
         } else if extended {
             2
@@ -2669,12 +2678,36 @@ mod compatibility_tests {
         );
 
         let mut rejected = value;
-        rejected["meta"]["format_version"] = serde_json::json!(4);
+        rejected["meta"]["format_version"] = serde_json::json!(5);
         let err =
             Document::from_snapshot_bytes(&serde_json::to_vec(&rejected).unwrap()).unwrap_err();
         assert!(
             err.to_string().contains("Unsupported document format"),
             "{err}"
         );
+        rejected["meta"]["format_version"] = serde_json::json!(4);
+        rejected["meta"]["render_version"] = serde_json::json!(4);
+        let err =
+            Document::from_snapshot_bytes(&serde_json::to_vec(&rejected).unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported render version"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn render_version_three_saves_format_four_and_reloads() {
+        let mut meta = DocumentMeta::srgb_u8(8, 8);
+        meta.render_version = alto_core::RENDER_VERSION_EXACT;
+        meta.format_version = 4;
+        let doc = Document::new(meta).unwrap();
+        let bytes = doc.snapshot_bytes().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["meta"]["format_version"], 4);
+        assert_eq!(value["meta"]["render_version"], 3);
+        let loaded = Document::from_snapshot_bytes(&bytes).unwrap();
+        assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION_EXACT);
+        assert_eq!(loaded.meta.format_version, 4);
+        assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
     }
 }

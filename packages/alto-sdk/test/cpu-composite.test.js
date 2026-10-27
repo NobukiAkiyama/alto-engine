@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, fnv64, parityCases, renderCase, renderColorAdjust, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -50,6 +50,65 @@ test("color-adjust of opaque 40,80,120 at brightness 0.6 is the known pixel", ()
   assert.equal(tile.length, 262144);
   assert.deepEqual([tile[0], tile[1], tile[2], tile[3]], [193, 233, 255, 255]);
   assert.ok(tile.every((value, index) => value === tile[index % 4]));
+});
+
+test("color-adjust gradient covers every channel and the alpha anchors", () => {
+  const image = colorAdjustGradient();
+  const hit = [new Set(), new Set(), new Set(), new Set()];
+  for (let i = 0; i < image.pixels.length; i += 4) {
+    for (let channel = 0; channel < 4; channel++) hit[channel].add(image.pixels[i + channel]);
+  }
+  for (const channel of hit) assert.equal(channel.size, 256);
+  assert.equal(image.pixels[3], 0);
+  assert.equal(image.pixels[256 * 4 + 3], 1);
+  assert.equal(image.pixels[2 * 256 * 4 + 3], 128);
+  assert.equal(image.pixels[3 * 256 * 4 + 3], 254);
+  assert.equal(image.pixels[(4 * 256 + 255) * 4 + 3], 255);
+  const anchor = image.pixels.slice(3 * 256 * 4, 3 * 256 * 4 + 4);
+  const flat = renderColorAdjust({ w: 1, h: 1, pixels: anchor }, { brightness: 0, contrast: 1, saturation: 1 });
+  const gray = renderColorAdjust({ w: 1, h: 1, pixels: anchor }, { brightness: -0.35, contrast: 1.7, saturation: 0 });
+  const vivid = renderColorAdjust({ w: 1, h: 1, pixels: anchor }, { brightness: 0.45, contrast: 0.5, saturation: 1.6 });
+  assert.notDeepEqual([...flat], [...gray]);
+  assert.notDeepEqual([...flat], [...vivid]);
+  assert.notDeepEqual([...gray], [...vivid]);
+  const clear = renderColorAdjust({ w: 1, h: 1, pixels: Uint8Array.of(40, 80, 120, 0) }, { brightness: 0.45, contrast: 1.7, saturation: 1.6 });
+  assert.deepEqual([...clear], [0, 0, 0, 0]);
+  assert.equal(colorAdjustGrid().length, 12);
+  const imageFull = colorAdjustGradient();
+  const expected = [
+    "09de5f49e7068fbe",
+    "d296346794223ecf",
+    "0a0b6c96d748999c",
+    "e80976ac9139b99d",
+    "5926c4243a96f79f",
+    "6e6fc79ca84727ab",
+    "beb375818b446960",
+    "8dd8cd53b2a57140",
+    "54e47915c5a04b18",
+    "9be25cf48c61da5a",
+    "c0cc9de8851d97d2",
+    "eaae1596e5e99a2b",
+  ];
+  colorAdjustGrid().forEach((settings, index) => {
+    assert.equal(fnv64(renderColorAdjust(imageFull, settings)), expected[index], `${settings.contrastLabel} ${settings.saturationLabel} ${settings.brightnessLabel}`);
+  });
+  const exact = [
+    "85427e72aa6975f4",
+    "d34d9def32069e30",
+    "6fabe3fd4a1d755d",
+    "03bdc46a2a94022a",
+    "e2631093ebe7c14b",
+    "6614a1c612c0eb35",
+    "35828221f6e46782",
+    "f2d63e24deb38bb5",
+    "e21500eb040c8e1d",
+    "54f48aae0e383c44",
+    "8e735cc19d43f13b",
+    "2edfc3149add3c41",
+  ];
+  colorAdjustGrid().forEach((settings, index) => {
+    assert.equal(fnv64(renderColorAdjustV3(imageFull, settings)), exact[index], `v3 ${settings.contrastLabel} ${settings.saturationLabel} ${settings.brightnessLabel}`);
+  });
 });
 
 test("opaque blue under half-red normal blend is the known pixel", () => {

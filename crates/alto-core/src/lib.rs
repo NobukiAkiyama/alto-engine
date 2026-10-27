@@ -15,6 +15,10 @@ pub const RENDER_VERSION_F32: u32 = 1;
 /// Integer 4-tap bilinear. Inverse coefficients are Q16, source positions are Q8,
 /// and the filter accumulates bytes with round-half-up. New documents use this.
 pub const RENDER_VERSION: u32 = 2;
+/// Integer color-adjust (Q14). Not the default: new documents stay on
+/// [`RENDER_VERSION`]. A document selects this explicitly. Version 1 and 2
+/// keep the float mode-3 formula.
+pub const RENDER_VERSION_EXACT: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
