@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, applyCoverageMask, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, renderLayerMask, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -119,6 +119,17 @@ test("color-adjust gradient covers every channel and the alpha anchors", () => {
   colorAdjustGrid().forEach((settings, index) => {
     assert.equal(fnv64(renderColorAdjustV3(imageFull, settings)), exact[index], `v3 ${settings.contrastLabel} ${settings.saturationLabel} ${settings.brightnessLabel}`);
   });
+});
+
+test("layer mask of opaque red keeps the left half and clears the right", () => {
+  const image = solid(256, 256, [255, 0, 0, 255]);
+  const tile = renderLayerMask(image, { x: 0, y: 0, width: 128, height: 256, opacity: 1 });
+  assert.deepEqual([tile[0], tile[1], tile[2], tile[3]], [255, 0, 0, 255]);
+  assert.deepEqual([tile[127 * 4], tile[127 * 4 + 1], tile[127 * 4 + 2], tile[127 * 4 + 3]], [255, 0, 0, 255]);
+  assert.deepEqual([tile[128 * 4], tile[128 * 4 + 1], tile[128 * 4 + 2], tile[128 * 4 + 3]], [0, 0, 0, 0]);
+  assert.deepEqual(applyCoverageMask([200, 10, 30, 255], 0, 255), [0, 0, 0, 0]);
+  assert.deepEqual(applyCoverageMask([200, 10, 30, 40], 255, 255), [200, 10, 30, 40]);
+  assert.deepEqual(applyCoverageMask([200, 0, 0, 0], 64, 128), [25, 0, 0, 0]);
 });
 
 test("opaque blue under half-red normal blend is the known pixel", () => {

@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, renderLayerMask, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -211,7 +211,7 @@ export async function runParityTests(engine, log) {
         log(`FAIL ${testCase.name} ${error}`);
       }
     }
-    await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
+    await test("mask", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
       const doc = await engine.createDocument({ width: 256, height: 256 });
       const asset = await imported(engine, image);
@@ -222,10 +222,15 @@ export async function runParityTests(engine, log) {
       await doc.selection.apply({ kind: "rectangle", x: 0, y: 0, width: 128, height: 256 });
       await doc.masks.fromSelection(layer);
       const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+      const cpu = renderLayerMask(image, { x: 0, y: 0, width: 128, height: 256, opacity: 1 });
+      const gap = diff(cpu, gpu);
+      log(`mask: ${gap}`);
       assert(gpu.length === 262144 && gpu.some((v, i) => i % 4 === 3 && v > 0), "mask produced no ink");
       assert(sceneGap(doc.getSnapshot()) === "mask", sceneGap(doc.getSnapshot()));
       const plain = renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0, nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
-      assert(!same(plain, gpu), "mask matched the unmasked composite bit-exactly; remove the xfail");
+      assert(!same(plain, cpu), "mask reference matched the unmasked composite");
+      assert(same(cpu, gpu), gap);
+      return "0 pixels differ";
     });
     await xfail("gaussian-blur", "effects: rgba16float and a Gaussian, not composite.wgsl", async () => {
       const image = square();

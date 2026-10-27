@@ -2,7 +2,7 @@
 
 作成日：2026-10-27
 
-状態：方針。実装順は `color-adjust`、`mask`、`vector-fill`、`gaussian-blur`、`text`。各パスは main から切った別 PR で、main へ向ける。`color-adjust` は最初の PR で通常の parity ケースにした。
+状態：方針。実装順は `color-adjust`、`mask`、`vector-fill`、`gaussian-blur`、`text`。各パスは main から切った別 PR で、main へ向ける。`color-adjust` と `mask` は通常の parity ケースにした。
 
 関連：[画像編集](IMAGE-EDITING.md)、[半透明合成の parity](../verification/semi-transparent-composite-parity.md)。
 
@@ -34,9 +34,9 @@ CPU 参照は Rust（`crates/alto-gpu/src/cpu_composite.rs`、テストのみ）
 
 1. 今日ずれる箇所。モード 4 は `load_a * coverage * opacity` である。カバレッジは R8 をアトラス上で R=G=B=値、A=255 にした最近傍サンプルの `.r` で、`byte/255` の f32 になる。矩形選択は画素境界に揃い、値は 0 か 255 だけである。0 と 1 の乗算は厳密なので、このケースのずれはカバレッジ側にはない。入力の色は color-adjust と同じ f16 往復を通る。ぼかし縁（feather）を掛けたマスクは別で、ガウス重みの `exp` がずれる。parity の矩形には feather はない。
 
-2. CPU、WGSL、JS で同じ式。カバレッジバイトが 0 なら出力は 0、255 なら入力の f16 色をそのまま返す。opacity が 1 でないときは、色の f16 値を Q8（0..255）に偶数丸めで戻し、`（色 * opacity_q8 * coverage + 127）/ 255` の整数除算で書き、再び f16 へ一意に載せる。parity の矩形は coverage が 0 か 255 で opacity が 1 なので、整数除算は恒等になる。
+2. CPU と JS で同じ式。WGSL のモード 4 は変えない。カバレッジバイトが 0、または opacity が 0 なら出力は 0。カバレッジ 255 かつ opacity が 1 なら入力のバイトをそのまま返す。不透明な 0 と 255 では、これは f16 の 0 と 1 をコピーするのと同じである。モード 4 の `load_a * 1 * 1` と、空の背面へのモード 1 のあと unorm へ戻した画素と一致する。それ以外は Q8 の整数除算を二段にする。先に `(channel * opacity_q8 + 127) / 255`、次に `(その値 * coverage + 127) / 255`。opacity の Q8 は 0..1 を 255 倍し、半整数は偶数側へ丸める。1 は 255 のままである。255 を二度通すと元のバイトに戻る。一段の `(色 * opacity_q8 * coverage + 127) / 255` は、coverage がバイト 255 のとき色の 255 倍になり、恒等にならないので使わない。この二段は参照だけで、モード 4 の float 乗算とは比べない。parity の矩形は coverage が 0 か 255 で opacity が 1 なので、二段には入らない。
 
-3. 既存出力は変えない。バージョン 2 のモード 4 の文は残す。描画バージョン 3 は要らない。
+3. 既存出力は変えない。バージョン 2 のモード 4 の文は残す。描画バージョン 3 は要らない。parity の矩形（不透明な赤、選択 `{x:0,y:0,width:128,height:256}`、opacity 1、feather なし）は通常の parity ケースとして全画素を比べる。0 と 1 の乗算は厳密で、そのあとの normal ブレンドは空の背面（アルファ 0）への合成なので、バージョン 2 の合成がビット一致する条件に入る。半透明同士ではない。カバレッジが 1..254、または opacity が 1 でない画素は、上の二段を CPU と JS で確かめるだけで、GPU とは比べない。ぼかし縁は対象外のままである。
 
 ## vector-fill
 

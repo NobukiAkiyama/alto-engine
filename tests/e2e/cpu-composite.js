@@ -795,6 +795,65 @@ function colorAdjustTexelV3(rgba, brightness, contrast, saturation) {
   ];
 }
 
+/** `(channel * factor + 127) / 255`. Factor 255 is the identity on 0..255. */
+function scaleQ8(channel, factor) {
+  return Math.floor((channel * factor + 127) / 255);
+}
+
+/** Opacity 1 stays 255. Any other value in 0..1 uses ties-to-even. */
+function opacityQ8(opacity) {
+  if (opacity === 1) return 255;
+  if (!(opacity >= 0 && opacity <= 1)) return 0;
+  const x = opacity * 255;
+  const down = Math.floor(x);
+  const frac = x - down;
+  if (frac > 0.5) return down + 1;
+  if (frac < 0.5) return down;
+  return down % 2 === 0 ? down : down + 1;
+}
+
+/**
+ * Version 2 mode 4 for one coverage byte.
+ * 0 writes 0. 255 with opacity 255 copies the source: the shader multiplies by 1,
+ * then a normal blend onto an empty backdrop keeps an opaque or zero texel.
+ * Any other pair is opacity then coverage, each `(n * factor + 127) / 255`.
+ * One division by 255 of `channel * opacityQ8 * coverage` is not that identity.
+ */
+export function applyCoverageMask(rgba, coverage, opacityByte) {
+  if (coverage === 0 || opacityByte === 0) return [0, 0, 0, 0];
+  if (coverage === 255 && opacityByte === 255) return [rgba[0], rgba[1], rgba[2], rgba[3]];
+  return rgba.map((channel) => scaleQ8(scaleQ8(channel, opacityByte), coverage));
+}
+
+/** Feather 0 rectangle. The sample is the pixel center, matching selection. */
+function rectCoverage(x, y, rect) {
+  const px = x + 0.5;
+  const py = y + 0.5;
+  const d = Math.min(px - rect[0], rect[2] - px, py - rect[1], rect[3] - py);
+  return d >= 0 ? 255 : 0;
+}
+
+/** Opaque-or-clear layer mask. Opacity 1 does not take the Q8 scale path. */
+export function renderLayerMask(image, mask = {}) {
+  const x0 = mask.x ?? 0;
+  const y0 = mask.y ?? 0;
+  const x1 = x0 + (mask.width ?? image.w);
+  const y1 = y0 + (mask.height ?? image.h);
+  const factor = opacityQ8(mask.opacity ?? 1);
+  const out = new Uint8Array(image.w * image.h * 4);
+  for (let y = 0; y < image.h; y++) {
+    for (let x = 0; x < image.w; x++) {
+      const i = (y * image.w + x) * 4;
+      out.set(applyCoverageMask(
+        [image.pixels[i], image.pixels[i + 1], image.pixels[i + 2], image.pixels[i + 3]],
+        rectCoverage(x, y, [x0, y0, x1, y1]),
+        factor,
+      ), i);
+    }
+  }
+  return out;
+}
+
 /** Render version 3: integer premultiply, Q14 color-adjust, unorm resolve. */
 export function renderColorAdjustV3(image, settings = {}) {
   const brightness = f(settings.brightness ?? 0);

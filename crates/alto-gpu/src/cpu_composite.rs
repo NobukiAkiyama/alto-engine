@@ -15,7 +15,11 @@
 //! after every store. The shader is unchanged, so render version 2 pixels stay put.
 //! The parity image is a 256² gradient (every R, G, B and alpha, including alpha
 //! 0, 1, 128 and 254) run through the contrast × saturation × brightness grid.
-//! The other four stay explicit xfails in the browser suite.
+//! The layer-mask rect is the other exception. It repeats version 2 mode 0, mode 4
+//! (`load_a * coverage * opacity`), mode 1 onto a clear backdrop, and
+//! `effects-resolve.wgsl`. Coverage is 0 or 255 and opacity is 1, so that multiply
+//! is exact and the shader is unchanged. Vector fill, gaussian blur, and text stay
+//! explicit xfails in the browser suite.
 
 use crate::blend_ref::{blend, effects_blend};
 use crate::damage::plain_scene;
@@ -1222,6 +1226,81 @@ fn color_adjust_image(src: &[u8], brightness: f32, contrast: f32, saturation: f3
         .zip(src.as_chunks::<4>().0)
     {
         *dst = color_adjust_texel(*px, brightness, contrast, saturation);
+    }
+    out
+}
+
+/// `(channel * factor + 127) / 255`. Factor 255 is the identity on 0..=255.
+fn scale_q8(channel: u32, factor: u32) -> u32 {
+    (channel * factor + 127) / 255
+}
+
+/// Opacity 1 stays 255. Any other finite value in 0..=1 uses ties-to-even.
+fn opacity_q8(opacity: f32) -> u8 {
+    if opacity == 1.0 {
+        return 255;
+    }
+    if !(0.0..=1.0).contains(&opacity) {
+        return 0;
+    }
+    (opacity * 255.0).round_ties_even() as u8
+}
+
+/// Version 2 mode 4 for one coverage byte.
+///
+/// Coverage 0 or opacity 0 writes 0. Coverage 255 and opacity 255 copy the source
+/// bytes. That is the f16 0/1 passthrough: mode 4 multiplies by 1, and the normal
+/// blend onto an empty backdrop keeps an opaque or zero texel. Any other pair is
+/// two Q8 scales, opacity then coverage, so passing 255 twice returns the byte.
+/// A single `(channel * opacity_q8 * coverage + 127) / 255` is `channel * 255`
+/// when coverage is the byte 255, which is not that identity. The two-step form
+/// is the reference only. Mode 4's float multiply is unchanged and is not compared
+/// for partial coverage.
+fn apply_coverage_mask(texel: [u8; 4], coverage: u8, opacity_q8: u8) -> [u8; 4] {
+    if coverage == 0 || opacity_q8 == 0 {
+        return [0; 4];
+    }
+    if coverage == 255 && opacity_q8 == 255 {
+        return texel;
+    }
+    texel.map(|channel| {
+        scale_q8(
+            scale_q8(u32::from(channel), u32::from(opacity_q8)),
+            u32::from(coverage),
+        ) as u8
+    })
+}
+
+/// Feather 0 rectangle. The sample is the pixel center, matching selection.
+fn rect_coverage(x: i32, y: i32, rect: [f64; 4]) -> u8 {
+    let px = f64::from(x) + 0.5;
+    let py = f64::from(y) + 0.5;
+    let d = (px - rect[0])
+        .min(rect[2] - px)
+        .min(py - rect[1])
+        .min(rect[3] - py);
+    u8::from(d >= 0.0) * 255
+}
+
+fn solid_rgba(rgba: [u8; 4]) -> Vec<u8> {
+    let mut image = vec![0u8; 256 * 256 * 4];
+    for chunk in image.as_chunks_mut::<4>().0 {
+        *chunk = rgba;
+    }
+    image
+}
+
+fn render_layer_mask(src: &[u8], width: u32, height: u32, rect: [f64; 4], opacity: f32) -> Vec<u8> {
+    assert_eq!(src.len(), (width * height * 4) as usize);
+    let q8 = opacity_q8(opacity);
+    let mut out = vec![0u8; src.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let i = ((y * width + x) * 4) as usize;
+            let texel = [src[i], src[i + 1], src[i + 2], src[i + 3]];
+            let masked = apply_coverage_mask(texel, rect_coverage(x as i32, y as i32, rect), q8);
+            out[i..i + 4].copy_from_slice(&masked);
+        }
     }
     out
 }
@@ -2606,6 +2685,327 @@ impl Gpu {
         }
         Ok(tiles_out)
     }
+
+    /// Version 2 layer mask for one 256² tile: mode 6 clear, mode 0 sample, mode 4
+    /// (`load_a * coverage * opacity` with opacity 1), mode 1 onto that clear backdrop,
+    /// then `effects-resolve.wgsl`. This is the chain `createDocument` runs. Coverage
+    /// bytes are uploaded as R=G=B, A=255, and sampled with nearest `.r`.
+    fn render_layer_mask(&self, pixels: &[u8], rect: [f64; 4]) -> Result<Vec<u8>, String> {
+        if pixels.len() != 256 * 256 * 4 {
+            return Err(format!("mask image is {} bytes", pixels.len()));
+        }
+        let mut mask = vec![0u8; 256 * 256 * 4];
+        for y in 0..256i32 {
+            for x in 0..256i32 {
+                let coverage = rect_coverage(x, y, rect);
+                let i = ((y * 256 + x) * 4) as usize;
+                mask[i] = coverage;
+                mask[i + 1] = coverage;
+                mask[i + 2] = coverage;
+                mask[i + 3] = 255;
+            }
+        }
+        let device = &self.device;
+        let effects = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mask effects"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mask effects"),
+                source: wgpu::ShaderSource::Wgsl(
+                    shader_with_blend(include_str!("../shaders/effects.wgsl")).into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mask resolve"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mask resolve"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/effects-resolve.wgsl").into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let float_tex = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let backdrop = float_tex("mask clear");
+        let sampled = float_tex("mask sample");
+        let masked = float_tex("mask coverage");
+        let blended = float_tex("mask blend");
+        let dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mask dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let atlas = |label: &str, texels: &[u8]| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+            texture
+        };
+        let image_atlas = atlas("mask image", pixels);
+        let mask_atlas = atlas("mask coverage atlas", &mask);
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mask resolve"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let region = [0.0, 0.0, 1.0, 0.0];
+        let config = |mode: u32, settings: [f32; 4]| EffectConfig {
+            out_region: region,
+            region_a: region,
+            region_b: region,
+            inv0: [1.0, 0.0, 0.0, 1.0],
+            inv1: [0.0; 4],
+            settings,
+            info: [mode, 0, u32::from(mode == 0 || mode == 4), 0],
+            extra: [0.0; 4],
+            curve: [0.0; 64],
+            sizes: [256, 256, 256, 256],
+            output_clip: [256, 256, 256, 256],
+        };
+        let configs = [
+            config(6, [0.0; 4]),
+            config(0, [0.0; 4]),
+            config(4, [1.0, 1.0, 0.0, 0.0]),
+            config(1, [1.0, 0.0, 0.0, 0.0]),
+        ];
+        let uniforms: Vec<_> = configs
+            .iter()
+            .map(|item| upload_buffer(device, &self.queue, &[*item], wgpu::BufferUsages::UNIFORM))
+            .collect();
+        let tiles = upload_buffer(
+            device,
+            &self.queue,
+            &[GpuTile {
+                xy: [0, 0],
+                slot: 0,
+                pad: 0,
+            }],
+            wgpu::BufferUsages::STORAGE,
+        );
+        let resolve_config = upload_buffer(
+            device,
+            &self.queue,
+            &[GpuConfig {
+                origin_scale: [0.0, 0.0, 1.0, 256.0],
+                info: [0, 256, 0, 0],
+            }],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
+        let backdrop_v = view(&backdrop);
+        let sampled_v = view(&sampled);
+        let masked_v = view(&masked);
+        let blended_v = view(&blended);
+        let dummy_v = view(&dummy);
+        let array_view = |texture: &wgpu::Texture| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let image_v = array_view(&image_atlas);
+        let mask_v = array_view(&mask_atlas);
+        let output_v = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layout = effects.get_bind_group_layout(0);
+        let bind = |a: &wgpu::TextureView,
+                    b: &wgpu::TextureView,
+                    atlas: &wgpu::TextureView,
+                    out: &wgpu::TextureView,
+                    uniform: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mask stage"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(a),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(b),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dummy_v),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(atlas),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(out),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: tiles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let stage = [
+            bind(&dummy_v, &dummy_v, &image_v, &backdrop_v, &uniforms[0]),
+            bind(&dummy_v, &dummy_v, &image_v, &sampled_v, &uniforms[1]),
+            bind(&sampled_v, &sampled_v, &mask_v, &masked_v, &uniforms[2]),
+            bind(&backdrop_v, &masked_v, &image_v, &blended_v, &uniforms[3]),
+        ];
+        let resolve_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mask resolve"),
+            layout: &resolve.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&blended_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resolve_config.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mask"),
+        });
+        for group in &stage {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mask"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&effects);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mask resolve"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&resolve);
+            pass.set_bind_group(0, &resolve_bind, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mask readback"),
+            size: 256 * 1024,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            return Err(format!("validation: {err}"));
+        }
+        let bytes = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        Ok(bytes)
+    }
 }
 
 fn upload_buffer<T: Pod + Zeroable>(
@@ -3437,6 +3837,35 @@ fn existing_v1_and_v2_hashes_are_unchanged() {
 }
 
 #[test]
+fn coverage_mask_is_identity_at_opaque_edges_and_integer_in_between() {
+    assert_eq!(opacity_q8(1.0), 255);
+    assert_eq!(opacity_q8(0.0), 0);
+    assert_eq!(opacity_q8(0.5), 128);
+    assert_eq!(
+        apply_coverage_mask([200, 10, 30, 255], 0, 255),
+        [0, 0, 0, 0]
+    );
+    assert_eq!(apply_coverage_mask([255, 0, 0, 255], 255, 0), [0, 0, 0, 0]);
+    assert_eq!(
+        apply_coverage_mask([200, 10, 30, 40], 255, 255),
+        [200, 10, 30, 40]
+    );
+    assert_eq!(apply_coverage_mask([200, 0, 0, 0], 64, 128), [25, 0, 0, 0]);
+    for channel in 0..=255u8 {
+        let once = scale_q8(u32::from(channel), 255);
+        assert_eq!(scale_q8(once, 255) as u8, channel);
+    }
+    let rect = [0.0, 0.0, 128.0, 256.0];
+    assert_eq!(rect_coverage(127, 255, rect), 255);
+    assert_eq!(rect_coverage(128, 0, rect), 0);
+    let masked = render_layer_mask(&solid_rgba([255, 0, 0, 255]), 256, 256, rect, 1.0);
+    assert_eq!(&masked[0..4], &[255, 0, 0, 255]);
+    assert_eq!(&masked[127 * 4..127 * 4 + 4], &[255, 0, 0, 255]);
+    assert_eq!(&masked[128 * 4..128 * 4 + 4], &[0, 0, 0, 0]);
+    assert_eq!(&masked[masked.len() - 4..], &[0, 0, 0, 0]);
+}
+
+#[test]
 fn gpu_shader_matches_cpu_reference() {
     let gpu = match Gpu::new() {
         Ok(Some(gpu)) => gpu,
@@ -3508,6 +3937,22 @@ fn gpu_shader_matches_cpu_reference() {
         Err(err) => {
             println!("color-adjust: GPU render failed: {err}");
             failed.push(format!("color-adjust: {err}"));
+        }
+    }
+    let rect = [0.0, 0.0, 128.0, 256.0];
+    let red = solid_rgba([255, 0, 0, 255]);
+    let cpu_mask = render_layer_mask(&red, 256, 256, rect, 1.0);
+    match gpu.render_layer_mask(&red, rect) {
+        Ok(tile) => {
+            let report = diff_report(&cpu_mask, &tile);
+            println!("mask: {report}");
+            if cpu_mask != tile {
+                failed.push(format!("mask: {report}"));
+            }
+        }
+        Err(err) => {
+            println!("mask: GPU render failed: {err}");
+            failed.push(format!("mask: {err}"));
         }
     }
     assert!(
