@@ -23,6 +23,8 @@ const examplesOnly = process.argv.includes("--examples");
 const vectorOnly = process.argv.includes("--vector-optimization");
 const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const startupOnly = process.argv.includes("--startup-only");
+// --behind-resize runs tests/diagnostics/behind-resize.html (plain WebGPU, crbug.com/557281760).
+const behindOnly = process.argv.includes("--behind-resize");
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
@@ -185,6 +187,8 @@ const suites = [
   ["m8", `const { runM8Tests } = await import('../../tests/e2e/m8-tests.js'); await runM8Tests(window.altoEngine, (line) => console.log(line));`],
   ["embed", `const { runEmbedTests } = await import('../../tests/e2e/embed-tests.js'); await runEmbedTests(window.altoEngine, (line) => console.log(line));`],
   ["parity", `const { runParityTests } = await import('../../tests/e2e/parity-tests.js'); await runParityTests(window.altoEngine, (line) => console.log(line));`],
+  // Diagnostic only, run with --suite=resize-stress.
+  ["resize-stress", `const { runResizeStress } = await import('../../tests/diagnostics/resize-stress.js'); await runResizeStress(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
@@ -221,7 +225,7 @@ try {
   const query = new URLSearchParams();
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
-  const pageUrl = `http://127.0.0.1:${address.port}/${vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
+  const pageUrl = `http://127.0.0.1:${address.port}/${behindOnly ? "tests/diagnostics/behind-resize.html" : vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
   const executable = chromeBin();
@@ -306,6 +310,51 @@ try {
     await writeFile(join(reportDir, "vector-optimization.json"), JSON.stringify(result, null, 2) + "\n");
     summary.push({ name: "vector optimization", ok: result.pass === true, count: result.cases?.length, error: result.error });
     await sampleSystem("vector-optimization");
+  } else if (behindOnly) {
+    const seconds = Number(process.env.ALTO_BEHIND_SECONDS || 60);
+    if (!Number.isFinite(seconds) || seconds < 5 || seconds > 300) throw Error("invalid ALTO_BEHIND_SECONDS");
+    const configs = {
+      "worker-raf": { thread: "worker", loop: "raf" },
+      "worker-raf-inflight1": { thread: "worker", loop: "raf", inflight: 1 },
+      "main-raf": { thread: "main", loop: "raf" },
+      "worker-raf-light": { thread: "worker", loop: "raf", light: true },
+      "worker-task": { thread: "worker", loop: "task" },
+      // Deeper backlog and a larger backing store, nearer the report's 5K canvas.
+      "worker-raf-deep": { thread: "worker", loop: "raf", targetMs: 80, big: true },
+      "worker-raf-deep-inflight1": { thread: "worker", loop: "raf", targetMs: 80, big: true, inflight: 1 },
+    };
+    const names = (process.env.ALTO_BEHIND_CONFIGS || Object.keys(configs).join(",")).split(",");
+    let hits = null;
+    chrome.stderr.on("data", (chunk) => {
+      if (!hits) return;
+      for (const line of String(chunk).split("\n"))
+        if (/non-existent mailbox|Invalid mailbox|kDissociateMailboxForPresent|external Instance/.test(line)) hits.push(line.slice(0, 300));
+    });
+    const results = [];
+    for (const name of names) {
+      if (!configs[name]) throw Error("unknown behind-resize config " + name);
+      // A fresh document per configuration: a lost device must not carry into the next.
+      await send("Page.navigate", { url: pageUrl }, 30000);
+      let ready = false;
+      for (let i = 0; i < 120 && !ready; i++) {
+        ready = !!(await evaluate("!!window.runBehindResize").catch(() => false));
+        if (!ready) await sleep(100);
+      }
+      if (!ready) throw Error("behind-resize fixture did not load");
+      hits = [];
+      const result = await evaluate(`window.runBehindResize(${JSON.stringify({ ...configs[name], seconds })})`, (seconds + 120) * 1000);
+      await sleep(500);
+      result.name = name;
+      result.gpuLog = hits;
+      hits = null;
+      results.push(result);
+      console.log("BEHIND-RESULT " + JSON.stringify({ name, lost: !!result.stats?.lost, mailboxLines: result.gpuLog.length,
+        frames: result.stats?.frames, resizes: result.stats?.resizes, maxInflight: result.stats?.maxInflight,
+        submitToDoneMs: result.stats?.submitToDoneMs, iterations: result.stats?.iterations, lostAtMs: result.stats?.lost?.atMs }));
+      await writeFile(join(reportDir, "behind-resize.json"), JSON.stringify(results, null, 2) + "\n");
+    }
+    // The outcome is data, not a pass/fail of the engine: only a broken harness fails the job.
+    summary.push({ name: "behind-resize harness", ok: true, count: results.length });
   } else if (lifecycleOnly) {
     await send("Page.navigate", { url: pageUrl }, 30000);
     let ready = false;
@@ -389,6 +438,7 @@ try {
       if (name === "dense-benchmark" && !selectedSuites?.includes(name)) continue;
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
+      if (name === "resize-stress" && !selectedSuites?.includes(name)) continue;
       if (benchmarkOnly && name !== "benchmark") continue;
       // Embed tests dispatch window pagehide/pageshow. That suspends the Playground
       // engine too, and its restart can still be in flight when the suite returns.

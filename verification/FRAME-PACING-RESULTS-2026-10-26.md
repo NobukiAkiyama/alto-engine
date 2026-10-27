@@ -1,6 +1,6 @@
 # 表示を GPU の 1 フレーム先までに抑える（2026-10-26）
 
-背景：[GPU-LOSS-RESIZE-TRIGGER-2026-10-25.md](GPU-LOSS-RESIZE-TRIGGER-2026-10-25.md)。調査記録は `claude/chrome-bug-repro` ブランチの `verification/CHROME-BUG-557281760-2026-10-25.md`。
+背景：[GPU-LOSS-RESIZE-TRIGGER-2026-10-25.md](GPU-LOSS-RESIZE-TRIGGER-2026-10-25.md)。Chromium の不具合との照合：[CHROME-BUG-557281760-2026-10-25.md](CHROME-BUG-557281760-2026-10-25.md)。
 
 ## 変更
 
