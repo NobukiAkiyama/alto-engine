@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, fnv64, parityCases, renderCase, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, fnv64, parityCases, renderCase, renderColorAdjust, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -43,6 +43,13 @@ test("a cancelling Q24 sum past 2^53 matches the integer coordinate", () => {
   assert.equal(sourceAxis(0, 0, 0, 0, 1n << 39n), null);
   // translation*256 does not fit in i64.
   assert.equal(sourceAxis(0, 0, 0, 0, (1n << 63n) - 1n), null);
+});
+
+test("color-adjust of opaque 40,80,120 at brightness 0.6 is the known pixel", () => {
+  const tile = renderColorAdjust(solid(256, 256, [40, 80, 120, 255]), { brightness: 0.6 });
+  assert.equal(tile.length, 262144);
+  assert.deepEqual([tile[0], tile[1], tile[2], tile[3]], [193, 233, 255, 255]);
+  assert.ok(tile.every((value, index) => value === tile[index % 4]));
 });
 
 test("opaque blue under half-red normal blend is the known pixel", () => {

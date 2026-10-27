@@ -8,11 +8,14 @@
 //! correct cull leaves the same pixels, and a wrong one fails the browser suite,
 //! which reads production tiles.
 //!
-//! Masks, clips, effects, vectors and text are not on this path. `composite.wgsl` never
-//! sees them (`plain_scene` is false, and the effect pass uses rgba16float). Those cases
-//! are explicit xfails in the browser suite.
+//! Masks, clips, blur, vectors and text are not on the composite path. `composite.wgsl`
+//! never sees them (`plain_scene` is false, and the effect pass uses rgba16float).
+//! Color adjust is the exception: the reference repeats `effects.wgsl` mode 0, the
+//! normal blend onto clear, mode 3, and `effects-resolve.wgsl`, with an f16 round trip
+//! after every store. The shader is unchanged, so render version 2 pixels stay put.
+//! The other four stay explicit xfails in the browser suite.
 
-use crate::blend_ref::blend;
+use crate::blend_ref::{blend, effects_blend};
 use crate::damage::plain_scene;
 use crate::sample::{
     IntegerInverse, axis_unit, bilinear_byte, floor_frac_q8, integer_inverse, pixel_q8, source_q8,
@@ -839,6 +842,117 @@ fn quantize(pixel: [f32; 4]) -> [u8; 4] {
     pixel.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8)
 }
 
+/// Round-ties-to-even f32→f16. Matches the `rgba16float` stores in `effects.wgsl`.
+fn f32_to_f16_bits(value: f32) -> u16 {
+    let x = value.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let mantissa = x & 0x007f_ffff;
+    let exp = (x & 0x7f80_0000) >> 23;
+    if exp == 0xff {
+        return if mantissa == 0 {
+            sign | 0x7c00
+        } else {
+            let payload = (mantissa >> 13) as u16;
+            sign | 0x7c00 | payload | u16::from(payload == 0)
+        };
+    }
+    let e = exp as i32 - 127 + 15;
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = mantissa | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        let mut half = (m >> shift) as u16;
+        let rem_mask = (1u32 << shift) - 1;
+        let rem = m & rem_mask;
+        let halfway = 1u32 << (shift - 1);
+        if rem > halfway || (rem == halfway && (half & 1) == 1) {
+            half += 1;
+        }
+        return sign | half;
+    }
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    let mut half = ((mantissa >> 13) as u16) | ((e as u16) << 10);
+    let rem = mantissa & 0x1fff;
+    if rem > 0x1000 || (rem == 0x1000 && (half & 1) == 1) {
+        half += 1;
+    }
+    sign | half
+}
+
+fn f16_to_f32(half: u16) -> f32 {
+    let sign = ((half as u32) & 0x8000) << 16;
+    let exp = ((half >> 10) & 0x1f) as u32;
+    let mant = (half & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            let mut m = mant;
+            let mut e = 113u32;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x3ff;
+            sign | (e << 23) | (m << 13)
+        }
+    } else if exp == 31 {
+        sign | 0x7f80_0000 | (mant << 13)
+    } else {
+        sign | ((exp + (127 - 15)) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
+fn f16_round(value: f32) -> f32 {
+    f16_to_f32(f32_to_f16_bits(value))
+}
+
+/// One solid texel through the color-adjust passes. The parity image is constant
+/// and axis-aligned, so every output pixel is this texel.
+fn color_adjust_texel(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> [u8; 4] {
+    let straight = rgba.map(|b| f32::from(b) / 255.0);
+    let premul = [
+        f16_round(straight[0] * straight[3]),
+        f16_round(straight[1] * straight[3]),
+        f16_round(straight[2] * straight[3]),
+        f16_round(straight[3]),
+    ];
+    let blended = effects_blend([0.0; 4], premul, 0).map(f16_round);
+    let eps = 0.000001f32;
+    let alpha = blended[3];
+    let scale = alpha.max(eps);
+    let mut rgb = [blended[0] / scale, blended[1] / scale, blended[2] / scale];
+    for channel in &mut rgb {
+        *channel = (*channel - 0.5) * contrast + 0.5 + brightness;
+    }
+    // `dot` as a left fold of f32 products. Saturation 1 multiplies this by zero.
+    let luma = (rgb[0] * 0.2126 + rgb[1] * 0.7152) + rgb[2] * 0.0722;
+    for channel in &mut rgb {
+        *channel = luma * (1.0 - saturation) + *channel * saturation;
+        *channel = channel.clamp(0.0, 1.0) * alpha;
+    }
+    quantize([
+        f16_round(rgb[0]),
+        f16_round(rgb[1]),
+        f16_round(rgb[2]),
+        f16_round(alpha),
+    ])
+}
+
+fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
+    let pixel = color_adjust_texel(rgba, brightness, contrast, saturation);
+    let mut out = vec![0u8; 256 * 256 * 4];
+    for chunk in out.as_chunks_mut::<4>().0 {
+        *chunk = pixel;
+    }
+    out
+}
+
 fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
     let mut out = vec![0u8; 256 * 256 * 4];
     let mut prequant = vec![0f32; 256 * 256 * 4];
@@ -1555,6 +1669,23 @@ fn parity_shader() -> String {
     src
 }
 
+/// `effects.wgsl` uniform. Field order matches the WGSL `Config` in uniform address space.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct EffectConfig {
+    out_region: [f32; 4],
+    region_a: [f32; 4],
+    region_b: [f32; 4],
+    inv0: [f32; 4],
+    inv1: [f32; 4],
+    settings: [f32; 4],
+    info: [u32; 4],
+    extra: [f32; 4],
+    curve: [f32; 64],
+    sizes: [u32; 4],
+    output_clip: [u32; 4],
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1841,6 +1972,309 @@ impl Gpu {
         let prequant = bytemuck::cast_slice(&pre_raw).to_vec();
         Ok((bytes, prequant))
     }
+
+    /// The production color-adjust chain: mode 0, normal blend onto clear, mode 3, resolve.
+    fn render_color_adjust(
+        &self,
+        rgba: [u8; 4],
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+    ) -> Result<Vec<u8>, String> {
+        let device = &self.device;
+        let effects = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color-adjust effects"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("color-adjust effects"),
+                source: wgpu::ShaderSource::Wgsl(
+                    shader_with_blend(include_str!("../shaders/effects.wgsl")).into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color-adjust resolve"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("color-adjust resolve"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/effects-resolve.wgsl").into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let float_tex = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let backdrop = float_tex("color-adjust clear");
+        let sampled = float_tex("color-adjust sample");
+        let blended = float_tex("color-adjust blend");
+        let adjusted = float_tex("color-adjust filter");
+        let dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust atlas"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut pixels = Vec::with_capacity(256 * 256 * 4);
+        for _ in 0..256 * 256 {
+            pixels.extend_from_slice(&rgba);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(256),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust resolve"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let region = [0.0, 0.0, 1.0, 0.0];
+        let config =
+            |mode: u32, settings: [f32; 4], entries: u32, size: [u32; 4], clip: u32| EffectConfig {
+                out_region: region,
+                region_a: region,
+                region_b: region,
+                inv0: [1.0, 0.0, 0.0, 1.0],
+                inv1: [0.0; 4],
+                settings,
+                info: [mode, 0, entries, 0],
+                extra: [0.0; 4],
+                curve: [0.0; 64],
+                sizes: size,
+                output_clip: [256, 256, clip, clip],
+            };
+        let tile = [GpuTile {
+            xy: [0, 0],
+            slot: 0,
+            pad: 0,
+        }];
+        let full = [256, 256, 256, 256];
+        let configs = [
+            config(6, [0.0; 4], 0, [1, 1, 1, 1], 1),
+            config(0, [0.0; 4], 1, full, 1),
+            config(1, [1.0, 0.0, 0.0, 0.0], 0, full, 1),
+            config(3, [brightness, contrast, saturation, 0.0], 0, full, 1),
+        ];
+        let uniforms: Vec<_> = configs
+            .iter()
+            .map(|item| upload_buffer(device, &self.queue, &[*item], wgpu::BufferUsages::UNIFORM))
+            .collect();
+        let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
+        let resolve_config = upload_buffer(
+            device,
+            &self.queue,
+            &[GpuConfig {
+                origin_scale: [0.0, 0.0, 1.0, 256.0],
+                info: [0, 256, 0, 0],
+            }],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
+        let backdrop_v = view(&backdrop);
+        let sampled_v = view(&sampled);
+        let blended_v = view(&blended);
+        let adjusted_v = view(&adjusted);
+        let dummy_v = view(&dummy);
+        let atlas_v = atlas.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let output_v = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layout = effects.get_bind_group_layout(0);
+        let bind = |a: &wgpu::TextureView,
+                    b: &wgpu::TextureView,
+                    clip: &wgpu::TextureView,
+                    out: &wgpu::TextureView,
+                    uniform: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("color-adjust stage"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(a),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(b),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(clip),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&atlas_v),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(out),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: tiles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let stage = [
+            bind(&dummy_v, &dummy_v, &dummy_v, &backdrop_v, &uniforms[0]),
+            bind(&backdrop_v, &backdrop_v, &dummy_v, &sampled_v, &uniforms[1]),
+            bind(&backdrop_v, &sampled_v, &dummy_v, &blended_v, &uniforms[2]),
+            bind(&blended_v, &blended_v, &dummy_v, &adjusted_v, &uniforms[3]),
+        ];
+        let resolve_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color-adjust resolve"),
+            layout: &resolve.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&adjusted_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resolve_config.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("color-adjust"),
+        });
+        for group in &stage {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color-adjust"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&effects);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color-adjust resolve"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&resolve);
+            pass.set_bind_group(0, &resolve_bind, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("color-adjust readback"),
+            size: 256 * 1024,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            return Err(format!("validation: {err}"));
+        }
+        let bytes = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        Ok(bytes)
+    }
 }
 
 fn upload_buffer<T: Pod + Zeroable>(
@@ -1889,6 +2323,24 @@ fn map_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), Stri
         }
     }
     Err("GPU readback did not complete".into())
+}
+
+#[test]
+fn f16_storage_round_trip_matches_known_bits() {
+    assert_eq!(f32_to_f16_bits(0.0), 0);
+    assert_eq!(f32_to_f16_bits(1.0), 0x3c00);
+    assert_eq!(f32_to_f16_bits(0.5), 0x3800);
+    assert_eq!(f16_to_f32(1).to_bits(), 0x3380_0000);
+    assert_eq!(f16_round(1.0), 1.0);
+}
+
+#[test]
+fn color_adjust_solid_differs_from_the_source_and_is_uniform() {
+    let tile = color_adjust_tile([40, 80, 120, 255], 0.6f64 as f32, 1.0, 1.0);
+    assert_eq!(tile.len(), 262_144);
+    assert_ne!(&tile[..4], &[40, 80, 120, 255]);
+    assert_eq!(&tile[..4], &[193, 233, 255, 255]);
+    assert!(tile.chunks(4).all(|pixel| pixel == &tile[..4]));
 }
 
 #[test]
@@ -2460,6 +2912,21 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
+    let brightness = 0.6f64 as f32;
+    let cpu = color_adjust_tile([40, 80, 120, 255], brightness, 1.0, 1.0);
+    match gpu.render_color_adjust([40, 80, 120, 255], brightness, 1.0, 1.0) {
+        Ok(gpu_tile) => {
+            let report = diff_report(&cpu, &gpu_tile);
+            println!("color-adjust: {report}");
+            if cpu != gpu_tile {
+                failed.push(format!("color-adjust: {report}"));
+            }
+        }
+        Err(err) => {
+            println!("color-adjust: GPU render failed: {err}");
+            failed.push(format!("color-adjust: {err}"));
+        }
+    }
     assert!(
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",

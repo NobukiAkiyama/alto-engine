@@ -528,6 +528,100 @@ export function renderCase(testCase, version = RENDER_VERSION) {
   return composite(ops, testCase.w, testCase.h, origin, scale, originPx, scaleI, version);
 }
 
+function f32ToF16Bits(value) {
+  const buf = new ArrayBuffer(4);
+  const f32 = new Float32Array(buf);
+  const u32 = new Uint32Array(buf);
+  f32[0] = value;
+  const x = u32[0];
+  const sign = (x >>> 16) & 0x8000;
+  const mantissa = x & 0x007fffff;
+  const exp = (x & 0x7f800000) >>> 23;
+  if (exp === 255) {
+    if (mantissa === 0) return sign | 0x7c00;
+    const payload = mantissa >>> 13;
+    return sign | 0x7c00 | payload | (payload === 0 ? 1 : 0);
+  }
+  const e = exp - 127 + 15;
+  if (e <= 0) {
+    if (e < -10) return sign;
+    const m = mantissa | 0x00800000;
+    const shift = 14 - e;
+    let half = m >>> shift;
+    const remMask = (1 << shift) - 1;
+    const rem = m & remMask;
+    const halfway = 1 << (shift - 1);
+    if (rem > halfway || (rem === halfway && (half & 1) === 1)) half += 1;
+    return (sign | half) & 0xffff;
+  }
+  if (e >= 31) return sign | 0x7c00;
+  let half = (mantissa >>> 13) | (e << 10);
+  const rem = mantissa & 0x1fff;
+  if (rem > 0x1000 || (rem === 0x1000 && (half & 1) === 1)) half += 1;
+  return (sign | half) & 0xffff;
+}
+function f16BitsToF32(half) {
+  const sign = (half & 0x8000) << 16;
+  const exp = (half >> 10) & 0x1f;
+  const mant = half & 0x3ff;
+  let bits;
+  if (exp === 0) {
+    if (mant === 0) bits = sign;
+    else {
+      let m = mant;
+      let e = 113;
+      while ((m & 0x400) === 0) {
+        m <<= 1;
+        e -= 1;
+      }
+      m &= 0x3ff;
+      bits = (sign | (e << 23) | (m << 13)) >>> 0;
+    }
+  } else if (exp === 31) bits = (sign | 0x7f800000 | (mant << 13)) >>> 0;
+  else bits = (sign | ((exp + (127 - 15)) << 23) | (mant << 13)) >>> 0;
+  const buf = new ArrayBuffer(4);
+  new Uint32Array(buf)[0] = bits >>> 0;
+  return new Float32Array(buf)[0];
+}
+function f16(value) {
+  return f16BitsToF32(f32ToF16Bits(value));
+}
+function unorm(byte) {
+  return div(f(byte), f(255));
+}
+function colorAdjustTexel(rgba, brightness, contrast, saturation) {
+  const straight = rgba.map(unorm);
+  const premul = [0, 1, 2].map((i) => f16(mul(straight[i], straight[3]))).concat([f16(straight[3])]);
+  const straightSrc = premul[3] > 0
+    ? [div(premul[0], Math.max(premul[3], EPS)), div(premul[1], Math.max(premul[3], EPS)), div(premul[2], Math.max(premul[3], EPS))]
+    : [f(0), f(0), f(0)];
+  const blended = blend([f(0), f(0), f(0), f(0)], [straightSrc[0], straightSrc[1], straightSrc[2], premul[3]], 0).map(f16);
+  const alpha = blended[3];
+  const scale = Math.max(alpha, EPS);
+  let rgb = [div(blended[0], scale), div(blended[1], scale), div(blended[2], scale)];
+  rgb = rgb.map((channel) => add(add(mul(sub(channel, f(0.5)), contrast), f(0.5)), brightness));
+  const luma = add(add(mul(rgb[0], f(0.2126)), mul(rgb[1], f(0.7152))), mul(rgb[2], f(0.0722)));
+  rgb = rgb.map((channel) => add(mul(luma, sub(f(1), saturation)), mul(channel, saturation)));
+  const stored = rgb.map((channel) => f16(mul(f(Math.min(f(1), Math.max(f(0), channel))), alpha)));
+  return [...stored, f16(alpha)].map(quantize);
+}
+
+/** Solid identity color-adjust: mode 0, normal blend onto clear, mode 3, unorm resolve. */
+export function renderColorAdjust(image, settings = {}) {
+  const brightness = f(settings.brightness ?? 0);
+  const contrast = f(settings.contrast ?? 1);
+  const saturation = f(settings.saturation ?? 1);
+  const texel = colorAdjustTexel(
+    [image.pixels[0], image.pixels[1], image.pixels[2], image.pixels[3]],
+    brightness,
+    contrast,
+    saturation,
+  );
+  const out = new Uint8Array(image.w * image.h * 4);
+  for (let i = 0; i < out.length; i += 4) out.set(texel, i);
+  return out;
+}
+
 export function fnv64(bytes) {
   let h = 0xcbf29ce484222325n;
   const prime = 0x100000001b3n;

@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, parityCases, renderCase, renderColorAdjust, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -242,7 +242,7 @@ export async function runParityTests(engine, log) {
       const plain = renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0, nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
       assert(!same(plain, gpu), "blur matched the sharp composite bit-exactly; remove the xfail");
     });
-    await xfail("color-adjust", "adjustment: effect pass, not composite.wgsl", async () => {
+    await test("color-adjust", async () => {
       const image = solid(256, 256, [40, 80, 120, 255]);
       const doc = await engine.createDocument({ width: 256, height: 256 });
       const asset = await imported(engine, image);
@@ -251,10 +251,12 @@ export async function runParityTests(engine, log) {
         tx.addAdjustment({ type: "color_adjust", brightness: 0.6 });
       });
       const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
-      assert(gpu.length === 262144 && gpu.some((v, i) => i % 4 === 3 && v > 0), "adjustment produced no ink");
+      const cpu = renderColorAdjust(image, { brightness: 0.6 });
+      const gap = diff(cpu, gpu);
+      log(`color-adjust: ${gap}`);
       assert(sceneGap(doc.getSnapshot()) === "adjustment", sceneGap(doc.getSnapshot()));
-      const plain = renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0, nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
-      assert(!same(plain, gpu), "color adjust matched the source bit-exactly; remove the xfail");
+      assert(same(cpu, gpu), gap);
+      return gap;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });

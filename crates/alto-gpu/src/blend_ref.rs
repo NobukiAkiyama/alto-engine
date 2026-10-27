@@ -181,7 +181,7 @@ fn straight_rgb(c: [f32; 4]) -> [f32; 4] {
 }
 
 /// effects.wgsl info.x==1: clip the premultiplied sample, then unpremultiply.
-fn effects_blend(dst: [f32; 4], src_premul: [f32; 4], mode: u32) -> [f32; 4] {
+pub(crate) fn effects_blend(dst: [f32; 4], src_premul: [f32; 4], mode: u32) -> [f32; 4] {
     blend(dst, straight_rgb(src_premul), mode)
 }
 
