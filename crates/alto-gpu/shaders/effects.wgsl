@@ -117,6 +117,52 @@ fn div_q(n: i32, d: i32) -> i32 {
   if n >= 0 { return (n + half) / d; }
   return -(((-n) + half) / d);
 }
+// Same 64-bit pair as composite.wgsl `Wide`. effects.wgsl is a separate shader,
+// so the emulation is copied rather than shared. Factors here are far from
+// i32::MIN, which `wide_mul_i32` cannot negate.
+struct Wide { lo: u32, hi: u32 };
+fn wide_neg(a: Wide) -> Wide {
+  let lo = ~a.lo + 1u;
+  let carry = select(0u, 1u, lo == 0u);
+  return Wide(lo, ~a.hi + carry);
+}
+fn wide_add(a: Wide, b: Wide) -> Wide {
+  let lo = a.lo + b.lo;
+  let carry = select(0u, 1u, lo < a.lo);
+  return Wide(lo, a.hi + b.hi + carry);
+}
+fn wide_mul_u32(a: u32, b: u32) -> Wide {
+  let a0 = a & 0xffffu; let a1 = a >> 16u;
+  let b0 = b & 0xffffu; let b1 = b >> 16u;
+  let p00 = a0 * b0; let p01 = a0 * b1; let p10 = a1 * b0; let p11 = a1 * b1;
+  let mid = (p00 >> 16u) + (p01 & 0xffffu) + (p10 & 0xffffu);
+  let lo = (p00 & 0xffffu) | (mid << 16u);
+  let hi = p11 + (p01 >> 16u) + (p10 >> 16u) + (mid >> 16u);
+  return Wide(lo, hi);
+}
+fn wide_mul_i32(a: i32, b: i32) -> Wide {
+  let neg = (a < 0) != (b < 0);
+  var ua = bitcast<u32>(a);
+  var ub = bitcast<u32>(b);
+  if a < 0 { ua = bitcast<u32>(-a); }
+  if b < 0 { ub = bitcast<u32>(-b); }
+  let p = wide_mul_u32(ua, ub);
+  if neg { return wide_neg(p); }
+  return p;
+}
+fn wide_negative(a: Wide) -> bool { return (a.hi & 0x80000000u) != 0u; }
+// Divide by 16384, half away from zero. The magnitude is shifted; an arithmetic
+// shift of a negative value is not `div_q`. The quotient fits in i32.
+fn wide_div_q14(n: Wide) -> i32 {
+  let neg = wide_negative(n);
+  var mag = n;
+  if neg { mag = wide_neg(n); }
+  let adj = wide_add(mag, Wide(8192u, 0u));
+  let lo = (adj.lo >> 14u) | (adj.hi << 18u);
+  var q = i32(lo);
+  if neg { q = -q; }
+  return q;
+}
 // The unorm-to-float conversion is a division, so it can miss by 2.5 ULP.
 // Half a byte is about 0.002, far outside that error, so the byte comes back.
 fn unorm_byte(v: f32) -> u32 {
@@ -147,13 +193,20 @@ fn color_adjust_exact(v: vec4f, settings: vec4i) -> vec4f {
     sg = clamp(i32((u32(qg) << 14u) / u32(qa)), 0, Q14_ONE);
     sb = clamp(i32((u32(qb) << 14u) / u32(qa)), 0, Q14_ONE);
   }
-  var r = clamp(div_q((sr - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness, -32768, 32767);
-  var g = clamp(div_q((sg - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness, -32768, 32767);
-  var b = clamp(div_q((sb - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness, -32768, 32767);
+  // No clamp between contrast and saturation. Straight 0..=16384, contrast
+  // Q14 -16384..=65536, brightness -16384..=16384: the contrast result is
+  // -40960..=57344, and luma stays in that span. The mix sum
+  // luma*(16384-saturation)+channel*saturation is -5502926848..=5771362304
+  // when luma and the channel are independent inside that span. It fits i64
+  // and does not fit i32, so those two products use Wide.
+  var r = div_q((sr - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness;
+  var g = div_q((sg - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness;
+  var b = div_q((sb - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness;
   let luma = div_q(r * 3483 + g * 11718 + b * 1183, Q14_ONE);
-  r = div_q(luma * (Q14_ONE - saturation) + r * saturation, Q14_ONE);
-  g = div_q(luma * (Q14_ONE - saturation) + g * saturation, Q14_ONE);
-  b = div_q(luma * (Q14_ONE - saturation) + b * saturation, Q14_ONE);
+  let gap = Q14_ONE - saturation;
+  r = wide_div_q14(wide_add(wide_mul_i32(luma, gap), wide_mul_i32(r, saturation)));
+  g = wide_div_q14(wide_add(wide_mul_i32(luma, gap), wide_mul_i32(g, saturation)));
+  b = wide_div_q14(wide_add(wide_mul_i32(luma, gap), wide_mul_i32(b, saturation)));
   r = div_q(clamp(r, 0, Q14_ONE) * qa, Q14_ONE);
   g = div_q(clamp(g, 0, Q14_ONE) * qa, Q14_ONE);
   b = div_q(clamp(b, 0, Q14_ONE) * qa, Q14_ONE);

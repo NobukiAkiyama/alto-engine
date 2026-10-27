@@ -137,14 +137,11 @@ export function colorAdjustGradient(w = 256, h = 256) {
  * Contrast, saturation, brightness. `Math.fround` is the JS form of the
  * document path's `f64 as f32`.
  */
-export function colorAdjustGrid() {
-  const contrast = [0.5, 1.7];
-  const saturation = [0, 0.35, 1.6];
-  const brightness = [-0.35, 0.45];
+function colorAdjustSettings(contrastValues, saturationValues, brightnessValues) {
   const grid = [];
-  for (const contrastValue of contrast) {
-    for (const saturationValue of saturation) {
-      for (const brightnessValue of brightness) {
+  for (const contrastValue of contrastValues) {
+    for (const saturationValue of saturationValues) {
+      for (const brightnessValue of brightnessValues) {
         grid.push({
           contrast: f(contrastValue),
           saturation: f(saturationValue),
@@ -157,6 +154,18 @@ export function colorAdjustGrid() {
     }
   }
   return grid;
+}
+
+/**
+ * Contrast, saturation, brightness. `Math.fround` is the JS form of the
+ * document path's `f64 as f32`. The first 12 are the interior cross product.
+ * The last 8 are the document-range endpoints.
+ */
+export function colorAdjustGrid() {
+  return [
+    ...colorAdjustSettings([0.5, 1.7], [0, 0.35, 1.6], [-0.35, 0.45]),
+    ...colorAdjustSettings([0, 4], [0, 4], [-1, 1]),
+  ];
 }
 
 export function ramp(w, h) {
@@ -666,13 +675,6 @@ const Q14_ONE = 16384;
 const Q14_HALF = 8192;
 const Q14_LUMA = [3483, 11718, 1183];
 
-/** `(n + d/2) / d` for `d > 0`, away from zero on a tie. */
-function divQ(n, d) {
-  const half = Math.trunc(d / 2);
-  if (n >= 0) return Math.trunc((n + half) / d);
-  return -Math.trunc(((-n) + half) / d);
-}
-
 /** Q14 of a color-adjust setting. 1 is 16384. Half away from zero. */
 function colorAdjustQ14(value) {
   if (!Number.isFinite(value)) return 0;
@@ -732,23 +734,42 @@ function f16BitsToQ14(half) {
   return Math.min(q, Q14_ONE);
 }
 
+/** `(n + d/2) / d` in BigInt. Division truncates toward zero, matching `divQ`. */
+function divQBig(n, d) {
+  const half = d / 2n;
+  if (n >= 0n) return (n + half) / d;
+  return -(((-n) + half) / d);
+}
+
 function colorAdjustExactQ14(q, brightness, contrast, saturation) {
-  const alpha = q[3];
-  const straight = [0, 0, 0];
-  if (alpha !== 0) {
+  const one = BigInt(Q14_ONE);
+  const half = BigInt(Q14_HALF);
+  const alpha = BigInt(q[3]);
+  const contrastQ = BigInt(contrast);
+  const brightnessQ = BigInt(brightness);
+  const saturationQ = BigInt(saturation);
+  const straight = [0n, 0n, 0n];
+  if (alpha !== 0n) {
     for (let i = 0; i < 3; i++) {
-      const s = Math.trunc((q[i] * Q14_ONE) / alpha);
-      straight[i] = Math.min(Q14_ONE, Math.max(0, s));
+      const s = (BigInt(q[i]) * one) / alpha;
+      straight[i] = s < 0n ? 0n : s > one ? one : s;
     }
   }
-  const rgb = straight.map((channel) => {
-    const v = divQ((channel - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness;
-    return Math.min(32767, Math.max(-32768, v));
-  });
-  const luma = divQ(rgb[0] * Q14_LUMA[0] + rgb[1] * Q14_LUMA[1] + rgb[2] * Q14_LUMA[2], Q14_ONE);
+  // Contrast is not clamped. Straight 0..=16384, contrast Q14 -16384..=65536
+  // and brightness -16384..=16384 land in -40960..=57344. The saturation sum
+  // luma*(16384-saturation)+channel*saturation is -5502926848..=5771362304
+  // over that box. It fits BigInt and does not fit i32. The only clamp is
+  // 0..=16384, after the mix.
+  const rgb = straight.map((channel) => divQBig((channel - half) * contrastQ, one) + half + brightnessQ);
+  const luma = divQBig(
+    rgb[0] * BigInt(Q14_LUMA[0]) + rgb[1] * BigInt(Q14_LUMA[1]) + rgb[2] * BigInt(Q14_LUMA[2]),
+    one,
+  );
+  const gap = one - saturationQ;
   return rgb.map((channel) => {
-    const mixed = divQ(luma * (Q14_ONE - saturation) + channel * saturation, Q14_ONE);
-    return divQ(Math.min(Q14_ONE, Math.max(0, mixed)) * alpha, Q14_ONE);
+    const mixed = divQBig(luma * gap + channel * saturationQ, one);
+    const clamped = mixed < 0n ? 0n : mixed > one ? one : mixed;
+    return Number(divQBig(clamped * alpha, one));
   });
 }
 

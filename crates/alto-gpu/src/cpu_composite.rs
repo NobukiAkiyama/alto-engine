@@ -939,20 +939,34 @@ fn color_adjust_gradient() -> Vec<u8> {
 
 /// Contrast, saturation, brightness. The cast is `f64 as f32`, the same one
 /// `render_effect` uses when a document number becomes the mode 3 uniform.
-fn color_adjust_grid() -> [(f32, f32, f32); 12] {
-    const CONTRAST: [f32; 2] = [0.5f64 as f32, 1.7f64 as f32];
-    const SATURATION: [f32; 3] = [0.0f64 as f32, 0.35f64 as f32, 1.6f64 as f32];
-    const BRIGHTNESS: [f32; 2] = [(-0.35f64) as f32, 0.45f64 as f32];
-    let mut out = [(0.0f32, 0.0, 0.0); 12];
+/// The first 12 entries are the interior cross product. The last 8 are the
+/// document-range endpoints.
+fn color_adjust_grid() -> [(f32, f32, f32); 20] {
+    const INTERIOR_CONTRAST: [f32; 2] = [0.5f64 as f32, 1.7f64 as f32];
+    const INTERIOR_SATURATION: [f32; 3] = [0.0f64 as f32, 0.35f64 as f32, 1.6f64 as f32];
+    const INTERIOR_BRIGHTNESS: [f32; 2] = [(-0.35f64) as f32, 0.45f64 as f32];
+    const END_CONTRAST: [f32; 2] = [0.0f64 as f32, 4.0f64 as f32];
+    const END_SATURATION: [f32; 2] = [0.0f64 as f32, 4.0f64 as f32];
+    const END_BRIGHTNESS: [f32; 2] = [(-1.0f64) as f32, 1.0f64 as f32];
+    let mut out = [(0.0f32, 0.0, 0.0); 20];
     let mut i = 0;
-    for contrast in CONTRAST {
-        for saturation in SATURATION {
-            for brightness in BRIGHTNESS {
+    for contrast in INTERIOR_CONTRAST {
+        for saturation in INTERIOR_SATURATION {
+            for brightness in INTERIOR_BRIGHTNESS {
                 out[i] = (contrast, saturation, brightness);
                 i += 1;
             }
         }
     }
+    for contrast in END_CONTRAST {
+        for saturation in END_SATURATION {
+            for brightness in END_BRIGHTNESS {
+                out[i] = (contrast, saturation, brightness);
+                i += 1;
+            }
+        }
+    }
+    assert_eq!(i, 20);
     out
 }
 
@@ -1044,51 +1058,85 @@ fn q14_to_f16_bits(q: u32) -> u16 {
 }
 
 /// `(n + d/2) / d` for `d > 0`, with the sign taken so a tie moves away from zero.
-fn div_q(n: i32, d: i32) -> i32 {
+fn div_q_i64(n: i64, d: i64) -> Option<i64> {
     let half = d / 2;
     if n >= 0 {
-        (n + half) / d
+        n.checked_add(half)?.checked_div(d)
     } else {
-        -(((-n) + half) / d)
+        n.checked_neg()?
+            .checked_add(half)?
+            .checked_div(d)?
+            .checked_neg()
     }
+}
+
+/// `luma * (16384 - saturation) + channel * saturation`.
+fn saturation_mix_sum(luma: i64, channel: i64, saturation: i64) -> Option<i64> {
+    let gap = i64::from(Q14_ONE).checked_sub(saturation)?;
+    luma.checked_mul(gap)?
+        .checked_add(channel.checked_mul(saturation)?)
 }
 
 /// Mode 17. `q` is premultiplied Q14 plus alpha. Settings are already Q14.
 /// The returned channels are premultiplied Q14; alpha is not part of the result
 /// because the stored alpha keeps the input f16 bits.
+///
+/// Straight channels are 0..=16384. `color_adjust_q14` quantizes a setting into
+/// −16384..=65536 (the f32 is clamped to [−1, 4] first). Brightness in the
+/// document is −1..=1, so its Q14 value is −16384..=16384. The contrast stage
+/// is not clamped: `(straight - 8192) * contrast / 16384 + 8192 + brightness`
+/// lands in −40960..=57344, and luma stays inside that span. The saturation
+/// sum, treating luma and the channel as independent inside the span and
+/// saturation inside −16384..=65536, is −5502926848..=5771362304. That fits
+/// i64 and does not fit i32. The only clamp is 0..=16384 after the mix, which
+/// matches `clamp(rgb, 0, 1)`.
+fn color_adjust_exact_q14_checked(
+    q: [u32; 4],
+    brightness: i32,
+    contrast: i32,
+    saturation: i32,
+) -> Option<[u32; 3]> {
+    let alpha = i64::from(q[3]);
+    let one = i64::from(Q14_ONE);
+    let half = i64::from(Q14_HALF);
+    let brightness = i64::from(brightness);
+    let contrast = i64::from(contrast);
+    let saturation = i64::from(saturation);
+    let mut straight = [0i64; 3];
+    if alpha != 0 {
+        for i in 0..3 {
+            let s = i64::from(q[i]).checked_shl(14)?.checked_div(alpha)?;
+            straight[i] = s.clamp(0, one);
+        }
+    }
+    let mut rgb = [0i64; 3];
+    for i in 0..3 {
+        rgb[i] = div_q_i64(straight[i].checked_sub(half)?.checked_mul(contrast)?, one)?
+            .checked_add(half)?
+            .checked_add(brightness)?;
+    }
+    let mut acc = 0i64;
+    for i in 0..3 {
+        acc = acc.checked_add(rgb[i].checked_mul(i64::from(Q14_LUMA[i]))?)?;
+    }
+    let luma = div_q_i64(acc, one)?;
+    let mut out = [0u32; 3];
+    for i in 0..3 {
+        let mixed = div_q_i64(saturation_mix_sum(luma, rgb[i], saturation)?, one)?;
+        let premul = div_q_i64(mixed.clamp(0, one).checked_mul(alpha)?, one)?;
+        out[i] = u32::try_from(premul).ok()?;
+    }
+    Some(out)
+}
+
 fn color_adjust_exact_q14(
     q: [u32; 4],
     brightness: i32,
     contrast: i32,
     saturation: i32,
 ) -> [u32; 3] {
-    let alpha = q[3] as i32;
-    let mut straight = [0i32; 3];
-    if alpha != 0 {
-        for i in 0..3 {
-            straight[i] = (((q[i] << 14) / q[3]) as i32).clamp(0, Q14_ONE);
-        }
-    }
-    let mut rgb = [0i32; 3];
-    for i in 0..3 {
-        // The guard keeps the saturation products inside i32 for the validated
-        // setting range (contrast and saturation up to 4).
-        rgb[i] = (div_q((straight[i] - Q14_HALF) * contrast, Q14_ONE) + Q14_HALF + brightness)
-            .clamp(-32768, 32767);
-    }
-    let luma = div_q(
-        rgb[0] * Q14_LUMA[0] + rgb[1] * Q14_LUMA[1] + rgb[2] * Q14_LUMA[2],
-        Q14_ONE,
-    );
-    for channel in &mut rgb {
-        *channel = div_q(
-            luma * (Q14_ONE - saturation) + *channel * saturation,
-            Q14_ONE,
-        );
-        *channel = (*channel).clamp(0, Q14_ONE);
-        *channel = div_q(*channel * alpha, Q14_ONE);
-    }
-    rgb.map(|c| c as u32)
+    color_adjust_exact_q14_checked(q, brightness, contrast, saturation)
+        .expect("color-adjust Q14 products fit in i64")
 }
 
 /// One texel through the color-adjust passes: mode 0 premultiply, normal blend
@@ -2645,6 +2693,124 @@ fn color_adjust_q14_known_values() {
     );
 }
 
+/// The saturation sum is i64. Clamping it, or the contrast result, would change
+/// the mix. This walks the quantizer box and the straight-Q14 domain with
+/// checked arithmetic.
+#[test]
+fn color_adjust_q14_mix_does_not_overflow() {
+    // Clamped contrast stage from the review: brightness -0.5, contrast 4,
+    // saturation 4, straight (255, 255, 0) became rgb (32767, 32767, -32768)
+    // and luma 28035. That product does not fit in i32.
+    let clamped = saturation_mix_sum(28_035, -32_768, 65_536).unwrap();
+    assert_eq!(clamped, -3_525_459_968);
+    assert!(i32::try_from(clamped).is_err());
+
+    // The formula does not apply that clamp. The same input's contrast stage
+    // is (32768, 32768, -32768) and luma is 28036. The blue product still
+    // does not fit in i32, and the checked path accepts it.
+    let rgb = [
+        div_q_i64((16_384 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+        div_q_i64((16_384 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+        div_q_i64((0 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+    ];
+    assert_eq!(rgb, [32_768, 32_768, -32_768]);
+    let luma = div_q_i64(rgb[0] * 3_483 + rgb[1] * 11_718 + rgb[2] * 1_183, 16_384).unwrap();
+    assert_eq!(luma, 28_036);
+    let unclamped = saturation_mix_sum(luma, rgb[2], 65_536).unwrap();
+    assert_eq!(unclamped, -3_525_509_120);
+    assert!(i32::try_from(unclamped).is_err());
+    let q = [16_384u32, 16_384, 0, 16_384];
+    assert!(color_adjust_exact_q14_checked(q, -8_192, 65_536, 65_536).is_some());
+    let _ = color_adjust_texel_v3([255, 255, 0, 255], -0.5, 4.0, 4.0);
+
+    // luma and the channel are not independent; this box contains every pair
+    // the contrast stage can produce. Corners are the extrema of the bilinear sum.
+    let span = [-40_960i64, 57_344];
+    let sats = [-16_384i64, 65_536];
+    let mut min_sum = i64::MAX;
+    let mut max_sum = i64::MIN;
+    for &luma in &span {
+        for &channel in &span {
+            for &sat in &sats {
+                let sum = saturation_mix_sum(luma, channel, sat).unwrap();
+                min_sum = min_sum.min(sum);
+                max_sum = max_sum.max(sum);
+            }
+        }
+    }
+    assert_eq!((min_sum, max_sum), (-5_502_926_848, 5_771_362_304));
+    assert!(i32::try_from(min_sum).is_err() && i32::try_from(max_sum).is_err());
+
+    // Straight Q14, step 512, including both ends (33 values, 33³ colors).
+    // Settings: brightness {-16384,-8192,0,8192,16384}, contrast and saturation
+    // {-16384,0,16384,32768,49152,65536}. Alpha 16384 makes unpremultiply the
+    // identity. Five extra alphas cover the final multiply, which is checked too.
+    let straight: Vec<u32> = (0..=16_384).step_by(512).map(|v| v as u32).collect();
+    assert_eq!(straight.len(), 33);
+    let brightness = [-16_384i32, -8_192, 0, 8_192, 16_384];
+    let contrast = [-16_384i32, 0, 16_384, 32_768, 49_152, 65_536];
+    let saturation = [-16_384i32, 0, 16_384, 32_768, 49_152, 65_536];
+    let mut checked = 0u64;
+    for &b in &brightness {
+        for &c in &contrast {
+            for &s in &saturation {
+                for &r in &straight {
+                    for &g in &straight {
+                        for &bl in &straight {
+                            assert!(
+                                color_adjust_exact_q14_checked([r, g, bl, 16_384], b, c, s)
+                                    .is_some(),
+                                "overflow straight ({r},{g},{bl}) b={b} c={c} s={s}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+                for alpha in [0u32, 1, 8_192, 16_383, 16_384] {
+                    assert!(
+                        color_adjust_exact_q14_checked([0, 16_384, 8_192, alpha], b, c, s)
+                            .is_some(),
+                        "overflow alpha {alpha} b={b} c={c} s={s}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    // Every Q14 value of one channel, the other two at 0, 0.5, and 1, on the
+    // endpoint settings (including negative contrast and saturation, which the
+    // quantizer still emits).
+    let anchors = [0u32, 8_192, 16_384];
+    let end_b = [-16_384i32, 16_384];
+    let end_c = [-16_384i32, 0, 65_536];
+    let end_s = [-16_384i32, 0, 65_536];
+    for channel in 0..3 {
+        for value in 0..=16_384u32 {
+            for &left in &anchors {
+                for &right in &anchors {
+                    let mut px = [16_384u32; 4];
+                    px[channel] = value;
+                    px[(channel + 1) % 3] = left;
+                    px[(channel + 2) % 3] = right;
+                    for &b in &end_b {
+                        for &c in &end_c {
+                            for &s in &end_s {
+                                assert!(
+                                    color_adjust_exact_q14_checked(px, b, c, s).is_some(),
+                                    "overflow axis {channel}={value} b={b} c={c} s={s}"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 33³ × 5 × 6 × 6 + 5 × 180 + 3 × 16385 × 9 × 18.
+    assert_eq!(checked, 14_432_670);
+}
+
 #[test]
 fn color_adjust_solid_differs_from_the_source_and_is_uniform() {
     let tile = color_adjust_tile([40, 80, 120, 255], 0.6f64 as f32, 1.0, 1.0);
@@ -2686,8 +2852,9 @@ fn color_adjust_gradient_covers_every_channel_and_the_alpha_anchors() {
         color_adjust_texel([40, 80, 120, 0], 0.45, 1.7, 1.6),
         [0, 0, 0, 0]
     );
-    assert_eq!(color_adjust_grid().len(), 12);
-    // Same FNV-1a bytes as tests/e2e/cpu-composite.js for this grid.
+    assert_eq!(color_adjust_grid().len(), 20);
+    // Same FNV-1a bytes as tests/e2e/cpu-composite.js for the original 12.
+    // The endpoint settings are render version 3 only.
     let expected = [
         "09de5f49e7068fbe",
         "d296346794223ecf",
@@ -2727,6 +2894,15 @@ fn color_adjust_gradient_covers_every_channel_and_the_alpha_anchors() {
         "54f48aae0e383c44",
         "8e735cc19d43f13b",
         "2edfc3149add3c41",
+        // Contrast 0 makes every channel the same, so saturation does not move a pixel.
+        "204b8da3774c1b25",
+        "455fe98699531725",
+        "204b8da3774c1b25",
+        "455fe98699531725",
+        "3696fac022da0187",
+        "a719b6b1ac5d2588",
+        "e3e29d265599c372",
+        "db4228c4143ca9ff",
     ];
     for (expected, (contrast, saturation, brightness)) in exact.into_iter().zip(color_adjust_grid())
     {
