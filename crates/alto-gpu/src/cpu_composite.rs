@@ -8,11 +8,16 @@
 //! correct cull leaves the same pixels, and a wrong one fails the browser suite,
 //! which reads production tiles.
 //!
-//! Masks, clips, effects, vectors and text are not on this path. `composite.wgsl` never
-//! sees them (`plain_scene` is false, and the effect pass uses rgba16float). Those cases
-//! are explicit xfails in the browser suite.
+//! Masks, clips, blur, vectors and text are not on the composite path. `composite.wgsl`
+//! never sees them (`plain_scene` is false, and the effect pass uses rgba16float).
+//! Color adjust is the exception: the reference repeats `effects.wgsl` mode 0, the
+//! normal blend onto clear, mode 3, and `effects-resolve.wgsl`, with an f16 round trip
+//! after every store. The shader is unchanged, so render version 2 pixels stay put.
+//! The parity image is a 256² gradient (every R, G, B and alpha, including alpha
+//! 0, 1, 128 and 254) run through the contrast × saturation × brightness grid.
+//! The other four stay explicit xfails in the browser suite.
 
-use crate::blend_ref::blend;
+use crate::blend_ref::{blend, effects_blend};
 use crate::damage::plain_scene;
 use crate::sample::{
     IntegerInverse, axis_unit, bilinear_byte, floor_frac_q8, integer_inverse, pixel_q8, source_q8,
@@ -839,6 +844,409 @@ fn quantize(pixel: [f32; 4]) -> [u8; 4] {
     pixel.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8)
 }
 
+/// Round-ties-to-even f32→f16. Matches the `rgba16float` stores in `effects.wgsl`.
+fn f32_to_f16_bits(value: f32) -> u16 {
+    let x = value.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let mantissa = x & 0x007f_ffff;
+    let exp = (x & 0x7f80_0000) >> 23;
+    if exp == 0xff {
+        return if mantissa == 0 {
+            sign | 0x7c00
+        } else {
+            let payload = (mantissa >> 13) as u16;
+            sign | 0x7c00 | payload | u16::from(payload == 0)
+        };
+    }
+    let e = exp as i32 - 127 + 15;
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = mantissa | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        let mut half = (m >> shift) as u16;
+        let rem_mask = (1u32 << shift) - 1;
+        let rem = m & rem_mask;
+        let halfway = 1u32 << (shift - 1);
+        if rem > halfway || (rem == halfway && (half & 1) == 1) {
+            half += 1;
+        }
+        return sign | half;
+    }
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    let mut half = ((mantissa >> 13) as u16) | ((e as u16) << 10);
+    let rem = mantissa & 0x1fff;
+    if rem > 0x1000 || (rem == 0x1000 && (half & 1) == 1) {
+        half += 1;
+    }
+    sign | half
+}
+
+fn f16_to_f32(half: u16) -> f32 {
+    let sign = ((half as u32) & 0x8000) << 16;
+    let exp = ((half >> 10) & 0x1f) as u32;
+    let mant = (half & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            let mut m = mant;
+            let mut e = 113u32;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x3ff;
+            sign | (e << 23) | (m << 13)
+        }
+    } else if exp == 31 {
+        sign | 0x7f80_0000 | (mant << 13)
+    } else {
+        sign | ((exp + (127 - 15)) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
+fn f16_round(value: f32) -> f32 {
+    f16_to_f32(f32_to_f16_bits(value))
+}
+
+/// 256² straight RGBA. R is x, G is y, B is `(x * 3 + y * 5) & 255` (every row
+/// hits every blue). Alpha is 0, 1, 128, 254 on the first four rows and x after that,
+/// so each channel, including those four alpha anchors, appears.
+fn color_adjust_gradient() -> Vec<u8> {
+    let mut pixels = vec![0u8; 256 * 256 * 4];
+    for y in 0..256u32 {
+        for x in 0..256u32 {
+            let i = ((y * 256 + x) * 4) as usize;
+            pixels[i] = x as u8;
+            pixels[i + 1] = y as u8;
+            pixels[i + 2] = ((x * 3 + y * 5) & 255) as u8;
+            pixels[i + 3] = match y {
+                0 => 0,
+                1 => 1,
+                2 => 128,
+                3 => 254,
+                _ => x as u8,
+            };
+        }
+    }
+    pixels
+}
+
+/// Contrast, saturation, brightness. The cast is `f64 as f32`, the same one
+/// `render_effect` uses when a document number becomes the mode 3 uniform.
+/// The first 12 entries are the interior cross product. The last 8 are the
+/// document-range endpoints.
+fn color_adjust_grid() -> [(f32, f32, f32); 20] {
+    const INTERIOR_CONTRAST: [f32; 2] = [0.5f64 as f32, 1.7f64 as f32];
+    const INTERIOR_SATURATION: [f32; 3] = [0.0f64 as f32, 0.35f64 as f32, 1.6f64 as f32];
+    const INTERIOR_BRIGHTNESS: [f32; 2] = [(-0.35f64) as f32, 0.45f64 as f32];
+    const END_CONTRAST: [f32; 2] = [0.0f64 as f32, 4.0f64 as f32];
+    const END_SATURATION: [f32; 2] = [0.0f64 as f32, 4.0f64 as f32];
+    const END_BRIGHTNESS: [f32; 2] = [(-1.0f64) as f32, 1.0f64 as f32];
+    let mut out = [(0.0f32, 0.0, 0.0); 20];
+    let mut i = 0;
+    for contrast in INTERIOR_CONTRAST {
+        for saturation in INTERIOR_SATURATION {
+            for brightness in INTERIOR_BRIGHTNESS {
+                out[i] = (contrast, saturation, brightness);
+                i += 1;
+            }
+        }
+    }
+    for contrast in END_CONTRAST {
+        for saturation in END_SATURATION {
+            for brightness in END_BRIGHTNESS {
+                out[i] = (contrast, saturation, brightness);
+                i += 1;
+            }
+        }
+    }
+    assert_eq!(i, 20);
+    out
+}
+
+fn color_adjust_case_name(contrast: f32, saturation: f32, brightness: f32) -> String {
+    format!("color-adjust c={contrast} s={saturation} b={brightness}")
+}
+
+const Q14_ONE: i32 = 16384;
+const Q14_HALF: i32 = 8192;
+/// Luma weights in Q14. They sum to [`Q14_ONE`].
+const Q14_LUMA: [i32; 3] = [3483, 11718, 1183];
+
+/// f16 bits to Q14, truncated toward zero and clamped to 0..1. Negatives become
+/// 0, inf becomes 1, NaN becomes 0, and subnormals become 0.
+fn f16_bits_to_q14(half: u16) -> u32 {
+    let sign = half & 0x8000;
+    let exp = ((half >> 10) & 0x1f) as u32;
+    let mant = (half & 0x3ff) as u32;
+    if sign != 0 {
+        return 0;
+    }
+    if exp == 31 {
+        return if mant == 0 { Q14_ONE as u32 } else { 0 };
+    }
+    if exp == 0 {
+        return 0;
+    }
+    let sig = 1024 + mant;
+    let q = if exp >= 11 {
+        sig << (exp - 11)
+    } else {
+        sig >> (11 - exp)
+    };
+    q.min(Q14_ONE as u32)
+}
+
+fn floor_log2(mut value: u32) -> u32 {
+    let mut p = 0u32;
+    if value >= 256 {
+        p += 8;
+        value >>= 8;
+    }
+    if value >= 16 {
+        p += 4;
+        value >>= 4;
+    }
+    if value >= 4 {
+        p += 2;
+        value >>= 2;
+    }
+    if value >= 2 {
+        p += 1;
+    }
+    p
+}
+
+/// Q14 in 0..1 to f16 bits, round ties to even.
+fn q14_to_f16_bits(q: u32) -> u16 {
+    if q == 0 {
+        return 0;
+    }
+    let q = q.min(Q14_ONE as u32);
+    if q == Q14_ONE as u32 {
+        return 0x3c00;
+    }
+    let p = floor_log2(q);
+    let (sig, exp_p) = if p >= 10 {
+        let cut = p - 10;
+        let mut sig = q;
+        if cut > 0 {
+            let half = 1u32 << (cut - 1);
+            let rem = sig & ((1u32 << cut) - 1);
+            sig >>= cut;
+            if rem > half || (rem == half && (sig & 1) == 1) {
+                sig += 1;
+            }
+        }
+        if sig >= 2048 {
+            (1024u32, p + 1)
+        } else {
+            (sig, p)
+        }
+    } else {
+        (q << (10 - p), p)
+    };
+    let mant = (sig & 1023) as u16;
+    let exp = (exp_p + 1) as u16;
+    (exp << 10) | mant
+}
+
+/// `(n + d/2) / d` for `d > 0`, with the sign taken so a tie moves away from zero.
+fn div_q_i64(n: i64, d: i64) -> Option<i64> {
+    let half = d / 2;
+    if n >= 0 {
+        n.checked_add(half)?.checked_div(d)
+    } else {
+        n.checked_neg()?
+            .checked_add(half)?
+            .checked_div(d)?
+            .checked_neg()
+    }
+}
+
+/// `luma * (16384 - saturation) + channel * saturation`.
+fn saturation_mix_sum(luma: i64, channel: i64, saturation: i64) -> Option<i64> {
+    let gap = i64::from(Q14_ONE).checked_sub(saturation)?;
+    luma.checked_mul(gap)?
+        .checked_add(channel.checked_mul(saturation)?)
+}
+
+/// Mode 17. `q` is premultiplied Q14 plus alpha. Settings are already Q14.
+/// The returned channels are premultiplied Q14; alpha is not part of the result
+/// because the stored alpha keeps the input f16 bits.
+///
+/// Straight channels are 0..=16384. `color_adjust_q14` quantizes a setting into
+/// −16384..=65536 (the f32 is clamped to [−1, 4] first). Brightness in the
+/// document is −1..=1, so its Q14 value is −16384..=16384. The contrast stage
+/// is not clamped: `(straight - 8192) * contrast / 16384 + 8192 + brightness`
+/// lands in −40960..=57344, and luma stays inside that span. The saturation
+/// sum, treating luma and the channel as independent inside the span and
+/// saturation inside −16384..=65536, is −5502926848..=5771362304. That fits
+/// i64 and does not fit i32. The only clamp is 0..=16384 after the mix, which
+/// matches `clamp(rgb, 0, 1)`.
+fn color_adjust_exact_q14_checked(
+    q: [u32; 4],
+    brightness: i32,
+    contrast: i32,
+    saturation: i32,
+) -> Option<[u32; 3]> {
+    let alpha = i64::from(q[3]);
+    let one = i64::from(Q14_ONE);
+    let half = i64::from(Q14_HALF);
+    let brightness = i64::from(brightness);
+    let contrast = i64::from(contrast);
+    let saturation = i64::from(saturation);
+    let mut straight = [0i64; 3];
+    if alpha != 0 {
+        for i in 0..3 {
+            let s = i64::from(q[i]).checked_shl(14)?.checked_div(alpha)?;
+            straight[i] = s.clamp(0, one);
+        }
+    }
+    let mut rgb = [0i64; 3];
+    for i in 0..3 {
+        rgb[i] = div_q_i64(straight[i].checked_sub(half)?.checked_mul(contrast)?, one)?
+            .checked_add(half)?
+            .checked_add(brightness)?;
+    }
+    let mut acc = 0i64;
+    for i in 0..3 {
+        acc = acc.checked_add(rgb[i].checked_mul(i64::from(Q14_LUMA[i]))?)?;
+    }
+    let luma = div_q_i64(acc, one)?;
+    let mut out = [0u32; 3];
+    for i in 0..3 {
+        let mixed = div_q_i64(saturation_mix_sum(luma, rgb[i], saturation)?, one)?;
+        let premul = div_q_i64(mixed.clamp(0, one).checked_mul(alpha)?, one)?;
+        out[i] = u32::try_from(premul).ok()?;
+    }
+    Some(out)
+}
+
+fn color_adjust_exact_q14(
+    q: [u32; 4],
+    brightness: i32,
+    contrast: i32,
+    saturation: i32,
+) -> [u32; 3] {
+    color_adjust_exact_q14_checked(q, brightness, contrast, saturation)
+        .expect("color-adjust Q14 products fit in i64")
+}
+
+/// One texel through the color-adjust passes: mode 0 premultiply, normal blend
+/// onto clear, mode 3, f16 between stores, unorm8 resolve.
+fn color_adjust_texel(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> [u8; 4] {
+    let straight = rgba.map(|b| f32::from(b) / 255.0);
+    let premul = [
+        f16_round(straight[0] * straight[3]),
+        f16_round(straight[1] * straight[3]),
+        f16_round(straight[2] * straight[3]),
+        f16_round(straight[3]),
+    ];
+    let blended = effects_blend([0.0; 4], premul, 0).map(f16_round);
+    let eps = 0.000001f32;
+    let alpha = blended[3];
+    let scale = alpha.max(eps);
+    let mut rgb = [blended[0] / scale, blended[1] / scale, blended[2] / scale];
+    for channel in &mut rgb {
+        *channel = (*channel - 0.5) * contrast + 0.5 + brightness;
+    }
+    // `dot` as a left fold of f32 products. Saturation 1 multiplies this by zero.
+    let luma = (rgb[0] * 0.2126 + rgb[1] * 0.7152) + rgb[2] * 0.0722;
+    for channel in &mut rgb {
+        *channel = luma * (1.0 - saturation) + *channel * saturation;
+        *channel = channel.clamp(0.0, 1.0) * alpha;
+    }
+    quantize([
+        f16_round(rgb[0]),
+        f16_round(rgb[1]),
+        f16_round(rgb[2]),
+        f16_round(alpha),
+    ])
+}
+
+/// Straight byte to Q14. `(b * 16384 + 127) / 255`, capped at 1.
+fn byte_q14(byte: u32) -> u32 {
+    (byte * 16384 + 127) / 255
+}
+
+/// Premultiplied Q14 of two unorm bytes. Opaque 255 stays at 1.
+fn premul_byte_q14(color: u32, alpha: u32) -> u32 {
+    (color * alpha * 16384 + 32_512) / 65_025
+}
+
+/// Render version 3. Recovered bytes are premultiplied in Q14, stored as f16,
+/// copied through the clear normal blend, then adjusted. The alpha f16 bits
+/// survive the adjustment. The unorm resolve is round-ties-to-even.
+fn color_adjust_texel_v3(
+    rgba: [u8; 4],
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+) -> [u8; 4] {
+    let bytes = rgba.map(u32::from);
+    let alpha = bytes[3];
+    let stored = [
+        q14_to_f16_bits(premul_byte_q14(bytes[0], alpha)),
+        q14_to_f16_bits(premul_byte_q14(bytes[1], alpha)),
+        q14_to_f16_bits(premul_byte_q14(bytes[2], alpha)),
+        q14_to_f16_bits(byte_q14(alpha)),
+    ];
+    let q = stored.map(f16_bits_to_q14);
+    let rgb = color_adjust_exact_q14(
+        q,
+        crate::renderer::color_adjust_q14(brightness),
+        crate::renderer::color_adjust_q14(contrast),
+        crate::renderer::color_adjust_q14(saturation),
+    );
+    quantize([
+        f16_to_f32(q14_to_f16_bits(rgb[0])),
+        f16_to_f32(q14_to_f16_bits(rgb[1])),
+        f16_to_f32(q14_to_f16_bits(rgb[2])),
+        f16_to_f32(stored[3]),
+    ])
+}
+
+fn color_adjust_image(src: &[u8], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
+    let mut out = vec![0u8; src.len()];
+    for (dst, px) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        *dst = color_adjust_texel(*px, brightness, contrast, saturation);
+    }
+    out
+}
+
+fn color_adjust_image_v3(src: &[u8], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
+    let mut out = vec![0u8; src.len()];
+    for (dst, px) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        *dst = color_adjust_texel_v3(*px, brightness, contrast, saturation);
+    }
+    out
+}
+
+fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
+    let mut solid = vec![0u8; 256 * 256 * 4];
+    for chunk in solid.as_chunks_mut::<4>().0 {
+        *chunk = rgba;
+    }
+    color_adjust_image(&solid, brightness, contrast, saturation)
+}
+
 fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
     let mut out = vec![0u8; 256 * 256 * 4];
     let mut prequant = vec![0f32; 256 * 256 * 4];
@@ -1555,6 +1963,23 @@ fn parity_shader() -> String {
     src
 }
 
+/// `effects.wgsl` uniform. Field order matches the WGSL `Config` in uniform address space.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct EffectConfig {
+    out_region: [f32; 4],
+    region_a: [f32; 4],
+    region_b: [f32; 4],
+    inv0: [f32; 4],
+    inv1: [f32; 4],
+    settings: [f32; 4],
+    info: [u32; 4],
+    extra: [f32; 4],
+    curve: [f32; 64],
+    sizes: [u32; 4],
+    output_clip: [u32; 4],
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1841,6 +2266,346 @@ impl Gpu {
         let prequant = bytemuck::cast_slice(&pre_raw).to_vec();
         Ok((bytes, prequant))
     }
+
+    /// The production color-adjust chain for each `(contrast, saturation, brightness)`:
+    /// mode 0, normal blend onto clear, mode 3, resolve. Sampling does not depend on
+    /// the settings, so those passes run once.
+    fn render_color_adjust(
+        &self,
+        pixels: &[u8],
+        grid: &[(f32, f32, f32)],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if pixels.len() != 256 * 256 * 4 {
+            return Err(format!("color-adjust image is {} bytes", pixels.len()));
+        }
+        let device = &self.device;
+        let effects = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color-adjust effects"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("color-adjust effects"),
+                source: wgpu::ShaderSource::Wgsl(
+                    shader_with_blend(include_str!("../shaders/effects.wgsl")).into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color-adjust resolve"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("color-adjust resolve"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/effects-resolve.wgsl").into(),
+                ),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let float_tex = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let backdrop = float_tex("color-adjust clear");
+        let sampled = float_tex("color-adjust sample");
+        let blended = float_tex("color-adjust blend");
+        let adjusted = float_tex("color-adjust filter");
+        let dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust atlas"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(256),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-adjust resolve"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let region = [0.0, 0.0, 1.0, 0.0];
+        let config =
+            |mode: u32, settings: [f32; 4], entries: u32, size: [u32; 4], clip: u32| EffectConfig {
+                out_region: region,
+                region_a: region,
+                region_b: region,
+                inv0: [1.0, 0.0, 0.0, 1.0],
+                inv1: [0.0; 4],
+                settings,
+                info: [mode, 0, entries, 0],
+                extra: [0.0; 4],
+                curve: [0.0; 64],
+                sizes: size,
+                output_clip: [256, 256, clip, clip],
+            };
+        let tile = [GpuTile {
+            xy: [0, 0],
+            slot: 0,
+            pad: 0,
+        }];
+        let full = [256, 256, 256, 256];
+        let configs = [
+            config(6, [0.0; 4], 0, [1, 1, 1, 1], 1),
+            config(18, [0.0; 4], 1, full, 1),
+            config(19, [1.0, 0.0, 0.0, 0.0], 0, full, 1),
+            config(17, [0.0; 4], 0, full, 1),
+        ];
+        let uniforms: Vec<_> = configs
+            .iter()
+            .map(|item| upload_buffer(device, &self.queue, &[*item], wgpu::BufferUsages::UNIFORM))
+            .collect();
+        let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
+        let resolve_config = upload_buffer(
+            device,
+            &self.queue,
+            &[GpuConfig {
+                origin_scale: [0.0, 0.0, 1.0, 256.0],
+                info: [0, 256, 0, 0],
+            }],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
+        let backdrop_v = view(&backdrop);
+        let sampled_v = view(&sampled);
+        let blended_v = view(&blended);
+        let adjusted_v = view(&adjusted);
+        let dummy_v = view(&dummy);
+        let atlas_v = atlas.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let output_v = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layout = effects.get_bind_group_layout(0);
+        let bind = |a: &wgpu::TextureView,
+                    b: &wgpu::TextureView,
+                    clip: &wgpu::TextureView,
+                    out: &wgpu::TextureView,
+                    uniform: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("color-adjust stage"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(a),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(b),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(clip),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&atlas_v),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(out),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: tiles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let stage = [
+            bind(&dummy_v, &dummy_v, &dummy_v, &backdrop_v, &uniforms[0]),
+            bind(&backdrop_v, &backdrop_v, &dummy_v, &sampled_v, &uniforms[1]),
+            bind(&backdrop_v, &sampled_v, &dummy_v, &blended_v, &uniforms[2]),
+            bind(&blended_v, &blended_v, &dummy_v, &adjusted_v, &uniforms[3]),
+        ];
+        let resolve_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color-adjust resolve"),
+            layout: &resolve.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&adjusted_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resolve_config.as_entire_binding(),
+                },
+            ],
+        });
+        let mut prep = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("color-adjust sample"),
+        });
+        for group in &stage[..3] {
+            let mut pass = prep.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color-adjust sample"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&effects);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.queue.submit(Some(prep.finish()));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("poll: {e}"))?;
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            return Err(format!("validation: {err}"));
+        }
+        let mut tiles_out = Vec::with_capacity(grid.len());
+        for &(contrast, saturation, brightness) in grid {
+            let filter = config(
+                17,
+                [
+                    f32::from_bits(crate::renderer::color_adjust_q14(brightness) as u32),
+                    f32::from_bits(crate::renderer::color_adjust_q14(contrast) as u32),
+                    f32::from_bits(crate::renderer::color_adjust_q14(saturation) as u32),
+                    0.0,
+                ],
+                0,
+                full,
+                1,
+            );
+            self.queue
+                .write_buffer(&uniforms[3], 0, bytemuck::bytes_of(&filter));
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("color-adjust"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("color-adjust"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&effects);
+                pass.set_bind_group(0, &stage[3], &[]);
+                pass.dispatch_workgroups(16, 16, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("color-adjust resolve"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&resolve);
+                pass.set_bind_group(0, &resolve_bind, &[]);
+                pass.dispatch_workgroups(16, 16, 1);
+            }
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("color-adjust readback"),
+                size: 256 * 1024,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(1024),
+                        rows_per_image: Some(256),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            self.queue.submit(Some(encoder.finish()));
+            map_readback(device, &read)?;
+            if let Some(err) = pollster::block_on(scope.pop()) {
+                return Err(format!("validation: {err}"));
+            }
+            let bytes = read
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| e.to_string())?
+                .to_vec();
+            read.unmap();
+            tiles_out.push(bytes);
+        }
+        Ok(tiles_out)
+    }
 }
 
 fn upload_buffer<T: Pod + Zeroable>(
@@ -1889,6 +2654,265 @@ fn map_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), Stri
         }
     }
     Err("GPU readback did not complete".into())
+}
+
+#[test]
+fn f16_storage_round_trip_matches_known_bits() {
+    assert_eq!(f32_to_f16_bits(0.0), 0);
+    assert_eq!(f32_to_f16_bits(1.0), 0x3c00);
+    assert_eq!(f32_to_f16_bits(0.5), 0x3800);
+    assert_eq!(f16_to_f32(1).to_bits(), 0x3380_0000);
+    assert_eq!(f16_round(1.0), 1.0);
+}
+
+#[test]
+fn color_adjust_q14_known_values() {
+    use crate::renderer::color_adjust_q14;
+    assert_eq!(color_adjust_q14(0.0), 0);
+    assert_eq!(color_adjust_q14(1.0), Q14_ONE);
+    assert_eq!(color_adjust_q14(0.5), Q14_HALF);
+    assert_eq!(color_adjust_q14(-1.0), -Q14_ONE);
+    assert_eq!(color_adjust_q14(4.0), Q14_ONE * 4);
+    assert_eq!(f16_bits_to_q14(0x3c00), Q14_ONE as u32);
+    assert_eq!(f16_bits_to_q14(0x3800), Q14_HALF as u32);
+    assert_eq!(f16_bits_to_q14(0), 0);
+    assert_eq!(q14_to_f16_bits(0), 0);
+    assert_eq!(q14_to_f16_bits(Q14_ONE as u32), 0x3c00);
+    assert_eq!(q14_to_f16_bits(Q14_HALF as u32), 0x3800);
+    assert_eq!(q14_to_f16_bits(1), 0x0400);
+    assert_eq!(Q14_LUMA[0] + Q14_LUMA[1] + Q14_LUMA[2], Q14_ONE);
+    let anchor = [251, 2, 251, 128];
+    let v2 = color_adjust_texel(anchor, -0.35f64 as f32, 0.5f64 as f32, 0.0);
+    let v3 = color_adjust_texel_v3(anchor, -0.35f64 as f32, 0.5f64 as f32, 0.0);
+    assert_eq!(v2[3], 128);
+    assert_eq!(v3[3], v2[3]);
+    assert_ne!(v2, v3);
+    assert_eq!(
+        color_adjust_texel_v3([40, 80, 120, 0], 0.45, 1.7, 1.6),
+        [0, 0, 0, 0]
+    );
+}
+
+/// The saturation sum is i64. Clamping it, or the contrast result, would change
+/// the mix. This walks the quantizer box and the straight-Q14 domain with
+/// checked arithmetic.
+#[test]
+fn color_adjust_q14_mix_does_not_overflow() {
+    // Clamped contrast stage from the review: brightness -0.5, contrast 4,
+    // saturation 4, straight (255, 255, 0) became rgb (32767, 32767, -32768)
+    // and luma 28035. That product does not fit in i32.
+    let clamped = saturation_mix_sum(28_035, -32_768, 65_536).unwrap();
+    assert_eq!(clamped, -3_525_459_968);
+    assert!(i32::try_from(clamped).is_err());
+
+    // The formula does not apply that clamp. The same input's contrast stage
+    // is (32768, 32768, -32768) and luma is 28036. The blue product still
+    // does not fit in i32, and the checked path accepts it.
+    let rgb = [
+        div_q_i64((16_384 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+        div_q_i64((16_384 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+        div_q_i64((0 - 8_192) * 65_536, 16_384).unwrap() + 8_192 - 8_192,
+    ];
+    assert_eq!(rgb, [32_768, 32_768, -32_768]);
+    let luma = div_q_i64(rgb[0] * 3_483 + rgb[1] * 11_718 + rgb[2] * 1_183, 16_384).unwrap();
+    assert_eq!(luma, 28_036);
+    let unclamped = saturation_mix_sum(luma, rgb[2], 65_536).unwrap();
+    assert_eq!(unclamped, -3_525_509_120);
+    assert!(i32::try_from(unclamped).is_err());
+    let q = [16_384u32, 16_384, 0, 16_384];
+    assert!(color_adjust_exact_q14_checked(q, -8_192, 65_536, 65_536).is_some());
+    let _ = color_adjust_texel_v3([255, 255, 0, 255], -0.5, 4.0, 4.0);
+
+    // luma and the channel are not independent; this box contains every pair
+    // the contrast stage can produce. Corners are the extrema of the bilinear sum.
+    let span = [-40_960i64, 57_344];
+    let sats = [-16_384i64, 65_536];
+    let mut min_sum = i64::MAX;
+    let mut max_sum = i64::MIN;
+    for &luma in &span {
+        for &channel in &span {
+            for &sat in &sats {
+                let sum = saturation_mix_sum(luma, channel, sat).unwrap();
+                min_sum = min_sum.min(sum);
+                max_sum = max_sum.max(sum);
+            }
+        }
+    }
+    assert_eq!((min_sum, max_sum), (-5_502_926_848, 5_771_362_304));
+    assert!(i32::try_from(min_sum).is_err() && i32::try_from(max_sum).is_err());
+
+    // Straight Q14, step 512, including both ends (33 values, 33³ colors).
+    // Settings: brightness {-16384,-8192,0,8192,16384}, contrast and saturation
+    // {-16384,0,16384,32768,49152,65536}. Alpha 16384 makes unpremultiply the
+    // identity. Five extra alphas cover the final multiply, which is checked too.
+    let straight: Vec<u32> = (0..=16_384).step_by(512).map(|v| v as u32).collect();
+    assert_eq!(straight.len(), 33);
+    let brightness = [-16_384i32, -8_192, 0, 8_192, 16_384];
+    let contrast = [-16_384i32, 0, 16_384, 32_768, 49_152, 65_536];
+    let saturation = [-16_384i32, 0, 16_384, 32_768, 49_152, 65_536];
+    let mut checked = 0u64;
+    for &b in &brightness {
+        for &c in &contrast {
+            for &s in &saturation {
+                for &r in &straight {
+                    for &g in &straight {
+                        for &bl in &straight {
+                            assert!(
+                                color_adjust_exact_q14_checked([r, g, bl, 16_384], b, c, s)
+                                    .is_some(),
+                                "overflow straight ({r},{g},{bl}) b={b} c={c} s={s}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+                for alpha in [0u32, 1, 8_192, 16_383, 16_384] {
+                    assert!(
+                        color_adjust_exact_q14_checked([0, 16_384, 8_192, alpha], b, c, s)
+                            .is_some(),
+                        "overflow alpha {alpha} b={b} c={c} s={s}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    // Every Q14 value of one channel, the other two at 0, 0.5, and 1, on the
+    // endpoint settings (including negative contrast and saturation, which the
+    // quantizer still emits).
+    let anchors = [0u32, 8_192, 16_384];
+    let end_b = [-16_384i32, 16_384];
+    let end_c = [-16_384i32, 0, 65_536];
+    let end_s = [-16_384i32, 0, 65_536];
+    for channel in 0..3 {
+        for value in 0..=16_384u32 {
+            for &left in &anchors {
+                for &right in &anchors {
+                    let mut px = [16_384u32; 4];
+                    px[channel] = value;
+                    px[(channel + 1) % 3] = left;
+                    px[(channel + 2) % 3] = right;
+                    for &b in &end_b {
+                        for &c in &end_c {
+                            for &s in &end_s {
+                                assert!(
+                                    color_adjust_exact_q14_checked(px, b, c, s).is_some(),
+                                    "overflow axis {channel}={value} b={b} c={c} s={s}"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 33³ × 5 × 6 × 6 + 5 × 180 + 3 × 16385 × 9 × 18.
+    assert_eq!(checked, 14_432_670);
+}
+
+#[test]
+fn color_adjust_solid_differs_from_the_source_and_is_uniform() {
+    let tile = color_adjust_tile([40, 80, 120, 255], 0.6f64 as f32, 1.0, 1.0);
+    assert_eq!(tile.len(), 262_144);
+    assert_ne!(&tile[..4], &[40, 80, 120, 255]);
+    assert_eq!(&tile[..4], &[193, 233, 255, 255]);
+    assert!(tile.chunks(4).all(|pixel| pixel == &tile[..4]));
+}
+
+#[test]
+fn color_adjust_gradient_covers_every_channel_and_the_alpha_anchors() {
+    let src = color_adjust_gradient();
+    assert_eq!(src.len(), 262_144);
+    let mut seen = [0u32; 4];
+    let mut hit = [[false; 256]; 4];
+    for px in src.as_chunks::<4>().0 {
+        for channel in 0..4 {
+            let value = px[channel] as usize;
+            if !hit[channel][value] {
+                hit[channel][value] = true;
+                seen[channel] += 1;
+            }
+        }
+    }
+    assert_eq!(seen, [256, 256, 256, 256]);
+    assert_eq!(pixel(&src, 0, 0)[3], 0);
+    assert_eq!(pixel(&src, 0, 1)[3], 1);
+    assert_eq!(pixel(&src, 0, 2)[3], 128);
+    assert_eq!(pixel(&src, 0, 3)[3], 254);
+    assert_eq!(pixel(&src, 255, 4)[3], 255);
+    let anchor = [200, 3, 19, 254];
+    let flat = color_adjust_texel(anchor, 0.0, 1.0, 1.0);
+    let gray = color_adjust_texel(anchor, -0.35f64 as f32, 1.7f64 as f32, 0.0);
+    let vivid = color_adjust_texel(anchor, 0.45f64 as f32, 0.5f64 as f32, 1.6f64 as f32);
+    assert_ne!(flat, gray);
+    assert_ne!(flat, vivid);
+    assert_ne!(gray, vivid);
+    assert_eq!(
+        color_adjust_texel([40, 80, 120, 0], 0.45, 1.7, 1.6),
+        [0, 0, 0, 0]
+    );
+    assert_eq!(color_adjust_grid().len(), 20);
+    // Same FNV-1a bytes as tests/e2e/cpu-composite.js for the original 12.
+    // The endpoint settings are render version 3 only.
+    let expected = [
+        "09de5f49e7068fbe",
+        "d296346794223ecf",
+        "0a0b6c96d748999c",
+        "e80976ac9139b99d",
+        "5926c4243a96f79f",
+        "6e6fc79ca84727ab",
+        "beb375818b446960",
+        "8dd8cd53b2a57140",
+        "54e47915c5a04b18",
+        "9be25cf48c61da5a",
+        "c0cc9de8851d97d2",
+        "eaae1596e5e99a2b",
+    ];
+    let src = color_adjust_gradient();
+    for (expected, (contrast, saturation, brightness)) in
+        expected.into_iter().zip(color_adjust_grid())
+    {
+        let tile = color_adjust_image(&src, brightness, contrast, saturation);
+        assert_eq!(
+            format!("{:016x}", fnv64(&tile)),
+            expected,
+            "c={contrast} s={saturation} b={brightness}"
+        );
+    }
+    // Render version 3. Same bytes as renderColorAdjustV3 in tests/e2e/cpu-composite.js.
+    let exact = [
+        "85427e72aa6975f4",
+        "d34d9def32069e30",
+        "6fabe3fd4a1d755d",
+        "03bdc46a2a94022a",
+        "e2631093ebe7c14b",
+        "6614a1c612c0eb35",
+        "35828221f6e46782",
+        "f2d63e24deb38bb5",
+        "e21500eb040c8e1d",
+        "54f48aae0e383c44",
+        "8e735cc19d43f13b",
+        "2edfc3149add3c41",
+        // Contrast 0 makes every channel the same, so saturation does not move a pixel.
+        "204b8da3774c1b25",
+        "455fe98699531725",
+        "204b8da3774c1b25",
+        "455fe98699531725",
+        "3696fac022da0187",
+        "a719b6b1ac5d2588",
+        "e3e29d265599c372",
+        "db4228c4143ca9ff",
+    ];
+    for (expected, (contrast, saturation, brightness)) in exact.into_iter().zip(color_adjust_grid())
+    {
+        let tile = color_adjust_image_v3(&src, brightness, contrast, saturation);
+        assert_eq!(
+            format!("{:016x}", fnv64(&tile)),
+            expected,
+            "v3 c={contrast} s={saturation} b={brightness}"
+        );
+    }
 }
 
 #[test]
@@ -2460,6 +3484,32 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
+    let src = color_adjust_gradient();
+    let grid = color_adjust_grid();
+    match gpu.render_color_adjust(&src, &grid) {
+        Ok(tiles) => {
+            if tiles.len() != grid.len() {
+                failed.push(format!(
+                    "color-adjust: {} GPU tiles for {} settings",
+                    tiles.len(),
+                    grid.len()
+                ));
+            }
+            for (tile, &(contrast, saturation, brightness)) in tiles.iter().zip(&grid) {
+                let cpu = color_adjust_image_v3(&src, brightness, contrast, saturation);
+                let name = color_adjust_case_name(contrast, saturation, brightness);
+                let report = diff_report(&cpu, tile);
+                println!("{name}: {report}");
+                if cpu != *tile {
+                    failed.push(format!("{name}: {report}"));
+                }
+            }
+        }
+        Err(err) => {
+            println!("color-adjust: GPU render failed: {err}");
+            failed.push(format!("color-adjust: {err}"));
+        }
+    }
     assert!(
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",

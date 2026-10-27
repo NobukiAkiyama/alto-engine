@@ -120,6 +120,54 @@ export function solid(w, h, rgba) {
   for (let i = 0; i < pixels.length; i += 4) pixels.set(rgba, i);
   return { w, h, pixels };
 }
+/** Straight RGBA. R is x, G is y, B is (x*3+y*5)&255. Alpha is 0, 1, 128, 254 on the first four rows and x after that. */
+export function colorAdjustGradient(w = 256, h = 256) {
+  const pixels = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    pixels[i] = x & 255;
+    pixels[i + 1] = y & 255;
+    pixels[i + 2] = (x * 3 + y * 5) & 255;
+    pixels[i + 3] = y === 0 ? 0 : y === 1 ? 1 : y === 2 ? 128 : y === 3 ? 254 : (x & 255);
+  }
+  return { w, h, pixels };
+}
+
+/**
+ * Contrast, saturation, brightness. `Math.fround` is the JS form of the
+ * document path's `f64 as f32`.
+ */
+function colorAdjustSettings(contrastValues, saturationValues, brightnessValues) {
+  const grid = [];
+  for (const contrastValue of contrastValues) {
+    for (const saturationValue of saturationValues) {
+      for (const brightnessValue of brightnessValues) {
+        grid.push({
+          contrast: f(contrastValue),
+          saturation: f(saturationValue),
+          brightness: f(brightnessValue),
+          contrastLabel: String(contrastValue),
+          saturationLabel: String(saturationValue),
+          brightnessLabel: String(brightnessValue),
+        });
+      }
+    }
+  }
+  return grid;
+}
+
+/**
+ * Contrast, saturation, brightness. `Math.fround` is the JS form of the
+ * document path's `f64 as f32`. The first 12 are the interior cross product.
+ * The last 8 are the document-range endpoints.
+ */
+export function colorAdjustGrid() {
+  return [
+    ...colorAdjustSettings([0.5, 1.7], [0, 0.35, 1.6], [-0.35, 0.45]),
+    ...colorAdjustSettings([0, 4], [0, 4], [-1, 1]),
+  ];
+}
+
 export function ramp(w, h) {
   const pixels = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -526,6 +574,242 @@ export function renderCase(testCase, version = RENDER_VERSION) {
   const origin = [f(testCase.tx * 256 * scale), f(testCase.ty * 256 * scale)];
   const originPx = [testCase.tx * 256 * scaleI, testCase.ty * 256 * scaleI];
   return composite(ops, testCase.w, testCase.h, origin, scale, originPx, scaleI, version);
+}
+
+function f32ToF16Bits(value) {
+  const buf = new ArrayBuffer(4);
+  const f32 = new Float32Array(buf);
+  const u32 = new Uint32Array(buf);
+  f32[0] = value;
+  const x = u32[0];
+  const sign = (x >>> 16) & 0x8000;
+  const mantissa = x & 0x007fffff;
+  const exp = (x & 0x7f800000) >>> 23;
+  if (exp === 255) {
+    if (mantissa === 0) return sign | 0x7c00;
+    const payload = mantissa >>> 13;
+    return sign | 0x7c00 | payload | (payload === 0 ? 1 : 0);
+  }
+  const e = exp - 127 + 15;
+  if (e <= 0) {
+    if (e < -10) return sign;
+    const m = mantissa | 0x00800000;
+    const shift = 14 - e;
+    let half = m >>> shift;
+    const remMask = (1 << shift) - 1;
+    const rem = m & remMask;
+    const halfway = 1 << (shift - 1);
+    if (rem > halfway || (rem === halfway && (half & 1) === 1)) half += 1;
+    return (sign | half) & 0xffff;
+  }
+  if (e >= 31) return sign | 0x7c00;
+  let half = (mantissa >>> 13) | (e << 10);
+  const rem = mantissa & 0x1fff;
+  if (rem > 0x1000 || (rem === 0x1000 && (half & 1) === 1)) half += 1;
+  return (sign | half) & 0xffff;
+}
+function f16BitsToF32(half) {
+  const sign = (half & 0x8000) << 16;
+  const exp = (half >> 10) & 0x1f;
+  const mant = half & 0x3ff;
+  let bits;
+  if (exp === 0) {
+    if (mant === 0) bits = sign;
+    else {
+      let m = mant;
+      let e = 113;
+      while ((m & 0x400) === 0) {
+        m <<= 1;
+        e -= 1;
+      }
+      m &= 0x3ff;
+      bits = (sign | (e << 23) | (m << 13)) >>> 0;
+    }
+  } else if (exp === 31) bits = (sign | 0x7f800000 | (mant << 13)) >>> 0;
+  else bits = (sign | ((exp + (127 - 15)) << 23) | (mant << 13)) >>> 0;
+  const buf = new ArrayBuffer(4);
+  new Uint32Array(buf)[0] = bits >>> 0;
+  return new Float32Array(buf)[0];
+}
+function f16(value) {
+  return f16BitsToF32(f32ToF16Bits(value));
+}
+function unorm(byte) {
+  return div(f(byte), f(255));
+}
+function colorAdjustTexel(rgba, brightness, contrast, saturation) {
+  const straight = rgba.map(unorm);
+  const premul = [0, 1, 2].map((i) => f16(mul(straight[i], straight[3]))).concat([f16(straight[3])]);
+  const straightSrc = premul[3] > 0
+    ? [div(premul[0], Math.max(premul[3], EPS)), div(premul[1], Math.max(premul[3], EPS)), div(premul[2], Math.max(premul[3], EPS))]
+    : [f(0), f(0), f(0)];
+  const blended = blend([f(0), f(0), f(0), f(0)], [straightSrc[0], straightSrc[1], straightSrc[2], premul[3]], 0).map(f16);
+  const alpha = blended[3];
+  const scale = Math.max(alpha, EPS);
+  let rgb = [div(blended[0], scale), div(blended[1], scale), div(blended[2], scale)];
+  rgb = rgb.map((channel) => add(add(mul(sub(channel, f(0.5)), contrast), f(0.5)), brightness));
+  const luma = add(add(mul(rgb[0], f(0.2126)), mul(rgb[1], f(0.7152))), mul(rgb[2], f(0.0722)));
+  rgb = rgb.map((channel) => add(mul(luma, sub(f(1), saturation)), mul(channel, saturation)));
+  const stored = rgb.map((channel) => f16(mul(f(Math.min(f(1), Math.max(f(0), channel))), alpha)));
+  return [...stored, f16(alpha)].map(quantize);
+}
+
+/** Mode 0, normal blend onto clear, mode 3, unorm resolve, one texel at a time. */
+export function renderColorAdjust(image, settings = {}) {
+  const brightness = f(settings.brightness ?? 0);
+  const contrast = f(settings.contrast ?? 1);
+  const saturation = f(settings.saturation ?? 1);
+  const out = new Uint8Array(image.w * image.h * 4);
+  for (let i = 0; i < out.length; i += 4) {
+    out.set(colorAdjustTexel(
+      [image.pixels[i], image.pixels[i + 1], image.pixels[i + 2], image.pixels[i + 3]],
+      brightness,
+      contrast,
+      saturation,
+    ), i);
+  }
+  return out;
+}
+
+const Q14_ONE = 16384;
+const Q14_HALF = 8192;
+const Q14_LUMA = [3483, 11718, 1183];
+
+/** Q14 of a color-adjust setting. 1 is 16384. Half away from zero. */
+function colorAdjustQ14(value) {
+  if (!Number.isFinite(value)) return 0;
+  const clamped = f(Math.min(4, Math.max(-1, value)));
+  const x = f(clamped * 16384);
+  const adj = x < 0 || Object.is(x, -0) ? -0.5 : 0.5;
+  return Math.trunc(f(x + adj));
+}
+
+function byteQ14(byte) {
+  return Math.trunc((byte * 16384 + 127) / 255);
+}
+
+function premulByteQ14(color, alpha) {
+  return Math.trunc((color * alpha * 16384 + 32512) / 65025);
+}
+
+function floorLog2(value) {
+  let n = value >>> 0;
+  let p = 0;
+  if (n >= 256) { p += 8; n >>>= 8; }
+  if (n >= 16) { p += 4; n >>>= 4; }
+  if (n >= 4) { p += 2; n >>>= 2; }
+  if (n >= 2) p += 1;
+  return p;
+}
+
+function q14ToF16Bits(qIn) {
+  if (qIn === 0) return 0;
+  const q = Math.min(qIn >>> 0, Q14_ONE);
+  if (q === Q14_ONE) return 0x3c00;
+  const p = floorLog2(q);
+  let sig = q;
+  let expP = p;
+  if (p >= 10) {
+    const cut = p - 10;
+    if (cut > 0) {
+      const half = 1 << (cut - 1);
+      const rem = sig & ((1 << cut) - 1);
+      sig >>>= cut;
+      if (rem > half || (rem === half && (sig & 1) === 1)) sig += 1;
+    }
+    if (sig >= 2048) { sig = 1024; expP = p + 1; }
+  } else sig = q << (10 - p);
+  return (((expP + 1) << 10) | (sig & 1023)) & 0xffff;
+}
+
+function f16BitsToQ14(half) {
+  const h = half & 0xffff;
+  if ((h & 0x8000) !== 0) return 0;
+  const exp = (h >> 10) & 0x1f;
+  const mant = h & 0x3ff;
+  if (exp === 31) return mant === 0 ? Q14_ONE : 0;
+  if (exp === 0) return 0;
+  const sig = 1024 + mant;
+  const q = exp >= 11 ? (sig << (exp - 11)) >>> 0 : sig >>> (11 - exp);
+  return Math.min(q, Q14_ONE);
+}
+
+/** `(n + d/2) / d` in BigInt. Division truncates toward zero, matching `divQ`. */
+function divQBig(n, d) {
+  const half = d / 2n;
+  if (n >= 0n) return (n + half) / d;
+  return -(((-n) + half) / d);
+}
+
+function colorAdjustExactQ14(q, brightness, contrast, saturation) {
+  const one = BigInt(Q14_ONE);
+  const half = BigInt(Q14_HALF);
+  const alpha = BigInt(q[3]);
+  const contrastQ = BigInt(contrast);
+  const brightnessQ = BigInt(brightness);
+  const saturationQ = BigInt(saturation);
+  const straight = [0n, 0n, 0n];
+  if (alpha !== 0n) {
+    for (let i = 0; i < 3; i++) {
+      const s = (BigInt(q[i]) * one) / alpha;
+      straight[i] = s < 0n ? 0n : s > one ? one : s;
+    }
+  }
+  // Contrast is not clamped. Straight 0..=16384, contrast Q14 -16384..=65536
+  // and brightness -16384..=16384 land in -40960..=57344. The saturation sum
+  // luma*(16384-saturation)+channel*saturation is -5502926848..=5771362304
+  // over that box. It fits BigInt and does not fit i32. The only clamp is
+  // 0..=16384, after the mix.
+  const rgb = straight.map((channel) => divQBig((channel - half) * contrastQ, one) + half + brightnessQ);
+  const luma = divQBig(
+    rgb[0] * BigInt(Q14_LUMA[0]) + rgb[1] * BigInt(Q14_LUMA[1]) + rgb[2] * BigInt(Q14_LUMA[2]),
+    one,
+  );
+  const gap = one - saturationQ;
+  return rgb.map((channel) => {
+    const mixed = divQBig(luma * gap + channel * saturationQ, one);
+    const clamped = mixed < 0n ? 0n : mixed > one ? one : mixed;
+    return Number(divQBig(clamped * alpha, one));
+  });
+}
+
+function colorAdjustTexelV3(rgba, brightness, contrast, saturation) {
+  const alpha = rgba[3];
+  const stored = [
+    q14ToF16Bits(premulByteQ14(rgba[0], alpha)),
+    q14ToF16Bits(premulByteQ14(rgba[1], alpha)),
+    q14ToF16Bits(premulByteQ14(rgba[2], alpha)),
+    q14ToF16Bits(byteQ14(alpha)),
+  ];
+  const rgb = colorAdjustExactQ14(
+    stored.map(f16BitsToQ14),
+    colorAdjustQ14(brightness),
+    colorAdjustQ14(contrast),
+    colorAdjustQ14(saturation),
+  );
+  return [
+    quantize(f16BitsToF32(q14ToF16Bits(rgb[0]))),
+    quantize(f16BitsToF32(q14ToF16Bits(rgb[1]))),
+    quantize(f16BitsToF32(q14ToF16Bits(rgb[2]))),
+    quantize(f16BitsToF32(stored[3])),
+  ];
+}
+
+/** Render version 3: integer premultiply, Q14 color-adjust, unorm resolve. */
+export function renderColorAdjustV3(image, settings = {}) {
+  const brightness = f(settings.brightness ?? 0);
+  const contrast = f(settings.contrast ?? 1);
+  const saturation = f(settings.saturation ?? 1);
+  const out = new Uint8Array(image.w * image.h * 4);
+  for (let i = 0; i < out.length; i += 4) {
+    out.set(colorAdjustTexelV3(
+      [image.pixels[i], image.pixels[i + 1], image.pixels[i + 2], image.pixels[i + 3]],
+      brightness,
+      contrast,
+      saturation,
+    ), i);
+  }
+  return out;
 }
 
 export function fnv64(bytes) {

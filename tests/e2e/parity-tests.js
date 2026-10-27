@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -242,19 +242,41 @@ export async function runParityTests(engine, log) {
       const plain = renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0, nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
       assert(!same(plain, gpu), "blur matched the sharp composite bit-exactly; remove the xfail");
     });
-    await xfail("color-adjust", "adjustment: effect pass, not composite.wgsl", async () => {
-      const image = solid(256, 256, [40, 80, 120, 255]);
-      const doc = await engine.createDocument({ width: 256, height: 256 });
-      const asset = await imported(engine, image);
-      await doc.transact("adjust", (tx) => {
-        tx.addRasterFromAsset(asset);
-        tx.addAdjustment({ type: "color_adjust", brightness: 0.6 });
-      });
-      const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
-      assert(gpu.length === 262144 && gpu.some((v, i) => i % 4 === 3 && v > 0), "adjustment produced no ink");
-      assert(sceneGap(doc.getSnapshot()) === "adjustment", sceneGap(doc.getSnapshot()));
-      const plain = renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0, nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
-      assert(!same(plain, gpu), "color adjust matched the source bit-exactly; remove the xfail");
+    await test("color-adjust", async () => {
+      const image = colorAdjustGradient();
+      const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
+      assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
+      const packageBytes = await fixture.arrayBuffer();
+      const failures = [];
+      for (const settings of colorAdjustGrid()) {
+        const name = `color-adjust c=${settings.contrastLabel} s=${settings.saturationLabel} b=${settings.brightnessLabel}`;
+        // createDocument is render version 2. Color-adjust's integer formula
+        // runs only when the opened document is render version 3.
+        const doc = await engine.open(new Blob([packageBytes]));
+        const opened = doc.getSnapshot().meta;
+        if (opened.render_version !== 3 || opened.format_version !== 4) {
+          failures.push(`${name}: opened render ${opened.render_version} format ${opened.format_version}`);
+        }
+        const asset = await imported(engine, image);
+        await doc.transact("adjust", (tx) => {
+          tx.addRasterFromAsset(asset);
+          tx.addAdjustment({
+            type: "color_adjust",
+            brightness: settings.brightness,
+            contrast: settings.contrast,
+            saturation: settings.saturation,
+          });
+        });
+        const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+        const cpu = renderColorAdjustV3(image, settings);
+        const gap = diff(cpu, gpu);
+        log(`${name}: ${gap}`);
+        const gapName = sceneGap(doc.getSnapshot());
+        if (gapName !== "adjustment") failures.push(`${name}: scene gap ${gapName}`);
+        if (!same(cpu, gpu)) failures.push(`${name}: ${gap}`);
+      }
+      assert(failures.length === 0, failures.join("\n"));
+      return `${colorAdjustGrid().length} settings, 0 pixels differ`;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });

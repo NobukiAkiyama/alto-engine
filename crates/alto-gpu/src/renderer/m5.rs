@@ -669,7 +669,10 @@ impl Context<'_> {
         clip: Option<Target>,
     ) -> Result<Target> {
         let out = self.alloc(dst.roi)?;
-        let mut p = Self::params(1, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        // Version 3 copies an f16 source onto an exact-zero backdrop. Any other
+        // blend falls through to the version 2 formula inside mode 19.
+        let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
+        let mut p = Self::params(if exact { 19 } else { 1 }, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         p.settings = [1.0, mode(node.blend), f32::from(clip.is_some()), 0.0];
         self.dispatch(&out, &dst, &src, clip.as_ref().unwrap_or(&dst), p, &[])?;
         Ok(out)
@@ -710,8 +713,21 @@ impl Context<'_> {
                 saturation,
             } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(3, world);
-                p.settings = [brightness, contrast, saturation, 0.0];
+                // Version 1 and 2 keep the float formula in mode 3. Version 3
+                // uses the Q14 formula in mode 17. The uniform carries the Q14
+                // integers in the f32 bit patterns.
+                let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
+                let mut p = Self::params(if exact { 17 } else { 3 }, world);
+                p.settings = if exact {
+                    [
+                        f32::from_bits(super::color_adjust_q14(brightness) as u32),
+                        f32::from_bits(super::color_adjust_q14(contrast) as u32),
+                        f32::from_bits(super::color_adjust_q14(saturation) as u32),
+                        0.0,
+                    ]
+                } else {
+                    [brightness, contrast, saturation, 0.0]
+                };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
@@ -1079,7 +1095,10 @@ impl Context<'_> {
                         Some(node.key)
                     },
                 )?;
-                let p = Self::params(0, world);
+                // Version 3 premultiplies recovered unorm bytes. Version 1 and 2
+                // keep the float product in mode 0.
+                let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
+                let p = Self::params(if exact { 18 } else { 0 }, world);
                 let dummy = self.dummy();
                 self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
                 out

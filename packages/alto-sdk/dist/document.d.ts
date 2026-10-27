@@ -1,3 +1,4 @@
+import { type UnstableRenderV3Options } from "./render-version.js";
 import { type Intent } from "./intents.js";
 import { type DocumentChange, type DocumentSnapshot } from "./snapshot.js";
 import { type ArchiveTarget, type ObjectStorageProvider } from "./storage.js";
@@ -42,6 +43,11 @@ export declare class DocumentHandle {
     get activeTool(): ToolSession | null;
     /** The folder this document was opened from or last saved to. */
     get folder(): ObjectStorageProvider | null;
+    /**
+     * A render version 3 document serializes as format 4. Saving that package
+     * needs the explicit opt-in, and this build does not have it.
+     */
+    private refuseUnstableFormatFour;
     private closed;
     /** Requests go through here, so a replaced handle cannot touch the new document. */
     private request;
@@ -60,8 +66,10 @@ export declare class DocumentHandle {
      * Switches a version-1 document to render version 2 as one undoable edit.
      * Bilinear and rotated samples change. Opening or saving a document does not
      * do this. A document that is already version 2 is rejected.
+     * `{ unstableRenderV3: true }` asks for render version 3. This build rejects
+     * that request: version 3 stays off until integer compositing lands.
      */
-    upgradeRenderVersion(): Promise<void>;
+    upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void>;
     /**
      * Resolves once every edit made so far is in the recovery journal. Edits resolve
      * when applied; this rejects with STORAGE if the journal could not be written.
@@ -142,14 +150,14 @@ export declare class DocumentHandle {
      */
     exportImage(options?: ExportImageOptions): Promise<Blob>;
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-    save(target: ArchiveTarget): Promise<void>;
+    save(target: ArchiveTarget, options?: UnstableRenderV3Options): Promise<void>;
     /**
      * Saves the folder form. Content-addressed files are written once; manifest.json
      * last. A folder holding another document is refused unless `overwrite`.
      */
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
-    }): Promise<{
+    } & UnstableRenderV3Options): Promise<{
         written: number;
         skipped: number;
     }>;
