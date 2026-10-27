@@ -1538,6 +1538,106 @@ fn dist_to_half(v: f32) -> f32 {
     (shifted - shifted.round()).abs()
 }
 
+/// `clamp(v, 0, 1) * 255` when that product is finite.
+fn scaled_byte(v: f32) -> Option<f32> {
+    if !v.is_finite() {
+        return None;
+    }
+    let scaled = v.clamp(0.0, 1.0) * 255.0;
+    scaled.is_finite().then_some(scaled)
+}
+
+/// Exact f32 equality with `n + 0.5`. Not an epsilon test.
+fn exactly_half_boundary(scaled: f32) -> bool {
+    let n = scaled.floor();
+    scaled == n + 0.5
+}
+
+/// `floor(x + 0.5)` on a non-negative byte-scaled value. At an exact tie this is
+/// `n + 1`. Elsewhere it is the nearest integer.
+fn round_half_up_byte(scaled: f32) -> u8 {
+    (scaled + 0.5).floor().clamp(0.0, 255.0) as u8
+}
+
+fn round_ties_even_byte(scaled: f32) -> u8 {
+    scaled.round_ties_even().clamp(0.0, 255.0) as u8
+}
+
+/// At an exact `n + 0.5`, the odd integer of `{n, n + 1}`.
+fn round_ties_odd_byte(scaled: f32) -> u8 {
+    let n = scaled.floor() as u32;
+    let odd = if n.is_multiple_of(2) { n + 1 } else { n };
+    odd.min(255) as u8
+}
+
+struct ChannelBoundary {
+    /// Pre-store f32 bits match. The byte still differs; the caller checked that.
+    bits_equal: bool,
+    exact_half: bool,
+    /// GPU byte is round-half-up and CPU byte is `round_ties_even`, and those
+    /// two bytes are different.
+    tie_even_vs_half_up: bool,
+    /// Exact tie, and the pair is not tie-even versus round-half-up.
+    exact_half_not_half_up: bool,
+    /// Bit-identical pre-store value whose `v * 255` is not exactly `n + 0.5`.
+    not_exact_half: bool,
+    /// Exact tie and the GPU byte is round-ties-to-odd.
+    gpu_ties_odd: bool,
+    class: &'static str,
+}
+
+fn classify_boundary(gpu_v: f32, cpu_v: f32, gpu_byte: u8, cpu_byte: u8) -> ChannelBoundary {
+    if gpu_v.to_bits() != cpu_v.to_bits() {
+        return ChannelBoundary {
+            bits_equal: false,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: false,
+            gpu_ties_odd: false,
+            class: "floats-differ",
+        };
+    }
+    let Some(scaled) = scaled_byte(gpu_v) else {
+        return ChannelBoundary {
+            bits_equal: true,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: true,
+            gpu_ties_odd: false,
+            class: "not-exact-half",
+        };
+    };
+    let ties_even = round_ties_even_byte(scaled);
+    let half_up = round_half_up_byte(scaled);
+    if !exactly_half_boundary(scaled) {
+        return ChannelBoundary {
+            bits_equal: true,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: true,
+            gpu_ties_odd: false,
+            class: "not-exact-half",
+        };
+    }
+    let tie_even_vs_half_up = half_up != ties_even && gpu_byte == half_up && cpu_byte == ties_even;
+    ChannelBoundary {
+        bits_equal: true,
+        exact_half: true,
+        tie_even_vs_half_up,
+        exact_half_not_half_up: !tie_even_vs_half_up,
+        not_exact_half: false,
+        gpu_ties_odd: gpu_byte == round_ties_odd_byte(scaled),
+        class: if tie_even_vs_half_up {
+            "tie-even-vs-half-up"
+        } else {
+            "exact-half-not-half-up"
+        },
+    }
+}
+
 fn json_f32(v: f32) -> String {
     if v.is_finite() {
         format!("{v:.8e}")
@@ -1691,6 +1791,11 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
     let mut floats_within = 0u32;
     let mut floats_apart = 0u32;
     let mut bit_identical = 0u32;
+    let mut exact_half = 0u32;
+    let mut tie_even_vs_half_up = 0u32;
+    let mut exact_half_not_half_up = 0u32;
+    let mut not_exact_half = 0u32;
+    let mut gpu_ties_odd = 0u32;
     let mut max_delta = 0f32;
     let mut lines = Vec::new();
     for row in rows {
@@ -1702,6 +1807,7 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                 differing += 1;
                 let gpu_v = pixel.gpu_pre[index];
                 let cpu_v = pixel.cpu_pre[index];
+                let boundary = classify_boundary(gpu_v, cpu_v, pixel.gpu[index], pixel.cpu[index]);
                 let gpu_dist = dist_to_half(gpu_v);
                 let cpu_dist = dist_to_half(cpu_v);
                 let nearer = gpu_dist.min(cpu_dist);
@@ -1717,12 +1823,31 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                 } else {
                     floats_apart += 1;
                 }
-                if gpu_v.to_bits() == cpu_v.to_bits() {
+                if boundary.bits_equal {
                     bit_identical += 1;
                 }
+                if boundary.exact_half {
+                    exact_half += 1;
+                }
+                if boundary.tie_even_vs_half_up {
+                    tie_even_vs_half_up += 1;
+                }
+                if boundary.exact_half_not_half_up {
+                    exact_half_not_half_up += 1;
+                }
+                if boundary.not_exact_half {
+                    not_exact_half += 1;
+                }
+                if boundary.gpu_ties_odd {
+                    gpu_ties_odd += 1;
+                }
+                let (ties_even_byte, half_up_byte) = scaled_byte(gpu_v)
+                    .filter(|_| boundary.bits_equal)
+                    .map(|scaled| (round_ties_even_byte(scaled), round_half_up_byte(scaled)))
+                    .unwrap_or((0, 0));
                 max_delta = max_delta.max(delta);
                 lines.push(format!(
-                    "    {{\"case\": \"{}\", \"x\": {}, \"y\": {}, \"channel\": \"{name}\", \"gpuByte\": {}, \"cpuByte\": {}, \"gpu\": {}, \"cpu\": {}, \"gpuBits\": {}, \"cpuBits\": {}, \"gpuDistToHalf\": {}, \"cpuDistToHalf\": {}, \"absScaledDelta\": {}, \"ops\": \"{}\"}}",
+                    "    {{\"case\": \"{}\", \"x\": {}, \"y\": {}, \"channel\": \"{name}\", \"gpuByte\": {}, \"cpuByte\": {}, \"gpu\": {}, \"cpu\": {}, \"gpuBits\": {}, \"cpuBits\": {}, \"gpuDistToHalf\": {}, \"cpuDistToHalf\": {}, \"absScaledDelta\": {}, \"exactHalf\": {}, \"tiesEvenByte\": {ties_even_byte}, \"halfUpByte\": {half_up_byte}, \"boundaryClass\": \"{}\", \"ops\": \"{}\"}}",
                     json_escape(&row.name),
                     pixel.x,
                     pixel.y,
@@ -1735,6 +1860,8 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                     json_f32(gpu_dist),
                     json_f32(cpu_dist),
                     json_f32(delta),
+                    if boundary.exact_half { "true" } else { "false" },
+                    boundary.class,
                     json_escape(&row.ops),
                 ));
             }
@@ -1746,7 +1873,7 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
         lines.join(",\n")
     };
     let json = format!(
-        "{{\n  \"backend\": \"{}\",\n  \"epsilonScaled\": {EPS:.0e},\n  \"tighterEpsilonScaled\": {TIGHTER:.0e},\n  \"differingChannels\": {differing},\n  \"withinEpsilonOfHalf\": {on_boundary},\n  \"withinTighterEpsilonOfHalf\": {on_boundary_tight},\n  \"prequantAbsDeltaWithinEpsilon\": {floats_within},\n  \"prequantAbsDeltaBeyondEpsilon\": {floats_apart},\n  \"bitIdenticalChannels\": {bit_identical},\n  \"maxAbsScaledDelta\": {},\n  \"channels\": [\n{body}\n  ]\n}}\n",
+        "{{\n  \"backend\": \"{}\",\n  \"epsilonScaled\": {EPS:.0e},\n  \"tighterEpsilonScaled\": {TIGHTER:.0e},\n  \"differingChannels\": {differing},\n  \"withinEpsilonOfHalf\": {on_boundary},\n  \"withinTighterEpsilonOfHalf\": {on_boundary_tight},\n  \"prequantAbsDeltaWithinEpsilon\": {floats_within},\n  \"prequantAbsDeltaBeyondEpsilon\": {floats_apart},\n  \"bitIdenticalChannels\": {bit_identical},\n  \"bitIdenticalExactHalf\": {exact_half},\n  \"bitIdenticalTieEvenVsHalfUp\": {tie_even_vs_half_up},\n  \"bitIdenticalExactHalfNotHalfUp\": {exact_half_not_half_up},\n  \"bitIdenticalNotExactHalf\": {not_exact_half},\n  \"bitIdenticalExactHalfGpuTiesToOdd\": {gpu_ties_odd},\n  \"maxAbsScaledDelta\": {},\n  \"channels\": [\n{body}\n  ]\n}}\n",
         json_escape(adapter),
         json_f32(max_delta)
     );
@@ -1763,13 +1890,34 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
          - `|GPU - CPU| * 255` within {EPS:.0e}: {floats_within}\n\
          - `|GPU - CPU| * 255` beyond {EPS:.0e}: {floats_apart}\n\
          - Bit-identical pre-quant channels: {bit_identical}\n\
-         - Max `|GPU - CPU| * 255`: {}\n\n",
+         - Max `|GPU - CPU| * 255`: {}\n\
+         - Bit-identical and `v * 255` exactly `n + 0.5`: {exact_half}\n\
+         - Of those, GPU byte is round-half-up and CPU byte is round-ties-even: {tie_even_vs_half_up}\n\
+         - Of those, exact `n + 0.5` but not that pair: {exact_half_not_half_up}\n\
+         - Bit-identical and not exactly `n + 0.5`: {not_exact_half}\n\
+         - Of the exact halves, GPU byte equals round-ties-to-odd: {gpu_ties_odd}\n\n",
         json_escape(adapter),
         json_f32(max_delta)
     );
+    markdown.push_str(
+        "Exact means f32 equality of `clamp(v, 0, 1) * 255` with `floor(that) + 0.5`, not an epsilon. \
+         round-half-up is `floor(clamp(v, 0, 1) * 255 + 0.5)`. \
+         CPU bytes use `round_ties_even`. \
+         A bit-identical channel that is not exactly `n + 0.5` means the unorm store differed from the CPU quantizer away from a tie.\n\n",
+    );
+    if not_exact_half > 0 {
+        markdown.push_str(
+            "At least one bit-identical channel is not exactly on `n + 0.5`. The unorm store conversion itself differs from CPU away from a tie.\n\n",
+        );
+    }
+    if exact_half_not_half_up > 0 {
+        markdown.push_str(
+            "Some exact ties are not round-half-up versus round-ties-even: those two rules agree, and the GPU byte is the other integer.\n\n",
+        );
+    }
     if floats_apart == 0 && differing > 0 && bit_identical == differing {
         markdown.push_str(
-            "Every differing channel has bit-identical pre-quantization floats on an n+0.5 boundary. The ±1 is the `rgba8unorm` store versus CPU `round_ties_even`.\n\n",
+            "Every differing channel has bit-identical pre-quantization floats. The ±1 is the `rgba8unorm` store versus CPU `round_ties_even`.\n\n",
         );
     } else if floats_apart == 0 && differing > 0 {
         markdown.push_str(&format!(
@@ -2954,6 +3102,75 @@ fn integer_filter_recovers_a_texel_and_rounds_half_up() {
         let restored = (decoded * 255.0).round_ties_even() as u8;
         assert_eq!(restored, byte, "unorm byte {byte} did not round-trip");
     }
+}
+
+/// Exact `n+0.5` is f32 equality, not an epsilon. `0.5` in byte space is a tie
+/// where round-ties-even and round-half-up disagree. `127.5` is a tie where
+/// they agree. `10` is an integer byte.
+#[test]
+fn unorm_boundary_split_is_exact_f32_equality() {
+    let half_up_tie = f32::from_bits(989_888_641);
+    let agreed = classify_boundary(half_up_tie, half_up_tie, 1, 0);
+    assert!(agreed.exact_half && agreed.tie_even_vs_half_up);
+    assert!(!agreed.exact_half_not_half_up && !agreed.not_exact_half);
+    assert!(agreed.gpu_ties_odd);
+    assert_eq!(agreed.class, "tie-even-vs-half-up");
+
+    let rules_agree = f32::from_bits(1_056_964_608);
+    let other = classify_boundary(rules_agree, rules_agree, 127, 128);
+    assert!(other.exact_half && other.exact_half_not_half_up);
+    assert!(!other.tie_even_vs_half_up && !other.not_exact_half);
+    assert!(other.gpu_ties_odd);
+    assert_eq!(other.class, "exact-half-not-half-up");
+
+    let integer = 10.0f32 / 255.0;
+    let off = classify_boundary(integer, integer, 11, 10);
+    assert!(off.not_exact_half && off.bits_equal);
+    assert!(!off.exact_half);
+    assert_eq!(off.class, "not-exact-half");
+
+    let drifted = classify_boundary(half_up_tie, rules_agree, 1, 0);
+    assert!(!drifted.bits_equal && !drifted.not_exact_half);
+    assert_eq!(drifted.class, "floats-differ");
+
+    let dir = std::env::temp_dir().join(format!(
+        "alto-boundary-{}-{}",
+        std::process::id(),
+        half_up_tie.to_bits()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pixel = MeasuredPixel {
+        x: 1,
+        y: 2,
+        sources: Vec::new(),
+        gpu: [1, 127, 11, 9],
+        cpu: [0, 128, 10, 8],
+        gpu_pre: [half_up_tie, rules_agree, integer, half_up_tie],
+        cpu_pre: [half_up_tie, rules_agree, integer, rules_agree],
+    };
+    write_prequant(
+        &dir,
+        "unit",
+        &[MeasuredCase {
+            name: "boundary".into(),
+            count: 1,
+            max_abs: [1, 1, 1, 1],
+            mismatches: vec![pixel],
+            length_note: String::new(),
+            ops: "unit".into(),
+        }],
+    );
+    let json = std::fs::read_to_string(dir.join("prequant.json")).unwrap();
+    assert!(json.contains("\"bitIdenticalExactHalf\": 2"));
+    assert!(json.contains("\"bitIdenticalTieEvenVsHalfUp\": 1"));
+    assert!(json.contains("\"bitIdenticalExactHalfNotHalfUp\": 1"));
+    assert!(json.contains("\"bitIdenticalNotExactHalf\": 1"));
+    assert!(json.contains("\"bitIdenticalExactHalfGpuTiesToOdd\": 2"));
+    assert!(json.contains("\"boundaryClass\": \"tie-even-vs-half-up\""));
+    assert!(json.contains("\"boundaryClass\": \"exact-half-not-half-up\""));
+    assert!(json.contains("\"boundaryClass\": \"not-exact-half\""));
+    assert!(json.contains("\"boundaryClass\": \"floats-differ\""));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A 0.1× layer moved 4000px inverts to a -40000px translation. That Q16 value
