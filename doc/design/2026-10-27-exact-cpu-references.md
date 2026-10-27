@@ -4,11 +4,13 @@
 
 状態：方針。実装順は `color-adjust`、`mask`、`vector-fill`、`gaussian-blur`、`text`。各パスは main から切った別 PR で、main へ向ける。`color-adjust` は最初の PR で通常の parity ケースにした。
 
-関連：[画像編集](IMAGE-EDITING.md)。
+関連：[画像編集](IMAGE-EDITING.md)、[半透明合成の parity](../verification/semi-transparent-composite-parity.md)。
 
 記録してあるハッシュは動かさない。`tests/parity/render-v1.txt` の全行と、`tests/parity/cpu-reference.txt` の既存行は再生成しない。新しいケースを足すときは行の追加だけにする。
 
 描画バージョン 1 と 2 の画素は変えない。バージョン 3 の式は `render_version` が 3 の文書だけが使う。バージョン 1 と 2 の式はコードに残す。バージョン 3 を既定の新規文書にする変更は、ロック済み合成ケースの画素がバージョン 2 と一致することを確認してからにする。一致しないあいだ、parity の新ケースだけがバージョン 3 を名指しで使う。整数合成が入るまで描画バージョン 3 は不安定である。3 へ上げる操作（`upgrade_render_version` / `upgradeRenderVersion`）と、format 4 のパッケージ保存（単一ファイル、フォルダ、履歴を切った保存）は明示のオプトインが要る。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ要求を受ける。既定はオフで、リリースビルドは要求を無視する。JS は `{ unstableRenderV3: true }` で、出荷する定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書と、引数なしの更新はバージョン 2 のままである。既にバージョン 3 / format 4 のファイルはオプトインなしで開ける。`tests/fixtures/render-v3-empty.alto` も読み込める。開いた文書のビュー、スナップショットハッシュ、復旧チェックポイントは、その文書を format 4 として直列化する。これは利用者が選ぶ保存ではない。オプトインがあるとき、バージョン 3 の文書の保存は `format_version` 4 になる。4 を知らないビルドはファイルを拒否する。`DocumentMeta::validate` が受け付ける `render_version` は 1、2、3 だけである。それ以外は拒否する。未知の値を読み飛ばして古い式で描くことはしない。
+
+描画バージョン 2 の合成がビット一致するのは、src か dst の少なくとも一方が不透明、またはアルファ 0 のときだけである。半透明の上に半透明を重ねると、lavapipe ではチャネルが ±1 ずれる。この P2P 設計では、その差はピア間のタイルハッシュの分岐になる。同じ文書が、ピアによって違う画素になる。v2 は、この既知の非決定性を持ったまま凍結する。対処は `render.upgrade` で、`render_version` 3 の整数合成へ上げることである。整数合成はまだ入っていない。いまのバージョン 3 は color-adjust だけで、上に書いた不安定オプトインの向こうにある。`-alpha-measure` の計測と、量子化前の float ダンプは [半透明合成の parity](../verification/semi-transparent-composite-parity.md) に置く。
 
 CPU 参照は Rust（`crates/alto-gpu/src/cpu_composite.rs`、テストのみ）と JS（`tests/e2e/cpu-composite.js`）に同じ式で置く。WGSL はその式を実行する。段と段のあいだの RGBA16F ストアと、最後の RGBA8 unorm ストアは、どちらも半整数を偶数側へ丸める。
 
