@@ -1,0 +1,81 @@
+{
+  "implementationHead": "65204531b4c502dafdd43470cab82b30a47ecc00",
+  "runs": [
+    {
+      "conclusion": "success",
+      "headSha": "65204531b4c502dafdd43470cab82b30a47ecc00",
+      "status": "completed",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366219457"
+    },
+    {
+      "conclusion": "success",
+      "headSha": "65204531b4c502dafdd43470cab82b30a47ecc00",
+      "status": "completed",
+      "url": "https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366266348"
+    }
+  ],
+  "browser": "Chrome/156.0.8078.47",
+  "adapter": {
+    "vendor": "google",
+    "architecture": "swiftshader",
+    "device": "",
+    "description": ""
+  },
+  "artifacts": {
+    "packages/alto-sdk/dist/worker.js": "cd28f4199363f98f28cddf5fd30001dea8518f8cba5d798c34b5a25418d7864e",
+    "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm": "87abe73d4c88fc890a1f1083f9f2864216e5e882d4002b67a41997b123c2dfaf"
+  },
+  "functional": [
+    {
+      "name": "functional",
+      "ok": true,
+      "count": 36
+    },
+    {
+      "name": "m5",
+      "ok": true,
+      "count": 9
+    },
+    {
+      "name": "m6",
+      "ok": true,
+      "count": 11
+    },
+    {
+      "name": "m7",
+      "ok": true,
+      "count": 9
+    },
+    {
+      "name": "m8",
+      "ok": true,
+      "count": 6
+    },
+    {
+      "name": "embed",
+      "ok": true,
+      "count": 37
+    }
+  ],
+  "examples": [
+    {
+      "name": "example minimal-embed",
+      "ok": true,
+      "count": 1,
+      "error": null
+    },
+    {
+      "name": "example react-embed",
+      "ok": true,
+      "count": 1,
+      "error": null
+    }
+  ],
+  "vector": [
+    {
+      "name": "vector optimization",
+      "ok": true,
+      "count": 10
+    }
+  ]
+}

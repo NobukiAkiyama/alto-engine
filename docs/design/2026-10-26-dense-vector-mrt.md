@@ -43,7 +43,7 @@ pass 終了時に各 R8 coverage を resolve し、一つの paint pass でバ�
 
 - Legacy / Pooled / Disjoint（先行実装）/ Dense（強制 MRT）/ Batched（自動選択）を同じ device / queue 上で比較する。
 - RGBA16F 全バイトを比較する。色の異なる半透明、0 / 微小 alpha、塗り＋線、自己重なり、ROI / 変換、8の倍数でないバッチ数を含める。
-- 実 GPU の独立5プロファイル、方式の順序を交互にして、3 warmup＋100フレーム。CPU encode と queue 完了を区別し、readback は計時外。全サンプル・失敗・実行 WASM hash を保存する。
+- 実 GPU の独立5プロファイル以上、方式の順序を交互にして、3 warmup＋100フレーム。今回の採用測定は正逆3回ずつ、計6プロファイル。CPU encode と queue 完了を区別し、readback は計時外。全サンプル・失敗・実行 WASM hash を保存する。
 - 密集1,000パスが先行 Disjoint の50%以下を目指す。疎な100パスは5 pass のまま、画素一致と継続的な速度悪化がないことを確認する。
 - SwiftShader は正しさと障害経路の確認に使う。SDK の密集 vector layer を通して、編集、Undo/Redo、tile seam、mask / effect、保存・再読込、GPU 再作成も確認する。
 
