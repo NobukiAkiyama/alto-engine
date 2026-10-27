@@ -101,4 +101,6 @@ The f32 values differ by 1 to 3 ulps. Every one of those gaps sits on a rounding
 
 On Metal in the same run, 8217 channels differ. 8208 of them are bit-identical before quantization and still store a different byte, so that ±1 is the `rgba8unorm` store versus CPU `round_ties_even` on an exact `n+0.5` boundary. The other 9 differ by one ulp (`|GPU - CPU| * 255` at most `1.51991844e-5`): `blend-hue` and `blend-color` blue at (181,82), and seven channels in `eight-layers`. All 8217 are within `1e-4` of an `n+0.5` boundary. None exceed `1e-3`.
 
+Metal exact-half count, [CI run 40593541861](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40593541861) on `30a4437` (`Apple Paravirtual device`): of 8208 bit-identical pre-store channels, 8208 have `v*255` exactly equal to `n+0.5` and 0 do not; 8201 differ as CPU `round_ties_even` versus `round-half-up`, and 7 are exact halves where those two rules agree but the GPU byte is the other integer (all 8208 GPU bytes match round-ties-to-odd).
+
 `rgba8unorm` store versus CPU `round_ties_even` is the step that turns a tie, or a one-ulp gap on that tie, into a byte. It is not a second formula.
