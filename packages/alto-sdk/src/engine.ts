@@ -1,7 +1,7 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
-import { PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type WorkerMessage } from "./protocol.js";
+import { PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { ToolHost, ToolSession } from "./tools.js";
@@ -37,7 +37,26 @@ export interface EngineStatus {
   readonly error: AltoError | null;
 }
 
+/** Logical canvas publication. This is not an OS scanout timestamp. */
+export interface PresentationSnapshot {
+  readonly phase: "preparing" | "holding" | "refining" | "ready";
+  readonly requestedViewVersion: number;
+  readonly presentedViewVersion: number | null;
+  readonly presentedViewport: Readonly<{ center: readonly [number, number]; zoom: number; rotation: number }> | null;
+  readonly sceneGeneration: number;
+  readonly presentedGeneration: number;
+  readonly documentSession: number;
+  readonly deviceEpoch: number;
+  readonly surfaceGeneration: number;
+  readonly requestedLevel: number;
+  readonly admittedLevel: number;
+  readonly degradedByBudget: boolean;
+  readonly hasStaleFallback: boolean;
+  readonly interactionReady: boolean;
+}
+
 export interface EngineEvents {
+  presentation: PresentationSnapshot;
   status: EngineStatus;
   /** The open document changed to another one (open, create, restore) or closed. */
   document: DocumentHandle | null;
@@ -77,6 +96,7 @@ export interface Engine {
   readonly document: DocumentHandle | null;
   /** Where the canvas looks; zoom is in CSS pixels. */
   readonly viewport: ViewportControl;
+  readonly presentation: PresentationSnapshot;
   readonly recovery: {
     /** A journal from an earlier session is waiting. */
     readonly available: boolean;
@@ -139,6 +159,69 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private nextDocumentEpoch = 0;
   private documentEpoch = 0;
   private readonly documentEpochs = new WeakMap<DocumentHandle, number>();
+  private requestedViewVersion = 0;
+  private deferredView: Extract<StreamMessage, { t: "viewport" }> | null = null;
+  private displayState: PresentationSnapshot = Object.freeze({
+    phase: "preparing", requestedViewVersion: 0, presentedViewVersion: null,
+    presentedViewport: null, sceneGeneration: 0, presentedGeneration: 0,
+    documentSession: 0, deviceEpoch: 0, surfaceGeneration: 0,
+    requestedLevel: 0, admittedLevel: 0, degradedByBudget: false,
+    hasStaleFallback: false, interactionReady: false,
+  });
+  get presentation(): PresentationSnapshot {
+    return this.displayState;
+  }
+  private publishDisplay(next: PresentationSnapshot) {
+    const frozen = Object.freeze(next);
+    if (JSON.stringify(frozen) === JSON.stringify(this.displayState)) return;
+    this.displayState = frozen;
+    this.element.style.visibility = next.presentedViewport ? "visible" : "hidden";
+    this.emit("presentation", frozen);
+  }
+  private resetDisplay() {
+    this.publishDisplay({
+      ...this.displayState, phase: "preparing", interactionReady: false,
+      presentedViewport: null, presentedViewVersion: null,
+    });
+  }
+  private requestView(v: Extract<StreamMessage, { t: "viewport" }>) {
+    this.requestedViewVersion = v.version;
+    this.publishDisplay({
+      ...this.displayState, requestedViewVersion: v.version,
+      phase: this.displayState.presentedViewport ? "holding" : "preparing", interactionReady: false,
+    });
+    if (this.document?.activeTool) this.deferredView = v;
+    else this.stream(v);
+  }
+  private flushDeferredView() {
+    if (this.document?.activeTool || !this.deferredView) return;
+    const view = this.deferredView;
+    this.deferredView = null;
+    this.stream(view);
+  }
+  private acceptDisplay(frame: FrameStats) {
+    if (frame.documentEpoch !== this.documentEpoch || !this.document) return;
+    const d = frame.display;
+    if (!d) return;
+    const sameView = frame.viewVersion === this.requestedViewVersion;
+    // A submission becomes visible to this API only after its GPU completion callback.
+    const has = !!d.hasPresented;
+    const phases = ["preparing", "holding", "refining", "ready"] as const;
+    const phase = has ? (sameView ? phases[d.phase] : "holding") : "preparing";
+    this.publishDisplay({
+      phase, requestedViewVersion: this.requestedViewVersion,
+      presentedViewVersion: has ? d.presentedViewVersion : null,
+      presentedViewport: has ? Object.freeze({
+        center: Object.freeze([d.centerX, d.centerY]) as readonly [number, number],
+        zoom: d.zoom / this.pixelRatio, rotation: d.rotation,
+      }) : null,
+      sceneGeneration: d.generation, presentedGeneration: d.presentedGeneration,
+      documentSession: d.session, deviceEpoch: d.deviceEpoch, surfaceGeneration: d.surface,
+      requestedLevel: d.requestedLevel, admittedLevel: d.admittedLevel,
+      degradedByBudget: d.admittedLevel > d.requestedLevel, hasStaleFallback: !!d.stale,
+      interactionReady: sameView && !!d.interactionReady,
+    });
+  }
   private raf = 0;
   private disposed = false;
   private pixelRatio: number;
@@ -179,6 +262,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       ? new URL("worker.js", new URL(options.assets.baseURL, location.href))
       : null;
     this.element = this.makeCanvas();
+    this.element.style.visibility="hidden";
     options.container.appendChild(this.element);
     this.viewport = new ViewportControl({
       rect: () => this.element.getBoundingClientRect(),
@@ -188,7 +272,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         return meta ? [meta.width, meta.height] : null;
       },
       send: (v) =>
-        this.stream({
+        this.requestView({
           t: "viewport",
           version: v.version,
           center: v.center,
@@ -257,7 +341,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
   private makeCanvas() {
     const c = document.createElement("canvas");
-    c.style.cssText = "display:block;width:100%;height:100%;touch-action:none";
+    c.style.cssText = "display:block;width:100%;height:100%;touch-action:none;visibility:hidden";
     return c;
   }
   private watchPixelRatio() {
@@ -310,6 +394,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       ? new Worker(this.workerURL, { type: "module" })
       : new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
     this.worker = worker;
+    this.resetDisplay();
     const generation = ++this.workerGeneration;
     worker.onmessage = ({ data }) => {
       if (generation !== this.workerGeneration || this.disposed) return;
@@ -370,14 +455,18 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if (data.ok) p.resolve(data.value);
       else p.reject(fromWorkerError(data.error));
     } else if (data.t === "patch") {
+      if(this.document && this.document.getSnapshot().revision!==data.value.revision)
+        this.publishDisplay({...this.displayState,phase:this.displayState.presentedViewport ? "holding" : "preparing",interactionReady:false});
       this.document?.apply(data.value);
     } else if (data.t === "storageFailure") {
       if (this.state.state !== "storage-failed") {
         const error = new AltoError("STORAGE", data.value.message);
         this.document?.abortTool(error);
+        this.flushDeferredView();
         this.setStatus("storage-failed", error);
       }
     } else if (data.t === "frame") {
+      this.acceptDisplay(data.value);
       this.diagnostics.emit("frame", data.value);
     } else if (data.t === "diagnostic") {
       const value = data.value;
@@ -385,7 +474,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if (typeof value?.initPhase === "string") this.initPhase = value.initPhase;
       this.diagnostics.emit("diagnostic", value);
     } else if (data.t === "gpuLost") {
+      this.resetDisplay();
       this.document?.abortTool(new AltoError("GPU_LOST", "the GPU device was lost during the stroke"));
+      this.flushDeferredView();
       this.diagnostics.emit("gpuLost", null);
     } else if (data.t === "gpuRestored") {
       this.diagnostics.emit("gpuRestored", null);
@@ -500,15 +591,27 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   }
   /** @internal */
   toolHost(doc: DocumentHandle): ToolHost {
+    // Freeze the transform for this stroke, while viewport.get() stays synchronous.
+    const view = this.viewport.get(), rect = this.element.getBoundingClientRect();
+    const ready = this.presentation.interactionReady;
     return {
+      presentationReady: () => ready,
       request: ((...args: Parameters<EngineCore["request"]>) => this.requestForDocument(doc, ...args)) as EngineCore["request"],
       stream: (m, transfer) => {
         if (doc !== this.document) return;
         this.stream(m.t === "input" ? { ...m, documentEpoch: this.documentEpochs.get(doc) } : m, transfer);
       },
-      screenToDocument: (x, y) => this.viewport.screenToDocument(x, y),
+      screenToDocument: (x, y) => {
+        const dx = (x - rect.left - rect.width / 2) / view.zoom;
+        const dy = (y - rect.top - rect.height / 2) / view.zoom;
+        const c = Math.cos(view.rotation), s = Math.sin(view.rotation);
+        return [view.center[0] + c * dx + s * dy, view.center[1] - s * dx + c * dy];
+      },
       storageError: () => this.storageError(),
-      ended: (session: ToolSession, state) => doc.toolEnded(session, state),
+      ended: (session: ToolSession, state) => {
+        doc.toolEnded(session, state);
+        if (doc === this.document) this.flushDeferredView();
+      },
       reportError: (e) => this.emit("error", e instanceof AltoError ? e : new AltoError("INTERNAL", String(e))),
     };
   }
@@ -543,6 +646,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.document = new DocumentHandle(this, state as WireState);
     this.documentEpoch = epoch;
     this.documentEpochs.set(this.document, epoch);
+    this.deferredView=null;
+    this.resetDisplay();
     this.emit("document", this.document);
     if (fit) this.viewport.fit();
     else this.viewport.publish();

@@ -1,6 +1,6 @@
 import type { ImportedImage, WireOp } from "./transaction.js";
 import type { CommitView, FontInfo, PathData, Rect, TextCaret, TextInfo, TextMotion, TileRef, VersionDiff } from "./types.js";
-export declare const PROTOCOL = 4;
+export declare const PROTOCOL = 5;
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
     code: string;
@@ -42,6 +42,12 @@ export type FrameStats = Record<string, unknown> & {
         effects: number;
         stroke: number;
         vector: number;
+        readback: number;
+        reserved: number;
+        pendingAllocation: number;
+        budgetUsed: number;
+        budgetLimit: number;
+        operationPeak: number;
         retiredFixed: number;
         retired: number;
         effectsAllocations: number;
@@ -51,6 +57,8 @@ export type FrameStats = Record<string, unknown> & {
         overviewTiles: number;
         overviewReady: number;
     };
+    display: Record<string, number>;
+    documentEpoch?: number;
     /** Display tiles composited this frame. */
     composed: number;
     pending: number;
@@ -213,6 +221,10 @@ export interface Requests {
         scale: number;
         type: string;
     }, Blob>;
+    injectFinishJournalFailure: Q<None, true>;
+    injectReadbackFailure: Q<{
+        after: number;
+    }, true>;
     waitFrame: Q<None, FrameStats>;
     readTile: Q<{
         x: number;

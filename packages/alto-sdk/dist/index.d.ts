@@ -1,7 +1,7 @@
 export { createEngine } from "./engine.js";
 export { isSupported } from "./browser.js";
 export { deleteRecovery, listRecoveryNamespaces } from "./recovery-store.js";
-export type { Engine, EngineEvents, EngineOptions, EngineState, EngineStatus, RecoveryReport, } from "./engine.js";
+export type { Engine, EngineEvents, EngineOptions, EngineState, EngineStatus, PresentationSnapshot, RecoveryReport, } from "./engine.js";
 export { DocumentHandle } from "./document.js";
 export type { ExportImageOptions, SelectionSpec } from "./document.js";
 export { AltoError } from "./errors.js";

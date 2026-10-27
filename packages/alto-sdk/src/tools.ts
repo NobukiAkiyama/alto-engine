@@ -34,6 +34,7 @@ export interface ToolHost {
   request: EngineCore["request"];
   stream(message: StreamMessage, transfer: Transferable[]): void;
   screenToDocument(clientX: number, clientY: number): [number, number];
+  presentationReady(): boolean;
   storageError(): AltoError | null;
   ended(session: ToolSession, state: unknown): void;
   reportError(error: AltoError): void;
@@ -47,6 +48,7 @@ export interface ToolHost {
 export class ToolSession {
   private samples: number[] = [];
   private done = false;
+  private ending = false;
   private aborted: AltoError | null = null;
   private readonly ready: Promise<unknown>;
   /** @internal */
@@ -84,6 +86,7 @@ export class ToolSession {
   input(input: PointerEvent | InputSample): void {
     if (this.done) return;
     if ("clientX" in input) {
+      if (!this.host.presentationReady()) throw new AltoError("CONFLICT", "the requested view is not ready for pointer input");
       const events = input.getCoalescedEvents?.() || [input];
       for (const e of events.length ? events : [input]) {
         const p = this.host.screenToDocument(e.clientX, e.clientY);
@@ -121,6 +124,7 @@ export class ToolSession {
       return;
     }
     this.done = true;
+    this.ending = true;
     try {
       await this.flush();
       const state = await this.host.request("endBrush");
@@ -128,11 +132,11 @@ export class ToolSession {
     } catch (error) {
       this.host.ended(this, null);
       throw error;
-    }
+    } finally {this.ending=false;}
   }
-  /** Discards the stroke. */
+  /** Discards the stroke, including a pending GPU readback before CPU commit. */
   async cancel(): Promise<void> {
-    if (this.done) return;
+    if (this.done && !this.ending) return;
     this.done = true;
     this.samples = [];
     try {

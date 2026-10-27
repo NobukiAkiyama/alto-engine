@@ -5,4 +5,4 @@
 tag=none
 # 0 until update-wasm-sums.sh rewrites the comparison package on aarch64-apple-darwin.
 # The release workflow refuses to publish any tag while this is not 1.
-enforce_vector=0
+enforce_vector=1

@@ -38,6 +38,8 @@ function Editor() {
   const container = useRef<HTMLDivElement>(null);
   const [engine, setEngine] = useState<Engine | null>(null);
   const [doc, setDoc] = useState<DocumentHandle | null>(null);
+  const [displayPhase,setDisplayPhase]=useState("preparing");
+  useEffect(()=>engine?.on("presentation",p=>setDisplayPhase(p.phase)),[engine]);
   const [layer, setLayer] = useState<NodeId>("");
   useEffect(() => {
     let disposed = false;
@@ -62,7 +64,7 @@ function Editor() {
     if (engine && doc) Object.assign(window, { altoExample: { engine, document: () => doc, layer: () => layer } });
   }, [engine, doc, layer]);
   const draw = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!doc) return;
+    if (!doc || !engine?.presentation.interactionReady) return;
     const el = event.currentTarget;
     el.setPointerCapture(event.pointerId);
     const stroke = doc.tools.begin("brush", { layer, color: [0.8, 0.1, 0.2, 1], tip: { size: 18 } });
@@ -74,6 +76,7 @@ function Editor() {
   return (
     <>
       <div className="editor" ref={container} onPointerDown={draw} />
+      <output>{displayPhase === "ready" ? "" : "Updating view…"}</output>
       {doc ? <Layers doc={doc} selected={layer} onSelect={setLayer} /> : <aside>Starting…</aside>}
     </>
   );

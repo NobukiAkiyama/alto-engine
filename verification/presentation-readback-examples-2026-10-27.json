@@ -1,0 +1,14 @@
+[
+  {
+    "name": "example minimal-embed",
+    "ok": true,
+    "count": 1,
+    "error": null
+  },
+  {
+    "name": "example react-embed",
+    "ok": true,
+    "count": 1,
+    "error": null
+  }
+]

@@ -416,6 +416,8 @@ export interface Engine {
     open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
     openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
     // (undocumented)
+    readonly presentation: PresentationSnapshot;
+    // (undocumented)
     readonly recovery: {
         readonly available: boolean;
         restore(): Promise<DocumentHandle>;
@@ -437,6 +439,8 @@ export interface Engine {
 export interface EngineEvents {
     document: DocumentHandle | null;
     error: AltoError;
+    // (undocumented)
+    presentation: PresentationSnapshot;
     recoveryAvailable: {
         records: number;
     };
@@ -767,6 +771,42 @@ export type PathCommand = {
 export interface PathData {
     // (undocumented)
     commands: PathCommand[];
+}
+
+// @public
+export interface PresentationSnapshot {
+    // (undocumented)
+    readonly admittedLevel: number;
+    // (undocumented)
+    readonly degradedByBudget: boolean;
+    // (undocumented)
+    readonly deviceEpoch: number;
+    // (undocumented)
+    readonly documentSession: number;
+    // (undocumented)
+    readonly hasStaleFallback: boolean;
+    // (undocumented)
+    readonly interactionReady: boolean;
+    // (undocumented)
+    readonly phase: "preparing" | "holding" | "refining" | "ready";
+    // (undocumented)
+    readonly presentedGeneration: number;
+    // (undocumented)
+    readonly presentedViewport: Readonly<{
+        center: readonly [number, number];
+        zoom: number;
+        rotation: number;
+    }> | null;
+    // (undocumented)
+    readonly presentedViewVersion: number | null;
+    // (undocumented)
+    readonly requestedLevel: number;
+    // (undocumented)
+    readonly requestedViewVersion: number;
+    // (undocumented)
+    readonly sceneGeneration: number;
+    // (undocumented)
+    readonly surfaceGeneration: number;
 }
 
 // @public

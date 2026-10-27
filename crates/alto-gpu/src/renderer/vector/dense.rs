@@ -206,10 +206,11 @@ impl Dense {
         if bytes + arena_bytes + old_coverage > budget {
             return false;
         }
-        if self
-            .coverage
-            .first()
-            .is_none_or(|c| c.w != first.w || c.h != first.h)
+        if self.coverage.len() != LANES - 1
+            || self
+                .coverage
+                .first()
+                .is_none_or(|c| c.w != first.w || c.h != first.h)
         {
             for c in self.coverage.drain(..) {
                 retired.texture(c.multi);
@@ -217,7 +218,16 @@ impl Dense {
             }
             self.uniforms.invalidate_paint();
             for _ in 1..LANES {
-                self.coverage.push(Coverage::new(device, first.w, first.h));
+                match Coverage::new(device, first.w, first.h) {
+                    Ok(c) => self.coverage.push(c),
+                    Err(_) => {
+                        for c in self.coverage.drain(..) {
+                            retired.texture(c.multi);
+                            retired.texture(c.resolved);
+                        }
+                        return false;
+                    }
+                };
             }
         }
         let views: Vec<_> = std::iter::once(first).chain(self.coverage.iter()).collect();

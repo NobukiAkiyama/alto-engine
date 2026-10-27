@@ -77,7 +77,7 @@ impl Renderer {
         store: &dyn TileStore,
     ) -> Result<JobStep> {
         self.overview_pins.clear();
-        let Some(mut key) = self
+        let Some(key) = self
             .overview_keys
             .iter()
             .filter(|k| !self.cache_map.contains_key(k))
@@ -86,6 +86,15 @@ impl Renderer {
         else {
             return Ok(JobStep::Idle);
         };
+        self.hierarchy_step(scene, store, key)
+    }
+    pub(super) fn hierarchy_step(
+        &mut self,
+        scene: &RenderScene,
+        store: &dyn TileStore,
+        mut key: CacheKey,
+    ) -> Result<JobStep> {
+        self.overview_pins.clear();
         loop {
             if key.0 == 0 {
                 break;

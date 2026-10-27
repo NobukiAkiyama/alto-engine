@@ -11,6 +11,7 @@ if (!support.ok) throw new Error("This browser cannot run the engine: " + suppor
 const editor = $("editor");
 const engine = await createEngine({ container: editor, storage: { namespace: "minimal-embed" } });
 engine.on("status", ({ state, error }) => status(error ? `${state}: ${error.code}` : state));
+engine.on("presentation", ({phase}) => { if(phase!=="ready") status("Updating view…"); });
 engine.on("error", (e: AltoError) => status("error: " + e.code));
 
 let doc: DocumentHandle;
@@ -34,6 +35,7 @@ await start(engine.recovery.available ? await engine.recovery.restore() : await 
 
 // Strokes: pointer events go to the container, which outlives the engine's canvas.
 editor.addEventListener("pointerdown", (event) => {
+  if (!engine.presentation.interactionReady) return;
   editor.setPointerCapture(event.pointerId);
   const stroke = doc.tools.begin("brush", { layer, color: [0.1, 0.3, 0.9, 1], tip: { size: 16 } });
   stroke.input(event);

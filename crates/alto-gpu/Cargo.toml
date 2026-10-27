@@ -17,6 +17,8 @@ log = "0.4"
 # so a Linux rebuild of the shipped package does not pick up Metal, Vulkan, or DX12.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu", "std"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "std", "vulkan", "metal", "dx12"] }

@@ -8,6 +8,7 @@ export class ToolSession {
     host;
     samples = [];
     done = false;
+    ending = false;
     aborted = null;
     ready;
     /** @internal */
@@ -43,6 +44,8 @@ export class ToolSession {
         if (this.done)
             return;
         if ("clientX" in input) {
+            if (!this.host.presentationReady())
+                throw new AltoError("CONFLICT", "the requested view is not ready for pointer input");
             const events = input.getCoalescedEvents?.() || [input];
             for (const e of events.length ? events : [input]) {
                 const p = this.host.screenToDocument(e.clientX, e.clientY);
@@ -79,6 +82,7 @@ export class ToolSession {
             return;
         }
         this.done = true;
+        this.ending = true;
         try {
             await this.flush();
             const state = await this.host.request("endBrush");
@@ -88,10 +92,13 @@ export class ToolSession {
             this.host.ended(this, null);
             throw error;
         }
+        finally {
+            this.ending = false;
+        }
     }
-    /** Discards the stroke. */
+    /** Discards the stroke, including a pending GPU readback before CPU commit. */
     async cancel() {
-        if (this.done)
+        if (this.done && !this.ending)
             return;
         this.done = true;
         this.samples = [];

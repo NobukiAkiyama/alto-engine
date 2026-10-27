@@ -36,12 +36,13 @@ export declare class ToolSession {
     private readonly host;
     private samples;
     private done;
+    private ending;
     private aborted;
     private readonly ready;
     get active(): boolean;
     input(input: PointerEvent | InputSample): void;
     /** Commits the stroke as one edit. */
     end(): Promise<void>;
-    /** Discards the stroke. */
+    /** Discards the stroke, including a pending GPU readback before CPU commit. */
     cancel(): Promise<void>;
 }

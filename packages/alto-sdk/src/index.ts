@@ -7,6 +7,7 @@ export type {
   EngineOptions,
   EngineState,
   EngineStatus,
+  PresentationSnapshot,
   RecoveryReport,
 } from "./engine.js";
 export { DocumentHandle } from "./document.js";

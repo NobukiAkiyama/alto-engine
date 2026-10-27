@@ -59,7 +59,13 @@ SDK には1レイヤー128パスの既存上限がある。単体 renderer の1,
 - ラスター主体の C2 / C3・B1〜B8 は13条件を通過した。編集全体の回帰記録（`dense-vector-editor-regression-metal-2026-10-26.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。密集ベクター以外の性能向上を主張する根拠にはしない。
 - 配布 WASM：4,603,311 bytes、gzip1,164,303 bytes、SHA-256 `b3a7df524b5e136e420f0af47baf3a89c4e6c9cc2a690d25dce508e07da45314`。先行版から22,996 bytes増加。比較専用 WASM：6,346,465 bytes、SHA-256 `9728b2423ca0d36414068e603fc0bb49546c65b853d2c85ee3eb402d06bc60d0`。通常配布に vello はリンクしていない。
 
-GitHub CI の結果はローカル検査と区別して記録する。
+## GitHub CI
+
+[CI run 40220872493](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40220872493) は commit `ba52f250db253f2ad77683822ed8b7366592d747` の通常 check job を全て成功した。Chrome 156.0.8078.47 / SwiftShader。Rust / WASM / 配布物、回帰94件、埋め込み2例、10画素条件×5方式と寿命・予算の検査を含む。[CI の記録](dense-vector-ci-2026-10-26.json)。手動の gpu-lifecycle 調査 job は通常 push のため未実行。
+
+CI の配布 WASM はローカルと同じ `b3a7df52...da45314`。比較専用 WASM も CI 上でソースから再ビルドし、実行 hash は `e94aae6e...eaea826` と記録した。比較ビルドには通常配布のパス固定処理を適用していないため、実行した hash をローカルと区別する。CI を通ったソースと配布物が主作業ツリーと一致することも照合した。
+
+通常回帰の破損 journal 復旧テスト中に `ProduceOverlay` の non-existent mailbox / Invalid mailbox を1件観測した。密集 M6 ケースより前であり、以前の `ProduceSkia` → Invalid Texture → DissociateMailboxForPresent → external Instance 消失の列は記録されていない。CI の成功を console の完全無診断や GPU 喪失の根治と取り違えず、診断行と前後の文脈も保存した。このログだけで原因や独立性を断定しない。
 
 ## 再現
 
