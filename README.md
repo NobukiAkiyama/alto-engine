@@ -2,11 +2,11 @@
 
 Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Playgroundです。**M7：テキスト（横組み・日本語縦組み・フォントフォールバック・OpenType機能・テキスト選択）**と、**M8：版管理（コミット・意味的差分・フォルダ形式・Git Adapter）**を追加しました。M6までのベクター・選択範囲・ラスター編集・調整・非破壊ぼかしも使えます。文書・Undo/Redo・`.alto`保存・OPFSジャーナル復旧につながっています。
 
-[実装状況](MILESTONES.md) / [最終検証結果](verification/RESULTS.md) / [M7/M8サンプル文書](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](verification/m8-git-transcript.txt)
+[ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [最終検証結果](doc/verification/RESULTS.md) / [M7/M8サンプル文書](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
 
-[コールド表示の実装・測定結果](verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
+[コールド表示の実装・測定結果](doc/verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](doc/design/COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
-[エンジン再設計（差分描画・エラー一本化）](docs/design/2026-10-24-engine-redesign.md)。編集後は、変更した範囲の表示タイルだけを作り直します。
+[エンジン再設計（差分描画・エラー一本化）](doc/design/2026-10-24-engine-redesign.md)。編集後は、変更した範囲の表示タイルだけを作り直します。
 
 ## まず起動する
 
@@ -119,7 +119,7 @@ alto-git export work.alto art.altoproj   # 単一ファイル → フォルダ
 alto-git pack art.altoproj work.alto     # フォルダ → 単一ファイル
 ```
 
-gitのコミットはその版の時点のフォルダで、メッセージにIntentの要約と変更レイヤーの一覧、`Alto-Commit:` トレーラを含みます。`sync` は何度実行しても同じ版を二重に写しません。[実行例](verification/m8-git-transcript.txt)
+gitのコミットはその版の時点のフォルダで、メッセージにIntentの要約と変更レイヤーの一覧、`Alto-Commit:` トレーラを含みます。`sync` は何度実行しても同じ版を二重に写しません。[実行例](doc/verification/m8-git-transcript.txt)
 
 ### M8 SDK例
 
@@ -180,7 +180,7 @@ await doc.undo();
 
 ### lyon / velloの比較
 
-[比較レポート](verification/VECTOR-COMPARISON.md)に実測と判断を記録しています。比較ページは `http://localhost:8765/examples/vector-comparison/`。velloを本体へ含めず、比較用WASMは `sh scripts/build-vector-comparison.sh` で作ります。リリース資産 `vector-comparison-alto_wasm_bg.wasm` のSHA-256が `wasm/SHA256SUMS` と一致するときだけ `sh scripts/fetch-wasm.sh` がそれを置きます。
+[比較レポート](doc/verification/VECTOR-COMPARISON.md)に実測と判断を記録しています。比較ページは `http://localhost:8765/examples/vector-comparison/`。velloを本体へ含めず、比較用WASMは `sh scripts/build-vector-comparison.sh` で作ります。リリース資産 `vector-comparison-alto_wasm_bg.wasm` のSHA-256が `wasm/SHA256SUMS` と一致するときだけ `sh scripts/fetch-wasm.sh` がそれを置きます。
 
 ## M5の使い方
 
@@ -238,7 +238,7 @@ Mainは入力と読み取り専用ミラー、Engine Workerは文書・GPU、Sto
 
 ## SDKの最小例
 
-ほかの Web アプリに組み込む方法（バンドラーの設定、保存場所の名前、状態、エラー、React での使い方）は、[組み込みの手引き](docs/embedding.md) にまとめています。動く例は [`examples/minimal-embed`](examples/minimal-embed) と [`examples/react-embed`](examples/react-embed) です。
+ほかの Web アプリに組み込む方法（バンドラーの設定、保存場所の名前、状態、エラー、React での使い方）は、[組み込みの手引き](doc/embedding.md) にまとめています。動く例は [`examples/minimal-embed`](examples/minimal-embed) と [`examples/react-embed`](examples/react-embed) です。
 
 ```ts
 import { createEngine } from '@alto/engine';
@@ -302,7 +302,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、一本の履歴の版管理とフォルダ形式・gitへの写像が対象です。ルビ・圏点、グリフアトラス、版の分岐・マージ、ブラウザ内のgit操作などの継続課題、各機能の上限は [MILESTONES.md](MILESTONES.md) に記載しています。画像編集ソフトの操作をこの正本の上へ足す設計は [IMAGE-EDITING.md](IMAGE-EDITING.md) です。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、一本の履歴の版管理とフォルダ形式・gitへの写像が対象です。ルビ・圏点、グリフアトラス、版の分岐・マージ、ブラウザ内のgit操作などの継続課題、各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に記載しています。画像編集ソフトの操作をこの正本の上へ足す設計は [IMAGE-EDITING.md](doc/design/IMAGE-EDITING.md) です。
 
 ## ライセンス
 

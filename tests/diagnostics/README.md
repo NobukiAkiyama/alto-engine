@@ -92,4 +92,4 @@ Additional raw controls selected through `lifecycle_mode`:
   `ALTO_BEHIND_CONFIGS`), or the manual CI input `lifecycle_implementation=chrome-repro`
   with `behind_configs`. A lost device is reported as data; only a broken harness
   fails the job. On SwiftShader CI it has not reproduced the loss:
-  `verification/CHROME-BUG-557281760-2026-10-25.md`.
+  `doc/verification/CHROME-BUG-557281760-2026-10-25.md`.

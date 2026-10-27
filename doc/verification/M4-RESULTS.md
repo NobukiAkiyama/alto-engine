@@ -13,7 +13,7 @@
 - Chromeで最終版の通常再読み込みと復旧案内を確認。OPFS同期ハンドルは各書き込み後に閉じ、pagehideでWorkerと作業領域のロックを解放します。
 - `sample.alto` は別のネイティブEngineで保存→読み込みし、スナップショット一致とZIP CRCを確認。ブラウザでも読み込みと表示を確認。
 
-生データ： Chrome機能（`chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium機能（`browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chrome性能（`chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium性能（`browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](rust-and-sdk.log)。
+生データ： Chrome機能（`chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium機能（`browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chrome性能（`chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、Chromium性能（`browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）、[Rust/SDKログ](../../verification/rust-and-sdk.log)。
 
 ## B1〜B7
 
@@ -49,6 +49,6 @@ SHA-256: `8f242eb571bb0ad23941354d24ef457fd751d542155a67993ae89de89942f40b`
 
 ## サンプル
 
-[`sample.alto`](sample.alto) は768×512、背景・色のかたち・ペイントの3レイヤーです。Playgroundの「開く」で読み込み、レイヤーの表示や不透明度、位置を変えて試せます。生成元は `crates/alto-engine/examples/create-sample.rs` です。
+[`sample.alto`](../../verification/sample.alto) は768×512、背景・色のかたち・ペイントの3レイヤーです。Playgroundの「開く」で読み込み、レイヤーの表示や不透明度、位置を変えて試せます。生成元は `crates/alto-engine/examples/create-sample.rs` です。
 
 設計との差分と後続フェーズは [MILESTONES.md](../MILESTONES.md) を参照してください。

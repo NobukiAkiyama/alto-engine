@@ -46,4 +46,4 @@ sh scripts/run.sh
 
 比較用WASMの再ビルドは `sh scripts/build-vector-comparison.sh`。本体WASMは2,532,853 bytes / gzip 599,840 bytes、比較用WASMは4,223,713 bytes / gzip 984,224 bytesです。比較版には本体のRuntimeもリンクされているため、この差はvelloライブラリ単体のサイズではありません。
 
-生JSON（`m6-vector-comparison.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） / [比較版Clippy](m6-comparison-clippy.log)。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。
+生JSON（`m6-vector-comparison.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） / [比較版Clippy](../../verification/m6-comparison-clippy.log)。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。

@@ -32,7 +32,7 @@ WASMは4,281,045 bytes、gzip 1,088,734 bytes、SHA-256 `9e73147b63eacbc17d5bbcf
 
 ## 2026-10-22：変更前の配布版
 
-固定ツールチェーン（rustc 1.99.1 / wasm-bindgen 0.2.129）とaarch64-apple-darwinのホストでWASMを再生成し、PlaygroundとSDKに同じバイト列を配布しました。CIのバイト比較もarm64 macOSを使用します。本体は **4,313,895 bytes**、SHA-256は `e29c7306aed94d786715d0ccf5f8802b9c75c867e3e0a52287e506f2c0fdbe55`、Node zlibの標準gzipで **1,088,017 bytes** です。[build.json](build.json) の数値は `scripts/check-build-metadata.mjs` で配布ファイルと照合します。
+固定ツールチェーン（rustc 1.99.1 / wasm-bindgen 0.2.129）とaarch64-apple-darwinのホストでWASMを再生成し、PlaygroundとSDKに同じバイト列を配布しました。CIのバイト比較もarm64 macOSを使用します。本体は **4,313,895 bytes**、SHA-256は `e29c7306aed94d786715d0ccf5f8802b9c75c867e3e0a52287e506f2c0fdbe55`、Node zlibの標準gzipで **1,088,017 bytes** です。[build.json](../../verification/build.json) の数値は `scripts/check-build-metadata.mjs` で配布ファイルと照合します。
 
 - `cargo test --workspace --locked`：Rust **91件成功**。nativeとwasm32のClippy、SDKビルド、Storage Session単体テスト **7件**も成功。
 - 空の`ALTO_TARGET_DIR`からのクリーンビルドも、両配布先と4ファイルすべてバイト一致。`sh scripts/check.sh` の再生成比較、検証記録の照合、ハッシュ一覧の検証も通過。
@@ -66,8 +66,8 @@ B6はエンジンが計上する割当量を描画時にサンプリングした
 
 ## 合否
 
-- **Rust 68件成功、失敗 0。** `alto-core` 3、`alto-doc` 11、`alto-engine` 16、`alto-git` 1、`alto-gpu` 10、`alto-raster` 2、`alto-store` 3、`alto-text` 20（単体 4 と `tests/layout.rs` 16）、`alto-vector` 2。[ログ](rebuild-rust.log)
-- `cargo fmt --all -- --check`、native と wasm32 の Clippy `-D warnings`、SDK の TypeScript ビルドを通過。2026-10-19 の記録は [ログ](m78-rust-and-sdk.log)。
+- **Rust 68件成功、失敗 0。** `alto-core` 3、`alto-doc` 11、`alto-engine` 16、`alto-git` 1、`alto-gpu` 10、`alto-raster` 2、`alto-store` 3、`alto-text` 20（単体 4 と `tests/layout.rs` 16）、`alto-vector` 2。[ログ](../../verification/rebuild-rust.log)
+- `cargo fmt --all -- --check`、native と wasm32 の Clippy `-D warnings`、SDK の TypeScript ビルドを通過。2026-10-19 の記録は [ログ](../../verification/m78-rust-and-sdk.log)。
 - **Headless Chrome 155.0.8059.84：機能 11項目、M5 8項目、M6 10項目、M7 9項目、M8 6項目、B1〜B7、すべて成功。** `node scripts/verify-browser.mjs` が、配布している WASM を配信する Playground に対して実行しました。
 
 | 検証 | 結果 |
@@ -117,7 +117,7 @@ B6はエンジンが計上する割当量を描画時にサンプリングした
 
 PlaygroundのUIでも、テキストツールのドラッグ選択→入力→Backspace→キャレット表示、M7/M8サンプルの表示を確認しました。
 
-![M7/M8 Playground](playground-m78.png)
+![M7/M8 Playground](../../verification/playground-m78.png)
 
 ## M8の検証内容
 
@@ -161,6 +161,6 @@ PlaygroundのUIでも、テキストツールのドラッグ選択→入力→Ba
 
 切り抜き、スタンプ、レベル補正、カーブ、色相、反転などの画像編集操作は Rust API にあります。WASM のコマンドにはしておらず、ブラウザへ配るプロトコルは 4 のままです。
 
-[M7/M8サンプル](sample-m78.alto)（1200×800、縦組み本文・横組み見出し・縦中横の注記、OFLのテスト用フォント2書体を埋め込み、3版の履歴）。テスト用フォントは `tests/fonts/`（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1）。
+[M7/M8サンプル](../../verification/sample-m78.alto)（1200×800、縦組み本文・横組み見出し・縦中横の注記、OFLのテスト用フォント2書体を埋め込み、3版の履歴）。テスト用フォントは `tests/fonts/`（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1）。
 
 テストは付属シナリオの検証で、すべての入力・フォント・GPUに対する保証ではありません。範囲と制限は [MILESTONES.md](../MILESTONES.md) を参照してください。

@@ -1,7 +1,7 @@
 # 表示保証・読み戻し予算の実装と検証
 
 2026-10-27 / 基準 main: `1f16c8094bdb847ddd18fa8ffdf7ab24621b80f4`。
-[設計書](../docs/design/2026-10-27-presentation-readback-guarantees.md) の変更を実装した。ソース、配布 WASM、SDK dist、API snapshot、内部 protocol 5 を同時に更新している。旧 protocol 4 の Worker / WASM を混ぜない。
+[設計書](../design/2026-10-27-presentation-readback-guarantees.md) の変更を実装した。ソース、配布 WASM、SDK dist、API snapshot、内部 protocol 5 を同時に更新している。旧 protocol 4 の Worker / WASM を混ぜない。
 
 ## 実装
 
@@ -17,7 +17,7 @@
 
 ## 機能検証
 
-SwiftShader / Chrome 155.0.8059.84：機能 36、M5 9、M6 11、M7 9、M8 6、組み込み 37 の **108 件、失敗 0**。[生データ](presentation-readback-swiftshader-2026-10-27.json)。別の Vite ビルドで minimal / React の 2 例も成功。[例の結果](presentation-readback-examples-2026-10-27.json)。
+SwiftShader / Chrome 155.0.8059.84：機能 36、M5 9、M6 11、M7 9、M8 6、組み込み 37 の **108 件、失敗 0**。[生データ](../../verification/presentation-readback-swiftshader-2026-10-27.json)。別の Vite ビルドで minimal / React の 2 例も成功。[例の結果](../../verification/presentation-readback-examples-2026-10-27.json)。
 
 組み込みに次の 6 件を追加した。1 件に複数条件を含む。
 
@@ -30,7 +30,7 @@ SwiftShader / Chrome 155.0.8059.84：機能 36、M5 9、M6 11、M7 9、M8 6、�
 
 Rust では Governor の予約・退役・所有移動・異なる epoch・読み戻し用の枠が残量ゼロでも使える条件、staging の GC と生画素 cache 回避、表示の準備状態、キャンセルと commit の境界を検査する。Rust **136 件**と Node **7 件**は成功。全 workspace、native / WASM Clippy、fresh 配布物の一致、SDK 型・公開 API、Node の保存回復テストを `scripts/check.sh` で検証する。
 
-RGBA16F の Legacy / Pooled / Disjoint / Dense / Batched 比較も 10 シーンで画素一致。[生データ](presentation-readback-vector-2026-10-27.json)。比較用 Vello は製品 WASM へリンクしない。
+RGBA16F の Legacy / Pooled / Disjoint / Dense / Batched 比較も 10 シーンで画素一致。[生データ](../../verification/presentation-readback-vector-2026-10-27.json)。比較用 Vello は製品 WASM へリンクしない。
 
 ## Metal の測定
 
@@ -53,7 +53,7 @@ Chrome 155 / Apple Metal、4K・20 レイヤー、970×472 の surface、physica
 
 新実装は既存ベンチ 13 項目の閾値を満たした。初回被覆・GPU 完了の確認、常時の Governor、overview の作業に伴うコールド／小編集の遅延増加も記録する。この変更を全体の高速化とは評価しない。実際の OS scanout、物理 VRAM / driver のピークは計測していない。旧フレーム値 485 MiB と新値 493 MiB を単純比較して物理メモリの増減と解釈しない。
 
-[今回](presentation-readback-metal-2026-10-27.json) / [基準 main に確定時間の計測だけを追加した実行](presentation-readback-baseline-metal-2026-10-27.json)。基準の製品 WASM は main の配布物をそのまま使用した。
+[今回](../../verification/presentation-readback-metal-2026-10-27.json) / [基準 main に確定時間の計測だけを追加した実行](../../verification/presentation-readback-baseline-metal-2026-10-27.json)。基準の製品 WASM は main の配布物をそのまま使用した。
 
 ## 確認範囲の限界
 
@@ -63,6 +63,6 @@ Chrome 155 / Apple Metal、4K・20 レイヤー、970×472 の surface、physica
 
 ## CI と配布物
 
-配布物の bytes / gzip / SHA-256 は [build.json](build.json)、全対象ファイルは [SHA256SUMS](../SHA256SUMS) で照合する。実装コミット `65204531b4c502dafdd43470cab82b30a47ecc00` の [push CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366219457) と [PR CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366266348) はともに成功した。Chrome 156.0.8078.47 / SwiftShader で機能 108、Vite 2 例、画素比較 10 シーンが成功。CI 成果物に記録された製品 WASM と Worker の SHA-256 は、ローカルの配布物と一致した。
+配布物の bytes / gzip / SHA-256 は [build.json](../../verification/build.json)、全対象ファイルは [SHA256SUMS](../../SHA256SUMS) で照合する。実装コミット `65204531b4c502dafdd43470cab82b30a47ecc00` の [push CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366219457) と [PR CI](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40366266348) はともに成功した。Chrome 156.0.8078.47 / SwiftShader で機能 108、Vite 2 例、画素比較 10 シーンが成功。CI 成果物に記録された製品 WASM と Worker の SHA-256 は、ローカルの配布物と一致した。
 
-[CI 成果物の集計](presentation-readback-ci-2026-10-27.json)。この CI 追記と集計はローカルの検証記録であり、実装コミットを再ビルドしたものではない。同じ結果のリンクは [PR #7](https://github.com/NobukiAkiyama/alto-engine/pull/7) の説明にも記載した。
+[CI 成果物の集計](../../verification/presentation-readback-ci-2026-10-27.json)。この CI 追記と集計はローカルの検証記録であり、実装コミットを再ビルドしたものではない。同じ結果のリンクは [PR #7](https://github.com/NobukiAkiyama/alto-engine/pull/7) の説明にも記載した。

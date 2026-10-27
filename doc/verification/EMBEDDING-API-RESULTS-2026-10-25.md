@@ -1,8 +1,8 @@
 # 組み込み用 API の実装結果（2026-10-25）
 
-設計：[docs/design/2026-10-24-embedding-api.md](../docs/design/2026-10-24-embedding-api.md)
-計画：[docs/design/2026-10-25-embedding-api-plan.md](../docs/design/2026-10-25-embedding-api-plan.md)
-手引き：[docs/embedding.md](../docs/embedding.md)
+設計：[doc/design/2026-10-24-embedding-api.md](../design/2026-10-24-embedding-api.md)
+計画：[doc/design/2026-10-25-embedding-api-plan.md](../design/2026-10-25-embedding-api-plan.md)
+手引き：[doc/embedding.md](../embedding.md)
 
 ## 機能テスト
 

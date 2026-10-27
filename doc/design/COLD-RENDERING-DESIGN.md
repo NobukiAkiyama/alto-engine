@@ -1,17 +1,17 @@
 # コールド表示と低倍率描画の改善設計
 
-状態: **通常ラスタの可視ジョブ共通化・中央優先・中断可能なコールド描画とC2/C3診断を実装**（2026-10-24）。[実装結果と未実装範囲](verification/COLD-RENDERING-RESULTS-2026-10-24.md)を参照。派生ディスクキャッシュとM5のジョブ化は未実装。対象は、先読み済み親タイルがない初回表示、急なズーム、GPUキャッシュ消失、Worker再起動後の完全描画。既存の[合成ピラミッド設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)と[中断可能な先読み設計](RESUMABLE-LOW-ZOOM-PREFETCH-DESIGN.md)の次段階にあたる。実装済み範囲は[2026-10-23の結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)で確認する。
+状態: **通常ラスタの可視ジョブ共通化・中央優先・中断可能なコールド描画とC2/C3診断を実装**（2026-10-24）。[実装結果と未実装範囲](../verification/COLD-RENDERING-RESULTS-2026-10-24.md)を参照。派生ディスクキャッシュとM5のジョブ化は未実装。対象は、先読み済み親タイルがない初回表示、急なズーム、GPUキャッシュ消失、Worker再起動後の完全描画。既存の[合成ピラミッド設計](LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)と[中断可能な先読み設計](RESUMABLE-LOW-ZOOM-PREFETCH-DESIGN.md)の次段階にあたる。実装済み範囲は[2026-10-23の結果](../verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md)で確認する。
 
 ## 1. 事実と未測定事項
 
 | 条件 | 現時点の根拠 | 読み方 |
 | --- | --- | --- |
-| 20層・DPR 2・物理倍率0.5、120フレームのパン直後 | 現行WASMの5回測定でB2 1.8–3.5 ms、ズーム前の親35/35、B1 p95 3.3–4.2 ms、B3 p95 10.4–20.7 ms | **先読み成功時**の値。コールド性能ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
-| 同条件のWorker再起動と初回完全描画 | 現行WASMのB7 1391.0–1421.2 ms | 起動・ジャーナル復旧・初回描画の合計。描画単独の値ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
+| 20層・DPR 2・物理倍率0.5、120フレームのパン直後 | 現行WASMの5回測定でB2 1.8–3.5 ms、ズーム前の親35/35、B1 p95 3.3–4.2 ms、B3 p95 10.4–20.7 ms | **先読み成功時**の値。コールド性能ではない。[結果](../verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
+| 同条件のWorker再起動と初回完全描画 | 現行WASMのB7 1391.0–1421.2 ms | 起動・ジャーナル復旧・初回描画の合計。描画単独の値ではない。[結果](../verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
 | 親がない低倍率表示 | **現行WASMの反復測定なし** | 旧実装の1回測定は428.8 ms、1960回・513.8 MB転送、`commandsMs` 304.7 ms。現行の予測値に転用しない。旧測定（`dpr2-same-physical-zoom-2026-10-22.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| メモリ | 現行測定はGPU計上値484.75/512 MiB、WASM 241.06–241.56/1024 MiB | GPU計上値は内部ステージングや実VRAM量の完全な測定ではない。[結果](verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
+| メモリ | 現行測定はGPU計上値484.75/512 MiB、WASM 241.06–241.56/1024 MiB | GPU計上値は内部ステージングや実VRAM量の完全な測定ではない。[結果](../verification/RESUMABLE-LOW-ZOOM-PREFETCH-RESULTS-2026-10-23.md) |
 
-現行の`Renderer::render`は可視キーを列挙し、欠けたキーごとに`compose()`を同期実行する。時間予算を超えても最初の1枚は完了させる。ラスタの`compose()`は完成済み子4枚があれば`downsample_cached()`を使うが、子が欠けると`commands()`から元タイルを取得・転送する。`prefetch_step()`は短いジョブに分割済みだが、可視描画には使われない。したがって、先読みの成功と初回表示の応答性は別問題である。[Renderer](crates/alto-gpu/src/renderer.rs)、[Worker](packages/alto-sdk/src/worker.js)。
+現行の`Renderer::render`は可視キーを列挙し、欠けたキーごとに`compose()`を同期実行する。時間予算を超えても最初の1枚は完了させる。ラスタの`compose()`は完成済み子4枚があれば`downsample_cached()`を使うが、子が欠けると`commands()`から元タイルを取得・転送する。`prefetch_step()`は短いジョブに分割済みだが、可視描画には使われない。したがって、先読みの成功と初回表示の応答性は別問題である。[Renderer](../../crates/alto-gpu/src/renderer.rs)、[Worker](../../packages/alto-sdk/src/worker.js)。
 
 ## 2. 守る契約と成功の定義
 
@@ -44,13 +44,13 @@ flowchart LR
 
 ### A. まず既存の完成済み子を使う
 
-各可視親で`downsample_cached()`を最初に試す。子が一部だけある場合に不足子を作るか、親を直接合成するかは計測値で選ぶ。子を作る場合は4枚の合成と縮小の合計費用を比較し、**「子が1枚あるから常に有利」とは決めない**。既存scratchは直列利用し、透明化は実装済みのレンダーパス`LoadOp::Clear`を維持する。WebGPU経路で未実装だった`clear_texture`へ戻さない。[Renderer](crates/alto-gpu/src/renderer.rs)。
+各可視親で`downsample_cached()`を最初に試す。子が一部だけある場合に不足子を作るか、親を直接合成するかは計測値で選ぶ。子を作る場合は4枚の合成と縮小の合計費用を比較し、**「子が1枚あるから常に有利」とは決めない**。既存scratchは直列利用し、透明化は実装済みのレンダーパス`LoadOp::Clear`を維持する。WebGPU経路で未実装だった`clear_texture`へ戻さない。[Renderer](../../crates/alto-gpu/src/renderer.rs)。
 
 ### B. キャッシュミスを短い可視ジョブへ変える
 
 ラスタ通常合成について、現行の先読み`PrefetchJob`の「計画位置を保存 → 固有入力を短い単位で準備 → スロット再解決 → 提出後に登録」という構造を、可視ジョブにも共有する。現行`commands()`のシーン走査と取得・アップロードの結合を分ける。状態は`Plan → Inputs → Resolve → Submit → Ready`とし、1ステップ後にWorkerの入力キューへ戻る。1件の`get_checked`、変換、転送、GPU提出はそれぞれ原子操作なので、その最長時間を計測する。2 msは初期の**目標ステップ**であって厳密な保証ではない。現行先読みの最大ステップも2.1–2.3 msだった。
 
-`Plan`はシーン更新時に保持するタイル索引を参照し、タイルごとの全`BTreeMap`再構築を避ける。1可視フレーム内で入力ハッシュを重複除去し、アトラス容量を超えない小バッチを作る。ただしコマンドのレイヤー順、opaque判定、グループ境界は現行と同じにする。`Inputs`は`get_checked`で検証されたタイルを取得し、RGBAは既に借用する現行`rgba_pixels()`を維持する。したがって旧設計の「RGBAの不要コピーを除く」は**既に実装済み**であり、再実装しない。[Renderer](crates/alto-gpu/src/renderer.rs)。
+`Plan`はシーン更新時に保持するタイル索引を参照し、タイルごとの全`BTreeMap`再構築を避ける。1可視フレーム内で入力ハッシュを重複除去し、アトラス容量を超えない小バッチを作る。ただしコマンドのレイヤー順、opaque判定、グループ境界は現行と同じにする。`Inputs`は`get_checked`で検証されたタイルを取得し、RGBAは既に借用する現行`rgba_pixels()`を維持する。したがって旧設計の「RGBAの不要コピーを除く」は**既に実装済み**であり、再実装しない。[Renderer](../../crates/alto-gpu/src/renderer.rs)。
 
 `Resolve`では長期保持したアトラスのスロット番号を信用せず、直前にハッシュから引き直す。計画と提出の間に可視処理が退避した入力だけ再準備する。提出までの入力スロットと表示先スロットの寿命を保護し、後続コマンドの書込みが先の読取りを壊さないことをGPUキュー順序と画素試験で確認する。表示キャッシュへの登録は必要入力が揃い、合成コマンドを正常に提出した後だけ。GPU完了前に同一スロットを再利用する場合もキュー順序を明示的に管理する。ジョブ取消時は未提出の出力を公開しない。
 

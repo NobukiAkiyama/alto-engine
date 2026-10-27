@@ -23,6 +23,6 @@ B1 ≤16.7 ms、B2 ≤250 ms、B3 ≤33.4 ms、B7 ≤1500 msを各回で満た�
 - 512×512 RGBAのscratchテクスチャを再利用する。欠けた端の子タイルが前回の内容を残さないよう、WebGPU対応の空レンダーパス `LoadOp::Clear` で透明にしてから子をコピーする。wgpu 30のWebGPUバックエンドで未実装の `clear_texture` は使わない。
 - WASM/Workerから候補数、完成数、先読み所要時間、最大同期ステップ、先読み転送量を報告する。最終WASMは `4ea8ffd898b49f539aa48f88585da94680d86a81e3b91eedd3d61ec22bb85e52`。
 
-先読みの合計CPU時間は各回336.3–357.9 ms、元タイル転送は各回550,502,400 bytesだった。ズーム時の転送を前倒ししたのであり、総仕事量の削減は示していない。親タイル1枚の合成は同期処理で、最長14.5–15.6 ms。元の[設計](../LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)が求めた「2 ms単位の中断可能な子ジョブ」は未実装であり、遅いGPUや大きな文書で入力遅延が再発する余地がある。コールド表示のB2、長時間編集後のキャッシュ圧迫、別GPUでの性能は未測定。
+先読みの合計CPU時間は各回336.3–357.9 ms、元タイル転送は各回550,502,400 bytesだった。ズーム時の転送を前倒ししたのであり、総仕事量の削減は示していない。親タイル1枚の合成は同期処理で、最長14.5–15.6 ms。元の[設計](../design/LOW-ZOOM-COMPOSITE-PYRAMID-DESIGN.md)が求めた「2 ms単位の中断可能な子ジョブ」は未実装であり、遅いGPUや大きな文書で入力遅延が再発する余地がある。コールド表示のB2、長時間編集後のキャッシュ圧迫、別GPUでの性能は未測定。
 
 SwiftShaderでは集計（`low-zoom-prefetch-swiftshader-summary-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）の機能54件（functional 21、M5 8、M6 10、M7 9、M8 6）が失敗0。画素試験（`low-zoom-prefetch-swiftshader-functional-2026-10-23.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）は512×512全面と300×300の透明端で、直接合成と先読み親タイルの一致を確認した。CI結果はPRのChecksを参照。

@@ -1,8 +1,8 @@
 # 縮小表示・復旧高速化 実装計画書
 
-状態: P1–P4とP7の機能・性能検証を実施。実測と未実装項目は[結果報告](verification/PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。P0の復旧内部計時、P5/P6は未実装。
+状態: P1–P4とP7の機能・性能検証を実施。実測と未実装項目は[結果報告](../verification/PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。P0の復旧内部計時、P5/P6は未実装。
 
-対象: [設計書](PERFORMANCE-RECOVERY-DESIGN.md)の復旧チェックポイントV2とコールド描画改善。基準は[20層半透明ベンチマーク](verification/PERFORMANCE-BOTTLENECKS-2026-10-22.md)の B2 395.1 ms、B7 2029.6 ms。目標は B2 ≤250 ms、B7 ≤1500 ms。数値は同一MacのChrome/Metalで確認し、SwiftShaderを使うCIは機能・破損耐性の合否に使う。
+対象: [設計書](PERFORMANCE-RECOVERY-DESIGN.md)の復旧チェックポイントV2とコールド描画改善。基準は[20層半透明ベンチマーク](../verification/PERFORMANCE-BOTTLENECKS-2026-10-22.md)の B2 395.1 ms、B7 2029.6 ms。目標は B2 ≤250 ms、B7 ≤1500 ms。数値は同一MacのChrome/Metalで確認し、SwiftShaderを使うCIは機能・破損耐性の合否に使う。
 
 ## 実施順
 
@@ -105,7 +105,7 @@ P0/P5の結果で、縮小段階のキャッシュ不足または1タイルの�
 - 同じMacのChrome/Metalで `ALTO_BROWSER_REPORT_DIR=<出力先> node scripts/verify-browser.mjs` を新規プロファイルから複数回実行する。B2 ≤250 ms、B7 ≤1500 ms、B3 p95 ≤33.4 ms、GPU推定 ≤512 MiB、WASM ≤1024 MiBを確認し、生JSONを保存する。性能値はCIのSwiftShader実行だけで合格としない。
 - 旧版V1ジャーナル、保存中断、破損、前世代への復帰、外部 `.alto` 読込、実際の編集・保存・再起動を一連の操作として確認する。
 
-**完了条件**: ソース、両配布WASM、SDKビルド、ビルドメタデータ、チェックサム、実ブラウザの結果が同じ変更を示す。設計書の性能目標を満たした測定JSONと、未達の環境・条件を `verification/RESULTS.md` に記録する。
+**完了条件**: ソース、両配布WASM、SDKビルド、ビルドメタデータ、チェックサム、実ブラウザの結果が同じ変更を示す。設計書の性能目標を満たした測定JSONと、未達の環境・条件を `doc/verification/RESULTS.md` に記録する。
 
 ## 停止・見直し条件
 

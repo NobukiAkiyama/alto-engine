@@ -74,7 +74,7 @@ export default defineConfig({
   - `script-src 'self' 'wasm-unsafe-eval'`
 - **メモリ予算：** 既定は 512 MiB、最低 64 MiB。`gpu.memoryBudgetMB` で指定します。エンジンが要求する GPU buffer / texture の常駐・退役・確保中・予約を合計して制限します。ブラウザ・ドライバ・surface・pipeline を含む物理 VRAM の上限ではありません。
 - **読み戻し：** 1 device に 1 本、既定最大 8 MiB（32 タイル）、64 MiB 予算なら 4 MiB（16 タイル）。ストローク確定と export はこの Pool を共有し、バッチごとに処理します。CPU の操作用配列・確定用 staging も、確保前の 512 MiB 操作予算で拒否します。既存文書・JS/WASM ランタイム全体の物理 RAM 制限ではありません。
-- 計測値・試験条件は [表示保証と読み戻しの検証記録](../verification/PRESENTATION-READBACK-RESULTS-2026-10-27.md) を参照してください。複数エンジンの予算は別々です。
+- 計測値・試験条件は [表示保証と読み戻しの検証記録](verification/PRESENTATION-READBACK-RESULTS-2026-10-27.md) を参照してください。複数エンジンの予算は別々です。
 
 ### 表示準備と画面入力
 

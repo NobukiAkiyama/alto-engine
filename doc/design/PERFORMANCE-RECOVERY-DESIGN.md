@@ -2,9 +2,9 @@
 
 高DPIでのズーム単位とWorker読み込み障害については、[追加設計](DPR-WORKER-RESILIENCE-DESIGN.md)を参照。
 
-状態: 復旧V2とタイル検証の要点を実装し、性能を実測。[結果報告](verification/PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。以下は当初の設計案で、索引の詳細形式、復旧内部計時、可視タイルバッチ化、先読みは今回の実装とは異なるか未実装。
+状態: 復旧V2とタイル検証の要点を実装し、性能を実測。[結果報告](../verification/PERFORMANCE-IMPLEMENTATION-RESULTS-2026-10-22.md)を参照。以下は当初の設計案で、索引の詳細形式、復旧内部計時、可視タイルバッチ化、先読みは今回の実装とは異なるか未実装。
 
-基準: `026ff48`、Chrome 155 headless / Apple Metal WebGPU、3840×2160、半透明ラスターレイヤー20層。[測定記録](verification/PERFORMANCE-BOTTLENECKS-2026-10-22.md)では B2 縮小表示 395.1 ms（目標250 ms）、B7 Worker 復旧と初回完全描画 2029.6 ms（目標1500 ms）。B7 の内訳は `openPackage` 799.8 ms、初回描画 1138.0 ms。各条件1回の診断ランなので、ここでの差分は設計の優先順位にのみ用いる。
+基準: `026ff48`、Chrome 155 headless / Apple Metal WebGPU、3840×2160、半透明ラスターレイヤー20層。[測定記録](../verification/PERFORMANCE-BOTTLENECKS-2026-10-22.md)では B2 縮小表示 395.1 ms（目標250 ms）、B7 Worker 復旧と初回完全描画 2029.6 ms（目標1500 ms）。B7 の内訳は `openPackage` 799.8 ms、初回描画 1138.0 ms。各条件1回の診断ランなので、ここでの差分は設計の優先順位にのみ用いる。
 
 ## 守る契約
 

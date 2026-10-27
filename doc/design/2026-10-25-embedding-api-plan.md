@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.99.1、wasm-bindgen 0.2.129、TypeScript 6、pnpm、@microsoft/api-extractor、Vite（例のビルドだけ）、React（例の中だけ）。
 
-**Spec:** `docs/design/2026-10-24-embedding-api.md`
+**Spec:** `doc/design/2026-10-24-embedding-api.md`
 
 ## Global Constraints
 
@@ -260,7 +260,7 @@
 ### Task 11: 手引きと例
 
 **Files:**
-- `docs/embedding.md`
+- `doc/embedding.md`
 - `examples/minimal-embed/`（`index.html`、`main.ts`、`package.json`、`vite.config.ts`）
 - `examples/react-embed/`（同じ構成）
 - `scripts/check-examples.sh`
@@ -280,5 +280,5 @@
 - [ ] B1〜B8 を、変更前と交互に 5 回ずつ計測する。
   - 計測のコードが新しい API に移るので、変更前のビルドでは、移す前の計測のコードを使う。
   - 計測の中身が同じであることは、差分を見て確かめる。
-- [ ] 結果を `verification/EMBEDDING-API-RESULTS-2026-10-25.md` に書く。
+- [ ] 結果を `doc/verification/EMBEDDING-API-RESULTS-2026-10-25.md` に書く。
 - [ ] `SHA256SUMS` と `build.json` を更新し、段階ごとにコミットする。

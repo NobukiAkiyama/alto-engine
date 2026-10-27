@@ -3,7 +3,7 @@
 
 生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
 
-2026-10-24。[設計](../COLD-RENDERING-DESIGN.md)の通常ラスタ向けP1/P2とC2/C3計測を実装した。可視ジョブの最大同期ステップを短縮する変更であり、コールド完全描画250 msは未達。派生OPFSキャッシュ、M5機能のジョブ化、C1/C4/C5の起動・検証・復旧内部の詳細時刻は未実装。
+2026-10-24。[設計](../design/COLD-RENDERING-DESIGN.md)の通常ラスタ向けP1/P2とC2/C3計測を実装した。可視ジョブの最大同期ステップを短縮する変更であり、コールド完全描画250 msは未達。派生OPFSキャッシュ、M5機能のジョブ化、C1/C4/C5の起動・検証・復旧内部の詳細時刻は未実装。
 
 ## 実装
 
