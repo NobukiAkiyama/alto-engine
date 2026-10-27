@@ -16,7 +16,7 @@ The render version 2 color-adjust mismatch also stays for existing version 2 doc
 
 ## Measurement
 
-Counts are mismatched pixels. The parenthetical is max absolute difference per channel, r,g,b,a. These three columns are from CI run [40583754183](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40583754183) on `4ffd834`. The native job failed afterwards on `clippy::manual_is_multiple_of` (`layer % 2`); the Metal table was already written. This commit does not change the v2 formula or those pixels.
+Counts are mismatched pixels. The parenthetical is max absolute difference per channel, r,g,b,a. Lavapipe and Metal are from CI run [40586190451](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40586190451) on `0fb35bb` (`gpu-parity` and `native` succeeded). SwiftShader is from CI run [40583754183](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40583754183) on `4ffd834`, the same sweep and the same JavaScript composite. The wasm job on `0fb35bb` stopped in the embed suite with `GPU_LOST: the previous frame did not finish on the GPU` before the parity suite, so it did not record SwiftShader again. No v2 formula changed between those commits.
 
 | backend | adapter | CPU reference |
 | --- | --- | --- |
@@ -99,4 +99,6 @@ On lavapipe (`llvmpipe (LLVM 20.1.2, 256 bits)`), 22 channels differ:
 
 The f32 values differ by 1 to 3 ulps. Every one of those gaps sits on a rounding boundary, and that is where the stored byte becomes ±1. The ops in the mismatching cases are unpremultiply division (`dst.rgb / max(dst.a, 0.000001)` inside `blend`, and the isolated-group pop which unpremultiplies the child accumulator the same way) and the blend FMAs (`mix_color` and the three-term sum). The dump does not separate those ops. The largest gap is color dodge, which divides. The other gaps are one or two ulps, including multiply, screen, overlay, hard light, soft light, exclusion, the isolated-group pop, and the eight-layer normal chain.
 
-`rgba8unorm` store versus CPU `round_ties_even` is the step that turns that ulp into a byte. It is not a second formula.
+On Metal in the same run, 8217 channels differ. 8208 of them are bit-identical before quantization and still store a different byte, so that ±1 is the `rgba8unorm` store versus CPU `round_ties_even` on an exact `n+0.5` boundary. The other 9 differ by one ulp (`|GPU - CPU| * 255` at most `1.51991844e-5`): `blend-hue` and `blend-color` blue at (181,82), and seven channels in `eight-layers`. All 8217 are within `1e-4` of an `n+0.5` boundary. None exceed `1e-3`.
+
+`rgba8unorm` store versus CPU `round_ties_even` is the step that turns a tie, or a one-ulp gap on that tie, into a byte. It is not a second formula.
