@@ -250,6 +250,12 @@ export interface DocumentMeta {
     readonly color: string;
     readonly depth: string;
     readonly format_version: number;
+    /**
+     * Compositor sampling version. Omitted on documents saved before version 2;
+     * absence means version 1, the float bilinear path, whose pixels match the
+     * hashes recorded for that version. Version 2 uses the integer 4-tap.
+     */
+    readonly render_version?: number;
 }
 export type AssetKind = {
     kind: "encoded_image";

@@ -1,0 +1,16 @@
+# SHA-256 of WASM packages rebuilt by CI. The binaries are not stored in git.
+# release: scripts/build-wasm-pkg.sh. Playground and @alto/engine share these bytes.
+# vector-comparison: scripts/build-vector-comparison.sh (--features vello-probe).
+# Update on aarch64-apple-darwin with: sh scripts/update-wasm-sums.sh
+0671330177b9f11519d32b5a7988f34fcbbf2820aa8cd1530a06039351315b6a  release/alto_decode.d.ts
+b78c65ca518dd31aa703a9e1ebc98d9c04aca84a6e74763d534922480c26dbdc  release/alto_decode.js
+7fadaed4c8915ab3a160f5844167673a8c7b2ab9257f85be1d1ef198aaf1dc9d  release/alto_decode_bg.wasm
+7cb097c3d7e8fb5c83ec91e2641a408a1e2aaa2b6c0ba200d6b07e0459079783  release/alto_decode_bg.wasm.d.ts
+df5deed47a93081b4cc17c96b56928c53072924687ec6a93f8c60f6aedbb49a9  release/alto_wasm.d.ts
+c90142ed562f53969679734f394b1c2e05735e34fcf5ebadf8d65d88c6ebd9f6  release/alto_wasm.js
+6da64fb5d0b559dcdbf557bf5f2b2fe3ebbc62110d95600ef53ddcb8ae85b46a  release/alto_wasm_bg.wasm
+f57836c5c7e406f6416b80dcb818116b68874d7592e6ac75f6d813b1f4954ff3  release/alto_wasm_bg.wasm.d.ts
+853ef1179942bfe9f5d1eb964f391bc0ab56eb2e4c0c1ea55950696b3e43b5f4  vector-comparison/alto_wasm.d.ts
+b63768dd81d962e4bef26ca035135e3774a891b9bb1a85a6afdbab9418115abe  vector-comparison/alto_wasm.js
+ab8fe3226ccc085049629b540361447c4098c02924e8da431206c08dfa65713a  vector-comparison/alto_wasm_bg.wasm
+ea255c2b41d4cb82b935e246c883e1fa70dcf134d52446fed1aff9933728bee8  vector-comparison/alto_wasm_bg.wasm.d.ts

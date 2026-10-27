@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  wasm:
+    # Same host as the byte-identical rebuild in CI. A tag whose wasm/SHA256SUMS
+    # does not match this build fails before any asset is uploaded.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Refuse to publish while comparison WASM is unchecked
+        run: |
+          set -eu
+          flag=$(sed -n 's/^enforce_vector=//p' wasm/RELEASE | head -n 1)
+          if [ "$flag" != 1 ]; then
+            echo "refusing to publish ${GITHUB_REF#refs/tags/}: wasm/RELEASE has enforce_vector=${flag:-unset}" >&2
+            echo "The vector-comparison hash is not a release gate until enforce_vector=1." >&2
+            echo "On Apple Silicon run: sh scripts/update-wasm-sums.sh" >&2
+            echo "See https://github.com/NobukiAkiyama/alto-engine/issues/9" >&2
+            echo "That rewrites wasm/SHA256SUMS and sets enforce_vector=1. It does not clear tag=." >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Confirm release build host
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+      - name: Install pinned wasm-bindgen
+        run: |
+          bindgen_version=$(sed -n 's/^wasm-bindgen *= *"=\([0-9][0-9.]*\)".*/\1/p' crates/alto-wasm/Cargo.toml)
+          cargo install wasm-bindgen-cli --version "$bindgen_version" --locked
+      - name: Build, verify, and pack WASM assets
+        run: |
+          set -eu
+          sh scripts/build-wasm-pkg.sh "$RUNNER_TEMP/wasm-release"
+          sh scripts/verify-wasm-sums.sh release "$RUNNER_TEMP/wasm-release"
+          sh scripts/build-vector-comparison.sh "$RUNNER_TEMP/wasm-vector"
+          # enforce_vector=1 was required above, so the comparison package is always checked.
+          sh scripts/verify-wasm-sums.sh vector-comparison "$RUNNER_TEMP/wasm-vector"
+          mkdir -p "$RUNNER_TEMP/wasm-assets"
+          cp "$RUNNER_TEMP/wasm-release/alto_wasm_bg.wasm" "$RUNNER_TEMP/wasm-assets/alto_wasm_bg.wasm"
+          cp "$RUNNER_TEMP/wasm-release/alto_decode_bg.wasm" "$RUNNER_TEMP/wasm-assets/alto_decode_bg.wasm"
+          cp "$RUNNER_TEMP/wasm-vector/alto_wasm_bg.wasm" "$RUNNER_TEMP/wasm-assets/vector-comparison-alto_wasm_bg.wasm"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$RUNNER_TEMP/wasm-assets" && sha256sum alto_wasm_bg.wasm alto_decode_bg.wasm vector-comparison-alto_wasm_bg.wasm) > "$RUNNER_TEMP/asset-SHA256SUMS"
+          else
+            (cd "$RUNNER_TEMP/wasm-assets" && shasum -a 256 alto_wasm_bg.wasm alto_decode_bg.wasm vector-comparison-alto_wasm_bg.wasm) > "$RUNNER_TEMP/asset-SHA256SUMS"
+          fi
+          mv "$RUNNER_TEMP/asset-SHA256SUMS" "$RUNNER_TEMP/wasm-assets/SHA256SUMS"
+      - name: Attach WASM assets to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${GITHUB_REF#refs/tags/}"
+          notes="WASM packages built from this tag on aarch64-apple-darwin.
+
+          The release package (alto_wasm_bg.wasm, alto_decode_bg.wasm) matches wasm/SHA256SUMS in this commit. Those binaries are not stored in git.
+
+          vector-comparison-alto_wasm_bg.wasm is the vello-probe build. fetch-wasm.sh reads this release's SHA256SUMS asset and downloads a WASM body only when that file matches wasm/SHA256SUMS.
+
+          sh scripts/fetch-wasm.sh ${tag}
+
+          With no argument, fetch-wasm.sh picks the newest release whose SHA256SUMS asset matches."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber "$RUNNER_TEMP/wasm-assets"/*
+          else
+            gh release create "$tag" --verify-tag --title "$tag" --notes "$notes" "$RUNNER_TEMP/wasm-assets"/*
+          fi

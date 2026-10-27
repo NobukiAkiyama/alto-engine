@@ -1,4 +1,4 @@
-# Alto Engine v0.4 — M7・M8
+# Alto Engine — M7・M8（crates 0.4.0 / TypeScript SDK 0.5.0 / プロトコル4）
 
 Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Playgroundです。**M7：テキスト（横組み・日本語縦組み・フォントフォールバック・OpenType機能・テキスト選択）**と、**M8：版管理（コミット・意味的差分・フォルダ形式・Git Adapter）**を追加しました。M6までのベクター・選択範囲・ラスター編集・調整・非破壊ぼかしも使えます。文書・Undo/Redo・`.alto`保存・OPFSジャーナル復旧につながっています。
 
@@ -10,10 +10,15 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-ビルド済みWASMとSDKを同梱しています。Python 3があれば、RustやNode.jsを導入せずに試せます。
+WASMバイナリはGitに入れません。SHA-256は [`wasm/SHA256SUMS`](wasm/SHA256SUMS) にあり、バイナリはGitHub Releaseの資産です。`sh scripts/fetch-wasm.sh` は新しい順にReleaseを見て、先にそのReleaseの `SHA256SUMS` を落とします。`alto_wasm_bg.wasm` と `alto_decode_bg.wasm` の値が出荷ハッシュと一致したReleaseだけ、WASM本体を落とします。一覧はGitHub APIを100件ずつ取り、一致したページで止めます。`GITHUB_TOKEN` または `GH_TOKEN` があればそのリクエストに付けます。`wasm/RELEASE` の `tag` は参照しません。`tag=none` のままでも、一致するReleaseがあればRustなしで取得できます。一致するReleaseが一つも無いときだけ失敗し、そのときは手元で作ります。Python 3でPlaygroundを開けます。
 
 ```sh
 cd alto-engine
+sh scripts/fetch-wasm.sh          # ハッシュが一致する最新Release。無ければ失敗する
+sh scripts/fetch-wasm.sh v0.1.0   # そのタグだけを調べ、一致しなければ失敗する
+# 取得できないときは:
+sh scripts/build-m0.sh
+sh scripts/build-vector-comparison.sh   # 比較ページを使うとき
 sh scripts/run.sh
 ```
 
@@ -130,7 +135,7 @@ await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。SDK・Worker・WASMは**v0.5 / プロトコル4**で照合します。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDKは **0.5.0 / プロトコル4**、クレートとWASMは **0.4.0** で照合します。
 
 ## M6の使い方
 
@@ -175,7 +180,7 @@ await doc.undo();
 
 ### lyon / velloの比較
 
-[比較レポート](verification/VECTOR-COMPARISON.md)に実測と判断を記録しています。比較ページは `http://localhost:8765/examples/vector-comparison/`。別WASMを同梱し、velloを本体へ含めずに再実行できます。比較用ソースを再ビルドする場合は `sh scripts/build-vector-comparison.sh` を使用します。
+[比較レポート](verification/VECTOR-COMPARISON.md)に実測と判断を記録しています。比較ページは `http://localhost:8765/examples/vector-comparison/`。velloを本体へ含めず、比較用WASMは `sh scripts/build-vector-comparison.sh` で作ります。リリース資産 `vector-comparison-alto_wasm_bg.wasm` のSHA-256が `wasm/SHA256SUMS` と一致するときだけ `sh scripts/fetch-wasm.sh` がそれを置きます。
 
 ## M5の使い方
 
@@ -222,7 +227,7 @@ await doc.undo();
 | `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
-| `packages/alto-sdk` | TypeScript SDK v0.4、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
+| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル4）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
 | `examples/browser-playground` | 編集UIとビルド済みWASM |
 | `tests/e2e` | 実ブラウザで実行する画素検証・性能測定 |
 | `tests/fonts` | テスト・デモ用フォント（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1） |
@@ -280,7 +285,9 @@ await doc.transact('layer.props', tx => tx.setProps(layer, { clip_to_below: true
 
 ## ソースから再ビルド
 
-Rust **1.99.1**（`rust-toolchain.toml`）、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**（`crates/alto-wasm/Cargo.toml` の `wasm-bindgen` と同じピン）、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。`sh scripts/check.sh` はリリース wasm を組み直し、`examples/browser-playground/pkg` と `packages/alto-sdk/dist/pkg` が一致しなければ失敗します。
+Rust **1.99.1**（`rust-toolchain.toml`）、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**（`crates/alto-wasm/Cargo.toml` の `wasm-bindgen` と同じピン）、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。`sh scripts/check.sh` はリリースWASMを組み直し、出力のSHA-256が `wasm/SHA256SUMS` と違えば失敗します。ソースだけ変えてハッシュを更新しない変更はここで落ちます。`examples/browser-playground/pkg` に未コミットの変更、またはgitignoreされていない未追跡ファイルがあると、そのディレクトリを消す前に止まります。gitignoreされた `*.wasm` はビルド成果物なので置き換えます。ハッシュの更新は aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` です。このスクリプトは `enforce_vector=1` にしますが、`wasm/RELEASE` の `tag=` は変えません。CIもそのホストで組み直します。`v*` タグのリリースworkflowは `enforce_vector=0` の間、Releaseを作りません。
+
+`@alto/engine` の公開物にはWASMを含めます。`pnpm --dir packages/alto-sdk build`（`npm publish` の `prepack` も同じ）が Playground の pkg を `dist/pkg` へコピーし、`package.json` の `files` が `dist` を梱包します。WASMが無いとビルドは失敗します。`.gitignore` はリポジトリからバイナリを外すだけで、パック対象からは外しません。
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -289,10 +296,14 @@ sh scripts/build.sh
 sh scripts/check.sh
 ```
 
-`ALTO_TARGET_DIR=/任意のビルド先 sh scripts/build.sh` でRustの成果物を外に置けます。ブラウザ検証は画面から実行でき、`ALTO_BROWSER_REPORT_DIR=/任意の出力先 node scripts/verify-browser.mjs --functional` でChrome・ローカルサーバーの起動からM4〜M8の機能検証まで自動実行できます。`--functional` を外すとB1〜B7の性能測定も実行します。CIは機能検証を必須とし、性能測定はハードウェア依存のため別に扱います。ネイティブRustテストだけではWebGPU・OPFSの実動作を検証できません。
+`ALTO_TARGET_DIR=/任意のビルド先 sh scripts/build.sh` でRustの成果物を外に置けます。ブラウザ検証は画面から実行でき、`ALTO_BROWSER_REPORT_DIR=/任意の出力先 node scripts/verify-browser.mjs --functional` でChrome・ローカルサーバーの起動からM4〜M8の機能検証まで自動実行できます。出力先を省略すると生JSONは gitignore した `verification/out/` に書きます。`--functional` を外すとB1〜B7の性能測定も実行します。CIは機能検証を必須とし、性能測定はハードウェア依存のため別に扱います。CIの生JSONは workflow artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）です。`verification/` に残すのは要約の `.md`、テストが読む `build.json`、サンプル文書です。ネイティブRustテストだけではWebGPU・OPFSの実動作を検証できません。
 
 DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2` を指定し、`ALTO_BROWSER_VIEW_MODE=css` で同じ文書範囲を描画します。例: `ALTO_BROWSER_DPR=2 ALTO_BROWSER_WIDTH=1093 ALTO_BROWSER_HEIGHT=827 ALTO_BROWSER_VIEW_MODE=css ALTO_BROWSER_PROFILE=1 ALTO_BROWSER_REPORT_DIR=/tmp/alto-dpr2 node scripts/verify-browser.mjs --benchmark-only`。従来の同じ物理ズームでの比較には `ALTO_BROWSER_VIEW_MODE=physical` を使います。結果JSONにはキャンバスのCSS/物理寸法とB2時点の可視文書範囲を記録します。
 
 ## 現在の範囲
 
 sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、一本の履歴の版管理とフォルダ形式・gitへの写像が対象です。ルビ・圏点、グリフアトラス、版の分岐・マージ、ブラウザ内のgit操作などの継続課題、各機能の上限は [MILESTONES.md](MILESTONES.md) に記載しています。画像編集ソフトの操作をこの正本の上へ足す設計は [IMAGE-EDITING.md](IMAGE-EDITING.md) です。
+
+## ライセンス
+
+このリポジトリのコードは MIT または Apache-2.0 のデュアルライセンスです。どちらかを選んで利用・改変できます。著作権は 2026 Nobuki Akiyama にあります。条文は [LICENSE-MIT](LICENSE-MIT) と [LICENSE-APACHE](LICENSE-APACHE) です。`third-party/` の表示とライセンスはそれぞれの著作者のままです。

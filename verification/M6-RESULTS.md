@@ -1,5 +1,8 @@
 # M6 最終検証結果（M6時点の記録）
 
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
 2026-10-18〜19、このMac上でM6の同梱ビルドを検証しました。SDK v0.3.0 / Worker protocol 3。
 
 ## 実装
@@ -12,15 +15,15 @@
 - **Chrome 155 / 内蔵Chromium 155：各29項目成功**（M6 10、M5回帰8、M4回帰11）。
 - **B1〜B7：両環境ですべて成功**。
 - native / wasm32 Clippyを `-D warnings` で通過。比較用vello featureのwasm32 Clippyも通過。Rust fmt、TypeScriptビルドとUI JavaScript構文確認も成功。
-- UIで制御点ドラッグ→パス変更、Undoで元の座標へ復元、線幅6→10→Undoで6への復元を確認。[UI記録](m6-ui.json)。
+- UIで制御点ドラッグ→パス変更、Undoで元の座標へ復元、線幅6→10→Undoで6への復元を確認。UI記録（`m6-ui.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 - `sample-m6.alto` は新しいネイティブEngineへ保存/読込してスナップショットとパスの一致を確認。ブラウザーでも読み込んで編集しました。
 
 | 検証 | Chrome 155 | 内蔵Chromium 155 |
 |---|---|---|
-| M6 10項目 | [JSON](m6-chrome-functional.json) | [JSON](m6-browser-functional.json) |
-| M5回帰8項目 | [JSON](m6-chrome-m5-regression.json) | [JSON](m6-browser-m5-regression.json) |
-| M4回帰11項目 | [JSON](m6-chrome-m4-regression.json) | [JSON](m6-browser-m4-regression.json) |
-| B1〜B7 | [JSON](m6-chrome-benchmark.json) | [JSON](m6-browser-benchmark.json) |
+| M6 10項目 | JSON（`m6-chrome-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M5回帰8項目 | JSON（`m6-chrome-m5-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-m5-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| M4回帰11項目 | JSON（`m6-chrome-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| B1〜B7 | JSON（`m6-chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 
 [Rust/SDKログ](m6-rust-and-sdk.log) / [比較用Clippy](m6-comparison-clippy.log) （M6時点のWASMの値は下の「配布物」）。以前の結果は [M5](M5-RESULTS.md)・[M4](M4-RESULTS.md) に保存しています。
 

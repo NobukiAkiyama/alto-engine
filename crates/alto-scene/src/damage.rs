@@ -184,7 +184,11 @@ fn same_composite(a: &Placed<'_>, b: &Placed<'_>) -> bool {
 }
 
 pub fn scene_damage(old: &RenderScene, new: &RenderScene) -> Damage {
-    if old.canvas != new.canvas || !plain_scene(old) || !plain_scene(new) {
+    if old.render_version != new.render_version
+        || old.canvas != new.canvas
+        || !plain_scene(old)
+        || !plain_scene(new)
+    {
         return Damage::All;
     }
     let (Some(before), Some(after)) = (place(old), place(new)) else {
@@ -269,6 +273,7 @@ mod tests {
                 y1: 1024,
             },
             root: 0,
+            render_version: alto_core::RENDER_VERSION,
             nodes: vec![
                 node(
                     root,

@@ -1,18 +1,18 @@
 {
-  "date": "2026-10-27",
+  "date": "2026-10-26",
   "version": "0.4.0",
   "milestone": "M8 + embedding API",
-  "protocolVersion": 5,
+  "protocolVersion": 4,
   "buildHost": "aarch64-apple-darwin",
-  "wasmBytes": 4786087,
-  "gzipBytes": 1206305,
-  "wasmSha256": "87abe73d4c88fc890a1f1083f9f2864216e5e882d4002b67a41997b123c2dfaf",
+  "wasmBytes": 4797122,
+  "gzipBytes": 1209109,
+  "wasmSha256": "6da64fb5d0b559dcdbf557bf5f2b2fe3ebbc62110d95600ef53ddcb8ae85b46a",
   "comparisonWasm": {
-    "bytes": 6530592,
-    "gzipBytes": 1615623,
-    "sha256": "edd88cb42fedc7f1e9fbb7f3a6deb3e4931c78251b6f713b6193c6800079ddbb"
+    "bytes": 6538689,
+    "gzipBytes": 1618259,
+    "sha256": "ab8fe3226ccc085049629b540361447c4098c02924e8da431206c08dfa65713a"
   },
-  "nativeTests": 136,
+  "nativeTests": 140,
   "targets": [
     "Chrome 155 / Apple Metal on macOS",
     "Chrome 155 / SwiftShader"
@@ -24,9 +24,9 @@
   "browserM5RegressionTests": 9,
   "browserM4RegressionTests": 11,
   "browserBenchmarks": 13,
-  "comparisonWasmNote": "Rebuilt on 2026-10-27. Optional RGBA16F vector comparison; Vello remains outside production.",
-  "imageEditingNote": "Image editing operations remain a Rust API. SDK, Worker and WASM must use protocol 5 together.",
+  "comparisonWasmNote": "Rebuilt on 2026-10-26. Optional Legacy/Pooled/Disjoint/Dense/Batched RGBA16F verification, including MRT8 lifetimes. Vello is not linked into the production package.",
+  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4.",
   "vectorOptimizationNote": "Disjoint batching plus ordered MRT8 coverage for dense vector calls, under the existing GPU budget. See DENSE-VECTOR-RESULTS-2026-10-26.md. Canvas loss remains an independent investigation.",
-  "browserEmbeddingTests": 37,
-  "gpuMemoryNote": "All engine buffer/texture API requests share a governor including pending, retired and reserved bytes. One per-device readback pool (8 MiB maximum, 4 MiB at 64 MiB budget), streamed stroke staging, complete-view publication and overview fallback. This is not physical driver VRAM. See PRESENTATION-READBACK-RESULTS-2026-10-27.md."
+  "browserEmbeddingTests": 31,
+  "gpuMemoryNote": "Budget-sized atlas/display arrays, managed byte categories and retirement ledger, viewport eviction with background overview, and lease-based 64px M5 bucket reuse. See GPU-MEMORY-RESULTS-2026-10-26.md. Values exclude driver VRAM and readback buffers; initial overview completion is asynchronous."
 }

@@ -98,6 +98,7 @@ export interface Requests {
     }, WireState>;
     undo: Q<None, WireState>;
     redo: Q<None, WireState>;
+    upgradeRenderVersion: Q<None, WireState>;
     beginBrush: Q<{
         layer: string;
         config: BrushConfig;
@@ -259,6 +260,11 @@ export interface Requests {
     }, Uint8Array>;
     stallDecodeWorkers: Q<None, number>;
     destroyGpu: Q<None, true>;
+    /** Test hook: the next ticks look like an idle deferred present, until `limit` of them. */
+    stickPresent: Q<{
+        enabled: boolean;
+        limit?: number;
+    }, true>;
     recoveryStore: Q<None, {
         latestGeneration: number;
         records: number;

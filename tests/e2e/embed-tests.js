@@ -325,19 +325,24 @@ export async function runEmbedTests(_playground, log) {
       const engine = await engineIn(el);
       const doc = await engine.createDocument({ width: 512, height: 256 });
       await quadrants(engine, doc);
-      let held = 0, newest = -1, last = null;
+      let held = 0, newest = -1, last = null, lastPresented = null;
       const off = unstable(engine).onFrame((f) => {
         if (f.presentDeferred) held++;
         newest = Math.max(newest, f.viewVersion ?? -1);
         last = f;
+        if (!f.presentDeferred) lastPresented = f;
       });
       for (let i = 0; i < 40; i++) engine.viewport.panBy(i % 2 ? 7 : -5, 1);
       await frameWhere(engine, (f) => f.viewVersion === newest && f.pending === 0 && !f.presentDeferred);
+      // A later tick of the same view can be deferred again while that present is
+      // still on the GPU. The screen is already the newest view; only an older
+      // presented view, or a newest view that never presents, is a miss.
       await new Promise((resolve) => setTimeout(resolve, 300));
       off();
       log(`  ${held} frames held back for the GPU`);
-      assert(!last.presentDeferred && last.viewVersion === newest,
-        `the last frame was ${last.presentDeferred ? "held back" : "presented"} at view ${last.viewVersion} of ${newest}`);
+      assert(last.viewVersion === newest, `the last frame is view ${last.viewVersion} of ${newest}`);
+      assert(lastPresented && lastPresented.viewVersion === newest,
+        `the newest view stayed held back; last presented view ${lastPresented?.viewVersion ?? "none"} of ${newest}`);
     });
     await test("an engine starts in a hidden container and draws once it is shown", async () => {
       const el = container(280, 180);

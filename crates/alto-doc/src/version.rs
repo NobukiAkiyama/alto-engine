@@ -434,6 +434,9 @@ pub fn diff(a: &Document, b: &Document) -> Vec<DiffItem> {
     if a.meta.depth != b.meta.depth {
         meta.push("depth".into());
     }
+    if a.meta.render_version != b.meta.render_version {
+        meta.push("render_version".into());
+    }
     if !meta.is_empty() {
         out.push(DiffItem::MetaChanged { fields: meta });
     }

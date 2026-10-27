@@ -343,6 +343,7 @@ impl Engine {
             },
             root,
             nodes,
+            render_version: doc.meta.render_version,
         })
     }
 }

@@ -119,6 +119,14 @@ export class DocumentHandle {
         return this.command("redo", {});
     }
     /**
+     * Switches a version-1 document to render version 2 as one undoable edit.
+     * Bilinear and rotated samples change. Opening or saving a document does not
+     * do this. A document that is already version 2 is rejected.
+     */
+    upgradeRenderVersion() {
+        return this.command("upgradeRenderVersion", {});
+    }
+    /**
      * Resolves once every edit made so far is in the recovery journal. Edits resolve
      * when applied; this rejects with STORAGE if the journal could not be written.
      */

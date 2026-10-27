@@ -99,8 +99,8 @@ P0/P5の結果で、縮小段階のキャッシュ不足または1タイルの�
 
 **必須ゲート**
 
-- `sh scripts/check.sh`: Rust整形、テスト、native/wasm32 Clippy、ピン留めしたリリースWASMのバイト一致、SDKビルド、Storage Sessionテスト、ビルドメタデータ、`SHA256SUMS`。
-- Rust変更後は `sh scripts/build-m0.sh` で `examples/browser-playground/pkg` と `packages/alto-sdk/dist/pkg` を揃える。`packages/alto-sdk/dist`、`verification/build.json`、変更した配布物の `SHA256SUMS` を更新してから `check.sh` を通す。
+- `sh scripts/check.sh`: Rust整形、テスト、native/wasm32 Clippy、ピン留めしたリリースWASMを組み直して `wasm/SHA256SUMS` と照合、SDKビルド、Storage Sessionテスト、ビルドメタデータ。
+- Rust変更後は aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` を実行し、`wasm/SHA256SUMS` と `verification/build.json` を更新する。WASMバイナリはコミットしない。リポジトリ全体の `SHA256SUMS` は置かない。
 - `ALTO_BROWSER_GPU=swiftshader ALTO_BROWSER_REPORT_DIR=<出力先> node scripts/verify-browser.mjs --functional`: 既存M4〜M8機能と追加したOPFS/破損テスト。GitHub Actionsの現行CIに載せ、保存されたJSONの失敗0件を確認する。
 - 同じMacのChrome/Metalで `ALTO_BROWSER_REPORT_DIR=<出力先> node scripts/verify-browser.mjs` を新規プロファイルから複数回実行する。B2 ≤250 ms、B7 ≤1500 ms、B3 p95 ≤33.4 ms、GPU推定 ≤512 MiB、WASM ≤1024 MiBを確認し、生JSONを保存する。性能値はCIのSwiftShader実行だけで合格としない。
 - 旧版V1ジャーナル、保存中断、破損、前世代への復帰、外部 `.alto` 読込、実際の編集・保存・再起動を一連の操作として確認する。

@@ -4,3 +4,9 @@ node_modules/
 .DS_Store
 packages/alto-sdk/temp/
 examples/*/dist/
+examples/browser-playground/pkg/*.wasm
+examples/vector-comparison/pkg/*.wasm
+packages/alto-sdk/dist/pkg/*.wasm
+verification/out/
+# The full-tree manifest conflicted on every PR. wasm/SHA256SUMS stays tracked.
+/SHA256SUMS

@@ -1,6 +1,9 @@
 # CI の GPU 喪失：起動直後のキャンバスのサイズ変更が引き金（2026-10-25）
 
-構造化した証拠：[gpu-loss-resize-trigger-ci-2026-10-25.json](gpu-loss-resize-trigger-ci-2026-10-25.json)。
+
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+
+構造化した証拠：`gpu-loss-resize-trigger-ci-2026-10-25.json`（CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。
 
 それまでの調査（GPU-LOSS-INVESTIGATION / ISOLATION / SURFACE-RECORDING、`codex/gpu-loss-ci` ブランチ）を引き継いだ。
 
