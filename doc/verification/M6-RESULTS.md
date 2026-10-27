@@ -25,7 +25,7 @@
 | M4回帰11項目 | JSON（`m6-chrome-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-m4-regression.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 | B1〜B7 | JSON（`m6-chrome-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） | JSON（`m6-browser-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
 
-[Rust/SDKログ](../../verification/m6-rust-and-sdk.log) / [比較用Clippy](../../verification/m6-comparison-clippy.log) （M6時点のWASMの値は下の「配布物」）。以前の結果は [M5](M5-RESULTS.md)・[M4](M4-RESULTS.md) に保存しています。
+Rust/SDKログ（`m6-rust-and-sdk.log`）と比較用 Clippy ログ（`m6-comparison-clippy.log`）はリポジトリに残していない（M6時点のWASMの値は下の「配布物」）。以前の結果は [M5](M5-RESULTS.md)・[M4](M4-RESULTS.md) に保存しています。
 
 ## M6の検証内容
 

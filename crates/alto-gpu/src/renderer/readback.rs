@@ -6,7 +6,37 @@ use std::rc::Rc as PoolRef;
 use std::sync::Arc as PoolRef;
 pub(super) type SharedPool = PoolRef<Pool>;
 pub(super) fn capacity(budget: u64) -> u64 {
-    (8 * 1048576).min(budget / 16) / TILE_RGBA_BYTES * TILE_RGBA_BYTES
+    // At least one tile. A 0-byte pool makes `next_batch` take nothing, so
+    // `finish_stroke` never drains `remaining`. Budgets under 64 MiB are
+    // rejected earlier; this floor does not rely on that.
+    let bytes = (8 * 1048576).min(budget / 16);
+    (bytes / TILE_RGBA_BYTES).max(1) * TILE_RGBA_BYTES
+}
+/// How many tiles this pool can copy. Zero is an error: `take(0)` would not
+/// drain the stroke, and the finish loop would spin.
+fn tile_slots(pool_bytes: u64) -> Result<usize> {
+    let count = (pool_bytes / TILE_RGBA_BYTES) as usize;
+    if count == 0 {
+        Err(RenderError::Internal("readback pool holds no tile".into()))
+    } else {
+        Ok(count)
+    }
+}
+/// Runs `body`, then `release`, including when `body` returns an error or panics.
+/// The mapped view has to be a local of `body` so it is dropped before unmap.
+fn release_after<T>(release: impl FnOnce(), body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let guard = ReleaseOnDrop(Some(release));
+    let result = body();
+    drop(guard);
+    result
+}
+struct ReleaseOnDrop<F: FnOnce()>(Option<F>);
+impl<F: FnOnce()> Drop for ReleaseOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
 }
 pub(super) struct Pool {
     pub buffer: wgpu::Buffer,
@@ -127,6 +157,8 @@ pub struct StrokeReadback {
     mask: bool,
     pub damage: Option<Rect>,
     fail_after: Option<u64>,
+    /// Set after a copy error. A later `next_batch` must not `map_async` again.
+    failed: bool,
 }
 impl StrokeReadback {
     pub async fn next_batch(
@@ -137,22 +169,40 @@ impl StrokeReadback {
                 "stroke cancelled before commit".into(),
             ));
         }
+        if self.failed {
+            return Err(RenderError::Internal(
+                "readback reader already failed".into(),
+            ));
+        }
         if self.remaining.len() == 0 {
             return Ok(None);
         }
         let completed = self.pool.0.completed.load(Ordering::Acquire);
+        // This injection returns before `map_async`. It cannot leave the buffer mapped.
         if self.fail_after.is_some_and(|n| completed >= n) {
             return Err(RenderError::Internal(
                 "injected readback batch failure".into(),
             ));
         }
-        let count = (self.pool.0.bytes / TILE_RGBA_BYTES) as usize;
+        let count = match tile_slots(self.pool.0.bytes) {
+            Ok(count) => count,
+            Err(e) => {
+                self.failed = true;
+                return Err(e);
+            }
+        };
         let batch = PendingBatch {
             tiles: self.remaining.by_ref().take(count).collect(),
             governor: self.governor.clone(),
             queue: self.queue.clone(),
             complete: false,
         };
+        if batch.tiles.is_empty() {
+            self.failed = true;
+            return Err(RenderError::Internal(
+                "readback batch made no progress".into(),
+            ));
+        }
         let mut e = self.device.create_command_encoder(&Default::default());
         for (i, (_, tile)) in batch.tiles.iter().enumerate() {
             e.copy_texture_to_buffer(
@@ -173,43 +223,52 @@ impl StrokeReadback {
             );
         }
         self.queue.submit(Some(e.finish()));
-        self.pool
+        let map_result = self
+            .pool
             .0
             .map_controlled(
                 batch.tiles.len() as u64 * TILE_RGBA_BYTES,
                 Some(&self.control),
             )
-            .await?;
+            .await;
+        if let Err(e) = map_result {
+            // map_controlled unmaps on failure. The batch tiles are dropped with
+            // this error, so a retry must not continue the stroke.
+            self.failed = true;
+            return Err(e);
+        }
         let mut batch = batch;
         batch.complete = true;
-        let mapped = self
-            .pool
-            .0
-            .buffer
-            .slice(..batch.tiles.len() as u64 * TILE_RGBA_BYTES)
-            .get_mapped_range()
-            .map_err(|e| RenderError::Internal(e.to_string()))?;
-        let mut out = Vec::with_capacity(batch.tiles.len());
-        for (i, (key, tile)) in batch.tiles.iter().enumerate() {
-            let rgba = &mapped[i * TILE_RGBA_BYTES as usize..(i + 1) * TILE_RGBA_BYTES as usize];
-            let data = TileData::new(
-                if self.mask {
-                    alto_core::PixelFormat::R8
-                } else {
-                    alto_core::PixelFormat::Rgba8
+        let copied = {
+            let pool = &self.pool.0;
+            let mask = self.mask;
+            let tiles = &batch.tiles;
+            // `fail_after` never reaches here. Unmap on every exit, then poison the
+            // reader so a later `next_batch` cannot `map_async` a mapped buffer.
+            release_after(
+                || {
+                    pool.buffer.unmap();
+                    pool.mapped.store(0, Ordering::Release);
                 },
-                if self.mask {
-                    rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
-                } else {
-                    rgba.to_vec()
+                || {
+                    let mapped = pool
+                        .buffer
+                        .slice(..tiles.len() as u64 * TILE_RGBA_BYTES)
+                        .get_mapped_range()
+                        .map_err(|e| RenderError::Internal(e.to_string()))?;
+                    let out = tiles_from_mapped(&mapped, tiles, mask);
+                    drop(mapped);
+                    out
                 },
             )
-            .map_err(|e| RenderError::CorruptData(e.to_string()))?;
-            out.push((*key, tile.before, data));
-        }
-        drop(mapped);
-        self.pool.0.buffer.unmap();
-        self.pool.0.mapped.store(0, Ordering::Release);
+        };
+        let out = match copied {
+            Ok(out) => out,
+            Err(e) => {
+                self.failed = true;
+                return Err(e);
+            }
+        };
         drop(batch);
         self.pool
             .0
@@ -231,6 +290,31 @@ impl StrokeReadback {
         }
         self.governor.submitted(&self.queue);
     }
+}
+fn tiles_from_mapped(
+    mapped: &[u8],
+    tiles: &[(TileKey, StrokeTile)],
+    mask: bool,
+) -> Result<Vec<(TileKey, Option<ContentHash>, TileData)>> {
+    let mut out = Vec::with_capacity(tiles.len());
+    for (i, (key, tile)) in tiles.iter().enumerate() {
+        let rgba = &mapped[i * TILE_RGBA_BYTES as usize..(i + 1) * TILE_RGBA_BYTES as usize];
+        let data = TileData::new(
+            if mask {
+                alto_core::PixelFormat::R8
+            } else {
+                alto_core::PixelFormat::Rgba8
+            },
+            if mask {
+                rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
+            } else {
+                rgba.to_vec()
+            },
+        )
+        .map_err(|e| RenderError::CorruptData(e.to_string()))?;
+        out.push((*key, tile.before, data));
+    }
+    Ok(out)
 }
 struct PendingBatch {
     tiles: Vec<(TileKey, StrokeTile)>,
@@ -350,6 +434,7 @@ impl Renderer {
             mask: stroke.mask,
             damage: stroke.damage,
             fail_after: self.readback_fault.take(),
+            failed: false,
         })
     }
     pub fn inject_readback_failure(&mut self, after_tiles: Option<u64>) {
@@ -398,10 +483,19 @@ impl Drop for NativePoller {
 }
 
 mod deadline {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Waker;
     pub(super) struct Deadline {
         state: Arc<Mutex<(bool, Option<Waker>)>>,
+        /// Set on drop so the waiter exits without reporting a timeout.
+        /// `park_timeout` can return early; the thread loops until this flag
+        /// or the real deadline. One thread per map is the existing shape:
+        /// finish maps a few batches, and drop unparks the thread when the
+        /// map ends.
+        #[cfg(not(target_arch = "wasm32"))]
+        stop: Arc<AtomicBool>,
         #[cfg(not(target_arch = "wasm32"))]
         thread: std::thread::JoinHandle<()>,
         #[cfg(target_arch = "wasm32")]
@@ -423,15 +517,35 @@ mod deadline {
             let signal = state.clone();
             #[cfg(not(target_arch = "wasm32"))]
             {
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_flag = stop.clone();
                 let thread = std::thread::spawn(move || {
-                    std::thread::park_timeout(std::time::Duration::from_secs(30));
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        if stop_flag.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        std::thread::park_timeout(remaining);
+                    }
+                    if stop_flag.load(Ordering::Acquire) {
+                        return;
+                    }
                     let mut s = signal.lock().unwrap();
                     s.0 = true;
                     if let Some(w) = s.1.take() {
                         w.wake();
                     }
                 });
-                Self { state, thread }
+                Self {
+                    state,
+                    stop,
+                    thread,
+                }
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -457,11 +571,18 @@ mod deadline {
             s.1 = Some(w.clone());
             s.0
         }
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        pub(super) fn wake_thread_for_test(&self) {
+            self.thread.thread().unpark();
+        }
     }
     impl Drop for Deadline {
         fn drop(&mut self) {
             #[cfg(not(target_arch = "wasm32"))]
-            self.thread.thread().unpark();
+            {
+                self.stop.store(true, Ordering::Release);
+                self.thread.thread().unpark();
+            }
             #[cfg(target_arch = "wasm32")]
             clear_timeout(self.timer);
         }
@@ -485,5 +606,44 @@ mod tests {
         c.begin();
         assert!(c.commit());
         assert!(!sibling.cancel());
+    }
+    #[test]
+    fn tiny_budget_readback_capacity_is_one_tile() {
+        // `budget / 16` below one tile used to truncate to 0 bytes.
+        for budget in [0, 1, TILE_RGBA_BYTES - 1, 16 * TILE_RGBA_BYTES - 1] {
+            assert_eq!(capacity(budget), TILE_RGBA_BYTES, "budget {budget}");
+        }
+        assert_eq!(capacity(16 * TILE_RGBA_BYTES), TILE_RGBA_BYTES);
+        assert!(tile_slots(0).is_err());
+        assert!(tile_slots(TILE_RGBA_BYTES - 1).is_err());
+        assert_eq!(tile_slots(TILE_RGBA_BYTES).unwrap(), 1);
+        assert_eq!(tile_slots(32 * TILE_RGBA_BYTES).unwrap(), 32);
+    }
+    #[test]
+    fn mapped_copy_releases_the_buffer_when_decode_fails() {
+        // The injected readback fault returns before map_async, so it cannot
+        // observe a buffer left mapped. Copy errors go through release_after.
+        let releases = std::cell::Cell::new(0);
+        let failed = release_after(
+            || releases.set(releases.get() + 1),
+            || Err::<(), _>(RenderError::CorruptData("tile".into())),
+        );
+        assert!(failed.is_err());
+        assert_eq!(releases.get(), 1);
+        let ok = release_after(|| releases.set(releases.get() + 1), || Ok(4));
+        assert_eq!(ok.unwrap(), 4);
+        assert_eq!(releases.get(), 2);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deadline_waits_through_a_spurious_wake() {
+        let deadline = super::deadline::Deadline::new();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        deadline.wake_thread_for_test();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !deadline.expired(std::task::Waker::noop()),
+            "a single wake was treated as the 30s map timeout"
+        );
     }
 }
