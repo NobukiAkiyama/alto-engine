@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, parityCases, renderCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -174,6 +174,9 @@ export async function runParityTests(engine, log) {
         return gap;
       });
     }
+    await test("alpha-measure layers are distinct", async () => {
+      assertDistinctAlphaLayers();
+    });
     for (const testCase of alphaMeasureCases()) {
       const start = performance.now();
       try {

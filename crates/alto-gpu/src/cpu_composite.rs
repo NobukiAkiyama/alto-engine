@@ -531,7 +531,8 @@ fn cases() -> Vec<Case> {
         nodes: vec![far],
     });
     // Measured, not enforced, and omitted from the locked CPU reference.
-    // Straight texels sweep RGB and use alpha 0, 1, 128, and 254.
+    // Each layer gets its own straight sweep: alpha phase offset by the layer
+    // index, and RGB rotated and shifted so neighboring layers are not copies.
     let enforced = out.len();
     for index in 0..enforced {
         let mut variant = out[index].clone();
@@ -544,35 +545,59 @@ fn cases() -> Vec<Case> {
     out
 }
 
-/// Straight RGBA. R and G cover 0..=255 across a 256px tile, B covers them as
-/// `3x+5y`, and alpha cycles through 0, 1, 128, 254.
-fn alpha_sweep(w: u32, h: u32) -> Image {
+/// Straight RGBA for one layer in paint order.
+///
+/// Layer 0 keeps R = `x & 255`, G = `y & 255`, B = `(3x+5y) & 255`. Layer `i`
+/// rotates those channels by `i % 3` and adds `17*i`, so two layers never share
+/// an RGB triple. Alpha is one of 0, 1, 128, 254. Even layers step with `x+y`,
+/// odd layers step with `x` only, and both add the layer index as a phase.
+/// Layers 0 and 1 therefore hit every pair of those four alphas.
+fn alpha_sweep(w: u32, h: u32, layer: u32) -> Image {
     const ALPHAS: [u8; 4] = [0, 1, 128, 254];
+    let rot = (layer % 3) as usize;
+    let shift = ((layer * 17) & 255) as u8;
     let mut pixels = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {
+            let base = [
+                (x & 255) as u8,
+                (y & 255) as u8,
+                (x.wrapping_mul(3).wrapping_add(y.wrapping_mul(5)) & 255) as u8,
+            ];
             let i = ((y * w + x) * 4) as usize;
-            pixels[i] = (x & 255) as u8;
-            pixels[i + 1] = (y & 255) as u8;
-            pixels[i + 2] = (x.wrapping_mul(3).wrapping_add(y.wrapping_mul(5)) & 255) as u8;
-            pixels[i + 3] = ALPHAS[((x + y) % 4) as usize];
+            pixels[i] = base[rot].wrapping_add(shift);
+            pixels[i + 1] = base[(1 + rot) % 3].wrapping_add(shift);
+            pixels[i + 2] = base[(2 + rot) % 3].wrapping_add(shift);
+            let phase = if layer % 2 == 0 {
+                x + y + layer
+            } else {
+                x + layer
+            };
+            pixels[i + 3] = ALPHAS[(phase % 4) as usize];
         }
     }
     Image { w, h, pixels }
 }
 
 fn paint_alpha_sweep(nodes: &mut [Node]) {
+    let mut layer = 0u32;
+    paint_alpha_sweep_at(nodes, &mut layer);
+}
+
+fn paint_alpha_sweep_at(nodes: &mut [Node], layer: &mut u32) {
     for node in nodes {
         match node {
             Node::Raster {
                 image, extra_tiles, ..
             } => {
-                *image = alpha_sweep(image.w, image.h);
+                let index = *layer;
+                *layer += 1;
+                *image = alpha_sweep(image.w, image.h, index);
                 for tile in extra_tiles {
-                    tile.pixels = alpha_sweep(256, 256).pixels;
+                    tile.pixels = alpha_sweep(256, 256, index).pixels;
                 }
             }
-            Node::Group { children, .. } => paint_alpha_sweep(children),
+            Node::Group { children, .. } => paint_alpha_sweep_at(children, layer),
         }
     }
 }
@@ -2028,6 +2053,96 @@ fn alpha_measure_cases_are_not_enforced() {
     );
     let locked = std::fs::read_to_string(reference_path()).unwrap();
     assert!(!locked.contains("-alpha-measure"));
+    assert_blend_layers_cover_alpha_pairs(&measured);
+}
+
+fn rasters_in_paint_order<'a>(nodes: &'a [Node], out: &mut Vec<&'a Image>) {
+    for node in nodes {
+        match node {
+            Node::Raster { image, .. } => out.push(image),
+            Node::Group { children, .. } => rasters_in_paint_order(children, out),
+        }
+    }
+}
+
+/// Blend, two-partial, and eight-layer sweeps must not paint src as a copy of
+/// dst. Every consecutive pair covers all 16 alpha combinations, and RGB differs
+/// at every pixel of that pair.
+fn assert_blend_layers_cover_alpha_pairs(measured: &[&Case]) {
+    const ALPHAS: [u8; 4] = [0, 1, 128, 254];
+    let mut checked = 0u32;
+    for case in measured {
+        let stacked = case.name.starts_with("blend-")
+            || case.name.starts_with("two-partial")
+            || case.name.starts_with("eight-layers")
+            || case.name.starts_with("alpha-extremes");
+        if !stacked {
+            continue;
+        }
+        let mut images = Vec::new();
+        rasters_in_paint_order(&case.nodes, &mut images);
+        assert!(
+            images.len() >= 2,
+            "{} should stack at least two layers",
+            case.name
+        );
+        for pair in images.windows(2) {
+            let dst = pair[0];
+            let src = pair[1];
+            assert_eq!(dst.w, src.w, "{}", case.name);
+            assert_eq!(dst.h, src.h, "{}", case.name);
+            let mut pairs = std::collections::HashSet::new();
+            let mut rgb_same = 0u32;
+            for i in (0..dst.pixels.len()).step_by(4) {
+                pairs.insert((dst.pixels[i + 3], src.pixels[i + 3]));
+                if dst.pixels[i..i + 3] == src.pixels[i..i + 3] {
+                    rgb_same += 1;
+                }
+            }
+            assert_eq!(
+                rgb_same, 0,
+                "{} has pixels where src RGB equals dst",
+                case.name
+            );
+            assert_eq!(pairs.len(), 16, "{} alpha pairs", case.name);
+            for &dst_a in &ALPHAS {
+                for &src_a in &ALPHAS {
+                    assert!(
+                        pairs.contains(&(dst_a, src_a)),
+                        "{} missing dst alpha {dst_a}, src alpha {src_a}",
+                        case.name
+                    );
+                }
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked >= 16, "blend sweeps were not checked");
+}
+
+#[test]
+fn existing_v1_and_v2_hashes_are_unchanged() {
+    let v2 = std::fs::read_to_string(reference_path()).unwrap();
+    let v2_before = include_str!("fixtures/cpu-reference-v2-before-alpha.txt");
+    assert!(
+        v2.starts_with(v2_before),
+        "an existing v2 hash line changed by at least one character"
+    );
+    for line in v2[v2_before.len()..]
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        assert!(
+            line.contains("-alpha-measure "),
+            "new hash line is not an alpha-measure case: {line}"
+        );
+    }
+    let v1 = std::fs::read_to_string(render_v1_path()).unwrap();
+    let v1_before = include_str!("fixtures/render-v1-before-alpha.txt");
+    assert_eq!(
+        v1, v1_before,
+        "an existing v1 hash changed by at least one character"
+    );
 }
 
 #[test]
