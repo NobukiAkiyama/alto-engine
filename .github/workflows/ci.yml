@@ -163,6 +163,60 @@ jobs:
           cache-bin: "false"
           shared-key: wasm-fast
           workspaces: ". -> target/wasm-fast"
+      - run: sh scripts/check.sh wasm-fast
+      - name: Build vector package for the hash report
+        if: ${{ !cancelled() }}
+        run: sh scripts/build-vector-comparison.sh
+      - name: Report proposed release-binary hashes and sizes
+        if: ${{ !cancelled() }}
+        run: node scripts/report-wasm-hashes.mjs "$RUNNER_TEMP/wasm-hashes"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: wasm-hashes
+          path: ${{ runner.temp }}/wasm-hashes
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alto-browser-reports-wasm
+          path: ${{ runner.temp }}/alto-browser
+          if-no-files-found: ignore
+
+  # Independent cached rebuilds let browser/vector tests start without waiting
+  # for wasm's clippy, API and Node checks or an artifact transfer.
+  wasm-browser:
+    if: ${{ !inputs.gpu_lifecycle }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ALTO_WASM_TARGET_DIR: target/wasm-fast
+      ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
+      ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            packages/alto-sdk/pnpm-lock.yaml
+            examples/*/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+          cache-bin: "false"
+          shared-key: wasm-fast
+          workspaces: ". -> target/wasm-fast"
       - name: Install pinned Chrome for Testing
         shell: bash
         run: |
@@ -176,7 +230,16 @@ jobs:
           "$chrome_executable" --version
           echo "CHROME=$chrome_executable" >> "$GITHUB_ENV"
           echo "ALTO_BROWSER_EXPECTED_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
-      - run: sh scripts/check.sh wasm-fast
+      - name: Build WASM packages and SDK for browser tests
+        run: |
+          . ./scripts/wasm-repro-env.sh
+          version=$(wasm_bindgen_version)
+          if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen $version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked
+          fi
+          sh scripts/build-m0.sh
+          pnpm --dir packages/alto-sdk install --frozen-lockfile
+          pnpm --dir packages/alto-sdk build
       - name: Run browser correctness suites
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
@@ -205,9 +268,70 @@ jobs:
           ALTO_BROWSER_GPU: swiftshader
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/examples
         run: sh scripts/check-examples.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alto-browser-reports-browser
+          path: ${{ runner.temp }}/alto-browser
+          if-no-files-found: ignore
+
+  wasm-vector:
+    if: ${{ !inputs.gpu_lifecycle }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ALTO_WASM_TARGET_DIR: target/wasm-fast
+      ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
+      ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
+      ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
+      ALTO_BROWSER_GRAPHITE_BACKEND: ${{ inputs.graphite_backend || 'default' }}
+      CHROME_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
+      ALTO_BROWSER_DISABLE_GPU_WATCHDOG: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu_watchdog == false && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            packages/alto-sdk/pnpm-lock.yaml
+            examples/*/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+          cache-bin: "false"
+          shared-key: wasm-fast
+          workspaces: ". -> target/wasm-fast"
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          chrome_dir="$RUNNER_TEMP/alto-chrome"
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/mac-arm64/chrome-mac-arm64.zip" \
+            --output "$RUNNER_TEMP/alto-chrome.zip"
+          unzip -q "$RUNNER_TEMP/alto-chrome.zip" -d "$chrome_dir"
+          chrome_executable="$chrome_dir/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          "$chrome_executable" --version
+          echo "CHROME=$chrome_executable" >> "$GITHUB_ENV"
+          echo "ALTO_BROWSER_EXPECTED_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
+      - name: Build WASM packages and SDK for browser tests
+        run: |
+          . ./scripts/wasm-repro-env.sh
+          version=$(wasm_bindgen_version)
+          if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen $version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked
+          fi
+          sh scripts/build-m0.sh
+          pnpm --dir packages/alto-sdk install --frozen-lockfile
+          pnpm --dir packages/alto-sdk build
       - name: Verify vector batching against legacy RGBA16F pixels
-        # Keep the no-Canvas comparison observable if the separate surface suites fail.
-        # This does not change the failed status of an earlier step or of this job.
         if: ${{ !cancelled() }}
         env:
           ALTO_BROWSER_GPU: swiftshader
@@ -217,18 +341,10 @@ jobs:
           sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed || true
           sh scripts/build-vector-comparison.sh
           node scripts/verify-browser.mjs --vector-optimization
-      - name: Report proposed release-binary hashes and sizes
-        if: ${{ !cancelled() }}
-        run: node scripts/report-wasm-hashes.mjs "$RUNNER_TEMP/wasm-hashes"
-      - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
-        with:
-          name: wasm-hashes
-          path: ${{ runner.temp }}/wasm-hashes
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: alto-browser-reports
+          name: alto-browser-reports-vector
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
 

@@ -115,4 +115,4 @@ P0/P5の結果で、縮小段階のキャッシュ不足または1タイルの�
 
 この計画では、P0〜P3で復旧の約800 ms、P4〜P6で縮小・コールド描画の負荷をそれぞれ減らす。各段階の測定結果を次の段階の判断材料にする。
 
-CI: PR の `wasm` ジョブは `check.sh wasm-fast` でキャッシュを使い、`wasm/SHA256SUMS` と build.json の差分を summary / `wasm-hashes` artifact に報告するだけ。main push の `wasm-release-hashes` は arm64 macOS の別々のクリーンターゲットで2回ビルドし、両者のハッシュ・サイズの全不一致を表示して失敗する。コミット済み値との差分は報告だけとし、`wasm-hashes-main` artifact に保存する。tag push だけがコミット済み値と照合する。タグ前に最新 main artifact から値を更新する PR をマージする（[リリース手順](../../RELEASING.md)）。これらはリリースバイナリの値で、v1/v2 render hash 検査は変更しない。
+CI: `wasm`、`wasm-browser`（機能検証・SwiftShader parity・埋め込み例）、`wasm-vector`（legacy RGBA16F との比較）は、同じ Rust キャッシュで独立にビルドして並列実行する。すべて必須で、ブラウザの生レポートはそれぞれ `alto-browser-reports-browser` / `alto-browser-reports-vector` に保存する。PR の `wasm` ジョブは `check.sh wasm-fast` でキャッシュを使い、`wasm/SHA256SUMS` と build.json の差分を summary / `wasm-hashes` artifact に報告するだけ。main push の `wasm-release-hashes` は arm64 macOS の別々のクリーンターゲットで2回ビルドし、両者のハッシュ・サイズの全不一致を表示して失敗する。コミット済み値との差分は報告だけとし、`wasm-hashes-main` artifact に保存する。tag push だけがコミット済み値と照合する。タグ前に最新 main artifact から値を更新する PR をマージする（[リリース手順](../../RELEASING.md)）。これらはリリースバイナリの値で、v1/v2 render hash 検査は変更しない。
