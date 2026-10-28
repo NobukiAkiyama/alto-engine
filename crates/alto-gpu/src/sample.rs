@@ -75,7 +75,16 @@ pub fn axis_unit(inv: [f32; 6]) -> bool {
 /// Integers with magnitude below this are exact in `f64`.
 const F64_EXACT_INT: f64 = (1u64 << 53) as f64;
 
+/// Round half away from zero, exactly: `f64::round` decides on the value itself.
+/// Render version 3 (`integer_inverse`).
 fn round_half_away(scaled: f64) -> f64 {
+    scaled.round()
+}
+
+/// Render version 2's rounding, kept so its quantization and hashes never move:
+/// `(scaled + 0.5).floor()` rounds the sum first, so a value just below a tie
+/// (`0.5 - 2^-54`) goes up. Only `integer_inverse_v2` uses it.
+fn round_half_away_v2(scaled: f64) -> f64 {
     if scaled >= 0.0 {
         (scaled + 0.5).floor()
     } else {
@@ -83,8 +92,9 @@ fn round_half_away(scaled: f64) -> f64 {
     }
 }
 
-/// Rounded Q16, or `None` when `v` is not finite or `v * 65536` is not an exact `f64` integer.
-fn quantize_q16(v: f64) -> Option<f64> {
+/// Rounded Q16 with `round`, or `None` when `v` is not finite or `v * 65536` is
+/// not an exact `f64` integer. `v * 65536` is exact (a power of two).
+fn quantize_q16(v: f64, round: fn(f64) -> f64) -> Option<f64> {
     if !v.is_finite() {
         return None;
     }
@@ -92,12 +102,11 @@ fn quantize_q16(v: f64) -> Option<f64> {
     if !scaled.is_finite() || scaled.abs() >= F64_EXACT_INT {
         return None;
     }
-    Some(round_half_away(scaled))
+    Some(round(scaled))
 }
 
-/// Q16 coefficient. `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
-pub fn quantize_coeff(v: f64) -> Option<i32> {
-    let rounded = quantize_q16(v)?;
+fn coeff(v: f64, round: fn(f64) -> f64) -> Option<i32> {
+    let rounded = quantize_q16(v, round)?;
     if rounded > i32::MAX as f64 || rounded < (i32::MIN + 1) as f64 {
         None
     } else {
@@ -108,7 +117,13 @@ pub fn quantize_coeff(v: f64) -> Option<i32> {
 /// Q16 translation as `i64`. `None` when the rounded value is not exact in `f64`.
 /// `|q| < 2^53` implies the Q24 shift (`<< 8`) fits in `i64`.
 pub fn quantize_translation(v: f64) -> Option<i64> {
-    Some(quantize_q16(v)? as i64)
+    Some(quantize_q16(v, round_half_away)? as i64)
+}
+
+/// Q16 coefficient, rounded exactly half away from zero (render version 3).
+/// `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
+pub fn quantize_coeff(v: f64) -> Option<i32> {
+    coeff(v, round_half_away)
 }
 
 /// Coefficients in `m` (`m00, m10, m01, m11`) and translation, all Q16.
@@ -119,16 +134,29 @@ pub struct IntegerInverse {
     pub ty: i64,
 }
 
+/// The Q16 inverse of render version 3, every value rounded exactly half away
+/// from zero.
 pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
+    integer_inverse_with(inv, round_half_away)
+}
+
+/// The Q16 inverse of render version 2 (`pack_inverse`), with its frozen
+/// rounding (`round_half_away_v2`).
+pub fn integer_inverse_v2(inv: [f64; 6]) -> Option<IntegerInverse> {
+    integer_inverse_with(inv, round_half_away_v2)
+}
+
+fn integer_inverse_with(inv: [f64; 6], round: fn(f64) -> f64) -> Option<IntegerInverse> {
+    let t = |v| Some(quantize_q16(v, round)? as i64);
     Some(IntegerInverse {
         m: [
-            quantize_coeff(inv[0])?,
-            quantize_coeff(inv[1])?,
-            quantize_coeff(inv[2])?,
-            quantize_coeff(inv[3])?,
+            coeff(inv[0], round)?,
+            coeff(inv[1], round)?,
+            coeff(inv[2], round)?,
+            coeff(inv[3], round)?,
         ],
-        tx: quantize_translation(inv[4])?,
-        ty: quantize_translation(inv[5])?,
+        tx: t(inv[4])?,
+        ty: t(inv[5])?,
     })
 }
 
@@ -162,7 +190,7 @@ pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
     if render_version < RENDER_VERSION || axis_unit(f32_inv) {
         return float;
     }
-    let Some(q) = integer_inverse(inv) else {
+    let Some(q) = integer_inverse_v2(inv) else {
         log::warn!(
             "compositor inverse does not fit the integer sampler (translation {}, {}); using the f32 path",
             inv[4],

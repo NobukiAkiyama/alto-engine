@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, maskByteV3, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14 } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, maskByteV3, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14, quantizeQ16, quantizeQ16V2, roundHalfAway } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -200,4 +200,26 @@ test("v3 mask lookup at non-zero and negative ROI origins is the integer shift",
   // The i32 bounds themselves are accepted; a pixel whose Q8 center leaves i32 reads 0.
   assert.equal(maskByteV3(pattern, move, 0, 0, [-(2 ** 31), 0], 1), 0);
   assert.equal(maskByteV3(pattern, move, 0, 0, [2 ** 31 - 1, 0], 1), 0);
+});
+
+test("v3 Q16 rounds exactly half away from zero; v2 keeps its rounding", () => {
+  const tie = 2 ** -17;
+  const below = tie - 2 ** -70;
+  // The f64 just below 2^-17: its Q16 is 0.5 - 2^-54, and the old floor(x + 0.5) is 1.
+  assert.equal(below * 65536, 0.5 - 2 ** -54);
+  assert.equal(Math.floor(below * 65536 + 0.5), 1);
+  assert.equal(Math.sign(-below) * Math.floor(Math.abs(-below * 65536) + 0.5), -1, "the rejected form has the same bug");
+  assert.equal(quantizeQ16(below), 0);
+  assert.equal(quantizeQ16(-below), 0);
+  assert.equal(quantizeQ16(tie), 1);
+  assert.equal(quantizeQ16(-tie), -1);
+  assert.equal(quantizeQ16(tie + 2 ** -69), 1);
+  assert.equal(quantizeQ16(-(tie + 2 ** -69)), -1);
+  for (const [x, want] of [[2.5, 3], [-2.5, -3], [2.4999999999999996, 2], [-2.4999999999999996, -2], [0.49999999999999994, 0], [-0.49999999999999994, 0]]) {
+    assert.equal(roundHalfAway(x), want, String(x));
+  }
+  // Version 2 is unchanged.
+  assert.equal(quantizeQ16V2(below), 1);
+  assert.equal(quantizeQ16V2(-below), -1);
+  assert.equal(quantizeQ16V2(tie), 1);
 });

@@ -271,13 +271,16 @@ measure するのは、算術が整数でも入力が float のまま来るケ�
 
 ## float purge（v3 デフォルト化の前提）
 
-#37 のあと、v3 の M5 経路に残っていた float を除いた（Linus 21:35 / 21:46 の項目 9〜12）。v1 / v2 のシェーダ、出力、ハッシュは変えない。
+#37 のあと、v3 のシェーダの読み取り経路（M5 の段、resolve、整数合成）に残っていた f32 を除いた（Linus 21:35 / 21:46 の項目 9〜12、00:33 の整数合成、03:25 の Q16 丸め）。v1 / v2 のシェーダ、量子化、出力、ハッシュは変えない。
+
+**範囲（Linus 03:25）。** シェーダの読み取り経路に f32 は残らない。シェーダが読むのは整数の uniform・コマンド・タイルと、`unorm_byte` でバイトに戻すアトラスのテクセルだけである。ホスト側の変換の合成（`multiply`）、逆行列（`inverse`）、Q16 の生成（`integer_inverse` の入力）は f64 のままで、これは未解決である。別の「v3 integer transform」設計メモと PR で追跡する。v3 の既定化とリリースの前の必須ブロッカーである。この PR は v3 経路が完全に float を含まないとは主張しない。
 
 - **項目 9。モード 8、17、19、20。** f32 の `p` から入力座標を作る `load_a` / `load_b` をやめ、モード 21〜23 と同じ整数の `input_map`（`texel_a` / `texel_b`、負の分子は床除算）で読む。設定も f32 の `settings` スロットではなく整数の `grid[0]` に置く。整数で表せない入力領域は GpuUnsupported。`effects-q14.wgsl` から `load_a`、`load_b`、`sparse_bytes` はなくなった。
 - **項目 10。モード 18（ラスタの入口）。** f32 の `p` と f32 の逆行列 `inv0` / `inv1`（f64 から f32 へ丸め、FMA の余地あり）をやめ、マスクと同じ Q16 の逆行列と Q8 の画素中心（`lookup`）で引く。タイルの選別も `mask_tile_range`。逆行列が特異なら何も描かない（v1 / v2 の f64 の選別と同じ）。
   - **設計判断：最近傍。** 整数の 4 タップではなく最近傍にした。CPU 参照（Rust `q14_program_cpu`、JS `renderM5V3`）は、そのまま置いたラスタを画素ごとにそのまま写す。最近傍は Q8 の位置 `i * 256 + 128` の床で、その画素そのものになり、参照と全バイト一致する（`v3_raster_lookup_is_nearest_and_copies_as_placed`）。整数合成の 4 タップは同じ位置で重み 128 を持ち、隣のテクセルと半分ずつ混ぜるので一致しない。v2 の M5 の `sparse` も最近傍なので、意味も変わらない。
 - **項目 11。resolve のキャンバス判定。** `effects-resolve-q14.wgsl` は f32 の中心で `p < canvas` を比べていた。ホストが i64 で 2 倍した式 `0 <= 2 o + (2 i + 1) s < 2 end` からキャンバス上の画素の矩形 `span` を求め（`resolve_span`）、シェーダは整数の添字を比べるだけにした。タイルの原点もキーから i64 で求め直し、f32 の `Roi` と一致しなければ GpuUnsupported（`integer_origin`）。
 - **項目 12。不透明度の量子化。** `composite_opacity_q14` は f32 で `v * 16384 + 0.5` を切り捨てていた。積は正確だが和は正確でなく、`2^-15` の直前の f32（Q14 で `0.5 - 2^-25`）が 0 ではなく 1 になる。f32 のビットから整数で `v * 16384` を 0 から遠い側へ丸める `q14_round` に替えた。color-adjust の `color_adjust_q14` も同じ欠陥があったので同じ関数にした。JS（`q14Round`、`opacityQ14`、`colorAdjustQ14`）も BigInt で同じ式にした。
+- **Q16 の丸め（Linus 03:25）。** v3 の `integer_inverse` は f64 を 65536 倍して（2 のべきなので正確）0 から遠い側へ丸める。`(scaled + 0.5).floor()` は和を先に丸めるので、結びのすぐ下で誤る（v = 2^-17 - 2^-70 は 0.5 - 2^-54 で、和が 1 に丸まり 1 になる。正しくは 0）。v3 は `f64::round()`（値そのもので決める正確な half away from zero）に替えた。JS の `quantizeQ16` は `a = |x|`、`f = floor(a)`、`a - f >= 0.5` なら `f + 1`（`a - f` は Sterbenz で正確）で、符号を戻す。`sign * floor(|x| + 0.5)` は同じ誤りを持つので使わない。v2 は `integer_inverse_v2` / `quantizeQ16V2` で従来の丸めを保ち、量子化とハッシュは動かない。検査は `q16_rounding_is_exact_half_away` と Rust・JS の一致（`q16-reference.mjs`）。
 - **uniform。** v3 の `Config` は float のフィールドを宣言しない（f32 のスロットは `unused` で、ホストは 0 のままにする）。
 - **アトラス。** `Rgba8Unorm` のままにし、`textureLoad` と `unorm_byte` でバイトに戻す。整数形式（`r8uint` / `rgba8uint`）は採らない。アトラスは v1 / v2 と共有の一枚で、WebGPU では `Rgba8Unorm` と `Rgba8Uint` はビュー互換でない。v3 だけを整数にするには、二枚目のアトラス（アップロードとメモリの二重化）か、v1 / v2 のシェーダのアトラスの型の変更が要る。後者は v1 / v2 を一文字も変えないという条件に反する。`unorm_byte` の往復は 256 値の全チャネルで `Gpu::atlas_read` が必須の検査として押さえ、v3 で float の値に触れるのはシェーダの `atlas_bytes` 一か所だけである（`v3_stages_call_no_f32_coordinate_helper`）。
 
@@ -288,3 +291,7 @@ measure するのは、算術が整数でも入力が float のまま来るケ�
   - v3 のハッシュは変わり得る（軸平行で倍率 1 から少しずれた描画の最近傍）。v3 はまだデフォルトでなく、ロック済みの v3 ハッシュはない。v1 / v2 のシェーダとハッシュは変えない。
 
 検査は、モードごとに GPU と CPU の全バイト比較（原点、負のキー、10^6 付近、2^23 の直前、レベル倍率 4、回転・縮小・結びのラスタ、キャンバスの端、レベル 1 のピラミッド、実際の `Renderer::read_tile` 経由）、Rust と JS の一致（`m5-v3-renderer-reference.mjs`）、`main` から届く関数に float がないことの検査である。
+
+### 未解決：v3 integer transform（v3 既定化・リリース前の必須ブロッカー）
+
+シェーダに渡る Q16 の逆行列と平行移動は、ホストが f64 で作る。ノードの変換の合成（`renderer::multiply`、`Affine2::concat`）、逆行列（`renderer::inverse`、`Affine2::inverse` の除算）、リンクしたマスクの変換の合成は f64 の算術で、その結果を `integer_inverse` が丸める。f64 の演算は IEEE で一意で、Rust と JS は同じ式を同じ順で評価するので現在の検査では一致するが、整数で定義された変換ではない。これを整数（または有理数）の変換として定義し直すのは、別の「v3 integer transform」設計メモと PR で扱う。

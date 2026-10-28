@@ -388,13 +388,42 @@ function fetchFloat(tiles, inv, p) {
   });
 }
 const F64_EXACT_INT = 9007199254740992;
-function quantizeQ16(v) {
+/**
+ * `x` rounded exactly half away from zero (Rust `f64::round`): the fraction
+ * `a - floor(a)` is exact for `|a| < 2^53` (Sterbenz), so no sum is rounded
+ * first. `sign * floor(|x| + 0.5)` is not exact: `0.5 - 2^-54` plus `0.5` is 1.
+ */
+export function roundHalfAway(x) {
+  const a = Math.abs(x);
+  const fl = Math.floor(a);
+  const r = a - fl >= 0.5 ? fl + 1 : fl;
+  // Q16 values are integers: no -0.
+  return x < 0 && r !== 0 ? -r : r;
+}
+/** Q16 of render version 3 (Rust `sample::integer_inverse`), exact. */
+export function quantizeQ16(v) {
+  return quantizeQ16With(v, roundHalfAway);
+}
+/**
+ * Q16 of render version 2 (Rust `sample::integer_inverse_v2`), its frozen
+ * `floor(x + 0.5)` rounding, so v2 quantization and hashes never move.
+ */
+export function quantizeQ16V2(v) {
+  return quantizeQ16With(v, (scaled) => (scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5)));
+}
+function quantizeQ16With(v, round) {
   if (!Number.isFinite(v)) return null;
   const scaled = v * 65536;
   if (!Number.isFinite(scaled) || Math.abs(scaled) >= F64_EXACT_INT) return null;
-  return scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5);
+  return round(scaled);
+}
+function quantizeInverseV2(inv) {
+  return quantizeInverseWith(inv, quantizeQ16V2);
 }
 function quantizeInverse(inv) {
+  return quantizeInverseWith(inv, quantizeQ16);
+}
+function quantizeInverseWith(inv, quantizeQ16) {
   const m = inv.slice(0, 4).map(quantizeQ16);
   if (m.some((v) => v === null)) return null;
   for (const v of m) {
@@ -493,7 +522,7 @@ function axisUnit(inv) {
 }
 function fetch(tiles, inv, p, originPx, scale, x, y, version) {
   const inv32 = inv.map(f);
-  const q = quantizeInverse(inv);
+  const q = quantizeInverseV2(inv);
   if (version < RENDER_VERSION || axisUnit(inv32) || !q) return fetchFloat(tiles, inv32, p);
   return fetchInteger(tiles, q, originPx, scale, x, y);
 }

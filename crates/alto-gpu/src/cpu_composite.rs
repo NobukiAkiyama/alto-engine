@@ -859,7 +859,7 @@ fn fetch(tiles: &[Tile], inv: [f64; 6], p: [f32; 2], x: i32, y: i32, frame: &Fra
     if frame.version < RENDER_VERSION || axis_unit(inv_f32) {
         return fetch_f32(tiles, inv_f32, p);
     }
-    match integer_inverse(inv) {
+    match crate::sample::integer_inverse_v2(inv) {
         Some(q) => fetch_integer(tiles, &q, frame.origin_px, frame.scale_i, x, y),
         None => fetch_f32(tiles, inv_f32, p),
     }
@@ -5322,15 +5322,9 @@ fn color_adjust_q14_known_values() {
 }
 
 /// `v * 16384` rounded half away from zero by an independent formulation: the
-/// f64 product is exact for an f32 `v`, and so is the f64 sum with one half
-/// wherever it can decide the result.
+/// f64 product is exact for an f32 `v`, and `f64::round` rounds it exactly.
 fn q14_round_f64(v: f32) -> i32 {
-    let x = f64::from(v) * 16384.0;
-    (if x < 0.0 {
-        -(-x + 0.5).floor()
-    } else {
-        (x + 0.5).floor()
-    }) as i32
+    (f64::from(v) * 16384.0).round() as i32
 }
 
 /// Item 12 of the float purge: the host's opacity and color-adjust Q14
@@ -5398,6 +5392,126 @@ fn q14_quantizers_round_exactly_half_away() {
     assert_eq!(color_adjust_q14(f32::INFINITY), 0);
     assert_eq!(color_adjust_q14(-7.0), -16384);
     assert_eq!(color_adjust_q14(9.0), 65536);
+}
+
+/// Values at and next to Q16 ties for [`q16_rounding_is_exact_half_away`] and
+/// `tests/e2e/q16-reference.mjs`: 2^-17 (Q16 0.5) and the f64 on each side of
+/// it, `(k + 1/2) / 65536` and its neighbors for k up to 2^30, all negated too.
+fn q16_tie_values() -> Vec<f64> {
+    let near = |v: f64| {
+        [
+            f64::from_bits(v.to_bits() - 1),
+            v,
+            f64::from_bits(v.to_bits() + 1),
+        ]
+    };
+    let mut out = vec![0.0, 1.0, 2f64.powi(-80)];
+    for k in [
+        0u64,
+        1,
+        2,
+        3,
+        255,
+        256,
+        32_767,
+        65_535,
+        65_536,
+        1 << 20,
+        (1 << 30) - 1,
+        1 << 30,
+    ] {
+        out.extend(near((k as f64 + 0.5) / 65_536.0));
+    }
+    let negated: Vec<f64> = out.iter().map(|v| -v).collect();
+    out.extend(negated);
+    out
+}
+
+/// The 03:25 ruling: render version 3 rounds Q16 exactly half away from zero.
+/// `(scaled + 0.5).floor()` rounds the sum first: at v = 2^-17 - 2^-70 the
+/// scaled value is 0.5 - 2^-54, the sum rounds to 1, and the floor is 1, not
+/// 0. Version 2 keeps that rounding (`integer_inverse_v2`) so its quantization
+/// and hashes do not move.
+#[test]
+fn q16_rounding_is_exact_half_away() {
+    use crate::sample::{
+        integer_inverse, integer_inverse_v2, quantize_coeff, quantize_translation,
+    };
+    let tie = 2f64.powi(-17);
+    let below = tie - 2f64.powi(-70);
+    assert_eq!(
+        below,
+        f64::from_bits(tie.to_bits() - 1),
+        "the f64 just below 2^-17"
+    );
+    assert_eq!(below * 65_536.0, 0.5 - 2f64.powi(-54));
+    assert_eq!((below * 65_536.0 + 0.5).floor(), 1.0, "the old rounding");
+    for (v, want) in [
+        (tie, 1),
+        (below, 0),
+        (f64::from_bits(tie.to_bits() + 1), 1),
+        (-tie, -1),
+        (-below, 0),
+        (-f64::from_bits(tie.to_bits() + 1), -1),
+    ] {
+        assert_eq!(quantize_coeff(v), Some(want), "{v:e}");
+        assert_eq!(quantize_translation(v), Some(i64::from(want)), "{v:e}");
+        let q = integer_inverse([v, v, v, v, v, v]).unwrap();
+        assert_eq!(q.m, [want; 4], "{v:e}");
+        assert_eq!((q.tx, q.ty), (i64::from(want), i64::from(want)), "{v:e}");
+    }
+    // Version 2 is unchanged: just below the tie it still rounds up.
+    let v2 = |v: f64| integer_inverse_v2([v, 0.0, 0.0, v, v, 0.0]).unwrap();
+    assert_eq!(v2(below).m[0], 1);
+    assert_eq!(v2(-below).tx, -1);
+    assert_eq!(v2(tie).m[0], 1);
+    // Every value: the exact rule, from the f64 itself (no rounded sum).
+    for v in q16_tie_values() {
+        let scaled = v * 65_536.0;
+        let (fl, frac) = (scaled.abs().floor(), scaled.abs() - scaled.abs().floor());
+        let magnitude = if frac >= 0.5 { fl + 1.0 } else { fl };
+        let want = if scaled < 0.0 { -magnitude } else { magnitude } as i64;
+        assert_eq!(quantize_translation(v), Some(want), "{v:e}");
+        assert_eq!(
+            integer_inverse([1.0, 0.0, 0.0, 1.0, v, -v]).unwrap().ty,
+            -want,
+            "{v:e}"
+        );
+    }
+}
+
+/// Rust = JS for the Q16 rounding of both versions: `tests/e2e/q16-reference.mjs`
+/// quantizes [`q16_tie_values`] with `quantizeQ16` (version 3) and
+/// `quantizeQ16V2`, from the same f64 bits.
+#[test]
+fn q16_rust_and_js_references_agree() {
+    let values = q16_tie_values();
+    let input = values
+        .iter()
+        .map(|v| format!("\"{:016x}\"", v.to_bits()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let js = std::process::Command::new("node")
+        .arg(root.join("tests/e2e/q16-reference.mjs"))
+        .arg(format!("[{input}]"))
+        .output()
+        .expect("node is required to compare the Rust and JavaScript Q16 rounding");
+    assert!(
+        js.status.success(),
+        "JS reference failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let text = String::from_utf8(js.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), values.len());
+    for (v, line) in values.iter().zip(lines) {
+        let v3 = crate::sample::quantize_translation(*v).unwrap();
+        let v2 = crate::sample::integer_inverse_v2([0.0, 0.0, 0.0, 0.0, *v, 0.0])
+            .unwrap()
+            .tx;
+        assert_eq!(line, format!("{v3} {v2}"), "{v:e}");
+    }
 }
 
 /// The saturation sum is i64. Clamping it, or the contrast result, would change
@@ -6519,7 +6633,7 @@ fn large_translation_is_exact_on_the_integer_path() {
     );
     let packed = pack_inverse(inv, RENDER_VERSION);
     assert_eq!(packed.sample_mode, SAMPLE_INTEGER);
-    let q = integer_inverse(inv).unwrap();
+    let q = crate::sample::integer_inverse_v2(inv).unwrap();
     assert_eq!(q.tx, -40_000 * 65_536);
     let case = cases()
         .into_iter()
@@ -6539,7 +6653,7 @@ fn large_translation_is_exact_on_the_integer_path() {
         pack_inverse(far_inv, RENDER_VERSION).sample_mode,
         SAMPLE_INTEGER
     );
-    let far_q = integer_inverse(far_inv).unwrap();
+    let far_q = crate::sample::integer_inverse_v2(far_inv).unwrap();
     let px = pixel_q8(0, 0, 1).unwrap();
     let py = pixel_q8(0, 0, 1).unwrap();
     assert!(
