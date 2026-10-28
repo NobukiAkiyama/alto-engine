@@ -14,7 +14,9 @@
 //! `effects.wgsl` mode 0, the normal blend onto clear, mode 3, and
 //! `effects-resolve.wgsl`, with an f16 round trip after every store. Render version 3
 //! runs the integer M5 stages of `effects-q14.wgsl` (Q14 in `rgba16uint`, resolved to
-//! `rgba8uint`), and its reference is integer throughout.
+//! `rgba8uint`), and its reference is integer throughout. That includes the v3
+//! pixel-mask stages (modes 21 to 23, `mask_programs`), whose Q8 mask lookup is
+//! the compositor's sampler.
 //! The parity image is a 256² gradient (every R, G, B and alpha, including alpha
 //! 0, 1, 128 and 254) run through the contrast × saturation × brightness grid.
 //! The other four stay explicit xfails in the browser suite.
@@ -1166,6 +1168,114 @@ fn color_adjust_texel_v3(
     q14::bytes([rgb[0], rgb[1], rgb[2], q[3]].map(i64::from))
 }
 
+/// The Q28 divisor of the mask factor `F = m * o` (`div28` in `effects-q14.wgsl`).
+const Q28: i64 = 1 << 28;
+
+/// Mode 21, the layer mask and opacity: `div28(v * F)` on all four channels.
+/// `None` when a product or sum leaves i64.
+fn mask_layer_q14(v: [i64; 4], f: i64) -> Option<[i64; 4]> {
+    let mut out = [0; 4];
+    for c in 0..4 {
+        out[c] = div_q_i64(v[c].checked_mul(f)?, Q28)?;
+    }
+    Some(out)
+}
+
+/// Mode 22, the effect selection: `div_q(in * (16384 - s) + f * s, 16384)`.
+/// The v2 mode 12 mix with coverage `k` is the same formula.
+fn mask_select_q14(input: [i64; 4], filtered: [i64; 4], s: i64) -> Option<[i64; 4]> {
+    let mut out = [0; 4];
+    for c in 0..4 {
+        let n = input[c]
+            .checked_mul(q14::Q - s)?
+            .checked_add(filtered[c].checked_mul(s)?)?;
+        out[c] = div_q_i64(n, q14::Q)?;
+    }
+    Some(out)
+}
+
+/// Mode 23 `g`: the adjusted copy, or for a non-normal blend, the straight
+/// product (screen for 2, multiply for every other mode, as v2) premultiplied by
+/// the backdrop alpha.
+fn mask_adjust_blend_q14(orig: [i64; 4], filt: [i64; 4], blend: u32) -> Option<[i64; 4]> {
+    if blend == 0 {
+        return Some(filt);
+    }
+    let d = q14::straight(orig);
+    let t = q14::straight(filt);
+    let mut g = [0, 0, 0, orig[3]];
+    for c in 0..3 {
+        let color = if blend == 2 {
+            q14::Q - div_q_i64((q14::Q - d[c]).checked_mul(q14::Q - t[c])?, q14::Q)?
+        } else {
+            div_q_i64(d[c].checked_mul(t[c])?, q14::Q)?
+        };
+        g[c] = div_q_i64(color.checked_mul(orig[3])?, q14::Q)?;
+    }
+    Some(g)
+}
+
+/// Mode 23, the adjustment-layer mask, opacity and blend:
+/// `div28(orig * (2^28 - F) + g * F)`.
+fn mask_adjust_q14(orig: [i64; 4], filt: [i64; 4], f: i64, blend: u32) -> Option<[i64; 4]> {
+    let g = mask_adjust_blend_q14(orig, filt, blend)?;
+    let mut out = [0; 4];
+    for c in 0..4 {
+        let n = orig[c]
+            .checked_mul(Q28 - f)?
+            .checked_add(g[c].checked_mul(f)?)?;
+        out[c] = div_q_i64(n, Q28)?;
+    }
+    Some(out)
+}
+
+/// The byte a v3 mask stage reads at pixel (x, y) of a target with the integer
+/// ROI `region` (`[x, y, level scale]`), from one mask tile at key (0, 0) whose
+/// R channel is the byte. See [`mask_tiles_byte_cpu`].
+fn mask_byte_cpu(
+    image: &[u8],
+    transform: [f64; 6],
+    region: [i32; 3],
+    x: i32,
+    y: i32,
+) -> Option<u8> {
+    mask_tiles_byte_cpu(&[([0, 0], image)], transform, region, x, y)
+}
+
+/// The byte a v3 mask stage reads at pixel (x, y) of a target with the integer
+/// ROI `region` (`[x, y, level scale]`), from the mask tiles `tiles` by tile
+/// key, each with the byte in its R channel. A texel in no listed tile is 0. As
+/// the host (`renderer::mask_sampler`), every mask takes the Q16 lookup; it is
+/// evaluated here from `integer_inverse` and `source_q8`, not from the packed
+/// bits. `None` when the host refuses the mask (no Q16 lookup).
+fn mask_tiles_byte_cpu(
+    tiles: &[([i32; 2], &[u8])],
+    transform: [f64; 6],
+    region: [i32; 3],
+    x: i32,
+    y: i32,
+) -> Option<u8> {
+    let [ox, oy, scale] = region;
+    crate::renderer::mask_sampler(transform, [ox as f32, oy as f32], scale as f32)?;
+    let inv = integer_inverse(crate::renderer::inverse(transform)?)?;
+    let (Some(px), Some(py)) = (pixel_q8(ox, x, scale), pixel_q8(oy, y, scale)) else {
+        return Some(0);
+    };
+    let Some(q) = source_q8(&inv, px, py) else {
+        return Some(0);
+    };
+    let (tx, ty) = (floor_frac_q8(q[0]).0, floor_frac_q8(q[1]).0);
+    let key = [tx >> 8, ty >> 8];
+    Some(
+        tiles
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map_or(0, |(_, image)| {
+                image[(((ty - key[1] * 256) * 256 + tx - key[0] * 256) * 4) as usize]
+            }),
+    )
+}
+
 /// One `effects-q14.wgsl` dispatch over 256² targets with the identity ROI.
 /// `a`/`b` are input targets, `slot` the atlas layer mode 18 reads, and
 /// `settings` the Q14 integers the host bit-casts into the uniform.
@@ -1177,6 +1287,8 @@ struct Q14Stage {
     b: usize,
     out: usize,
     slot: u32,
+    /// Modes 21 to 23: the mask's document transform (`RMask` after linking).
+    transform: [f64; 6],
 }
 
 /// An M5 graph as `renderer/m5.rs` dispatches it for render version 3. Target 0
@@ -1184,8 +1296,29 @@ struct Q14Stage {
 struct Q14Program {
     name: String,
     targets: usize,
+    /// The integer ROI `[x, y, level scale]` of each 256² target; a target past
+    /// the end is `[0, 0, 1]`.
+    regions: Vec<[i32; 3]>,
     stages: Vec<Q14Stage>,
     result: usize,
+}
+
+impl Q14Program {
+    fn region(&self, target: usize) -> [i32; 3] {
+        self.regions.get(target).copied().unwrap_or([0, 0, 1])
+    }
+}
+
+/// The texel of a 256² target with ROI `input` under pixel (x, y) of a target
+/// with ROI `out`: `floor((p - origin) / scale)` at the pixel center
+/// `p = out_origin + (i + 1/2) * out_scale`, exact in i64. `None` outside.
+fn input_texel_cpu(out: [i32; 3], input: [i32; 3], x: i32, y: i32) -> Option<usize> {
+    let axis = |o: i32, i: i32, v: i32| {
+        let n = 2 * (i64::from(o) - i64::from(i)) + (2 * i64::from(v) + 1) * i64::from(out[2]);
+        n.div_euclid(2 * i64::from(input[2]))
+    };
+    let (tx, ty) = (axis(out[0], input[0], x), axis(out[1], input[1], y));
+    ((0..256).contains(&tx) && (0..256).contains(&ty)).then(|| (ty * 256 + tx) as usize)
 }
 
 impl Q14Stage {
@@ -1197,6 +1330,7 @@ impl Q14Stage {
             b: 0,
             out,
             slot,
+            transform: ident(),
         }
     }
     fn layer(dst: usize, src: usize, opacity: f32, mode: u32, out: usize) -> Self {
@@ -1207,6 +1341,7 @@ impl Q14Stage {
             b: src,
             out,
             slot: 0,
+            transform: ident(),
         }
     }
     fn color_adjust(
@@ -1226,6 +1361,7 @@ impl Q14Stage {
             b: input,
             out,
             slot: 0,
+            transform: ident(),
         }
     }
     fn adjustment_mix(backdrop: usize, adjusted: usize, opacity: f32, out: usize) -> Self {
@@ -1236,59 +1372,159 @@ impl Q14Stage {
             b: adjusted,
             out,
             slot: 0,
+            transform: ident(),
+        }
+    }
+    /// Mode 21: the layer mask in atlas layer `slot` and the layer opacity.
+    fn mask(input: usize, slot: u32, opacity: f32, transform: [f64; 6], out: usize) -> Self {
+        Self {
+            mode: 21,
+            settings: [crate::composite_opacity_q14(opacity), 1, 0, 0],
+            a: input,
+            b: input,
+            out,
+            slot,
+            transform,
+        }
+    }
+    /// Mode 22: `before` where the selection in `slot` is 0, `after` where it is 255.
+    fn select(before: usize, after: usize, slot: u32, out: usize) -> Self {
+        Self {
+            mode: 22,
+            settings: [0; 4],
+            a: before,
+            b: after,
+            out,
+            slot,
+            transform: ident(),
+        }
+    }
+    /// Mode 23: an adjustment layer's mask (or none), opacity and blend.
+    fn adjust(
+        backdrop: usize,
+        adjusted: usize,
+        mask: Option<u32>,
+        opacity: f32,
+        blend: u32,
+        out: usize,
+    ) -> Self {
+        Self {
+            mode: 23,
+            settings: [
+                crate::composite_opacity_q14(opacity),
+                i32::from(mask.is_some()),
+                blend as i32,
+                0,
+            ],
+            a: backdrop,
+            b: adjusted,
+            out,
+            slot: mask.unwrap_or(0),
+            transform: ident(),
         }
     }
 }
 
-/// CPU reference for a [`Q14Program`], one pixel at a time, with the checked
-/// Q14 functions of the integer tile compositor.
+/// CPU reference for a [`Q14Program`], one stage at a time, with the checked
+/// Q14 functions of the integer tile compositor. A stage reads each input at
+/// the texel under its output pixel (`input_texel_cpu`); mode 18 writes the
+/// atlas layer as it is, whatever the target's ROI. A mask stage's mask is the
+/// one tile at key (0, 0) in its `slot`.
 fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
-    let mut out = vec![0u8; 256 * 256 * 4];
-    for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let mut t = vec![[0i64; 4]; program.targets];
-        for stage in &program.stages {
-            let a = t[stage.a];
-            let b = t[stage.b];
-            let w = i64::from(stage.settings[0]);
-            t[stage.out] = match stage.mode {
-                18 => {
-                    let rgba = &images[stage.slot as usize][i * 4..i * 4 + 4];
-                    let alpha = u32::from(rgba[3]);
-                    let mut q = [0i64; 4];
-                    for c in 0..3 {
-                        q[c] = i64::from(premul_byte_q14(u32::from(rgba[c]), alpha));
-                    }
-                    q[3] = i64::from(byte_q14(alpha));
-                    q
-                }
-                19 => {
-                    let mode = stage.settings[1] as u32;
-                    if w == q14::Q {
-                        q14::blend(a, q14::straight(b), [b[0], b[1], b[2]], b[3], mode)
-                    } else {
-                        q14::pop(a, b, w, mode)
-                    }
-                }
-                17 => {
-                    let q = a.map(|v| v as u32);
-                    let rgb = color_adjust_exact_q14(
-                        q,
-                        stage.settings[0],
-                        stage.settings[1],
-                        stage.settings[2],
-                    );
-                    [rgb[0], rgb[1], rgb[2], q[3]].map(i64::from)
-                }
-                20 => std::array::from_fn(|c| {
-                    div_q_i64(a[c] * (q14::Q - w) + b[c] * w, q14::Q).unwrap()
-                }),
-                mode => panic!("no CPU reference for Q14 mode {mode}"),
-            }
-            .map(|v| v.clamp(0, q14::Q));
+    q14_program_masks_cpu(images, program, &[])
+}
+
+/// [`q14_program_cpu`] with every mask stage reading the mask tiles
+/// `mask_tiles` (tile key, layer of `images`) instead, when it is not empty.
+fn q14_program_masks_cpu(
+    images: &[Vec<u8>],
+    program: &Q14Program,
+    mask_tiles: &[([i32; 2], usize)],
+) -> Vec<u8> {
+    let mut t = vec![vec![[0i64; 4]; 256 * 256]; program.targets];
+    for stage in &program.stages {
+        let region = program.region(stage.out);
+        let one = [([0, 0], stage.slot as usize)];
+        let tiles: Vec<([i32; 2], &[u8])> = if mask_tiles.is_empty() {
+            &one[..]
+        } else {
+            mask_tiles
         }
-        *px = q14::bytes(t[program.result]);
+        .iter()
+        .map(|(key, layer)| (*key, &images[*layer][..]))
+        .collect();
+        let read = |target: usize, x, y| {
+            input_texel_cpu(region, program.region(target), x, y).map_or([0; 4], |j| t[target][j])
+        };
+        let next: Vec<[i64; 4]> = (0..256 * 256)
+            .map(|i| {
+                let (x, y) = ((i % 256) as i32, (i / 256) as i32);
+                let a = read(stage.a, x, y);
+                let b = read(stage.b, x, y);
+                let w = i64::from(stage.settings[0]);
+                match stage.mode {
+                    18 => {
+                        let rgba = &images[stage.slot as usize][i * 4..i * 4 + 4];
+                        let alpha = u32::from(rgba[3]);
+                        let mut q = [0i64; 4];
+                        for c in 0..3 {
+                            q[c] = i64::from(premul_byte_q14(u32::from(rgba[c]), alpha));
+                        }
+                        q[3] = i64::from(byte_q14(alpha));
+                        q
+                    }
+                    19 => {
+                        let mode = stage.settings[1] as u32;
+                        if w == q14::Q {
+                            q14::blend(a, q14::straight(b), [b[0], b[1], b[2]], b[3], mode)
+                        } else {
+                            q14::pop(a, b, w, mode)
+                        }
+                    }
+                    17 => {
+                        let q = a.map(|v| v as u32);
+                        let rgb = color_adjust_exact_q14(
+                            q,
+                            stage.settings[0],
+                            stage.settings[1],
+                            stage.settings[2],
+                        );
+                        [rgb[0], rgb[1], rgb[2], q[3]].map(i64::from)
+                    }
+                    20 => std::array::from_fn(|c| {
+                        div_q_i64(a[c] * (q14::Q - w) + b[c] * w, q14::Q).unwrap()
+                    }),
+                    21..=23 => {
+                        let m = || {
+                            i64::from(byte_q14(u32::from(
+                                mask_tiles_byte_cpu(&tiles, stage.transform, region, x, y)
+                                    .expect("v3 refuses a mask without a Q16 lookup"),
+                            )))
+                        };
+                        let f = |has: i32| if has == 0 { q14::Q } else { m() } * w;
+                        match stage.mode {
+                            21 => mask_layer_q14(a, f(stage.settings[1])),
+                            22 => mask_select_q14(a, b, m()),
+                            _ => mask_adjust_q14(
+                                a,
+                                b,
+                                f(stage.settings[1]),
+                                stage.settings[2] as u32,
+                            ),
+                        }
+                        .expect("mask Q14 terms fit in i64")
+                    }
+                    mode => panic!("no CPU reference for Q14 mode {mode}"),
+                }
+                .map(|v| v.clamp(0, q14::Q))
+            })
+            .collect();
+        t[stage.out] = next;
     }
-    out
+    t[program.result]
+        .iter()
+        .flat_map(|q| q14::bytes(*q))
+        .collect()
 }
 
 /// The browser `color-adjust` test as an M5 graph: an adjustment layer over one
@@ -1297,6 +1533,7 @@ fn color_adjust_program(settings: (f32, f32, f32)) -> Q14Program {
     Q14Program {
         name: color_adjust_case_name(settings.0, settings.1, settings.2),
         targets: 4,
+        regions: vec![],
         stages: vec![
             Q14Stage::ingress(0, 1),
             Q14Stage::layer(0, 1, 1.0, 0, 2),
@@ -1325,6 +1562,7 @@ fn opacity_programs() -> Vec<Q14Program> {
     let mut out = vec![Q14Program {
         name: "m5-opacity-half".into(),
         targets: 5,
+        regions: vec![],
         stages: vec![
             Q14Stage::ingress(1, 1),
             Q14Stage::layer(0, 1, 1.0, 0, 2),
@@ -1342,6 +1580,7 @@ fn opacity_programs() -> Vec<Q14Program> {
         out.push(Q14Program {
             name: format!("m5-opacity-half-{name}"),
             targets: 5,
+            regions: vec![],
             stages: vec![
                 Q14Stage::ingress(0, 1),
                 Q14Stage::layer(0, 1, 1.0, 0, 2),
@@ -1354,6 +1593,7 @@ fn opacity_programs() -> Vec<Q14Program> {
     out.push(Q14Program {
         name: "m5-color-adjust-layer-opacity-half".into(),
         targets: 6,
+        regions: vec![],
         stages: vec![
             Q14Stage::ingress(1, 1),
             Q14Stage::layer(0, 1, 1.0, 0, 2),
@@ -1366,6 +1606,7 @@ fn opacity_programs() -> Vec<Q14Program> {
     out.push(Q14Program {
         name: "m5-adjustment-opacity-half".into(),
         targets: 5,
+        regions: vec![],
         stages: vec![
             Q14Stage::ingress(0, 1),
             Q14Stage::layer(0, 1, 1.0, 0, 2),
@@ -1375,6 +1616,517 @@ fn opacity_programs() -> Vec<Q14Program> {
         result: 4,
     });
     out
+}
+
+/// An R8 mask as the atlas holds it (`rgba_pixels`: `[v, v, v, 255]`).
+fn mask_image(byte: impl Fn(u32, u32) -> u8) -> Vec<u8> {
+    let mut pixels = vec![0u8; 256 * 256 * 4];
+    for y in 0..256u32 {
+        for x in 0..256u32 {
+            let v = byte(x, y);
+            let i = ((y * 256 + x) * 4) as usize;
+            pixels[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    pixels
+}
+
+/// The bytes `selection_ops` writes for a feathered rectangle `[x0, y0, x1, y1]`:
+/// f64 distance to the nearest edge, `(d / feather + 0.5).clamp(0, 1)`, then
+/// `(coverage * 255).round()`. Every operation is IEEE-exact or correctly rounded.
+fn feathered_rectangle(rect: [f64; 4], feather: f64) -> Vec<u8> {
+    mask_image(|x, y| {
+        let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+        let d = (p[0] - rect[0])
+            .min(rect[2] - p[0])
+            .min(p[1] - rect[1])
+            .min(rect[3] - p[1]);
+        ((d / feather + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8
+    })
+}
+
+/// The feathered selection of the mask cases (`selectionSpec` in the browser
+/// suite). Feather 64 is the engine's limit, so one edge has only 65 bytes; the
+/// edges sit at fractions 0.25, 0.75, 0.5 and 0 of a pixel so that the four
+/// together give every byte.
+const FEATHER_RECT: [f64; 4] = [40.25, 40.75, 216.5, 216.0];
+const FEATHER: f64 = 64.0;
+
+/// The mask rotated by 0.3 rad about the tile center, as an unlinked mask transform.
+fn rotated_mask_transform() -> [f64; 6] {
+    let (s, c) = 0.3f64.sin_cos();
+    [
+        c,
+        s,
+        -s,
+        c,
+        128.0 - (c - s) * 128.0,
+        128.0 - (s + c) * 128.0,
+    ]
+}
+
+/// A unit mask moved by (2.501953125, -0.498046875) px. Both inverse
+/// translations are Q16 exact (-163968 and 32640), and with Q8 pixel centers
+/// `x * 256 + 128` the Q8 sums land exactly on `.5`: `x * 256 - 512.5` and
+/// `y * 256 + 255.5`, the ties of `wide_round_shr16`. At x = 2 the negative tie
+/// crosses into the tile at key -1. An f32 floor would pick the other texel at
+/// every tie.
+fn tie_mask_transform() -> [f64; 6] {
+    [1.0, 0.0, 0.0, 1.0, 2.501953125, -0.498046875]
+}
+
+/// Atlas layers for [`mask_programs`].
+fn mask_images() -> Vec<Vec<u8>> {
+    let mut opaque = color_adjust_gradient();
+    for px in opaque.as_chunks_mut::<4>().0 {
+        px[3] = 255;
+    }
+    vec![
+        // 0: the color-adjust gradient (every channel value, alpha 0, 1, 128, 254).
+        color_adjust_gradient(),
+        // 1: every mask byte, x.
+        mask_image(|x, _| x as u8),
+        // 2: all 255.
+        mask_image(|_, _| 255),
+        // 3: a feathered rectangle selection with every byte 0..=255 at its edges.
+        feathered_rectangle(FEATHER_RECT, FEATHER),
+        // 4: the gradient with opaque alpha (an opaque backdrop).
+        opaque,
+        // 5: a pattern that shows where a rotated lookup lands.
+        mask_image(|x, y| ((x * 7 + y * 13) & 255) as u8),
+        // 6: half-alpha red, 7: opaque blue, 8: opaque red.
+        [255, 0, 0, 128].repeat(256 * 256),
+        [0, 0, 255, 255].repeat(256 * 256),
+        [255, 0, 0, 255].repeat(256 * 256),
+        // 9: the browser `mask` case: a rectangle selection of x < 128.
+        mask_image(|x, _| if x < 128 { 255 } else { 0 }),
+    ]
+}
+
+/// The memo's enforced mask cases as `renderer/m5.rs` dispatches them for
+/// render version 3. A masked raster: mode 18, mode 21 (mask and opacity), then
+/// mode 19 at opacity 1 onto the backdrop.
+fn mask_programs() -> Vec<Q14Program> {
+    let vivid = (1.7, 1.6, 0.0);
+    let masked = |name: String, image: u32, mask: u32, opacity: f32, transform| Q14Program {
+        name,
+        targets: 4,
+        regions: vec![],
+        stages: vec![
+            Q14Stage::ingress(image, 1),
+            Q14Stage::mask(1, mask, opacity, transform, 2),
+            Q14Stage::layer(0, 2, 1.0, 0, 3),
+        ],
+        result: 3,
+    };
+    let mut out = vec![masked("v3-mask".into(), 8, 9, 1.0, ident())];
+    for opacity in [1.0, 0.5, 0.35, 0.0] {
+        out.push(masked(
+            format!("m5-mask-coverage o={opacity}"),
+            0,
+            1,
+            opacity,
+            ident(),
+        ));
+    }
+    for opacity in [1.0, 0.5, 0.35] {
+        out.push(masked(
+            format!("m5-mask-white o={opacity}"),
+            0,
+            2,
+            opacity,
+            ident(),
+        ));
+    }
+    out.push(masked(
+        "m5-mask-rotated".into(),
+        0,
+        5,
+        1.0,
+        rotated_mask_transform(),
+    ));
+    // The Q8 rounding tie, positive and negative, with the negative tie crossing
+    // a tile boundary (`tie_mask_transform`).
+    out.push(masked(
+        "m5-mask-tie".into(),
+        0,
+        5,
+        1.0,
+        tie_mask_transform(),
+    ));
+    // A selection-limited color-adjust layer effect: mode 17, then mode 22.
+    out.push(Q14Program {
+        name: "m5-selection-color-adjust".into(),
+        targets: 5,
+        regions: vec![],
+        stages: vec![
+            Q14Stage::ingress(0, 1),
+            Q14Stage::color_adjust(1, vivid, 2),
+            Q14Stage::select(1, 2, 3, 3),
+            Q14Stage::layer(0, 3, 1.0, 0, 4),
+        ],
+        result: 4,
+    });
+    // A masked color-adjust adjustment layer over an opaque backdrop (mode 23),
+    // and a non-normal one without a mask.
+    for (blend, name) in [
+        (0, "normal"),
+        (1, "multiply"),
+        (2, "screen"),
+        (3, "overlay"),
+    ] {
+        for opacity in [1.0, 0.5] {
+            out.push(Q14Program {
+                name: format!("m5-adjustment-mask-{name} o={opacity}"),
+                targets: 5,
+                regions: vec![],
+                stages: vec![
+                    Q14Stage::ingress(4, 1),
+                    Q14Stage::layer(0, 1, 1.0, 0, 2),
+                    Q14Stage::color_adjust(2, vivid, 3),
+                    Q14Stage::adjust(2, 3, Some(3), opacity, blend, 4),
+                ],
+                result: 4,
+            });
+        }
+    }
+    out.push(Q14Program {
+        name: "m5-adjustment-screen-unmasked".into(),
+        targets: 5,
+        regions: vec![],
+        stages: vec![
+            Q14Stage::ingress(4, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::color_adjust(2, vivid, 3),
+            Q14Stage::adjust(2, 3, None, 0.5, 2, 4),
+        ],
+        result: 4,
+    });
+    // A masked group of semi-transparent children over opaque blue: the children
+    // composite onto an empty target, mode 21 applies mask and opacity once, and
+    // the group composites at opacity 1.
+    out.push(Q14Program {
+        name: "m5-mask-group".into(),
+        targets: 9,
+        regions: vec![],
+        stages: vec![
+            Q14Stage::ingress(7, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::ingress(6, 3),
+            Q14Stage::layer(0, 3, 1.0, 0, 4),
+            Q14Stage::ingress(0, 5),
+            Q14Stage::layer(4, 5, 1.0, 1, 6),
+            Q14Stage::mask(6, 1, 0.5, ident(), 7),
+            Q14Stage::layer(2, 7, 1.0, 0, 8),
+        ],
+        result: 8,
+    });
+    out
+}
+
+/// Output ROIs `[x, y, level scale]` away from the origin, three of them
+/// negative, each with a mask transform that puts the mask partly under the
+/// tile, for [`mask_origin_programs`] and `tests/e2e/mask-v3-origin-reference.mjs`.
+fn mask_origin_cases() -> Vec<([i32; 3], [f64; 6])> {
+    let r = rotated_mask_transform();
+    vec![
+        ([-300, 37, 1], [1.0, 0.0, 0.0, 1.0, -400.0, 0.0]),
+        ([-256, -512, 2], [2.0, 0.0, 0.0, 2.0, -512.0, -600.0]),
+        (
+            [-37, -91, 1],
+            [r[0], r[1], r[2], r[3], r[4] - 100.0, r[5] - 100.0],
+        ),
+        ([300, 200, 1], [1.0, 0.0, 0.0, 1.0, 250.0, 150.0]),
+    ]
+}
+
+/// The input ROIs (`a`, `b`) of the offset programs for each case in
+/// [`mask_origin_cases`]: shifted by whole pixels, some at another level
+/// scale, so that `input_map` is not the identity and its floor division sees
+/// negative numerators.
+fn mask_offset_regions() -> Vec<([i32; 3], [i32; 3])> {
+    vec![
+        ([-295, 34, 1], [-307, 40, 1]),
+        ([-251, -509, 1], [-260, -520, 4]),
+        ([-40, -88, 2], [-33, -95, 1]),
+        ([303, 197, 1], [290, 210, 2]),
+    ]
+}
+
+/// Modes 21, 22 and 23 at the ROIs of [`mask_origin_cases`]. For each case,
+/// three programs whose targets all share the output ROI (`origin ...`, the
+/// graphs `renderM5V3` draws at that origin) and three whose inputs sit at the
+/// ROIs of [`mask_offset_regions`] (`offset ...`). The mask is the pattern in
+/// atlas layer 5.
+fn mask_origin_programs() -> Vec<Q14Program> {
+    let vivid = (1.7, 1.6, 0.0);
+    let mut out = vec![];
+    for ((region, t), (a, b)) in mask_origin_cases().into_iter().zip(mask_offset_regions()) {
+        let at = |targets: usize| vec![region; targets];
+        let tag = format!("{region:?}");
+        out.push(Q14Program {
+            name: format!("origin {tag} mask o=0.5"),
+            targets: 4,
+            regions: at(4),
+            stages: vec![
+                Q14Stage::ingress(0, 1),
+                Q14Stage::mask(1, 5, 0.5, t, 2),
+                Q14Stage::layer(0, 2, 1.0, 0, 3),
+            ],
+            result: 3,
+        });
+        out.push(Q14Program {
+            name: format!("origin {tag} selection"),
+            targets: 5,
+            regions: at(5),
+            stages: vec![
+                Q14Stage::ingress(0, 1),
+                Q14Stage::color_adjust(1, vivid, 2),
+                Q14Stage {
+                    transform: t,
+                    ..Q14Stage::select(1, 2, 5, 3)
+                },
+                Q14Stage::layer(0, 3, 1.0, 0, 4),
+            ],
+            result: 4,
+        });
+        out.push(Q14Program {
+            name: format!("origin {tag} adjustment screen o=0.5"),
+            targets: 5,
+            regions: at(5),
+            stages: vec![
+                Q14Stage::ingress(4, 1),
+                Q14Stage::layer(0, 1, 1.0, 0, 2),
+                Q14Stage::color_adjust(2, vivid, 3),
+                Q14Stage {
+                    transform: t,
+                    ..Q14Stage::adjust(2, 3, Some(5), 0.5, 2, 4)
+                },
+            ],
+            result: 4,
+        });
+        out.push(Q14Program {
+            name: format!("offset {tag} mask o=0.5"),
+            targets: 4,
+            regions: vec![region, a, region, region],
+            stages: vec![
+                Q14Stage::ingress(0, 1),
+                Q14Stage::mask(1, 5, 0.5, t, 2),
+                Q14Stage::layer(0, 2, 1.0, 0, 3),
+            ],
+            result: 3,
+        });
+        out.push(Q14Program {
+            name: format!("offset {tag} selection"),
+            targets: 6,
+            regions: vec![region, a, b, b, region, region],
+            stages: vec![
+                Q14Stage::ingress(0, 1),
+                Q14Stage::ingress(0, 2),
+                Q14Stage::color_adjust(2, vivid, 3),
+                Q14Stage {
+                    transform: t,
+                    ..Q14Stage::select(1, 3, 5, 4)
+                },
+                Q14Stage::layer(0, 4, 1.0, 0, 5),
+            ],
+            result: 5,
+        });
+        out.push(Q14Program {
+            name: format!("offset {tag} adjustment screen o=0.5"),
+            targets: 5,
+            regions: vec![region, a, b, b, region],
+            stages: vec![
+                Q14Stage::ingress(4, 1),
+                Q14Stage::ingress(4, 2),
+                Q14Stage::color_adjust(2, vivid, 3),
+                Q14Stage {
+                    transform: t,
+                    ..Q14Stage::adjust(1, 3, Some(5), 0.5, 2, 4)
+                },
+            ],
+            result: 4,
+        });
+    }
+    out
+}
+
+/// A masked raster drawn through the renderer for render version 3
+/// (`Renderer::read_tile`), so its mask tiles are the ones
+/// `Context::mask_entries` selects and uploads. The raster is the opaque
+/// gradient (`mask_images` 4) in the display tile `key` at level 0, under a
+/// root group; the mask spans several tiles.
+struct RendererMaskCase {
+    name: &'static str,
+    key: [i32; 2],
+    linked: bool,
+    transform: [f64; 6],
+    opacity: f32,
+    /// R8 mask tiles by tile key.
+    mask: Vec<([i32; 2], Vec<u8>)>,
+}
+
+impl RendererMaskCase {
+    fn region(&self) -> [i32; 3] {
+        [self.key[0] * 256, self.key[1] * 256, 1]
+    }
+    /// The mask's document transform as `apply_props` links it (world = identity).
+    fn document_transform(&self) -> [f64; 6] {
+        if self.linked {
+            crate::renderer::multiply(ident(), self.transform)
+        } else {
+            self.transform
+        }
+    }
+}
+
+/// R8 mask bytes below 255 (so a 255 tile is told apart), different for each `seed`.
+fn mask_tile_bytes(seed: i32) -> Vec<u8> {
+    (0..256 * 256)
+        .map(|i: i32| ((i % 256) * 7 + (i / 256) * 13 + seed * 31).rem_euclid(200) as u8)
+        .collect()
+}
+
+fn renderer_mask_cases() -> Vec<RendererMaskCase> {
+    // At origin 999936 the Q16 inverse (x coefficient 65537) reads texel
+    // 1000195 at pixel (255, 0), in tile (3907, 0). The f64 inverse puts the
+    // ROI's right edge at 1000191.0000000001, before that tile.
+    let far = RendererMaskCase {
+        name: "renderer-mask-origin-999936",
+        key: [3906, 0],
+        linked: false,
+        transform: [0.9999900000999989, 0.0, 0.0, 1.0, 11.00180998190018, 0.0],
+        opacity: 1.0,
+        mask: vec![
+            ([3905, 0], mask_tile_bytes(1)),
+            ([3906, 0], mask_tile_bytes(2)),
+            ([3907, 0], vec![255; 256 * 256]),
+        ],
+    };
+    // A linked mask shrunk by 0.8 and rotated by 0.3 rad about the center of
+    // display tile (5, 3): the tile reads mask tiles (4..=6, 2..=4).
+    let (s, c) = 0.3f64.sin_cos();
+    let (k, cx, cy) = (0.8, 5.0 * 256.0 + 128.0, 3.0 * 256.0 + 128.0);
+    let rotated = RendererMaskCase {
+        name: "renderer-mask-rotated-3x3",
+        key: [5, 3],
+        linked: true,
+        transform: [
+            k * c,
+            k * s,
+            -k * s,
+            k * c,
+            cx - k * (c * cx - s * cy),
+            cy - k * (s * cx + c * cy),
+        ],
+        opacity: 0.5,
+        mask: (2..=4)
+            .flat_map(|ty| (4..=6).map(move |tx| ([tx, ty], mask_tile_bytes(tx * 3 + ty))))
+            .collect(),
+    };
+    vec![far, rotated]
+}
+
+/// CPU reference for a [`RendererMaskCase`]: mode 18, mode 21 with the mask
+/// tiles, then mode 19 at opacity 1 onto the empty root group, all at the
+/// display tile's ROI.
+fn renderer_mask_cpu(case: &RendererMaskCase) -> Vec<u8> {
+    let mut images = vec![mask_images().swap_remove(4)];
+    let mut tiles = Vec::new();
+    for (key, bytes) in &case.mask {
+        tiles.push((*key, images.len()));
+        images.push(bytes.iter().flat_map(|v| [*v, *v, *v, 255]).collect());
+    }
+    let program = Q14Program {
+        name: case.name.into(),
+        targets: 4,
+        regions: vec![case.region(); 4],
+        stages: vec![
+            Q14Stage::ingress(0, 1),
+            Q14Stage::mask(1, 0, case.opacity, case.document_transform(), 2),
+            Q14Stage::layer(0, 2, 1.0, 0, 3),
+        ],
+        result: 3,
+    };
+    q14_program_masks_cpu(&images, &program, &tiles)
+}
+
+/// [`renderer_mask_cases`] composed by a headless `Renderer` and read back.
+fn renderer_mask_gpu(cases: &[RendererMaskCase]) -> Result<Vec<Vec<u8>>, String> {
+    use alto_core::{PixelFormat, TileKey};
+    use alto_raster::{ObjectStore, TileData};
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+    let instance = wgpu::Instance::new(descriptor);
+    let mut renderer = pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
+        .map_err(|e| format!("headless renderer: {e}"))?;
+    // Native `map_async` completes only while the device is polled.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let (device, done) = (renderer.device.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = device.poll(wgpu::PollType::Poll);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    let result = cases
+        .iter()
+        .map(|case| {
+            let mut store = ObjectStore::default();
+            let mut insert = |format, pixels| {
+                store.insert_tile(&TileData::new(format, pixels).expect("tile size"))
+            };
+            let tile = |key: [i32; 2], hash| crate::RenderTile {
+                key: TileKey {
+                    tx: key[0],
+                    ty: key[1],
+                },
+                hash,
+            };
+            let raster = tile(
+                case.key,
+                insert(PixelFormat::Rgba8, mask_images().swap_remove(4)),
+            );
+            let mask = RMask {
+                tiles: case
+                    .mask
+                    .iter()
+                    .map(|(key, bytes)| tile(*key, insert(PixelFormat::R8, bytes.clone())))
+                    .collect(),
+                linked: case.linked,
+                transform: case.transform,
+            };
+            let mut scene = scene(
+                RContent::Group {
+                    children: vec![1],
+                    isolated: false,
+                },
+                RFeatures::default(),
+            );
+            scene.render_version = alto_core::RENDER_VERSION_EXACT;
+            scene.canvas = IRect {
+                x0: 0,
+                y0: 0,
+                x1: (case.key[0] + 1) * 256,
+                y1: (case.key[1] + 1) * 256,
+            };
+            let mut node = scene.nodes[0].clone();
+            node.key = NodeId::new();
+            node.opacity = case.opacity;
+            node.content = RContent::Tiles(vec![raster]);
+            node.features.mask = Some(mask);
+            scene.nodes.push(node);
+            pollster::block_on(renderer.read_tile(&scene, &store, (0, case.key[0], case.key[1])))
+                .map_err(|e| format!("{}: {e}", case.name))
+        })
+        .collect();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    poller
+        .join()
+        .map_err(|_| "device poller panicked".to_string())?;
+    result
 }
 
 fn color_adjust_image(src: &[u8], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
@@ -3279,7 +4031,6 @@ impl Gpu {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
-        let region = [0.0, 0.0, 1.0, 0.0];
         let mut tiles_out = Vec::with_capacity(programs.len());
         for program in programs {
             let targets: Vec<_> = (0..program.targets)
@@ -3313,19 +4064,60 @@ impl Gpu {
                     pad: 0,
                 }];
                 let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
+                // The mask stages take their whole uniform from the host's
+                // `mask_sampler`, `input_map` and `mask_grid`.
+                let mask = (21..=23).contains(&stage.mode);
+                let f32_region = |t: usize| program.region(t).map(|v| v as f32);
+                let out_region = f32_region(stage.out);
+                let curve = if mask {
+                    let sampler = crate::renderer::mask_sampler(
+                        stage.transform,
+                        [out_region[0], out_region[1]],
+                        out_region[2],
+                    )
+                    .ok_or_else(|| format!("{}: v3 refuses the mask", program.name))?;
+                    let map = |t: usize| {
+                        crate::renderer::input_map(out_region, [256, 256], f32_region(t))
+                            .ok_or_else(|| format!("{}: v3 refuses the region", program.name))
+                    };
+                    crate::renderer::mask_grid(
+                        stage.settings,
+                        map(stage.a)?,
+                        map(stage.b)?,
+                        Some(&sampler),
+                    )
+                } else {
+                    [0.0; 64]
+                };
+                // Mode 18 reads its atlas layer as it is: the inverse takes the
+                // pixel center of the target's ROI back to `i + 1/2`.
+                let [x, y, scale] = out_region;
+                let uniform_region = |t: usize| {
+                    let [x, y, scale] = f32_region(t);
+                    [x, y, scale, 0.0]
+                };
                 let uniform = upload_buffer(
                     device,
                     &self.queue,
                     &[EffectConfig {
-                        out_region: region,
-                        region_a: region,
-                        region_b: region,
-                        inv0: [1.0, 0.0, 0.0, 1.0],
-                        inv1: [0.0; 4],
+                        out_region: [x, y, scale, 0.0],
+                        region_a: uniform_region(stage.a),
+                        region_b: uniform_region(stage.b),
+                        inv0: [1.0 / scale, 0.0, 0.0, 1.0 / scale],
+                        inv1: [-x / scale, -y / scale, 0.0, 0.0],
                         settings: stage.settings.map(|v| f32::from_bits(v as u32)),
-                        info: [stage.mode, 0, u32::from(stage.mode == 18), 0],
+                        info: [
+                            stage.mode,
+                            0,
+                            u32::from(stage.mode == 18 || mask),
+                            if mask {
+                                crate::sample::SAMPLE_INTEGER
+                            } else {
+                                0
+                            },
+                        ],
                         extra: [0.0; 4],
-                        curve: [0.0; 64],
+                        curve,
                         sizes: [256; 4],
                         output_clip: [256; 4],
                     }],
@@ -3629,6 +4421,548 @@ fn color_adjust_q14_mix_does_not_overflow() {
     }
     // 33³ × 5 × 6 × 6 + 5 × 180 + 3 × 16385 × 9 × 18.
     assert_eq!(checked, 14_432_670);
+}
+
+/// The bounds in the memo's overflow table, checked on the analytic endpoints.
+#[test]
+fn mask_q14_does_not_overflow() {
+    const E: [i64; 10] = [0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384];
+    const WIDE: i64 = 4_398_180_728_832; // 2^42 + 2^27
+    let q = q14::Q;
+    // Premultiplied pixels with rgb <= a: 55 of them.
+    let pixels: Vec<[i64; 4]> = E
+        .iter()
+        .flat_map(|&a| {
+            E.iter()
+                .filter(move |&&v| v <= a)
+                .map(move |&v| [v, v, v, a])
+        })
+        .collect();
+    assert_eq!(pixels.len(), 55);
+    let ordered = |p: [i64; 4]| p[..3].iter().all(|v| *v <= p[3]);
+    let in_range = |p: [i64; 4]| p.iter().all(|v| (0..=q).contains(v));
+
+    let coverage: Vec<i64> = (0..=255).map(|b| i64::from(byte_q14(b))).collect();
+    // The memo's table prints 4_177_967 for this sum; the value is 4_178_047.
+    // Either fits u32 with room to spare.
+    assert_eq!(255 * 16384 + 127, 4_178_047);
+    assert_eq!((coverage[0], coverage[255]), (0, q));
+    assert!(coverage.windows(2).all(|w| w[0] < w[1]));
+
+    // Mode 21.
+    for &v in &pixels {
+        for &m in &coverage {
+            for o in E {
+                let f = m.checked_mul(o).unwrap();
+                assert!((0..=Q28).contains(&f));
+                for c in v {
+                    assert!(c.checked_mul(f).unwrap().checked_add(1 << 27).unwrap() <= WIDE);
+                }
+                let out = mask_layer_q14(v, f).unwrap();
+                assert!(in_range(out) && ordered(out), "mode 21 {v:?} m={m} o={o}");
+            }
+        }
+    }
+    // Mode 21 identities: no mask is one Q14 opacity product; F = 0 and F = 2^28.
+    for v in 0..=q {
+        let p = [v; 4];
+        for o in E {
+            assert_eq!(
+                mask_layer_q14(p, q * o).unwrap()[0],
+                div_q_i64(v * o, q).unwrap()
+            );
+        }
+        assert_eq!(mask_layer_q14(p, 0).unwrap(), [0; 4]);
+        assert_eq!(mask_layer_q14(p, Q28).unwrap(), p);
+    }
+    // Mode 22.
+    for &input in &pixels {
+        for &filtered in &pixels {
+            for &s in &coverage {
+                for c in 0..4 {
+                    let n = input[c] * (q - s) + filtered[c] * s + 8192;
+                    assert!(n <= 268_443_648 && n <= i64::from(i32::MAX));
+                }
+                let out = mask_select_q14(input, filtered, s).unwrap();
+                assert!(in_range(out) && ordered(out), "mode 22");
+            }
+            assert_eq!(mask_select_q14(input, filtered, 0).unwrap(), input);
+            assert_eq!(mask_select_q14(input, filtered, q).unwrap(), filtered);
+        }
+    }
+    // Mode 23. Blend 3 (overlay) falls to multiply, as v2.
+    for &orig in &pixels {
+        for &filt in &pixels {
+            for b in [0u32, 1, 127, 128, 254, 255] {
+                let m = i64::from(byte_q14(b));
+                for o in E {
+                    let f = m * o;
+                    for blend in 0..4 {
+                        let d = q14::straight(orig);
+                        let t = q14::straight(filt);
+                        for c in 0..3 {
+                            for n in [orig[c] * q, d[c] * t[c], (q - d[c]) * (q - t[c])] {
+                                assert!(n <= Q28);
+                            }
+                        }
+                        let g = mask_adjust_blend_q14(orig, filt, blend).unwrap();
+                        assert!(in_range(g) && ordered(g), "mode 23 g");
+                        for c in 0..4 {
+                            let n = orig[c]
+                                .checked_mul(Q28 - f)
+                                .unwrap()
+                                .checked_add(g[c].checked_mul(f).unwrap())
+                                .unwrap()
+                                .checked_add(1 << 27)
+                                .unwrap();
+                            assert!(n <= WIDE);
+                        }
+                        let out = mask_adjust_q14(orig, filt, f, blend).unwrap();
+                        assert!(in_range(out) && ordered(out), "mode 23");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        mask_adjust_blend_q14([0, 0, 0, q], [q, q, q, q], 3),
+        mask_adjust_blend_q14([0, 0, 0, q], [q, q, q, q], 1)
+    );
+    // The mask texel of a negative Q8 position is the floor, as `div_euclid`.
+    for v in [-257, -256, -255, -1, 0, 255, 256] {
+        assert_eq!(v >> 8, i32::div_euclid(v, 256), "{v}");
+        assert_eq!(floor_frac_q8(v).0, v >> 8);
+    }
+    // The resolve product.
+    assert_eq!(q * 255, 4_177_920);
+}
+
+/// WGSL = Rust = JS: `tests/e2e/mask-v3-reference.mjs` evaluates the JS mask
+/// formulas and lookup on the same grids, and every value must equal Rust's.
+#[test]
+fn mask_v3_rust_and_js_references_agree() {
+    const E: [i64; 10] = [0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384];
+    let pixels: Vec<[i64; 4]> = E
+        .iter()
+        .flat_map(|&a| {
+            E.iter()
+                .filter(move |&&v| v <= a)
+                .map(move |&v| [v, v, v, a])
+        })
+        .collect();
+    let q = |b: u32| i64::from(byte_q14(b));
+    let all: Vec<i64> = (0..=255).map(q).collect();
+    let some: Vec<i64> = [0, 1, 2, 127, 128, 129, 253, 254, 255].map(q).to_vec();
+    let few: Vec<i64> = [0, 1, 127, 128, 254, 255].map(q).to_vec();
+    let opacities = [0, 1, 8192, 16383, 16384];
+    // Rotated, a unit move, a 2x scale with a move, and the rounding tie: all Q16.
+    let transforms = [
+        rotated_mask_transform(),
+        [1.0, 0.0, 0.0, 1.0, 3.0, -7.0],
+        [2.0, 0.0, 0.0, 2.0, -5.0, 9.0],
+        tie_mask_transform(),
+    ];
+    let mut rust = Vec::new();
+    let mut push = |v: [i64; 4]| {
+        for c in v {
+            rust.extend_from_slice(&u16::try_from(c).unwrap().to_le_bytes());
+        }
+    };
+    for &v in &pixels {
+        for &m in &all {
+            for o in E {
+                push(mask_layer_q14(v, m * o).unwrap());
+            }
+        }
+    }
+    for &input in &pixels {
+        for &filtered in &pixels {
+            for &s in &some {
+                push(mask_select_q14(input, filtered, s).unwrap());
+            }
+        }
+    }
+    for &orig in &pixels {
+        for &filt in &pixels {
+            for &m in &few {
+                for o in opacities {
+                    for blend in 0..4 {
+                        push(mask_adjust_q14(orig, filt, m * o, blend).unwrap());
+                    }
+                }
+            }
+        }
+    }
+    let pattern = mask_image(|x, y| ((x * 7 + y * 13) & 255) as u8);
+    for transform in transforms {
+        for y in 0..256 {
+            for x in 0..256 {
+                rust.push(mask_byte_cpu(&pattern, transform, [0, 0, 1], x, y).unwrap());
+            }
+        }
+    }
+    let feathered = feathered_rectangle(FEATHER_RECT, FEATHER);
+    rust.extend(feathered.as_chunks::<4>().0.iter().map(|px| px[0]));
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let args = format!(
+        "[{}]",
+        transforms
+            .iter()
+            .map(|t| format!("[{}]", t.map(|v| format!("{v:?}")).join(",")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let js = std::process::Command::new("node")
+        .arg(root.join("tests/e2e/mask-v3-reference.mjs"))
+        .arg(args)
+        .output()
+        .expect("node is required to compare the Rust and JavaScript v3 mask references");
+    assert!(
+        js.status.success(),
+        "JS reference failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    assert_eq!(js.stdout.len(), rust.len(), "JS produced a different count");
+    if let Some(i) = rust.iter().zip(&js.stdout).position(|(a, b)| a != b) {
+        panic!("Rust and JS v3 mask references differ first at byte {i}");
+    }
+    // Every lookup is Q16, the axis-aligned unit move included.
+    for t in transforms {
+        assert!(
+            crate::renderer::mask_sampler(t, [0.0, 0.0], 1.0).is_some(),
+            "{t:?}"
+        );
+    }
+}
+
+/// The host's integer texel map (`renderer::input_map`, evaluated as
+/// `effects-q14.wgsl` `input_texel` does) is the CPU's exact floor at every
+/// pixel of the offset programs, negative numerators included, and the origin
+/// programs are not the same tiles as at the origin.
+#[test]
+fn mask_origin_programs_place_inputs_and_masks_by_integers() {
+    // WGSL `floor_div`: truncating `/`, one less for a negative remainder.
+    let floor_div = |n: i32, d: i32| {
+        let q = n / d;
+        if n < 0 && q * d != n { q - 1 } else { q }
+    };
+    let mut truncation_differs = false;
+    for ((region, _), (a, b)) in mask_origin_cases().into_iter().zip(mask_offset_regions()) {
+        let f = |r: [i32; 3]| r.map(|v| v as f32);
+        for input in [a, b] {
+            let m = crate::renderer::input_map(f(region), [256, 256], f(input)).unwrap();
+            assert_ne!(m[3], 0, "{region:?} from {input:?} is not the identity");
+            for v in 0..256 {
+                let (nx, ny) = (m[0] + v * m[2], m[1] + v * m[2]);
+                let shader = |tx: i32, ty: i32| {
+                    ((0..256).contains(&tx) && (0..256).contains(&ty))
+                        .then(|| (ty * 256 + tx) as usize)
+                };
+                for (x, y) in [(v, 0), (0, v), (v, v), (v, 255 - v)] {
+                    let (nx, ny) = (m[0] + x * m[2], m[1] + y * m[2]);
+                    assert_eq!(
+                        shader(floor_div(nx, m[3]), floor_div(ny, m[3])),
+                        input_texel_cpu(region, input, x, y),
+                        "{region:?} from {input:?} at ({x}, {y})"
+                    );
+                }
+                // A negative numerator above -divisor: the floor is -1 (outside),
+                // truncation would read texel 0.
+                for n in [nx, ny] {
+                    if n < 0 && n > -m[3] {
+                        assert_eq!(floor_div(n, m[3]), -1);
+                        assert_eq!(n / m[3], 0);
+                        truncation_differs = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        truncation_differs,
+        "no case puts a negative numerator above -divisor"
+    );
+    // Every origin case puts part of the mask under the tile, and moving the
+    // ROI changes the tile.
+    let images = mask_images();
+    let programs = mask_origin_programs();
+    for (region, t) in mask_origin_cases() {
+        let bytes: Vec<u8> = (0..256 * 256)
+            .map(|i| mask_byte_cpu(&images[5], t, region, i % 256, i / 256).unwrap())
+            .collect();
+        assert!(bytes.contains(&0), "{region:?}: the mask covers the tile");
+        assert!(
+            bytes.iter().filter(|b| **b != 0).count() > 1000,
+            "{region:?}: no mask"
+        );
+    }
+    for program in &programs {
+        let at_origin = Q14Program {
+            name: program.name.clone(),
+            targets: program.targets,
+            regions: vec![],
+            stages: program.stages.clone(),
+            result: program.result,
+        };
+        assert_ne!(
+            q14_program_cpu(&images, program),
+            q14_program_cpu(&images, &at_origin),
+            "{}",
+            program.name
+        );
+    }
+}
+
+/// The v3 mask tiles `Context::mask_entries` uploads (`mask_tile_range`) are
+/// the tiles the Q16 lookup reads: the four corners bound every pixel. At
+/// origin 999936 that includes tile (3907, 0), which the f64 inverse misses.
+/// A corner outside the integer range has no range (the render is refused).
+#[test]
+fn v3_mask_tile_range_is_the_q16_lookup() {
+    let renderer_cases = renderer_mask_cases();
+    let mut cases: Vec<([i32; 3], [f64; 6])> = renderer_cases
+        .iter()
+        .map(|c| (c.region(), c.document_transform()))
+        .collect();
+    cases.extend(mask_origin_cases());
+    cases.push(([0, 0, 1], tie_mask_transform()));
+    cases.push(([512, -768, 2], rotated_mask_transform()));
+    let range_of = |region: [i32; 3], t: [f64; 6]| {
+        let at = [region[0] as f32, region[1] as f32];
+        let sampler = crate::renderer::mask_sampler(t, at, region[2] as f32).unwrap();
+        crate::renderer::mask_tile_range(&sampler, [256, 256])
+    };
+    for (region, t) in cases {
+        let inv = integer_inverse(crate::renderer::inverse(t).unwrap()).unwrap();
+        let mut every = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for y in 0..256 {
+            for x in 0..256 {
+                let px = pixel_q8(region[0], x, region[2]).unwrap();
+                let py = pixel_q8(region[1], y, region[2]).unwrap();
+                let q = source_q8(&inv, px, py).unwrap();
+                let key = [(q[0] >> 8) >> 8, (q[1] >> 8) >> 8];
+                every = [
+                    every[0].min(key[0]),
+                    every[1].min(key[1]),
+                    every[2].max(key[0]),
+                    every[3].max(key[1]),
+                ];
+            }
+        }
+        assert_eq!(range_of(region, t), Some(every), "{region:?} {t:?}");
+    }
+    let far = &renderer_cases[0];
+    let t = far.document_transform();
+    assert_eq!(range_of(far.region(), t), Some([3906, 0, 3907, 0]));
+    let right = crate::renderer::point(crate::renderer::inverse(t).unwrap(), [1_000_192.0, 0.0]);
+    assert!(
+        right[0] <= 3907.0 * 256.0,
+        "the f64 bound reaches tile 3907"
+    );
+    let tiles: Vec<_> = far.mask.iter().map(|(k, b)| (*k, &b[..])).collect();
+    assert_eq!(
+        mask_tiles_byte_cpu(&tiles, t, far.region(), 255, 0),
+        Some(255),
+        "pixel (255, 0) reads the white tile (3907, 0)"
+    );
+    let rotated = &renderer_cases[1];
+    assert_eq!(
+        range_of(rotated.region(), rotated.document_transform()),
+        Some([4, 2, 6, 4])
+    );
+    // 0.01x inverts to 100x: the Q8 source of a corner leaves i32.
+    assert_eq!(
+        range_of([8_000_000, 0, 1], [0.01, 0.0, 0.0, 0.01, 0.0, 0.0]),
+        None
+    );
+    // The Q8 pixel center of the right corners leaves i32 (pixel 0 fits).
+    assert!(pixel_q8(8_388_480, 0, 1).is_some() && pixel_q8(8_388_480, 255, 1).is_none());
+    assert_eq!(range_of([8_388_480, 0, 1], ident()), None);
+}
+
+/// Rust = JS away from the origin: `tests/e2e/mask-v3-origin-reference.mjs`
+/// draws the `origin ...` programs of [`mask_origin_programs`] with
+/// `renderM5V3` at the same ROIs, and every byte must equal `q14_program_cpu`.
+#[test]
+fn mask_origin_rust_and_js_references_agree() {
+    let images = mask_images();
+    let mut rust = Vec::new();
+    for program in mask_origin_programs()
+        .iter()
+        .filter(|p| p.name.starts_with("origin "))
+    {
+        rust.extend(q14_program_cpu(&images, program));
+    }
+    let cases = mask_origin_cases();
+    assert_eq!(rust.len(), cases.len() * 3 * 256 * 256 * 4);
+    let args = format!(
+        "[{}]",
+        cases
+            .iter()
+            .map(|(r, t)| format!(
+                "[[{}],[{}]]",
+                r.map(|v| v.to_string()).join(","),
+                t.map(|v| format!("{v:?}")).join(",")
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let js = std::process::Command::new("node")
+        .arg(root.join("tests/e2e/mask-v3-origin-reference.mjs"))
+        .arg(args)
+        .output()
+        .expect("node is required to compare the Rust and JavaScript v3 mask references");
+    assert!(
+        js.status.success(),
+        "JS reference failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    assert_eq!(js.stdout.len(), rust.len(), "JS produced a different count");
+    if let Some(i) = rust.iter().zip(&js.stdout).position(|(a, b)| a != b) {
+        let tile = i / (256 * 256 * 4);
+        panic!(
+            "Rust and JS v3 mask references differ first in tile {tile} at byte {}",
+            i % (256 * 256 * 4)
+        );
+    }
+}
+
+/// The CPU programs reproduce the memo's stated pixels and identities.
+#[test]
+fn mask_programs_known_values() {
+    let images = mask_images();
+    let programs = mask_programs();
+    let by_name = |name: &str| programs.iter().find(|p| p.name == name).unwrap();
+    let run = |name: &str| q14_program_cpu(&images, by_name(name));
+    // The browser `mask` case: opaque red where x < 128, transparent elsewhere.
+    let tile = run("v3-mask");
+    for (i, px) in tile.as_chunks::<4>().0.iter().enumerate() {
+        let want = if i % 256 < 128 {
+            [255, 0, 0, 255]
+        } else {
+            [0; 4]
+        };
+        assert_eq!(*px, want, "pixel {i}");
+    }
+    // Opacity 0.5 on an opaque pixel through a full mask is F = 2^27; the Q14
+    // value 8192 resolves to the tie 127.5, which goes up.
+    let half = pixel(&run("m5-mask-white o=0.5"), 255, 200);
+    assert_eq!((half[0], half[3]), (128, 128));
+    // A full mask equals the v3 composite of the unmasked layer at that opacity.
+    for opacity in [1.0, 0.5, 0.35] {
+        let case = Case {
+            name: format!("white mask {opacity}"),
+            w: 256,
+            h: 256,
+            level: 0,
+            tx: 0,
+            ty: 0,
+            lock: false,
+            measure: false,
+            nodes: vec![raster(
+                Image {
+                    w: 256,
+                    h: 256,
+                    pixels: color_adjust_gradient(),
+                },
+                0,
+                opacity,
+                true,
+                ident(),
+            )],
+        };
+        assert_eq!(
+            run(&format!("m5-mask-white o={opacity}")),
+            render_at(&case, 3),
+            "{}",
+            case.name
+        );
+    }
+    // The feathered selection has every byte.
+    let mut seen = [false; 256];
+    for px in images[3].as_chunks::<4>().0 {
+        seen[px[0] as usize] = true;
+    }
+    assert!(seen.iter().all(|s| *s), "feathered selection misses a byte");
+    // Opacity 0 removes the layer; the mask ramp shows every coverage.
+    assert!(run("m5-mask-coverage o=0").iter().all(|v| *v == 0));
+    let full = run("m5-mask-coverage o=1");
+    assert_eq!(pixel(&full, 0, 200), [0; 4]);
+    assert_eq!(
+        pixel(&full, 255, 200),
+        pixel(&run("m5-mask-white o=1"), 255, 200)
+    );
+    // Every v3 mask takes the Q16 lookup, axis-aligned unit moves included. A
+    // non-integer ROI, a level scale below 1, a singular transform or an inverse
+    // outside the Q16 format has no lookup, and the host refuses it (DQ3-4).
+    let sampler = crate::renderer::mask_sampler;
+    for (t, origin, scale) in [
+        (rotated_mask_transform(), [0.0, 0.0], 1.0),
+        ([1.0, 0.0, 0.0, 1.0, 3.0, -7.0], [256.0, 0.0], 2.0),
+        (ident(), [-512.0, 256.0], 4.0),
+    ] {
+        assert!(
+            sampler(t, origin, scale).is_some(),
+            "{t:?} at {origin:?} {scale}"
+        );
+    }
+    for (t, origin, scale) in [
+        (rotated_mask_transform(), [0.0, 0.0], 0.5),
+        (rotated_mask_transform(), [0.5, 0.0], 1.0),
+        (ident(), [0.0, 0.0], 0.5),
+        ([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0], 1.0),
+        ([1.0, 0.0, 0.0, 1.0, 1e12, 0.0], [0.0, 0.0], 1.0),
+        ([1e-6, 0.0, 0.0, 1e-6, 0.0, 0.0], [0.0, 0.0], 1.0),
+    ] {
+        assert!(
+            sampler(t, origin, scale).is_none(),
+            "{t:?} at {origin:?} {scale} has no Q16 lookup"
+        );
+        assert_eq!(
+            mask_byte_cpu(&images[5], t, [0, 0, 1], 0, 0).is_none(),
+            origin == [0.0, 0.0] && scale == 1.0
+        );
+    }
+    // The tie: the Q8 sum is exactly half a step below a texel edge. Half away
+    // from zero sends x = 3 (+) up to texel 1, and x = 2 (-) down to texel -1,
+    // which is the tile at key -1 (not in the map, byte 0). Rows move up by one
+    // texel; the last row lands on key 1.
+    let pattern = |x: i32, y: i32| ((x * 7 + y * 13) & 255) as u8;
+    let tie = tie_mask_transform();
+    let byte = |x, y| mask_byte_cpu(&images[5], tie, [0, 0, 1], x, y).unwrap();
+    for y in [0, 1, 254] {
+        assert_eq!(byte(2, y), 0, "x = 2, y = {y}");
+        assert_eq!(byte(3, y), pattern(1, y + 1), "x = 3, y = {y}");
+        assert_eq!(byte(255, y), pattern(253, y + 1), "x = 255, y = {y}");
+    }
+    assert_eq!(byte(3, 255), 0);
+    assert_ne!(run("m5-mask-tie"), run("m5-mask-coverage o=1"));
+    assert_ne!(run("m5-mask-rotated"), run("m5-mask-coverage o=1"));
+    // The selection keeps the input where the selection is 0 and is the adjusted
+    // copy where it is 255.
+    let selected = run("m5-selection-color-adjust");
+    let adjusted = color_adjust_image_v3(&images[0], 0.0, 1.7, 1.6);
+    let plain = run("m5-mask-white o=1");
+    assert_eq!(pixel(&selected, 250, 128), pixel(&plain, 250, 128));
+    assert_ne!(pixel(&adjusted, 250, 128), pixel(&plain, 250, 128));
+    assert_eq!(pixel(&selected, 128, 128), pixel(&adjusted, 128, 128));
+    // Multiply and overlay are the same v2 product; screen is not.
+    let mul = run("m5-adjustment-mask-multiply o=1");
+    assert_eq!(mul, run("m5-adjustment-mask-overlay o=1"));
+    assert_ne!(mul, run("m5-adjustment-mask-screen o=1"));
+    assert_ne!(mul, run("m5-adjustment-mask-normal o=1"));
+    // Every program draws something other than the empty tile.
+    for program in &programs {
+        if !program.name.ends_with("o=0") {
+            assert!(
+                q14_program_cpu(&images, program).iter().any(|v| *v != 0),
+                "{}",
+                program.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -4177,17 +5511,16 @@ fn plain_scene_gaps_are_explicit() {
         assert_eq!(gap(scene), Some(reason));
         let mut v3 = scene.clone();
         v3.render_version = 3;
-        // A color-adjust adjustment layer is the only one of these with integer stages.
-        let expected = if reason == "adjustment" {
+        // A pixel mask and a color-adjust adjustment layer are the ones of these
+        // with integer stages.
+        let integer = reason == "adjustment" || reason == "mask";
+        let expected = if integer {
             "v3-m5-integer"
         } else {
             "v3-unsupported"
         };
         assert_eq!(gap(&v3), Some(expected), "v3 {reason}");
-        assert_eq!(
-            crate::renderer::v3_gap(&v3),
-            (reason != "adjustment").then_some(reason)
-        );
+        assert_eq!(crate::renderer::v3_gap(&v3), (!integer).then_some(reason));
     }
     // The plain compositor skips an unsupported node, so the tile stays exact.
     assert!(plain_scene(&unsupported));
@@ -4196,8 +5529,10 @@ fn plain_scene_gaps_are_explicit() {
     v3.render_version = 3;
     assert_eq!(gap(&v3), None);
 
-    // Color-adjust layer effects are integer M5; a selection-limited one, or any
-    // other effect, has no integer stage yet. So does a non-normal adjustment layer.
+    // Color-adjust layer effects are integer M5, selection-limited ones too (mode
+    // 22). Any other effect has no integer stage yet, with or without a selection.
+    // Blends of masked adjustment layers are mode 23. Without a mask a non-normal
+    // blend is refused until the stages upstream of mode 23 are integer.
     let color_adjust = REffect {
         kind: REffectKind::ColorAdjust {
             brightness: 0.2,
@@ -4221,11 +5556,47 @@ fn plain_scene_gaps_are_explicit() {
         linked: true,
         transform: ident(),
     });
-    assert_eq!(crate::renderer::v3_gap(&layer), Some("effects"));
+    assert_eq!(crate::renderer::v3_gap(&layer), None);
+    assert_eq!(gap(&layer), Some("v3-m5-integer"));
+    let mut blur = layer.clone();
+    blur.nodes[0].features.effects[0].kind = REffectKind::GaussianBlur { radius: 8.0 };
+    assert_eq!(crate::renderer::v3_gap(&blur), Some("effects"));
     let mut multiply = adjustment.clone();
     multiply.render_version = 3;
     multiply.nodes[0].blend = RenderBlend::Multiply;
     assert_eq!(crate::renderer::v3_gap(&multiply), Some("adjustment"));
+    assert_eq!(gap(&multiply), Some("v3-unsupported"));
+    multiply.nodes[0].features.mask = mask.nodes[0].features.mask.clone();
+    assert_eq!(crate::renderer::v3_gap(&multiply), None);
+    assert_eq!(gap(&multiply), Some("v3-m5-integer"));
+    let mut invert = multiply.clone();
+    invert.nodes[0].content = RContent::Adjustment(REffect {
+        kind: REffectKind::Invert,
+        selection: None,
+    });
+    assert_eq!(crate::renderer::v3_gap(&invert), Some("adjustment"));
+    // DQ3-4: a mask does not open a path for the features it is combined with.
+    let mut masked = mask.clone();
+    masked.render_version = 3;
+    for (reason, add) in [
+        ("vector mask", &vector_mask),
+        ("clip path", &clip_path),
+        ("clip", &clip),
+        ("effects", &effects),
+    ] {
+        let mut v3 = masked.clone();
+        let f = &add.nodes[0].features;
+        let n = &mut v3.nodes[0].features;
+        n.vector_mask = f.vector_mask.clone();
+        n.clip_path = f.clip_path.clone();
+        n.clip = f.clip;
+        n.effects = f.effects.clone();
+        assert_eq!(
+            crate::renderer::v3_gap(&v3),
+            Some(reason),
+            "mask + {reason}"
+        );
+    }
 }
 
 fn is_lavapipe_adapter(name: &str) -> bool {
@@ -4499,9 +5870,17 @@ fn gpu_shader_matches_cpu_reference() {
         .collect();
     let images = opacity_images();
     let opacity = opacity_programs();
+    // Enforced: the v3 pixel-mask stages (modes 21, 22 and 23).
+    let mask_atlas = mask_images();
+    let masks = mask_programs();
+    // Enforced: the same stages at non-zero and negative ROI origins, and with
+    // inputs at other ROIs (the integer texel map).
+    let origins = mask_origin_programs();
     for (images, programs) in [
         (std::slice::from_ref(&src), &adjust),
         (&images[..], &opacity),
+        (&mask_atlas[..], &masks),
+        (&mask_atlas[..], &origins),
     ] {
         match gpu.render_q14(images, programs) {
             Ok(tiles) => {
@@ -4525,6 +5904,25 @@ fn gpu_shader_matches_cpu_reference() {
                 println!("q14 stages: GPU render failed: {err}");
                 failed.push(format!("q14 stages: {err}"));
             }
+        }
+    }
+    // Enforced: v3 masks over several tiles through the renderer, so the mask
+    // tiles are the ones `Context::mask_entries` selects and uploads.
+    let cases = renderer_mask_cases();
+    match renderer_mask_gpu(&cases) {
+        Ok(tiles) => {
+            for (tile, case) in tiles.iter().zip(&cases) {
+                let cpu = renderer_mask_cpu(case);
+                let report = diff_report(&cpu, tile);
+                println!("{} (v3 renderer mask, enforced): {report}", case.name);
+                if cpu != *tile {
+                    failed.push(format!("{}: {report}", case.name));
+                }
+            }
+        }
+        Err(err) => {
+            println!("renderer masks: GPU render failed: {err}");
+            failed.push(format!("renderer masks: {err}"));
         }
     }
     assert!(
@@ -4594,6 +5992,7 @@ fn m5_opacity_half_over_blue_is_the_known_pixel() {
         let mut opaque = Q14Program {
             name: program.name.clone(),
             targets: program.targets,
+            regions: program.regions.clone(),
             stages: program.stages.clone(),
             result: program.result,
         };

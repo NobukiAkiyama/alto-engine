@@ -50,6 +50,9 @@ impl Roi {
     fn uniform(self) -> [f32; 4] {
         [self.x, self.y, self.scale, 0.0]
     }
+    fn region(self) -> [f32; 3] {
+        [self.x, self.y, self.scale]
+    }
     fn bounds(self) -> [f64; 4] {
         [
             self.x as f64,
@@ -488,6 +491,21 @@ impl Context<'_> {
             .iter()
             .map(|p| p[1])
             .fold(f64::NEG_INFINITY, f64::max);
+        self.upload_entries(map, layer, |key| {
+            !(key.tx as f64 * 256.0 >= maxx
+                || (key.tx + 1) as f64 * 256.0 <= minx
+                || key.ty as f64 * 256.0 >= maxy
+                || (key.ty + 1) as f64 * 256.0 <= miny)
+        })
+    }
+    /// Uploads the tiles of `map` (with the stroke overrides of `layer`) that
+    /// `keep` selects, in key order.
+    fn upload_entries(
+        &mut self,
+        map: &[crate::RenderTile],
+        layer: Option<NodeId>,
+        keep: impl Fn(TileKey) -> bool,
+    ) -> Result<Vec<Entry>> {
         let mut map: BTreeMap<_, _> = map.iter().map(|t| (t.key, t.hash)).collect();
         if let Some(layer) = layer {
             for ((l, key), hash) in &self.overrides {
@@ -498,11 +516,7 @@ impl Context<'_> {
         }
         let mut entries = vec![];
         for (key, hash) in map {
-            if key.tx as f64 * 256.0 >= maxx
-                || (key.tx + 1) as f64 * 256.0 <= minx
-                || key.ty as f64 * 256.0 >= maxy
-                || (key.ty + 1) as f64 * 256.0 <= miny
-            {
+            if !keep(key) {
                 continue;
             }
             let slot = self.r.upload(
@@ -529,6 +543,42 @@ impl Context<'_> {
             ..Params::zeroed()
         }
     }
+    /// A version 3 mask stage (modes 21 to 23) writing `out` from inputs `a` and
+    /// `b`. Every input texel is placed from the integer pixel index
+    /// (`input_map`), and the mask, if any, is read at `out` through
+    /// `mask_sampler`: the Q16 lookup only. An input region or a mask without an
+    /// integer definition is refused (DQ3-4), never sampled in f32. `settings`
+    /// are Q14 integers. All of it is in `Config.grid` (`mask_grid`).
+    fn mask_params(
+        mode: u32,
+        transform: Option<[f64; 6]>,
+        out: Roi,
+        a: Roi,
+        b: Roi,
+        settings: [i32; 4],
+    ) -> Result<Params> {
+        let sampler = transform
+            .map(|t| {
+                super::mask_sampler(t, [out.x, out.y], out.scale).ok_or_else(|| {
+                    RenderError::GpuUnsupported(
+                        "v3 mask transform or level has no integer lookup".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let map = |input: Roi| {
+            super::input_map(out.region(), [out.w, out.h], input.region()).ok_or_else(|| {
+                RenderError::GpuUnsupported(
+                    "v3 mask stage input region has no integer texel map".into(),
+                )
+            })
+        };
+        Ok(Params {
+            curve: super::mask_grid(settings, map(a)?, map(b)?, sampler.as_ref()),
+            info: [mode, 0, 0, crate::sample::SAMPLE_INTEGER],
+            ..Params::zeroed()
+        })
+    }
     fn mask_entries(
         &mut self,
         mask: &RMask,
@@ -541,7 +591,22 @@ impl Context<'_> {
         } else {
             mask.transform
         };
-        Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform))
+        if !self.resources.exact {
+            return Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform));
+        }
+        // Version 3 reads the mask through `mask_sampler` (modes 21 to 23), so its
+        // tiles are selected with the same Q16 inverse and Q8 pixel centers, not
+        // with the f64 inverse: the two differ by the quantization error, which
+        // grows with the distance from the origin.
+        let range = super::mask_sampler(transform, [roi.x, roi.y], roi.scale)
+            .and_then(|s| super::mask_tile_range(&s, [roi.w, roi.h]))
+            .ok_or_else(|| {
+                RenderError::GpuUnsupported("v3 mask ROI has no integer tile range".into())
+            })?;
+        let entries = self.upload_entries(&mask.tiles, layer, |key| {
+            (range[0]..=range[2]).contains(&key.tx) && (range[1]..=range[3]).contains(&key.ty)
+        })?;
+        Ok((entries, transform))
     }
     fn vector(
         &mut self,
@@ -676,9 +741,34 @@ impl Context<'_> {
         Ok(result)
     }
     fn apply_props(&mut self, source: Target, node: &RNode, world: [f64; 6]) -> Result<Target> {
-        // Version 3 has no masks here (`v3_gap`); `blend` applies the opacity.
+        // Version 3 has no vector masks or clip paths (`v3_gap`). Without a pixel
+        // mask, `blend` applies the opacity. With one, mode 21 applies the mask and
+        // the opacity once, as one Q28 factor, and `blend` uses opacity 1.
         if self.resources.exact {
-            return Ok(source);
+            let Some(mask) = &node.features.mask else {
+                return Ok(source);
+            };
+            let out = self.alloc(source.roi)?;
+            let (entries, transform) = self.mask_entries(
+                mask,
+                world,
+                source.roi,
+                if self.mask_preview {
+                    Some(node.key)
+                } else {
+                    None
+                },
+            )?;
+            let p = Self::mask_params(
+                21,
+                Some(transform),
+                source.roi,
+                source.roi,
+                source.roi,
+                [crate::composite_opacity_q14(node.opacity), 1, 0, 0],
+            )?;
+            self.dispatch(&out, &source, &source, &source, p, &entries)?;
+            return Ok(out);
         }
         if node.features.mask.is_none()
             && node.features.vector_mask.is_none()
@@ -726,10 +816,16 @@ impl Context<'_> {
         let mut p;
         if self.resources.exact {
             // Version 3 mode 19: the Q14 layer composite with the host-quantized
-            // opacity. `apply_props` left the target unscaled. Clipping is refused.
+            // opacity. Clipping is refused. A masked node's opacity was consumed
+            // by `apply_props` (mode 21), so it composites at opacity 1.
             p = Self::params(19, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let opacity = if node.features.mask.is_some() {
+                1.0
+            } else {
+                node.opacity
+            };
             p.settings = q14_settings([
-                crate::composite_opacity_q14(node.opacity),
+                crate::composite_opacity_q14(opacity),
                 node.blend as i32,
                 0,
                 0,
@@ -755,6 +851,7 @@ impl Context<'_> {
         roi: Roi,
         world: [f64; 6],
     ) -> Result<Target> {
+        // A selection on a color-adjust is mode 22 below.
         if self.resources.exact && !matches!(effect.kind, REffectKind::ColorAdjust { .. }) {
             return Err(RenderError::Internal(
                 "v3 effect without an integer stage reached the M5 renderer".into(),
@@ -846,7 +943,11 @@ impl Context<'_> {
         if let Some(mask) = &effect.selection {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
-            let p = Self::params(5, transform);
+            let p = if self.resources.exact {
+                Self::mask_params(22, Some(transform), roi, input.roi, filtered.roi, [0; 4])?
+            } else {
+                Self::params(5, transform)
+            };
             self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
             Ok(out)
         } else {
@@ -962,6 +1063,9 @@ impl Context<'_> {
             }
             let transform = multiply(world, node.transform);
             if let RContent::Adjustment(effect) = &node.content {
+                if self.resources.exact {
+                    v3_adjustment_blend(node.features.mask.is_some(), node.blend)?;
+                }
                 let mut stack = vec![effect.clone()];
                 stack.extend(node.features.effects.clone());
                 // A backdrop blur needs extra input from the same siblings. The caller renders that halo below.
@@ -998,9 +1102,43 @@ impl Context<'_> {
                 };
                 let mut mixed = filtered.clone();
                 if self.resources.exact {
-                    // Version 3 adjustment layers are normal, unmasked and unclipped
-                    // (`v3_gap`). Only the opacity mixes, in Q14 (mode 20).
-                    if node.opacity != 1.0 {
+                    // Version 3 adjustment layers are unclipped (`v3_gap`). A pixel
+                    // mask takes mode 23 (mask, opacity and blend in one Q28 mix).
+                    // Otherwise only the opacity mixes, in Q14 (mode 20).
+                    if node.features.mask.is_some() {
+                        let out = self.alloc(desired)?;
+                        let (entries, mask_transform, has_mask) = match &node.features.mask {
+                            Some(mask) => {
+                                let (e, t) = self.mask_entries(
+                                    mask,
+                                    transform,
+                                    desired,
+                                    if self.mask_preview {
+                                        Some(node.key)
+                                    } else {
+                                        None
+                                    },
+                                )?;
+                                (e, Some(t), 1)
+                            }
+                            None => (vec![], None, 0),
+                        };
+                        let p = Self::mask_params(
+                            23,
+                            mask_transform,
+                            desired,
+                            input.roi,
+                            filtered.roi,
+                            [
+                                crate::composite_opacity_q14(node.opacity),
+                                has_mask,
+                                node.blend as i32,
+                                0,
+                            ],
+                        )?;
+                        self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
+                        mixed = out;
+                    } else if node.opacity != 1.0 {
                         let out = self.alloc(desired)?;
                         let mut p = Self::params(20, transform);
                         p.settings =
@@ -1317,6 +1455,17 @@ impl Renderer {
     }
 }
 
+/// Version 3 refuses a non-normal adjustment-layer blend without a pixel mask
+/// (`v3_gap`) before any stage runs: its inputs would come through stages that
+/// still take f32 coordinates. It is never drawn in float (DQ3-4).
+fn v3_adjustment_blend(masked: bool, blend: RenderBlend) -> Result<()> {
+    if masked || blend == RenderBlend::Normal {
+        return Ok(());
+    }
+    Err(RenderError::GpuUnsupported(
+        "v3 adjustment layer blend needs a pixel mask".into(),
+    ))
+}
 #[cfg(test)]
 mod pool_tests {
     use super::*;
@@ -1341,5 +1490,239 @@ mod pool_tests {
         assert!(s.contains("id.xy>=c.output_clip.xy"));
         assert!(s.contains("vec2i(c.output_clip.zw)"));
         assert!(!s.contains("textureDimensions("));
+    }
+    fn roi(x: f32, y: f32, scale: f32) -> Roi {
+        Roi {
+            x,
+            y,
+            scale,
+            w: 256,
+            h: 256,
+        }
+    }
+    #[test]
+    fn v3_unmasked_adjustment_blends_are_refused() {
+        for blend in [
+            RenderBlend::Multiply,
+            RenderBlend::Screen,
+            RenderBlend::Overlay,
+        ] {
+            assert!(matches!(
+                v3_adjustment_blend(false, blend),
+                Err(RenderError::GpuUnsupported(_))
+            ));
+            assert!(v3_adjustment_blend(true, blend).is_ok());
+        }
+        assert!(v3_adjustment_blend(false, RenderBlend::Normal).is_ok());
+        assert!(v3_adjustment_blend(true, RenderBlend::Normal).is_ok());
+    }
+    /// Every input region and mask a v3 mask stage cannot place in integers is
+    /// refused with `GpuUnsupported` (DQ3-4); equal regions need no integers.
+    #[test]
+    fn v3_mask_stages_refuse_regions_without_an_integer_map() {
+        let map = super::super::input_map;
+        // Equal regions are the pixel index itself, fractional or not.
+        assert_eq!(
+            map([0.5, 3.25, 0.5], [256, 256], [0.5, 3.25, 0.5]),
+            Some([0; 4])
+        );
+        // 2 (out - in) + out_scale, 2 out_scale, 2 in_scale.
+        assert_eq!(
+            map([-300.0, 37.0, 1.0], [256, 256], [-295.0, 34.0, 1.0]),
+            Some([-9, 7, 2, 2])
+        );
+        assert_eq!(
+            map([-256.0, -512.0, 2.0], [256, 256], [-260.0, -520.0, 4.0]),
+            Some([10, 18, 4, 8])
+        );
+        for (out, input) in [
+            ([0.5, 0.0, 1.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [0.0, -0.25, 1.0]),
+            ([0.0, 0.0, 0.5], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.5]),
+            // A numerator past i32.
+            ([1_073_741_824.0, 0.0, 1.0], [-1_073_741_824.0, 0.0, 1.0]),
+            // The step times the last pixel past i32.
+            ([0.0, 0.0, 16_777_216.0], [0.0, 0.0, 1.0]),
+        ] {
+            assert_eq!(map(out, [256, 256], input), None, "{out:?} from {input:?}");
+        }
+        let unsupported = |r: Result<Params>| matches!(r, Err(RenderError::GpuUnsupported(_)));
+        let out = roi(-300.0, 37.0, 1.0);
+        for mode in [21, 22, 23] {
+            // Either input off the integer grid.
+            assert!(unsupported(Context::mask_params(
+                mode,
+                None,
+                out,
+                roi(-299.5, 37.0, 1.0),
+                out,
+                [16384, 0, 0, 0]
+            )));
+            assert!(unsupported(Context::mask_params(
+                mode,
+                None,
+                out,
+                out,
+                roi(-300.0, 37.0, 0.5),
+                [16384, 0, 0, 0]
+            )));
+            // A mask at a level below 1 or a fractional origin.
+            for at in [roi(0.0, 0.0, 0.5), roi(0.5, 0.0, 1.0)] {
+                assert!(unsupported(Context::mask_params(
+                    mode,
+                    Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                    at,
+                    at,
+                    at,
+                    [16384, 1, 0, 0]
+                )));
+            }
+        }
+        // An unmasked mode 23 at a fractional level with equal regions draws.
+        let zoomed = roi(64.0, 32.0, 0.5);
+        let p = Context::mask_params(23, None, zoomed, zoomed, zoomed, [8192, 0, 2, 0]).unwrap();
+        assert_eq!(
+            p.curve[0..12]
+                .iter()
+                .map(|v| v.to_bits() as i32)
+                .collect::<Vec<_>>(),
+            [8192, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(p.out_region == [0.0; 4] && p.inv0 == [0.0; 4] && p.extra == [0.0; 4]);
+    }
+    /// Removes `//` comments.
+    fn strip_comments(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    /// Every `fn` of a WGSL source and its body, braces included.
+    fn wgsl_functions(src: &str) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let mut rest = src;
+        while let Some(at) = rest.find("fn ") {
+            let boundary = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+            let after = &rest[at + 3..];
+            let name: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let Some(open) = after.find('{') else {
+                break;
+            };
+            if !boundary || name.is_empty() {
+                rest = after;
+                continue;
+            }
+            let mut depth = 0;
+            let mut end = open;
+            for (i, ch) in after[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.insert(name, after[open..end].to_string());
+            rest = &after[end..];
+        }
+        out
+    }
+    /// The v3 mask stages (modes 21 to 23) reach none of the f32 coordinate
+    /// helpers (`load_a`, `load_b`, `sparse_bytes`) and read no float region,
+    /// position or uniform: everything they call is integer, except
+    /// `unorm_byte`, which turns the `Rgba8Unorm` atlas `.r` back into its byte.
+    #[test]
+    fn v3_mask_stages_call_no_f32_coordinate_helper() {
+        let shader = strip_comments(&crate::integer_effects_shader());
+        let functions = wgsl_functions(&shader);
+        for helper in ["load_a", "load_b", "sparse_bytes", "mask_stage", "main"] {
+            assert!(functions.contains_key(helper), "{helper} not found");
+        }
+        let mut reached = vec!["mask_stage".to_string()];
+        let mut i = 0;
+        while i < reached.len() {
+            let body = &functions[&reached[i]];
+            for name in functions.keys() {
+                if !reached.contains(name)
+                    && body.match_indices(&format!("{name}(")).any(|(at, _)| {
+                        at == 0 || {
+                            let c = body.as_bytes()[at - 1];
+                            !(c.is_ascii_alphanumeric() || c == b'_')
+                        }
+                    })
+                {
+                    reached.push(name.clone());
+                }
+            }
+            i += 1;
+        }
+        for needed in [
+            "texel_a",
+            "texel_b",
+            "input_texel",
+            "floor_div",
+            "mask_q",
+            "mask_byte",
+            "mask_texel",
+            "pixel_q8",
+            "coord_q8",
+            "div28",
+            "unorm_byte",
+        ] {
+            assert!(
+                reached.iter().any(|r| r == needed),
+                "mask_stage does not reach {needed}"
+            );
+        }
+        for helper in ["load_a", "load_b", "sparse_bytes", "main"] {
+            assert!(
+                !reached.iter().any(|r| r == helper),
+                "mask_stage reaches {helper}"
+            );
+        }
+        let float = [
+            "f32",
+            "vec2f",
+            "vec3f",
+            "vec4f",
+            "floor(",
+            "fract(",
+            "round(",
+            "c.out_region",
+            "c.region_a",
+            "c.region_b",
+            "c.inv0",
+            "c.inv1",
+            "c.extra",
+            "c.settings",
+        ];
+        for name in reached.iter().filter(|n| *n != "unorm_byte") {
+            for token in float {
+                assert!(
+                    !functions[name].contains(token),
+                    "{name} (reached from mask_stage) uses {token}"
+                );
+            }
+        }
+        // `main` sends modes 21 to 23 to `mask_stage` before it forms `p`.
+        let main = &functions["main"];
+        let branch = main.find("c.info.x>=21u&&c.info.x<=23u").unwrap();
+        let call = main.find("mask_stage(vec2i(id.xy))").unwrap();
+        let p = main.find("let p=").unwrap();
+        assert!(branch < call && call < p);
+        assert!(main[branch..p].contains("return;"));
+        assert!(!main[branch..p].contains("load_"));
+        // The integer uniform is declared integer.
+        assert!(shader.contains("grid: array<vec4i, 16>"));
     }
 }

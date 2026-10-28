@@ -48,7 +48,7 @@ parity の `mask` が xfail なのは、このケースが v2 の文書（`creat
 | `premul_byte_q14` / `premulByteQ14` | 同上 | レイヤーの入口（モード 18 の置き換え先）。マスクの式では使わない |
 | `div_q` / `div_q_i64` / `divQBig` | `effects.wgsl` / `cpu_composite.rs` / `cpu-composite.js` | 16384 での除算。Q28 での除算も `div_q_i64` と `divQBig` が除数 `1 << 28` で受ける |
 | `Wide`、`wide_mul_u32`、`wide_add` | `effects.wgsl` | u32 に入らない積。マスクの積は負にならないので `wide_mul_i32` と `wide_neg` は要らない |
-| `pack_inverse`、`integer_inverse`、`axis_unit`、`SAMPLE_F32`、`SAMPLE_INTEGER` | `crates/alto-gpu/src/sample.rs` | マスクを引く位置を f32 にするか Q16 にするか |
+| `integer_inverse`、`pack_wide`、`SAMPLE_INTEGER` | `crates/alto-gpu/src/sample.rs` | マスクを引く位置の Q16 の逆行列。v3 のマスクは常にこれを使う |
 | `pixel_q8`、`source_q8`、`floor_frac_q8` | `sample.rs`（テスト用） | Rust の参照の位置 |
 | `pixel_q8`、`coord_q8`、`wide_round_shr16` | `crates/alto-gpu/shaders/composite.wgsl` | WGSL の位置。`effects.wgsl` は別シェーダなので、`Wide` と同じく写す |
 | `quantizeInverse`、`pixelQ8`、`sourceAxis`、`floorFracQ8` | `cpu-composite.js` | JS の参照の位置 |
@@ -76,6 +76,15 @@ color-adjust のように f16 の中間（`q14_stored`）と `effects-resolve.wg
 
 したがって f16 の段階を挟むと、不透明度 0.5 を enforce できない。整数の出力では、`div_q_i64(8192 * 255, 16384)` は 0 から遠い側の 128 で一意である。
 
+## v3 の範囲：モード 22 と 23
+
+この PR は、マスクのほかに v3 の範囲を二つ広げる。どちらも `effects-q14.wgsl` の整数のモードで描き、`v3_gap`（Rust）と `sceneGap`（JS）が受け入れる。
+
+- **モード 22。選択つきの color-adjust。** v2 のモード 5 にあたる。効果の `selection` を持つ color-adjust を、上の「モード 5」の式で描く。color-adjust 以外の効果の選択は、今までどおり拒否する。
+- **モード 23。normal 以外のブレンドの調整レイヤー。** v2 のモード 7 にあたる。マスクがなくても、ブレンドが normal でない color-adjust の調整レイヤーはこのモードで描く。式は上の「モード 7」である。ただし、マスクなしは v3 では拒否する（float purge PR まで。上流のモード 18・17・19 と resolve に f32 が残るため、`v3_gap` / `sceneGap` は v3-unsupported、ホストは GpuUnsupported とし、float では描かない）。
+
+**v3 では、screen 以外のブレンドはすべて multiply で描く。** モード 23 の分岐は screen（2）と multiply の二つだけで、overlay、darken、lighten などのほかのモードも multiply の式を通る。これは v2 のモード 7 の意味をそのまま保ったもので、仕様として凍結する。v3 の調整レイヤーで、ブレンドモードごとの式を後から入れることはしない。入れるなら、新しい描画バージョンの変更として扱う。
+
 ## マスクのバイトを読む
 
 アトラスは #24 の裁定どおり `Rgba8Unorm` 一枚のままにする。マスク用の `Rgba8Uint` は作らない。
@@ -85,11 +94,11 @@ color-adjust のように f16 の中間（`q14_stored`）と `effects-resolve.wg
 - タイルの探し方は `sparse` と同じ二分探索である。マップにないタイルはバイト 0、スロットが `0xffffffff` のタイルは v2 と同じ `(1, 0, 0.2, 1)` で、`.r` はバイト 255 になる。
 - その後はすべて整数である。`unorm_byte` の往復は `Gpu::atlas_read` と `measureAtlasRead` が 256 値の全チャネルで必須の検査として押さえる。`.r` はそのチャネルの一つなので、新しいアトラスの検査は足さない。
 
-引く位置は合成と同じ規則にする。ホストがマスクの逆変換（`mask_entries` の `transform` の逆）を `pack_inverse(inv, render_version)` に通す。
+引く位置は常に整数である。ホストの `mask_sampler`（`crates/alto-gpu/src/renderer.rs`）がマスクの逆変換（`mask_entries` の `transform` の逆）を `integer_inverse` で Q16 にし、`SAMPLE_INTEGER` で引く。軸平行で倍率 1 の逆変換も同じ経路を通る。v3 のマスクに f32 の位置（`sparse`）はない。
 
-- `axis_unit` のときは `SAMPLE_F32` で、v2 の `sparse` の f32 のままである。係数がちょうど 1 と 0 なら、積は正確で、融合しても結果は同じである。残る和は WGSL が正しい丸めを保証する加算だけである。enforce するのは、係数がちょうど 1 と 0 で、平行移動が整数の場合だけにする。`axis_unit` の許容 0.0001 の内側にある、1 でない係数は enforce しない。
-- それ以外で `integer_inverse` が収まるときは `SAMPLE_INTEGER` である。画素中心は `pixel_q8`、ソース位置は `coord_q8`（Rust `source_q8`、JS `sourceAxis`）。テクセルは Q8 の算術右シフト `>> 8`（`floor_frac_q8` の床）で、負の座標でも床になる。タイルキーはテクセルの `>> 8`、タイル内の位置はテクセルからキー × 256 を引いたものである。重み `fx, fy` は使わない。
-- `pixel_q8` は整数の原点と倍率を要る。`Roi`（`m5.rs`）の `x`、`y`、`scale` は f32 である。ホストは、三つがちょうど整数で倍率が 1 以上のときだけ整数経路を選ぶ。そうでないとき（負のレベル、整数でない原点）と `integer_inverse` が `None` のときは f32 に戻す。戻ったケースは enforce しない。
+- 画素中心は `pixel_q8`、ソース位置は `coord_q8`（Rust `source_q8`、JS `sourceAxis`）。テクセルは Q8 の算術右シフト `>> 8`（`floor_frac_q8` の床）で、負の座標でも床になる。タイルキーはテクセルの `>> 8`、タイル内の位置はテクセルからキー × 256 を引いたものである。重み `fx, fy` は使わない。
+- `pixel_q8` は整数の原点と倍率を要る。`Roi`（`m5.rs`）の `x`、`y`、`scale` は f32 である。三つがちょうど整数で倍率が 1 以上であることを要る。
+- 整数で表せないマスク（逆変換がない、`integer_inverse` が `None`、整数でない原点、倍率が 1 未満）は、描画を `GpuUnsupported` で拒否する（DQ3-4）。float で描くことはしない。CPU 参照も同じ条件で拒否する（Rust `mask_byte_cpu` は `None`、JS `maskByteV3` は例外）。
 
 ## 式
 
@@ -124,7 +133,7 @@ out = div_q(in * (16384 - s) + f * s, 16384)
 
 - ブレンドが normal なら `g = filt`。
 - そうでないときは、#24 のストレート化（アルファ 0 なら 0、そうでなければ `clamp(div_q(p * 16384, a), 0, 16384)`）で `d = straight(orig)`、`t = straight(filt)` を作る。ブレンドが screen（2）なら `c = 16384 - div_q((16384 - d) * (16384 - t), 16384)`、それ以外は `c = div_q(d * t, 16384)` である。`g_rgb = div_q(c * orig_a, 16384)`、`g_a = orig_a`。
-- v2 は screen 以外の非 normal を全部 multiply にしている（`u32(c.settings.w) == 2u` の分岐だけがある）。v3 はこの意味を変えない。変えるのは算術だけである。
+- v2 は screen 以外の非 normal を全部 multiply にしている（`u32(c.settings.w) == 2u` の分岐だけがある）。v3 はこの意味を変えない。変えるのは算術だけである。これは仕様として凍結する（「v3 の範囲：モード 22 と 23」）。
 
 ```text
 out = div28(orig * (2^28 - F) + g * F)
@@ -190,7 +199,7 @@ WGSL は `wide_mul_u32(v, F)` で積を作り、`wide_add` で `Wide(1u << 27u, 
 
 一致は全バイト一致である。バックエンドは #24 と同じ三つである。Metal は native ジョブ（`Apple Paravirtual device`、実機は未検証）、lavapipe は gpu-parity ジョブ、SwiftShader は wasm ジョブ（アダプタの architecture に `swiftshader`）。ブラウザは color-adjust と同じく `tests/fixtures/render-v3-empty.alto` を開いて v3 の文書にする。
 
-一致を期待する理由は一つである。`unorm_byte` のあとはすべて整数の加減乗と、非負の整数除算である。WGSL の整数演算は仕様で一意で、上の表で溢れがないことを示した。残る f32 は `SAMPLE_F32` の位置だけで、係数がちょうど 1 と 0 なら丸めは起きない。
+一致を期待する理由は一つである。`unorm_byte` のあとはすべて整数の加減乗と、非負の整数除算である。引く位置も Q16 と Q8 の整数である。WGSL の整数演算は仕様で一意で、上の表で溢れがないことを示した。
 
 | ケース | 中身 | WGSL = Rust = JS | Metal | lavapipe | SwiftShader | 扱い |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -200,10 +209,11 @@ WGSL は `wide_mul_u32(v, F)` で積を作り、`wide_add` で `Wide(1u << 27u, 
 | 選択つき color-adjust | モード 5。入力は勾配、選択は矩形の feather | 一致 | 一致 | 一致 | 一致 | enforce |
 | マスクつき調整レイヤー | モード 7。color-adjust、ブレンド `{normal, multiply, screen, overlay}`、不透明な背面 | 一致 | 一致 | 一致 | 一致 | enforce。半透明の背面は #24 の M5 のブレンドが入ってから |
 | 回転したマスク | リンクしないマスクを 0.3 rad 回し、恒等のレイヤーへ。`SAMPLE_INTEGER` | 一致 | 一致 | 一致 | 一致 | enforce |
+| 位置の結び | 平行移動 (2.501953125, -0.498046875) の倍率 1 のマスク。Q8 の和がちょうど `.5` になり、負の側はタイルキー -1 へ越える | 一致 | 一致 | 一致 | 一致 | enforce |
 | マスクつきグループ | 半透明の子を持つグループにマスク | 一致 | 一致 | 一致 | 一致 | enforce。#24 の M5 のブレンドが入ってから |
 | ベクターマスク、クリッピングパス | MSAA とガウスのカバレッジ | 期待しない | — | — | — | measured-not-enforced |
 | 選択つきのぼかし、levels、curves、hue-saturation、invert | 効果側が v2 の float | 期待しない | — | — | — | measured-not-enforced |
-| f32 に戻るマスク | `integer_inverse` が `None`、許容内の非 1 係数、負のレベル | 期待しない | — | — | — | parity に入れない |
+| 整数で引けないマスク | `integer_inverse` が `None`、逆変換がない、整数でない原点、負のレベル | — | — | — | — | 描画を拒否する（DQ3-4） |
 | v2 の `mask` | `createDocument` のまま | — | — | — | — | xfail のまま |
 
 Rust の参照は、R8 タイルをシーンに直接置ける（`plain_scene_gaps_are_explicit` と同じ組み方）。カバレッジ全値のケースは、Rust では x がバイトになる R8 タイルを置く。ブラウザは feather つきの矩形選択で 0..=255 を作る。JS の参照は、そのバイトを `selection_ops` の矩形と同じ f64 の式で作り直す。使う演算は加減除、`min`、`clamp`、非負の値の `round` だけで、どれも IEEE で一意である。`Math.round` と Rust の `round` が違うのは負の結びだけで、ここには現れない。楕円と投げ縄は `hypot` を使うので parity に入れない。
@@ -248,11 +258,11 @@ measure するのは、算術が整数でも入力が float のまま来るケ�
 
 1. **M5 の中間の形。決定済み。** M5 の v3 の中間は `rgba16uint` に置く。0..=16384 は u16 に収まり、整数で、変換もフィルタもなく、`textureLoad` だけで読み、今の M5 の形を保つ。パック u32 のバッファは、大きな書き換えで決定性の利得がないので採らない。#24 の文言は「最終のタイル出力は `rgba8uint` かパック u32。中間値は Q14 の整数で `rgba16uint` を許す。float の中間は v3 のどこにも置かない」に改訂する。改訂は v3 composite の実装 PR で入る（「値の置き場と順番」）。
 2. **color-adjust の v3 の危険。決定済み。** 問題は結びより大きい。`q14_to_f16_bits` は q >= 2048 で 2、4、8 の倍数に丸めるので、#22 の color-adjust の v3 は真の Q14 ではなく、Q14 と名乗る f16 の精度落ちである。20 ケースの一致は結びを踏まず、精度落ちが CPU 参照と一致しただけである。対応は「実装順」の (a) から (c) で、(a) で 8192 を生む画素の数をバックエンドごとに数え、(c) で中間を `rgba16uint` にして f16 の段階と unorm 解決を v3 から除き、color-adjust の v3 を enforce し直し、不透明度 0.5 の parity ケースを足す。
-3. **モード 7 の意味。** v2 は screen 以外の非 normal を multiply にしている。v3 はこれを残すとした。#24 のブレンド関数をそのまま使えば overlay などが正しくなるが、それは算術ではなく意味の変更で、製品として決める必要がある。
+3. **モード 7 の意味。決定済み。** v3 の調整レイヤーでは、screen 以外の非 normal のブレンドはすべて multiply で描く。これを仕様として凍結する（「v3 の範囲：モード 22 と 23」）。
 4. **マスクつきグループのポップ。** M5（プレマルチプライに `F`）と #24 の合成パス（ストレート化してからアルファに不透明度）は、半透明のグループで丸めが違い得る。経路を一本にするか、この差を許すかは決めていない。
 5. **ブラウザの参照のマスクバイト。** wasm に R8 のマスクタイルを直接読む API はない（`readTile` は表示タイル）。この文書は、JS が矩形の feather の式を作り直すとした。エンジンのコードを二重に持つことになる。読み出し API を足すほうがよいかは決めていない。
 6. **マスク生成の決定性。** `hypot`（楕円、投げ縄）、native と wasm の libm、GPU のブラシは、同じ編集を二つのピアが別々に行うと違うバイトを作り得る。内容ハッシュで複製するので、複製後の分岐はない。`render_version` の範囲外だが、どこかで扱う必要がある。
 7. **ベクターのカバレッジ。** モード 11 と 12 の乗算は定義したが、カバレッジの Q14 は vector-fill と gaussian-blur の v3 待ちである。feather つきのベクターマスクは両方に依存する。
-8. **f32 に戻る位置。** 負のレベルや整数でない `Roi` が、マスクのある M5 の経路で実際に現れるかは調べていない。現れるなら、その位置も整数にする方法が要る。
+8. **整数で引けない位置。** v3 のマスクに f32 の位置はない。負のレベルや整数でない `Roi`、Q16 に入らない逆変換は描画を拒否する（DQ3-4）。これらが実際に現れるかは調べていない。現れるなら、拒否をやめるには整数の位置の定義を広げる必要がある。
 9. **欠けたスロット。** `0xffffffff` のスロットはカバレッジ 255 になる（v2 の `(1, 0, 0.2, 1)` の `.r`）。デバッグ用の印がマスクとしては「全部見せる」になる。v3 で 0 にするかは決めていない。
 10. **古いメモの指し先。** [正確な CPU 参照](2026-10-27-exact-cpu-references.md) の「mask」節は、この文書で置き換えた。あの節からこの文書への指し先は、実装 PR で足す。この変更は文書を一つ足すだけで、既存の文書は触らない。

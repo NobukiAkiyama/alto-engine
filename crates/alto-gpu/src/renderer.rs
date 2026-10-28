@@ -239,7 +239,8 @@ pub struct GpuStroke {
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    /// `None` only for the test renderer (`headless`), which never presents.
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     atlas: wgpu::Texture,
     atlas_view: wgpu::TextureView,
@@ -528,21 +529,160 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     (x + adj) as i32
 }
 
-/// The feature that render version 3 has no integer definition for, or `None`.
-/// Version 3 draws plain scenes with the integer tile compositor and color-adjust
-/// (layer effects and adjustment layers, normal blend, any opacity) with the
-/// integer M5 stages. Everything else is refused before any command is built,
-/// so no v3 tile is ever written through a float or unorm target. Every node is
-/// checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap` mirrors this.
-pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
-    let color_adjust = |e: &crate::REffect| {
-        matches!(e.kind, crate::REffectKind::ColorAdjust { .. }) && e.selection.is_none()
+/// Where a v3 mask stage reads its mask: the integer output ROI (`x`, `y`,
+/// level scale), the Q16 inverse and its i64 Q16 translation bits
+/// (`effects-q14.wgsl` `Config.grid` rows 3 to 5). The lookup is always
+/// `SAMPLE_INTEGER` (`sample.rs`).
+pub(crate) struct MaskSampler {
+    pub origin: [i32; 3],
+    pub inverse: [i32; 4],
+    pub translation: [u32; 4],
+}
+
+/// An f32 that is exactly an `i32`.
+fn exact_i32(v: f32) -> Option<i32> {
+    (v.fract() == 0.0 && (-2_147_483_648.0..2_147_483_648.0).contains(&v)).then_some(v as i32)
+}
+
+/// The sampler for a v3 mask with document-to-pixel `transform`, read at an
+/// output ROI with origin `origin` and level scale `scale`. Every v3 mask takes
+/// the Q16 lookup (`SAMPLE_INTEGER`), axis-aligned unit inverses included; there
+/// is no f32 lookup. The Q16 inverse is `integer_inverse`, and the Q8 pixel
+/// center needs an origin and a scale that are exact integers, with the scale at
+/// least 1. `None` when any of that fails or `transform` is singular: the host
+/// refuses the render (DQ3-4).
+pub(crate) fn mask_sampler(
+    transform: [f64; 6],
+    origin: [f32; 2],
+    scale: f32,
+) -> Option<MaskSampler> {
+    let x = exact_i32(origin[0])?;
+    let y = exact_i32(origin[1])?;
+    let scale = exact_i32(scale).filter(|s| *s >= 1)?;
+    let q = crate::sample::integer_inverse(inverse(transform)?)?;
+    Some(MaskSampler {
+        origin: [x, y, scale],
+        inverse: q.m,
+        translation: crate::sample::pack_wide(q.tx, q.ty),
+    })
+}
+
+/// The mask tile keys a v3 mask stage with sampler `s` can read over an output
+/// of `size` pixels, as `[min tx, min ty, max tx, max ty]` (inclusive). Each
+/// corner pixel is evaluated with the shader's own integers (`pixel_q8`,
+/// `coord_q8` on the packed Q16 bits) and its texel `q >> 8` taken to its tile
+/// `>> 8`. The Q24 sum is exact and affine in the pixel index, and the rounding
+/// and the shifts are monotone, so the four corners bound every pixel of the
+/// output. `None` when a corner leaves the integer range (the shader would read
+/// byte 0 there instead of a texel): the host refuses the render (DQ3-4).
+pub(crate) fn mask_tile_range(s: &MaskSampler, size: [u32; 2]) -> Option<[i32; 4]> {
+    let [ox, oy, scale] = s.origin;
+    let wide = |lo: u32, hi: u32| ((u64::from(hi) << 32) | u64::from(lo)) as i64;
+    let t = s.translation;
+    let inv = crate::sample::IntegerInverse {
+        m: s.inverse,
+        tx: wide(t[0], t[1]),
+        ty: wide(t[2], t[3]),
     };
+    let last = |n: u32| i32::try_from(n.checked_sub(1)?).ok();
+    let (w, h) = (last(size[0])?, last(size[1])?);
+    let mut range = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for (x, y) in [(0, 0), (w, 0), (0, h), (w, h)] {
+        let px = crate::sample::pixel_q8(ox, x, scale)?;
+        let py = crate::sample::pixel_q8(oy, y, scale)?;
+        let [qx, qy] = crate::sample::source_q8(&inv, px, py)?;
+        let (kx, ky) = ((qx >> 8) >> 8, (qy >> 8) >> 8);
+        range = [
+            range[0].min(kx),
+            range[1].min(ky),
+            range[2].max(kx),
+            range[3].max(ky),
+        ];
+    }
+    Some(range)
+}
+
+/// The integer texel map of one input of a v3 mask stage (`effects-q14.wgsl`
+/// `input_texel`). `out` and `input` are ROIs as `[x, y, scale]`, and `size` is
+/// the output size in pixels. Equal ROIs map pixel `i` to texel `i`: `[0; 4]`.
+/// Otherwise the texel of output pixel `i` is `floor((p - in_x) / in_scale)` at
+/// the center `p = out_x + (i + 1/2) * out_scale`. Doubled, every term is an
+/// integer: `floor((2 (out_x - in_x) + out_scale + i * 2 out_scale) / (2 in_scale))`,
+/// returned as `[numerator x, numerator y, step, divisor]`. `None` when an origin
+/// or a scale is not an exact integer, a scale is below 1, or the numerator of
+/// some pixel leaves `i32`: the host refuses the render (DQ3-4).
+pub(crate) fn input_map(out: [f32; 3], size: [u32; 2], input: [f32; 3]) -> Option<[i32; 4]> {
+    if out == input {
+        return Some([0; 4]);
+    }
+    let [ox, oy, os] = [exact_i32(out[0])?, exact_i32(out[1])?, exact_i32(out[2])?];
+    let [ix, iy, is] = [
+        exact_i32(input[0])?,
+        exact_i32(input[1])?,
+        exact_i32(input[2])?,
+    ];
+    if os < 1 || is < 1 {
+        return None;
+    }
+    let step = 2 * i64::from(os);
+    let numerator = |o: i32, i: i32, len: u32| -> Option<i32> {
+        let n = 2 * (i64::from(o) - i64::from(i)) + i64::from(os);
+        let last = i64::from(len.max(1) - 1) * step;
+        i32::try_from(last).ok()?;
+        i32::try_from(n + last).ok()?;
+        i32::try_from(n).ok()
+    };
+    Some([
+        numerator(ox, ix, size[0])?,
+        numerator(oy, iy, size[1])?,
+        i32::try_from(step).ok()?,
+        i32::try_from(2 * i64::from(is)).ok()?,
+    ])
+}
+
+/// The integer uniform of a v3 mask stage, `effects-q14.wgsl` `Config.grid`:
+/// row 0 the Q14 settings, rows 1 and 2 the `input_map` of inputs `a` and `b`,
+/// rows 3 to 5 the mask lookup (zero without a mask). The rows go into the
+/// `curve` slots of the M5 uniform, which no v3 stage reads otherwise. That
+/// uniform is shared with versions 1 and 2 and its Rust type is `[f32; 64]`,
+/// so the integers travel as f32 bit patterns (`f32::from_bits`, a copy). The
+/// shader declares the slots `array<vec4i, 16>`; no float is loaded or computed.
+pub(crate) fn mask_grid(
+    settings: [i32; 4],
+    a: [i32; 4],
+    b: [i32; 4],
+    sampler: Option<&MaskSampler>,
+) -> [f32; 64] {
+    let mut rows = [[0u32; 4]; 16];
+    rows[0] = settings.map(i32::cast_unsigned);
+    rows[1] = a.map(i32::cast_unsigned);
+    rows[2] = b.map(i32::cast_unsigned);
+    if let Some(s) = sampler {
+        rows[3] = [s.origin[0], s.origin[1], s.origin[2], 0].map(i32::cast_unsigned);
+        rows[4] = s.inverse.map(i32::cast_unsigned);
+        rows[5] = s.translation;
+    }
+    let mut out = [0.0; 64];
+    for (slot, bits) in out.iter_mut().zip(rows.as_flattened()) {
+        *slot = f32::from_bits(*bits);
+    }
+    out
+}
+
+/// The feature that render version 3 has no integer definition for, or `None`.
+/// Version 3 draws plain scenes with the integer tile compositor, and with the
+/// integer M5 stages: color-adjust (layer effects and adjustment layers, any
+/// opacity), pixel masks on layers and adjustment layers, selection-limited
+/// color-adjust, and blends of masked adjustment layers (v2 mode 7: screen, or
+/// multiply for every other non-normal mode). Everything else is refused before any command is
+/// built, so no v3 tile is ever written through a float or unorm target. Every
+/// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
+/// mirrors this.
+pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
+    let color_adjust =
+        |e: &crate::REffect| matches!(e.kind, crate::REffectKind::ColorAdjust { .. });
     for n in &scene.nodes {
         let f = &n.features;
-        if f.mask.is_some() {
-            return Some("mask");
-        }
         if f.vector_mask.is_some() {
             return Some("vector mask");
         }
@@ -558,7 +698,11 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
             RContent::Text(_) => return Some("text"),
-            RContent::Adjustment(e) if !color_adjust(e) || n.blend != RenderBlend::Normal => {
+            // Without a pixel mask, a non-normal blend would reach mode 23 through
+            // stages that still take f32 coordinates; refused until they do not.
+            RContent::Adjustment(e)
+                if !color_adjust(e) || (f.mask.is_none() && n.blend != RenderBlend::Normal) =>
+            {
                 return Some("adjustment");
             }
             _ => {}
@@ -807,6 +951,26 @@ impl Renderer {
             })
             .await
             .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
+        Self::with_adapter(instance, adapter, Some(surface), width, height, budget_mb).await
+    }
+    /// A renderer without a surface, for tests that compose display tiles and
+    /// read them back (`read_tiles`). It cannot present.
+    #[cfg(test)]
+    pub(crate) async fn headless(instance: &wgpu::Instance, budget_mb: u32) -> Result<Self> {
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .await
+            .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
+        Self::with_adapter(instance, adapter, None, 256, 256, budget_mb).await
+    }
+    async fn with_adapter(
+        instance: &wgpu::Instance,
+        adapter: wgpu::Adapter,
+        surface: Option<wgpu::Surface<'static>>,
+        width: u32,
+        height: u32,
+        budget_mb: u32,
+    ) -> Result<Self> {
         let (slots, display_layers) =
             cache_layers(budget_mb, adapter.limits().max_texture_array_layers)?;
         let limits = wgpu::Limits {
@@ -826,18 +990,34 @@ impl Renderer {
         );
         memory::install(&device, &governor);
         let readback = readback::Pool::new(&device, &governor).await?;
-        let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
-        if let Some(f) = surface
-            .get_capabilities(&adapter)
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-        {
-            config.format = *f;
-        }
-        surface.configure(&device, &config);
+        let config = match &surface {
+            Some(surface) => {
+                let mut config = surface
+                    .get_default_config(&adapter, width.max(1), height.max(1))
+                    .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
+                if let Some(f) = surface
+                    .get_capabilities(&adapter)
+                    .formats
+                    .iter()
+                    .find(|f| !f.is_srgb())
+                {
+                    config.format = *f;
+                }
+                surface.configure(&device, &config);
+                config
+            }
+            None => wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                width: width.max(1),
+                height: height.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
+                color_space: Default::default(),
+            },
+        };
         let lost = Arc::new(AtomicBool::new(false));
         let lost_detail = Arc::new(std::sync::Mutex::new(String::new()));
         let (flag, detail) = (lost.clone(), lost_detail.clone());
@@ -1006,7 +1186,9 @@ impl Renderer {
             self.presentation.resized();
             self.config.width = w.max(1);
             self.config.height = h.max(1);
-            self.surface.configure(&self.device, &self.config);
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
     }
     pub fn vector_stats(&self) -> (u64, u64, usize, u64) {
@@ -2701,11 +2883,20 @@ impl Renderer {
             layout: &present.get_bind_group_layout(0),
             entries: &present_entries,
         });
-        let frame = match self.surface.get_current_texture() {
+        let Some(current) = self
+            .surface
+            .as_ref()
+            .map(wgpu::Surface::get_current_texture)
+        else {
+            return Err(RenderError::Internal("renderer has no surface".into()));
+        };
+        let frame = match current {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                if let Some(surface) = &self.surface {
+                    surface.configure(&self.device, &self.config);
+                }
                 self.present_deferred = true;
                 let mut r = self.frame_report(composed, pending)?;
                 r.deferred = true;

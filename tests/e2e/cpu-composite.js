@@ -782,40 +782,147 @@ export function renderColorAdjustV3(image, settings = {}) {
   return out;
 }
 
+// v3 pixel masks (doc/design/2026-10-28-v3-integer-mask.md), `effects-q14.wgsl`
+// modes 21 to 23. Every term is non-negative BigInt; `F = m * o` is Q28.
+const Q28 = 1n << 28n;
+
+/** Mode 21, layer mask and opacity: `div28(v * F)` on all four channels. */
+export function maskLayerQ14(v, f) {
+  return v.map((c) => divQBig(c * f, Q28));
+}
+
+/** Mode 22, effect selection: `div_q(in * (16384 - s) + f * s, 16384)`. */
+export function maskSelectQ14(input, filtered, s) {
+  return input.map((c, i) => divQBig(c * (CQ - s) + filtered[i] * s, CQ));
+}
+
 /**
- * Render version 3 M5 reference for a flat stack at the identity transform, as
- * `renderer/m5.rs` dispatches it. `layers` is bottom first. A raster is
- * `{ image, opacity, mode, effects }` (color-adjust settings only) and composites
- * with mode 19; `{ adjust, opacity }` is a color-adjust adjustment layer (mode 17,
- * then mode 20 when its opacity is below 1).
+ * Mode 23, adjustment-layer mask, opacity and blend: `div28(orig * (2^28 - F) + g * F)`.
+ * `g` is the adjusted copy for normal; otherwise the straight product (screen for 2,
+ * multiply for every other mode, as v2) premultiplied by the backdrop alpha.
  */
-export function renderM5V3(layers, w = 256, h = 256) {
+export function maskAdjustQ14(orig, filt, f, blend) {
+  let g = filt;
+  if (blend !== 0) {
+    const d = cqStraight(orig);
+    const t = cqStraight(filt);
+    const color = d.map((v, i) => (blend === 2 ? CQ - cqDiv((CQ - v) * (CQ - t[i])) : cqDiv(v * t[i])));
+    g = [...color.map((v) => cqDiv(v * orig[3])), orig[3]];
+  }
+  return orig.map((c, i) => divQBig(c * (Q28 - f) + g[i] * f, Q28));
+}
+
+/**
+ * The byte a v3 mask stage reads at pixel (x, y) of a tile whose ROI has origin
+ * `origin` and level scale `scale` (default: level 0 at the origin).
+ * `byteAt(x, y)` is the stored mask byte, 0 outside its tiles. As the host
+ * (`renderer::mask_sampler`), every mask takes the Q16 inverse and Q8 pixel
+ * centers, axis-aligned unit inverses included; there is no f32 lookup. A mask
+ * without a Q16 inverse, or a ROI whose origin is not an integer or whose scale
+ * is not an integer of at least 1, is refused (throws), as the host refuses the
+ * render. Nearest; the texel is the floor.
+ */
+export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
+  const inv = inverseF64(transform);
+  const q = inv && quantizeInverse(inv);
+  if (!q) throw new Error("v3 refuses a mask without a Q16 lookup");
+  if (!origin.every(Number.isInteger) || !Number.isInteger(scale) || scale < 1) {
+    throw new Error("v3 refuses a mask at a ROI without integer origin and scale");
+  }
+  const px = pixelQ8(origin[0], x, scale);
+  const py = pixelQ8(origin[1], y, scale);
+  const pos = px === null || py === null ? null : sourceQ8(q, px, py);
+  if (!pos) return 0;
+  return byteAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+}
+
+/**
+ * Q14 coverage of `mask` (`{ bytes, transform }`, one 256² R8 tile at key 0,0) at
+ * pixel (x, y) of a tile with ROI `frame` (`{ origin, scale }`).
+ */
+function maskCoverage(mask, x, y, frame) {
+  const byteAt = (tx, ty) => (tx >= 0 && ty >= 0 && tx < 256 && ty < 256 ? mask.bytes[ty * 256 + tx] : 0);
+  return BigInt(byteQ14(maskByteV3(byteAt, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
+}
+
+/**
+ * Render version 3 M5 reference for a stack at the identity transform, as
+ * `renderer/m5.rs` dispatches it. `layers` is bottom first. A raster is
+ * `{ image, opacity, mode, effects, mask }` and composites with mode 19; an effect
+ * is color-adjust settings, with an optional `selection` mask (mode 22). A group is
+ * `{ group: layers, opacity, mode, mask }`, composited onto an empty target first.
+ * A `mask` is mode 21: the mask and the opacity once, then mode 19 at opacity 1.
+ * `{ adjust, opacity, mode, mask }` is a color-adjust adjustment layer: mode 17,
+ * then mode 23 with a mask or a non-normal blend, else mode 20 below opacity 1.
+ * A mask is `{ bytes, transform }` (see `maskCoverage`). The tile's ROI has
+ * origin `origin` and level scale `scale`; images are the tile's pixels, and only
+ * the mask lookup depends on where the tile is.
+ */
+export function renderM5V3(layers, w = 256, h = 256, origin = [0, 0], scale = 1) {
   const out = new Uint8Array(w * h * 4);
-  const Q = 16384n;
-  const big = (q) => q.map(BigInt);
+  const frame = { origin, scale };
   for (let i = 0; i < out.length; i += 4) {
-    let accum = [0n, 0n, 0n, 0n];
-    for (const layer of layers) {
-      const opacity = cqOpacity(layer.opacity ?? 1);
-      if (layer.adjust) {
-        const adjusted = big(colorAdjustStageQ14(accum.map(Number), layer.adjust));
-        accum = opacity === Q ? adjusted : accum.map((v, c) => cqDiv(v * (Q - opacity) + adjusted[c] * opacity));
-        continue;
-      }
-      let q = ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4)));
-      for (const effect of layer.effects || []) q = colorAdjustStageQ14(q, effect);
-      const src = big(q);
-      const mode = layer.mode ?? 0;
-      const straight = cqStraight(src);
-      if (opacity === Q) accum = compositeQ14Blend(accum, straight, src.slice(0, 3), src[3], mode);
-      else {
-        const sa = cqMul(src[3], opacity);
-        accum = compositeQ14Blend(accum, straight, straight.map((v) => cqMul(v, sa)), sa, mode);
-      }
-    }
-    out.set(resolveQ14(accum), i);
+    out.set(resolveQ14(stackM5V3(layers, i, (i / 4) % w, Math.floor(i / 4 / w), frame)), i);
   }
   return out;
+}
+
+function stackM5V3(layers, i, x, y, frame) {
+  const Q = 16384n;
+  const big = (q) => q.map(BigInt);
+  let accum = [0n, 0n, 0n, 0n];
+  for (const layer of layers) {
+    const opacity = cqOpacity(layer.opacity ?? 1);
+    const mode = layer.mode ?? 0;
+    if (layer.adjust) {
+      const adjusted = big(colorAdjustStageQ14(accum.map(Number), layer.adjust));
+      if (layer.mask || mode !== 0) {
+        const m = layer.mask ? maskCoverage(layer.mask, x, y, frame) : Q;
+        accum = maskAdjustQ14(accum, adjusted, m * opacity, mode);
+      } else {
+        accum = opacity === Q ? adjusted : accum.map((v, c) => cqDiv(v * (Q - opacity) + adjusted[c] * opacity));
+      }
+      continue;
+    }
+    let src;
+    if (layer.group) src = stackM5V3(layer.group, i, x, y, frame);
+    else {
+      let q = big(ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4))));
+      for (const effect of layer.effects || []) {
+        const adjusted = big(colorAdjustStageQ14(q.map(Number), effect));
+        q = effect.selection ? maskSelectQ14(q, adjusted, maskCoverage(effect.selection, x, y, frame)) : adjusted;
+      }
+      src = q;
+    }
+    let op = opacity;
+    if (layer.mask) {
+      src = maskLayerQ14(src, maskCoverage(layer.mask, x, y, frame) * opacity);
+      op = Q;
+    }
+    const straight = cqStraight(src);
+    if (op === Q) accum = compositeQ14Blend(accum, straight, src.slice(0, 3), src[3], mode);
+    else {
+      const sa = cqMul(src[3], op);
+      accum = compositeQ14Blend(accum, straight, straight.map((v) => cqMul(v, sa)), sa, mode);
+    }
+  }
+  return accum;
+}
+
+/**
+ * The bytes `selection_ops` writes for a feathered rectangle `[x0, y0, x1, y1]` on a
+ * 256² document: f64 distance to the nearest edge, `(d / feather + 0.5)` clamped to
+ * 0..1, then `round(coverage * 255)`. Non-negative, so `Math.round` is Rust's `round`.
+ */
+export function featheredRectangle(rect, feather) {
+  const bytes = new Uint8Array(256 * 256);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const px = x + 0.5;
+    const py = y + 0.5;
+    const d = Math.min(px - rect[0], rect[2] - px, py - rect[1], rect[3] - py);
+    bytes[y * 256 + x] = Math.round(Math.min(1, Math.max(0, d / feather + 0.5)) * 255);
+  }
+  return bytes;
 }
 
 export function fnv64(bytes) {
@@ -828,21 +935,26 @@ export function fnv64(bytes) {
 
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
-const isColorAdjust = (effect) => effect?.type === "color_adjust" && !effect.selection;
+// Selection-limited color-adjust is v3 mode 22.
+const isColorAdjust = (effect) => effect?.type === "color_adjust";
 
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
  * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
- * effects and color-adjust adjustment layers) and "v3-unsupported" (the host
- * refuses the scene; no tile is drawn).
+ * effects, with or without a selection, color-adjust adjustment layers (any
+ * blend with an enabled pixel mask, normal blend without), and enabled pixel masks) and "v3-unsupported" (the host refuses the
+ * scene; no tile is drawn).
  */
 export function sceneGap(snapshot) {
   const found = new Set();
   let unsupported = false;
+  let pixelMask = false;
   for (const node of snapshot.nodes.values()) {
     const props = node.props || {};
     if (props.mask) found.add("mask");
+    const enabledMask = Boolean(props.mask && props.mask_enabled !== false);
+    if (enabledMask) pixelMask = true;
     if (props.vector_mask) found.add("vector mask");
     if (props.clip_path) found.add("clip path");
     if (props.clip_to_below) found.add("clip");
@@ -851,16 +963,18 @@ export function sceneGap(snapshot) {
     if (node.type === "text") found.add("text");
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
-    if (props.mask || props.vector_mask || props.clip_path || props.clip_to_below ||
+    if (props.vector_mask || props.clip_path || props.clip_to_below ||
         node.type === "vector" || node.type === "text" ||
         (props.effects || []).some((effect) => !isColorAdjust(effect)) ||
-        (node.type === "adjustment" && (!isColorAdjust(node.adjustment) || (props.blend ?? "normal") !== "normal"))) {
+        (node.type === "adjustment" && (!isColorAdjust(node.adjustment) ||
+          // Unmasked non-normal blends reach f32 stages upstream of mode 23.
+          (!enabledMask && (props.blend ?? "normal") !== "normal")))) {
       unsupported = true;
     }
   }
   if (snapshot.meta?.render_version === 3) {
     if (unsupported) return "v3-unsupported";
-    if (found.has("effects") || found.has("adjustment")) return "v3-m5-integer";
+    if (found.has("effects") || found.has("adjustment") || pixelMask) return "v3-m5-integer";
     return null;
   }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;

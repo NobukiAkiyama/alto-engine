@@ -171,7 +171,6 @@ pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
 
 /// Q8 source coordinate. `px` and `py` are Q8 pixel centers.
 /// `None` when the i64 sum overflows or the rounded coordinate does not fit in `i32`.
-#[cfg(test)]
 pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> Option<[i32; 2]> {
     Some([
         source_axis(inv.m[0], px, inv.m[2], py, inv.tx)?,
@@ -179,7 +178,6 @@ pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> Option<[i32; 2]> {
     ])
 }
 
-#[cfg(test)]
 fn source_axis(m0: i32, px: i32, m1: i32, py: i32, translation: i64) -> Option<i32> {
     let a = i64::from(m0).checked_mul(i64::from(px))?;
     let b = i64::from(m1).checked_mul(i64::from(py))?;
@@ -189,7 +187,6 @@ fn source_axis(m0: i32, px: i32, m1: i32, py: i32, translation: i64) -> Option<i
 }
 
 /// Round half away from zero, then arithmetic `>> 16`. `None` when the half-step overflows `i64`.
-#[cfg(test)]
 fn round_shr16(v: i64) -> Option<i64> {
     let half = 1i64 << 15;
     let adjusted = if v >= 0 {
@@ -209,7 +206,6 @@ pub fn floor_frac_q8(q: i32) -> (i32, i32) {
 
 /// Q8 pixel center. `origin_px` is the tile origin in document pixels.
 /// `None` when the center does not fit in `i32`.
-#[cfg(test)]
 pub fn pixel_q8(origin_px: i32, index: i32, scale: i32) -> Option<i32> {
     let term = i64::from(index).checked_mul(256)?.checked_add(128)?;
     let q = i64::from(origin_px)
