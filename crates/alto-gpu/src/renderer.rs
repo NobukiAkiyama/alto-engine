@@ -1784,6 +1784,8 @@ impl Renderer {
     /// Render version 3 defines a level >= 1 tile only as the integer downsample of
     /// its children, so a cold request builds the missing children first and its
     /// bytes equal the warm (cached-children) result. Determinism over speed.
+    /// Only explicit readback (`read_tiles`) reaches this synchronously; display
+    /// and prefetch build v3 parents step by step through `hierarchy_step`.
     fn compose_from_children(
         &mut self,
         scene: &RenderScene,
@@ -2473,6 +2475,41 @@ impl Renderer {
                 break;
             }
             let step_start = now();
+            if self.integer_cache && key.0 > 0 {
+                // Version 3 defines a parent only as the integer downsample of its
+                // children (cold == warm). Build it through the hierarchy: one leaf
+                // slice or one downsample per step, while the frame budget lasts,
+                // then hand the Worker back. A huge cold canvas takes many frames.
+                let mut done = false;
+                loop {
+                    let step_start = now();
+                    let step = self.hierarchy_step(scene, store, *key)?;
+                    self.profile.steps += 1;
+                    self.profile.max_step_ms = self.profile.max_step_ms.max(now() - step_start);
+                    if step == JobStep::Blocked {
+                        return Err(RenderError::Budget(
+                            "GPU budget too small for the v3 display pyramid".into(),
+                        ));
+                    }
+                    // Progress, not an idle wait: the deferred-present watchdog
+                    // must not count these frames (PRESENT_DEFER_LIMIT).
+                    composed += 1;
+                    if self.cache_map.contains_key(key) {
+                        done = true;
+                        break;
+                    }
+                    if now() - start >= budget_ms {
+                        break;
+                    }
+                }
+                if self.profiling {
+                    self.profile.compose_ms += now() - step_start;
+                }
+                if done {
+                    continue;
+                }
+                break;
+            }
             if self.presentation.hierarchy == Some(*key) {
                 self.hierarchy_step(scene, store, *key)?;
                 self.profile.steps += 1;
@@ -2482,12 +2519,7 @@ impl Renderer {
                 }
                 break;
             }
-            // A v3 level >= 1 tile is never composited from sources: `compose`
-            // builds its children first, so cold and warm bytes agree.
-            if self.visible_tile_jobs
-                && self.resumable_scene(scene)
-                && !(self.integer_cache && key.0 > 0)
-            {
+            if self.visible_tile_jobs && self.resumable_scene(scene) {
                 // Reuse already-composited children before touching source tiles.
                 if self.visible_job.is_none() {
                     let slot = self

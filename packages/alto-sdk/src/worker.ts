@@ -961,12 +961,15 @@ async function execute(m: Queued): Promise<unknown> {
       return true;
     case "waitFrame": {
       let frame;
+      // Ticks this request took; each one returns control to the Worker loop.
+      let ticks = 0;
       const profiles = diagnosticProfiles || [];
       try {
         do {
           applyPendingView();
           pumpDecodes();
           frame = takeFrame(8, true);
+          ticks++;
           pumpDecodes();
           if (frame.profile) profiles.push(frame.profile);
           noteDeferred(frame, "wait");
@@ -987,7 +990,7 @@ async function execute(m: Queued): Promise<unknown> {
         frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) =>
           [key, key === "maxStepMs" ? profiles.reduce((max, profile) => Math.max(max, profile[key]), 0) : profiles.reduce((sum, profile) => sum + profile[key], 0)]));
       }
-      const value = { ...frame, viewVersion };
+      const value = { ...frame, viewVersion, ticks };
       postMessage({ t: "frame", value });
       return value;
     }

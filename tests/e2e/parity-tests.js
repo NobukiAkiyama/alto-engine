@@ -450,6 +450,46 @@ export async function runParityTests(engine, log) {
         return formatMeasure(row);
       });
     }
+    // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
+    // hierarchy in many steps over several ticks, and still equals the warm pyramid.
+    await test("v3 cold pyramid is built incrementally across ticks", async () => {
+      const fixture = await fetch("../../tests/fixtures/render-v3-empty-4096x256.alto");
+      assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+      const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+      assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not open at version 3");
+      const image = { w: 4096, h: 256, pixels: new Uint8Array(4096 * 256 * 4) };
+      for (let i = 0; i < image.pixels.length; i += 4) {
+        const x = (i / 4) % 4096, y = Math.floor(i / 4 / 4096);
+        image.pixels.set([x & 255, y, (x >> 4) & 255, 128 + (x & 127)], i);
+      }
+      const asset = await imported(engine, image);
+      await doc.transact("raster", (tx) => tx.addRasterFromAsset(asset));
+      // Level 4: one display tile over all 16 level-0 tiles, so 16 leaves and
+      // 15 downsamples (8 + 4 + 2 + 1) once the caches are empty.
+      const view = { center: [2048, 128], zoom: 1 / 16, rotation: 0 };
+      engine.viewport.set(view);
+      await testing(engine).request("setProfiling", { enabled: true });
+      await testing(engine).request("resetRenderCache", { cpu: true });
+      engine.viewport.set(view);
+      let frame;
+      try {
+        frame = await unstable(engine).settle();
+      } finally {
+        await testing(engine).request("setProfiling", { enabled: false });
+        await testing(engine).request("enablePrefetch");
+      }
+      const steps = frame.profile?.steps ?? 0;
+      log(`v3 cold pyramid: ${steps} steps over ${frame.ticks} ticks, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
+      assert(steps >= 31, `cold level 4 built in ${steps} steps; expected one per leaf or downsample`);
+      assert(frame.ticks >= 2, `cold level 4 finished in ${frame.ticks} tick(s); the Worker was not handed back`);
+      const shown = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0 }));
+      const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0, fresh: true }));
+      const cpu = renderPyramidCase({ w: 4096, h: 256, level: 4, tx: 0, ty: 0,
+        nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
+      assert(same(cpu, shown), `displayed level 4: ${diff(cpu, shown)}`);
+      assert(same(cpu, cold), `cold readback level 4: ${diff(cpu, cold)}`);
+      return `${steps} steps, ${frame.ticks} ticks`;
+    });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });
       const data = await engine.vectors.parseSvg("M32 32 H200 V200 H32 Z");
