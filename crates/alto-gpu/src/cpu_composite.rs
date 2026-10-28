@@ -6194,6 +6194,7 @@ fn v3_mask_tile_range_is_the_q16_lookup() {
         let inv = integer_inverse(crate::renderer::inverse(t).unwrap()).unwrap();
         let [x, y, scale] = region.map(i64::from);
         crate::renderer::exact_reach(&inv, [x, y], scale, [0, 0, 256, 256], 0)
+            .unwrap()
             .keys
             .map(|k| k as i32)
     };
@@ -6269,7 +6270,8 @@ fn v3_reach_refuses_only_what_reaches_a_tile() {
         1,
         [0, 0, 256, 256],
         1,
-    );
+    )
+    .unwrap();
     assert!(r.dropped[0] && r.centers_fit);
     // At the tile the layer covers it is drawn.
     assert!(matches!(reach(far, [84_000, 0], 1, &[[0, 0]]), Ok(Some(_))));
@@ -6294,6 +6296,7 @@ fn v3_reach_refuses_only_what_reaches_a_tile() {
             [0, 0, 256, 256],
             0
         )
+        .unwrap()
         .dropped[0]
     );
     assert_eq!(
@@ -6315,6 +6318,7 @@ fn v3_reach_refuses_only_what_reaches_a_tile() {
             [0, 0, 256, 256],
             1
         )
+        .unwrap()
         .dropped[0]
     );
     assert!(matches!(
@@ -6322,6 +6326,24 @@ fn v3_reach_refuses_only_what_reaches_a_tile() {
         Ok(Some(_))
     ));
     assert_eq!(reach(left, [0, 0], 1, &[[-32_768, 0]]), Err(()));
+    // Inputs past the documented bounds overflow i128: checked, so refused
+    // (GpuUnsupported), never wrapped.
+    let q = integer_inverse(id).unwrap();
+    assert!(
+        crate::renderer::exact_reach(&q, [i64::MAX, 0], i64::MAX, [0, 0, i64::MAX, 256], 0)
+            .is_none()
+    );
+    assert_eq!(
+        crate::renderer::v3_reach(
+            &q,
+            [i64::MAX, 0],
+            i64::MAX,
+            [0, 0, i64::MAX, 256],
+            0,
+            std::iter::once(alto_core::TileKey { tx: 0, ty: 0 })
+        ),
+        Err(())
+    );
     // An empty span reads nothing.
     let q = integer_inverse(id).unwrap();
     assert_eq!(
@@ -6577,6 +6599,7 @@ fn renderer_cases_are_not_trivial() {
     };
     let q = integer_inverse(crate::renderer::inverse(*transform).unwrap()).unwrap();
     let range = crate::renderer::exact_reach(&q, [3906 * 256, 5 * 256], 1, [0, 0, 256, 256], 0)
+        .unwrap()
         .keys
         .map(|k| k as i32);
     assert_eq!(range, [-3907, 4, -3906, 5]);

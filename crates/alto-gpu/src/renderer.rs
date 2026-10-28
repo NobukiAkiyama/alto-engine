@@ -595,6 +595,17 @@ pub(crate) fn sampler_inverse(s: &MaskSampler) -> crate::sample::IntegerInverse 
 /// evaluated exactly in i128 at the four corners. The Q24 sum is affine in the
 /// pixel index, and the half-away rounding and the floors are monotone, so the
 /// corners bound every pixel.
+///
+/// i128 bound (Linus 05:25). The inputs are a Q16 coefficient `|m| < 2^31`
+/// (`quantize_coeff`), a Q16 translation `|t| < 2^53` (`quantize_translation`),
+/// and from the callers an origin `|o| < 2^70` (a tile key below 2^31 times a
+/// tile of at most `256 << 30` px, `invalidate_reach`), a pixel index
+/// `0 <= i < 2^39` and a scale `1 <= s < 2^31`. Then a pixel center
+/// `o * 256 + (i * 256 + 128) * s` is below `2^78 + 2^79 < 2^80`, each product
+/// `m * center` below `2^111`, `t * 256` below `2^61`, and the Q24 sum below
+/// `2^113`: far inside i128. Every step is still checked: an input outside
+/// those bounds gives `None`, which `v3_reach` refuses (GpuUnsupported) and
+/// `invalidate_reach` treats as reaching the tile.
 pub(crate) struct ExactReach {
     /// Inclusive source tile keys `[min x, min y, max x, max y]`, with `reach`
     /// more texels on each axis (1 for the 4-tap, 0 for nearest).
@@ -613,13 +624,27 @@ pub(crate) fn exact_reach(
     scale: i64,
     span: [i64; 4],
     reach: i32,
-) -> ExactReach {
-    let center =
-        |o: i64, i: i64| i128::from(o) * 256 + (i128::from(i) * 256 + 128) * i128::from(scale);
+) -> Option<ExactReach> {
+    let center = |o: i64, i: i64| {
+        let step = i128::from(i)
+            .checked_mul(256)?
+            .checked_add(128)?
+            .checked_mul(i128::from(scale))?;
+        i128::from(o).checked_mul(256)?.checked_add(step)
+    };
     let source = |m0: i32, px: i128, m1: i32, py: i128, t: i64| {
-        let sum = i128::from(m0) * px + i128::from(m1) * py + i128::from(t) * 256;
+        let sum = i128::from(m0)
+            .checked_mul(px)?
+            .checked_add(i128::from(m1).checked_mul(py)?)?
+            .checked_add(i128::from(t).checked_mul(256)?)?;
         let half = 1i128 << 15;
-        (if sum >= 0 { sum + half } else { sum - half }) >> 16
+        Some(
+            (if sum >= 0 {
+                sum.checked_add(half)?
+            } else {
+                sum.checked_sub(half)?
+            }) >> 16,
+        )
     };
     let i32_range = i128::from(i32::MIN)..=i128::from(i32::MAX);
     let mut out = ExactReach {
@@ -629,11 +654,11 @@ pub(crate) fn exact_reach(
     };
     let [x0, y0, x1, y1] = span;
     for (x, y) in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)] {
-        let (px, py) = (center(origin[0], x), center(origin[1], y));
+        let (px, py) = (center(origin[0], x)?, center(origin[1], y)?);
         out.centers_fit &= i32_range.contains(&px) && i32_range.contains(&py);
         let q = [
-            source(inv.m[0], px, inv.m[2], py, inv.tx),
-            source(inv.m[1], px, inv.m[3], py, inv.ty),
+            source(inv.m[0], px, inv.m[2], py, inv.tx)?,
+            source(inv.m[1], px, inv.m[3], py, inv.ty)?,
         ];
         for (axis, q) in q.into_iter().enumerate() {
             out.dropped[axis] |= !i32_range.contains(&q);
@@ -642,7 +667,7 @@ pub(crate) fn exact_reach(
             out.keys[axis + 2] = out.keys[axis + 2].max((texel + i128::from(reach)) >> 8);
         }
     }
-    out
+    Some(out)
 }
 
 /// The tiles a v3 atlas read (a plain draw, mode 18's raster, a mask) needs on
@@ -666,7 +691,7 @@ pub(crate) fn v3_reach(
     if span[0] >= span[2] || span[1] >= span[3] {
         return Ok(None);
     }
-    let r = exact_reach(inv, origin, scale, span, reach);
+    let r = exact_reach(inv, origin, scale, span, reach).ok_or(())?;
     let mut present = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
     for k in keys {
         let (x, y) = (i128::from(k.tx), i128::from(k.ty));
@@ -1749,8 +1774,16 @@ impl Renderer {
                     return true;
                 }
                 let size = 256i64 << l;
-                let origin = [i64::from(x) * size, i64::from(y) * size];
-                let r = exact_reach(&q, origin, 1, [0, 0, size, size], 1);
+                let (Some(ox), Some(oy)) = (
+                    i64::from(x).checked_mul(size),
+                    i64::from(y).checked_mul(size),
+                ) else {
+                    return true;
+                };
+                // Outside the bounds of `exact_reach`: discard, conservatively.
+                let Some(r) = exact_reach(&q, [ox, oy], 1, [0, 0, size, size], 1) else {
+                    return true;
+                };
                 r.keys[0] <= k[2] && r.keys[2] >= k[0] && r.keys[1] <= k[3] && r.keys[3] >= k[1]
             })
             .copied()

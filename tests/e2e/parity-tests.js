@@ -284,16 +284,22 @@ export async function runParityTests(engine, log) {
           assert(fixture.ok, `v3 fixture status ${fixture.status}`);
           const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
           assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not select integer compositing");
+          // Linus 04:40 item 5: read the tile of the empty document first, so it is
+          // cached when the layers arrive; the next read is through their damage.
+          if (!testCase.level) await gpuTile(engine, testCase);
           for (const node of testCase.nodes) await addNode(doc, engine, node);
           // DQ3-1: a v3 tile at level >= 1 is the integer downsample of its children,
           // even when read cold, never a direct composite at that scale.
           const cpu = testCase.level ? renderPyramidCase(testCase) : renderCase(testCase, 3);
           const gpu = await gpuTile(engine, testCase);
-          // Linus 04:40: the warm read (tiles cached before the layers were added,
-          // then damaged) and a cold read (caches emptied) agree on every byte.
-          const cold = testCase.level ? gpu
-            : new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: testCase.tx, y: testCase.ty, fresh: true }));
-          assert(same(cold, gpu), `v3-${testCase.name} cold differs from warm: ${diff(gpu, cold)}`);
+          if (!testCase.level) {
+            // The damaged read, a re-read of the cached tile and a cold read (caches
+            // emptied) agree on every byte (and with the CPU below when enforced).
+            const again = await gpuTile(engine, testCase);
+            const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: testCase.tx, y: testCase.ty, fresh: true }));
+            assert(same(again, gpu), `v3-${testCase.name} re-read differs from the damaged read: ${diff(gpu, again)}`);
+            assert(same(cold, gpu), `v3-${testCase.name} cold differs from the damaged read: ${diff(gpu, cold)}`);
+          }
           renderPath = sceneGap(doc.getSnapshot());
           const enforced = isV3IntegerCase({ renderPath });
           const row = { ...measureRow(testCase, cpu, gpu), renderPath, name: `v3-${testCase.name}`, enforced, status: same(cpu, gpu) ? "exact" : "mismatch" };
@@ -339,6 +345,144 @@ export async function runParityTests(engine, log) {
           throw error;
         }
       });
+    }
+    // The 2^23 boundary in the browser (Linus 04:40 item 5, DQ3-4), each read
+    // warm (the tile cached before the change, then damaged), re-read, and cold.
+    // A drawn tile equals the CPU on every byte; a refused tile gives the same
+    // GPU_UNSUPPORTED warm and cold. The canvas is at most 65536 px, so the
+    // plain-path tiles past 2^23 px are off the canvas (no pixel, skipped); those
+    // cases run natively (`renderer_cold_warm`, `renderer_cases`).
+    {
+      const vivid = { brightness: 0, contrast: 1.7, saturation: 1.6 };
+      const open = async (name) => {
+        const fixture = await fetch(`../../tests/fixtures/${name}`);
+        assert(fixture.ok, `${name} status ${fixture.status}`);
+        const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+        assert(doc.getSnapshot().meta.render_version === 3, `${name} is not v3`);
+        return doc;
+      };
+      const read = async (x, y) => new Uint8Array(await unstable(engine).readTile(x, y));
+      const readCold = async (x, y) =>
+        new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x, y, fresh: true }));
+      const refusal = async (fn) => {
+        try {
+          await fn();
+        } catch (error) {
+          return error;
+        }
+        return null;
+      };
+      // Warm (damaged), re-read and cold reads of tile (x, y) after `change`,
+      // with the tile read before it. `want` is the CPU tile, or the refusal.
+      const check = async (name, x, y, change, want) => {
+        await read(x, y);
+        await change();
+        if (want.message) {
+          for (const [kind, fn] of [["warm", () => read(x, y)], ["re-read", () => read(x, y)], ["cold", () => readCold(x, y)]]) {
+            const e = await refusal(fn);
+            assert(e, `${name} (${x}, ${y}) ${kind} was drawn; expected ${want.message}`);
+            assert(e.code === "GPU_UNSUPPORTED" && e.message === want.message, `${name} (${x}, ${y}) ${kind}: ${e.code} ${e.message}`);
+          }
+          compositeV3.push({ name: `${name} (${x}, ${y})`, renderPath: "v3-unsupported", enforced: false, status: "refused", error: want.message });
+          return `refused warm, re-read and cold: ${want.message}`;
+        }
+        const warm = await read(x, y);
+        const again = await read(x, y);
+        const cold = await readCold(x, y);
+        assert(same(again, warm), `${name} (${x}, ${y}) re-read differs: ${diff(warm, again)}`);
+        assert(same(cold, warm), `${name} (${x}, ${y}) cold differs from warm: ${diff(warm, cold)}`);
+        const row = { ...measureRow({ name, nodes: [], level: 0, tx: x, ty: y }, want, warm), renderPath: "v3-m5-integer", enforced: true, status: same(want, warm) ? "exact" : "mismatch" };
+        compositeV3.push(row);
+        assert(same(want, warm), formatMeasure(row));
+        return formatMeasure(row);
+      };
+      // RGBA 256x256 tiles of `image` by key, for `renderM5V3`.
+      const tilesOf = (image) => {
+        const out = [];
+        for (let ty = 0; ty * 256 < image.h; ty++) for (let tx = 0; tx * 256 < image.w; tx++) {
+          const bytes = new Uint8Array(256 * 256 * 4);
+          for (let y = 0; y < 256 && ty * 256 + y < image.h; y++) {
+            const from = ((ty * 256 + y) * image.w + tx * 256) * 4;
+            const n = Math.min(256, image.w - tx * 256) * 4;
+            bytes.set(image.pixels.subarray(from, from + n), y * 256 * 4);
+          }
+          out.push({ key: [tx, ty], bytes });
+        }
+        return out;
+      };
+      // A 300x100 document: an opaque backdrop and a color-adjust adjustment
+      // layer moved by `shift` px with a linked white mask. The engine writes the
+      // mask in the layer's pixels (`mask_for_node`): 255 where the pixel center
+      // lands on the canvas, so its tiles run from texel -shift to 300 - shift.
+      const W = 300, H = 100;
+      const backdrop = () => {
+        const image = colorAdjustGradient(W, H);
+        for (let i = 3; i < image.pixels.length; i += 4) image.pixels[i] = 255;
+        return image;
+      };
+      const maskScene = (shift) => async (doc, image) => {
+        const asset = await imported(engine, image);
+        let adjustment;
+        await doc.transact("backdrop", (tx) => { tx.addRasterFromAsset(asset); });
+        return async () => {
+          await doc.transact("adjust", (tx) => {
+            adjustment = tx.addAdjustment({ type: "color_adjust", ...vivid });
+            tx.setTransform(adjustment, [1, 0, 0, 1, shift, 0]);
+          });
+          await doc.masks.addWhite(adjustment);
+          assert(sceneGap(doc.getSnapshot()) === "v3-m5-integer", "masked adjustment is not v3 M5");
+        };
+      };
+      const maskCpu = (image, shift, x, y) => {
+        const at = (tx, ty) => (tx + 0.5 + shift >= 0 && tx + 0.5 + shift < W && ty + 0.5 < H ? 255 : 0);
+        const out = renderM5V3([
+          { tiles: tilesOf(image), transform: [1, 0, 0, 1, 0, 0] },
+          { adjust: vivid, opacity: 1, mode: 0, mask: { transform: [1, 0, 0, 1, shift, 0], at } },
+        ], 256, 256, [x * 256, y * 256], 1);
+        for (let py = 0; py < 256; py++) for (let px = 0; px < 256; px++) {
+          if (x * 256 + px >= W || y * 256 + py >= H) out.fill(0, (py * 256 + px) * 4, (py * 256 + px) * 4 + 4);
+        }
+        return out;
+      };
+      // Mask tiles end at texel 2^23 - 1 (shift -(2^23 - 300)); the pixels of tile
+      // (1, 0) from 300 on are past 2^23 and dropped, and read nothing: drawn.
+      await test("v3-mask-up-to-2^23-draws", async () => {
+        const shift = -(8388608 - W);
+        const doc = await open("render-v3-empty-300x100.alto");
+        const image = backdrop();
+        const change = await maskScene(shift)(doc, image);
+        return check("v3-mask-up-to-2^23-draws", 1, 0, change, maskCpu(image, shift, 1, 0));
+      });
+      // Shifted 100 px further, the mask has a tile at 2^23 that dropped pixels
+      // could read: refused, warm and cold.
+      for (const x of [0, 1]) {
+        await test(`v3-mask-tile-at-2^23-refused (${x}, 0)`, async () => {
+          const doc = await open("render-v3-empty-300x100.alto");
+          const change = await maskScene(-(8388608 - W) - 100)(doc, backdrop());
+          return check("v3-mask-tile-at-2^23-refused", x, 0, change, { message: "GPU_UNSUPPORTED: v3 mask ROI has no integer tile range" });
+        });
+      }
+      // M5 rasters (a color-adjust effect) placed at tile 32767 (the last tile
+      // whose pixel centers fit i32) and at 32768 (they do not): drawn (off the
+      // canvas, so transparent, as the CPU), and refused.
+      for (const [key, want] of [
+        [32767, () => new Uint8Array(256 * 256 * 4)],
+        [32768, () => ({ message: "GPU_UNSUPPORTED: v3 raster ROI has no integer tile range" })],
+      ]) {
+        await test(`v3-raster-at-tile-${key}`, async () => {
+          const doc = await open("render-v3-empty.alto");
+          const asset = await imported(engine, colorAdjustGradient());
+          const change = async () => {
+            let id;
+            await doc.transact("raster", (tx) => {
+              id = tx.addRasterFromAsset(asset);
+              tx.setTransform(id, [1, 0, 0, 1, key * 256, 0]);
+            });
+            await doc.effects.set(id, [{ type: "color_adjust", ...vivid }]);
+          };
+          return check(`v3-raster-at-tile-${key}`, key, 0, change, want());
+        });
+      }
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
