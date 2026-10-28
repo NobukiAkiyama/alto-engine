@@ -66,11 +66,21 @@ fn fetch_bytes(c: Command,p:vec2f,ix:vec2i)->vec4u {
 }
 
 /// Render version 3 M5 stages: Q14 helpers, the Q14 blend, then the stage modes.
+/// The mask stages place their texel with the Q8 position of the frozen
+/// `composite.wgsl` (`pixel_q8`, `coord_q8`, `wide_round_shr16`), copied from that
+/// source here rather than restated. `q14.wgsl` supplies the `Wide` they use.
 pub fn integer_effects_shader() -> String {
+    let composite = include_str!("../shaders/composite.wgsl");
+    let between = |from: &str, to: &str| {
+        &composite[composite.find(from).unwrap()..composite.find(to).unwrap()]
+    };
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}{}{}\n{}",
         include_str!("../shaders/q14.wgsl"),
         include_str!("../shaders/blend-q14.wgsl"),
+        between("struct WideSum", "@group(0)"),
+        between("fn wide_shl8", "fn wide_negative"),
+        between("// Signed 64-bit add", "fn sample_texel"),
         include_str!("../shaders/effects-q14.wgsl")
     )
 }

@@ -529,6 +529,20 @@ impl Context<'_> {
             ..Params::zeroed()
         }
     }
+    /// A version 3 mask stage (modes 21 to 23). The mask is read at `roi`, the
+    /// output region of the stage, through `mask_sampler`. `settings` are Q14
+    /// integers.
+    fn mask_params(mode: u32, transform: [f64; 6], roi: Roi, settings: [i32; 4]) -> Params {
+        let s = super::mask_sampler(transform, [roi.x, roi.y], roi.scale);
+        Params {
+            inv0: s.inv0,
+            inv1: s.inv1,
+            extra: s.extra,
+            settings: q14_settings(settings),
+            info: [mode, 0, 0, s.mode],
+            ..Params::zeroed()
+        }
+    }
     fn mask_entries(
         &mut self,
         mask: &RMask,
@@ -676,9 +690,32 @@ impl Context<'_> {
         Ok(result)
     }
     fn apply_props(&mut self, source: Target, node: &RNode, world: [f64; 6]) -> Result<Target> {
-        // Version 3 has no masks here (`v3_gap`); `blend` applies the opacity.
+        // Version 3 has no vector masks or clip paths (`v3_gap`). Without a pixel
+        // mask, `blend` applies the opacity. With one, mode 21 applies the mask and
+        // the opacity once, as one Q28 factor, and `blend` uses opacity 1.
         if self.resources.exact {
-            return Ok(source);
+            let Some(mask) = &node.features.mask else {
+                return Ok(source);
+            };
+            let out = self.alloc(source.roi)?;
+            let (entries, transform) = self.mask_entries(
+                mask,
+                world,
+                source.roi,
+                if self.mask_preview {
+                    Some(node.key)
+                } else {
+                    None
+                },
+            )?;
+            let p = Self::mask_params(
+                21,
+                transform,
+                source.roi,
+                [crate::composite_opacity_q14(node.opacity), 1, 0, 0],
+            );
+            self.dispatch(&out, &source, &source, &source, p, &entries)?;
+            return Ok(out);
         }
         if node.features.mask.is_none()
             && node.features.vector_mask.is_none()
@@ -726,10 +763,16 @@ impl Context<'_> {
         let mut p;
         if self.resources.exact {
             // Version 3 mode 19: the Q14 layer composite with the host-quantized
-            // opacity. `apply_props` left the target unscaled. Clipping is refused.
+            // opacity. Clipping is refused. A masked node's opacity was consumed
+            // by `apply_props` (mode 21), so it composites at opacity 1.
             p = Self::params(19, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let opacity = if node.features.mask.is_some() {
+                1.0
+            } else {
+                node.opacity
+            };
             p.settings = q14_settings([
-                crate::composite_opacity_q14(node.opacity),
+                crate::composite_opacity_q14(opacity),
                 node.blend as i32,
                 0,
                 0,
@@ -755,6 +798,7 @@ impl Context<'_> {
         roi: Roi,
         world: [f64; 6],
     ) -> Result<Target> {
+        // A selection on a color-adjust is mode 22 below.
         if self.resources.exact && !matches!(effect.kind, REffectKind::ColorAdjust { .. }) {
             return Err(RenderError::Internal(
                 "v3 effect without an integer stage reached the M5 renderer".into(),
@@ -846,7 +890,11 @@ impl Context<'_> {
         if let Some(mask) = &effect.selection {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
-            let p = Self::params(5, transform);
+            let p = if self.resources.exact {
+                Self::mask_params(22, transform, roi, [0; 4])
+            } else {
+                Self::params(5, transform)
+            };
             self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
             Ok(out)
         } else {
@@ -998,9 +1046,42 @@ impl Context<'_> {
                 };
                 let mut mixed = filtered.clone();
                 if self.resources.exact {
-                    // Version 3 adjustment layers are normal, unmasked and unclipped
-                    // (`v3_gap`). Only the opacity mixes, in Q14 (mode 20).
-                    if node.opacity != 1.0 {
+                    // Version 3 adjustment layers are unclipped (`v3_gap`). A pixel
+                    // mask or a non-normal blend takes mode 23 (mask, opacity and
+                    // blend in one Q28 mix). Otherwise only the opacity mixes, in
+                    // Q14 (mode 20).
+                    if node.features.mask.is_some() || node.blend != RenderBlend::Normal {
+                        let out = self.alloc(desired)?;
+                        let (entries, t, has_mask) = match &node.features.mask {
+                            Some(mask) => {
+                                let (e, t) = self.mask_entries(
+                                    mask,
+                                    transform,
+                                    desired,
+                                    if self.mask_preview {
+                                        Some(node.key)
+                                    } else {
+                                        None
+                                    },
+                                )?;
+                                (e, t, 1)
+                            }
+                            None => (vec![], transform, 0),
+                        };
+                        let p = Self::mask_params(
+                            23,
+                            t,
+                            desired,
+                            [
+                                crate::composite_opacity_q14(node.opacity),
+                                has_mask,
+                                node.blend as i32,
+                                0,
+                            ],
+                        );
+                        self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
+                        mixed = out;
+                    } else if node.opacity != 1.0 {
                         let out = self.alloc(desired)?;
                         let mut p = Self::params(20, transform);
                         p.settings =

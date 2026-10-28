@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -449,6 +449,138 @@ export async function runParityTests(engine, log) {
         assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
         return formatMeasure(row);
       });
+    }
+    // v3 pixel masks (doc/design/2026-10-28-v3-integer-mask.md), integer-exact:
+    // layer masks (mode 21), selection-limited color-adjust (mode 22) and masked or
+    // blended adjustment layers (mode 23), plus their cold level 1. The JS
+    // reference rebuilds the mask bytes with the `selection_ops` rectangle formula.
+    {
+      const IDENT = [1, 0, 0, 1, 0, 0];
+      const vivid = { brightness: 0, contrast: 1.7, saturation: 1.6 };
+      // Edges at pixel fractions 0.25, 0.75, 0.5 and 0 with feather 64 (the
+      // limit), so the four feathered edges hold every mask byte 0..=255.
+      const feathered = { kind: "rectangle", x: 40.25, y: 40.75, width: 176.25, height: 175.25, feather: 64 };
+      const featheredMask = { bytes: featheredRectangle([40.25, 40.75, 216.5, 216], 64) };
+      const halfRect = { kind: "rectangle", x: 0, y: 0, width: 128, height: 256 };
+      const halfMask = { bytes: Uint8Array.from({ length: 65536 }, (_, i) => (i % 256 < 128 ? 255 : 0)) };
+      const whiteMask = { bytes: new Uint8Array(65536).fill(255) };
+      const angle = 0.3;
+      const c = Math.cos(angle), s = Math.sin(angle);
+      const rotated = [c, s, -s, c, 128 - (c - s) * 128, 128 - (s + c) * 128];
+      const opaque = () => {
+        const image = colorAdjustGradient();
+        for (let i = 3; i < image.pixels.length; i += 4) image.pixels[i] = 255;
+        return image;
+      };
+      const raster = async (doc, image, props = {}, parent) => {
+        const asset = await imported(engine, image);
+        let id;
+        await doc.transact("raster", (tx) => {
+          id = tx.addRasterFromAsset(asset, parent ? { parent } : {});
+          tx.setProps(id, props);
+        });
+        return id;
+      };
+      const masked = async (doc, id, spec) => {
+        await doc.selection.apply(spec);
+        await doc.masks.fromSelection(id);
+      };
+      const plain = (image, opacity) => renderCase({ w: 256, h: 256, level: 0, tx: 0, ty: 0,
+        nodes: [{ type: "raster", image, mode: 0, opacity, visible: true, transform: IDENT }] }, 3);
+      const maskCases = [
+        // The v2 `mask` xfail scene on a v3 document.
+        ["v3-mask", async (doc) => {
+          const image = solid(256, 256, [255, 0, 0, 255]);
+          await masked(doc, await raster(doc, image), halfRect);
+          return { layers: [{ image, mask: halfMask }] };
+        }],
+        ...[1, 0.5, 0.35, 0].map((opacity) => [`v3-mask-coverage o=${opacity}`, async (doc) => {
+          const image = colorAdjustGradient();
+          await masked(doc, await raster(doc, image, { opacity }), feathered);
+          const seen = new Set(featheredMask.bytes);
+          assert(seen.size === 256, `feathered selection has ${seen.size} distinct bytes`);
+          return { layers: [{ image, opacity, mask: featheredMask }] };
+        }]),
+        // A full mask equals the v3 tile compositor without a mask (0.5 is the 8192 tie).
+        ...[1, 0.5, 0.35].map((opacity) => [`v3-mask-white o=${opacity}`, async (doc) => {
+          const image = colorAdjustGradient();
+          await doc.masks.addWhite(await raster(doc, image, { opacity }));
+          return { layers: [{ image, opacity, mask: whiteMask }], also: plain(image, opacity) };
+        }]),
+        ["v3-mask-selection-color-adjust", async (doc) => {
+          const image = colorAdjustGradient();
+          const id = await raster(doc, image);
+          await doc.selection.apply(feathered);
+          await doc.effects.set(id, [{ type: "color_adjust", ...vivid }]);
+          return { layers: [{ image, effects: [{ ...vivid, selection: featheredMask }] }] };
+        }],
+        ...[[0, 1], [1, 1], [2, 1], [3, 1], [2, 0.5]].map(([mode, opacity]) => [`v3-mask-adjustment-${BLENDS[mode]} o=${opacity}`, async (doc) => {
+          const image = opaque();
+          await raster(doc, image);
+          let id;
+          await doc.transact("adjust", (tx) => {
+            id = tx.addAdjustment({ type: "color_adjust", ...vivid });
+            tx.setProps(id, { opacity, blend: BLENDS[mode] });
+          });
+          await masked(doc, id, feathered);
+          return { layers: [{ image }, { adjust: vivid, opacity, mode, mask: featheredMask }] };
+        }]),
+        ["v3-adjustment-screen-unmasked", async (doc) => {
+          const image = opaque();
+          await raster(doc, image);
+          await doc.transact("adjust", (tx) => {
+            const id = tx.addAdjustment({ type: "color_adjust", ...vivid });
+            tx.setProps(id, { opacity: 0.5, blend: "screen" });
+          });
+          return { layers: [{ image }, { adjust: vivid, opacity: 0.5, mode: 2 }] };
+        }],
+        // An unlinked mask turned 0.3 rad: the Q16 lookup (`SAMPLE_INTEGER`).
+        ["v3-mask-rotated", async (doc) => {
+          const image = colorAdjustGradient();
+          const id = await raster(doc, image);
+          await masked(doc, id, feathered);
+          await doc.transact("mask transform", (tx) => tx.setProps(id, { mask_linked: false, mask_transform: rotated }));
+          return { layers: [{ image, mask: { ...featheredMask, transform: rotated } }] };
+        }],
+        // A masked pass-through group of semi-transparent children over blue.
+        ["v3-mask-group", async (doc) => {
+          const blue = solid(256, 256, [0, 0, 255, 255]);
+          const red = solid(256, 256, [255, 0, 0, 128]);
+          const image = colorAdjustGradient();
+          await raster(doc, blue);
+          let group;
+          await doc.transact("group", (tx) => {
+            group = tx.addGroup({ isolated: false });
+            tx.setProps(group, { opacity: 0.5 });
+          });
+          await raster(doc, red, {}, group);
+          await raster(doc, image, { blend: "multiply" }, group);
+          await masked(doc, group, feathered);
+          return { layers: [{ image: blue }, { group: [{ image: red }, { image, mode: 1 }], opacity: 0.5, mask: featheredMask }] };
+        }],
+      ];
+      for (const [name, build] of maskCases) {
+        await test(name, async () => {
+          const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
+          assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not open at version 3");
+          const { layers, also } = await build(doc);
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          const cpu = renderM5V3(layers);
+          if (also) assert(same(cpu, also), `M5 reference differs from the tile compositor: ${diff(also, cpu)}`);
+          const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+          const row = { ...measureRow({ name, nodes: [], level: 0, tx: 0, ty: 0 }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`${name} (enforced): ${formatMeasure(row)}`);
+          assert(same(cpu, gpu), formatMeasure(row));
+          const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+          const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
+          assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
+          return formatMeasure(row);
+        });
+      }
     }
     // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
     // hierarchy in many steps over several ticks, and still equals the warm pyramid.

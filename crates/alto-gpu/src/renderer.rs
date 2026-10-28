@@ -528,21 +528,65 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     (x + adj) as i32
 }
 
-/// The feature that render version 3 has no integer definition for, or `None`.
-/// Version 3 draws plain scenes with the integer tile compositor and color-adjust
-/// (layer effects and adjustment layers, normal blend, any opacity) with the
-/// integer M5 stages. Everything else is refused before any command is built,
-/// so no v3 tile is ever written through a float or unorm target. Every node is
-/// checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap` mirrors this.
-pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
-    let color_adjust = |e: &crate::REffect| {
-        matches!(e.kind, crate::REffectKind::ColorAdjust { .. }) && e.selection.is_none()
+/// Where a v3 mask stage reads its mask: the uniform `inv0`, `inv1` and `extra`
+/// slots and the `info.w` sampler (`sample.rs`).
+pub(crate) struct MaskSampler {
+    pub inv0: [f32; 4],
+    pub inv1: [f32; 4],
+    pub extra: [f32; 4],
+    pub mode: u32,
+}
+
+/// An f32 that is exactly an `i32`.
+fn exact_i32(v: f32) -> Option<i32> {
+    (v.fract() == 0.0 && (-2_147_483_648.0..2_147_483_648.0).contains(&v)).then_some(v as i32)
+}
+
+/// The sampler for a v3 mask with document-to-pixel `transform`, read at an
+/// output ROI with origin `origin` and level scale `scale`. The rule is the
+/// compositor's: `pack_inverse` keeps axis-aligned unit inverses on the f32
+/// nearest lookup and packs the rest as Q16. The Q16 path also needs the Q8 pixel
+/// center, so it is taken only when the origin and the scale are exact integers
+/// and the scale is at least 1. Otherwise the f32 lookup is used.
+pub(crate) fn mask_sampler(transform: [f64; 6], origin: [f32; 2], scale: f32) -> MaskSampler {
+    let inv = inverse(transform).unwrap_or([0.0; 6]);
+    let float = MaskSampler {
+        inv0: [inv[0] as f32, inv[1] as f32, inv[2] as f32, inv[3] as f32],
+        inv1: [inv[4] as f32, inv[5] as f32, 0.0, 0.0],
+        extra: [0.0; 4],
+        mode: crate::sample::SAMPLE_F32,
     };
+    let integer_roi = exact_i32(origin[0]).is_some()
+        && exact_i32(origin[1]).is_some()
+        && exact_i32(scale).is_some_and(|s| s >= 1);
+    if !integer_roi || inverse(transform).is_none() {
+        return float;
+    }
+    let packed = crate::sample::pack_inverse(inv, alto_core::RENDER_VERSION_EXACT);
+    if packed.sample_mode != crate::sample::SAMPLE_INTEGER {
+        return float;
+    }
+    MaskSampler {
+        inv0: packed.inv0,
+        inv1: [0.0; 4],
+        extra: packed.trans.map(f32::from_bits),
+        mode: crate::sample::SAMPLE_INTEGER,
+    }
+}
+
+/// The feature that render version 3 has no integer definition for, or `None`.
+/// Version 3 draws plain scenes with the integer tile compositor, and with the
+/// integer M5 stages: color-adjust (layer effects and adjustment layers, any
+/// opacity), pixel masks on layers and adjustment layers, selection-limited
+/// color-adjust, and adjustment-layer blends (v2 mode 7: screen, or multiply for
+/// every other non-normal mode). Everything else is refused before any command is
+/// built, so no v3 tile is ever written through a float or unorm target. Every
+/// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
+/// mirrors this.
+pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
+    let color_adjust = |e: &crate::REffect| matches!(e.kind, crate::REffectKind::ColorAdjust { .. });
     for n in &scene.nodes {
         let f = &n.features;
-        if f.mask.is_some() {
-            return Some("mask");
-        }
         if f.vector_mask.is_some() {
             return Some("vector mask");
         }
@@ -558,7 +602,7 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
             RContent::Text(_) => return Some("text"),
-            RContent::Adjustment(e) if !color_adjust(e) || n.blend != RenderBlend::Normal => {
+            RContent::Adjustment(e) if !color_adjust(e) => {
                 return Some("adjustment");
             }
             _ => {}
