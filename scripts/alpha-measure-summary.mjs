@@ -60,7 +60,7 @@ if (floatRows.length) {
 }
 
 if (integerRows.length) {
-  markdown += `### v3 integer composite (${backendLabel})\n\nEnforced: every byte must match the CPU reference.\n\n`;
+  markdown += `### v3 integer composite (${backendLabel})\n\nEnforced: every byte must match the CPU reference, including cached pyramid levels >=1.\n\n`;
   markdown += "| case | status | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | --- | ---: | --- | --- |\n";
   for (const row of integerRows) {
     markdown += `| ${row.name} | ${row.status} | ${row.count ?? "error"} | ${(row.maxAbs || []).join(",")} | ${row.error || cell(row)} |\n`;

@@ -1413,6 +1413,40 @@ fn render_pair(case: &Case, version: u32) -> (Vec<u8>, Vec<f32>) {
     )
 }
 
+/// Byte reference for the v3 cached pyramid; children are TL, TR, BL, BR.
+fn downsample_q14(children: &[Vec<u8>; 4]) -> Vec<u8> {
+    let mut out = vec![0; 256 * 256 * 4];
+    for y in 0..256 {
+        for x in 0..256 {
+            for c in 0..4 {
+                let child = &children[(y / 128) * 2 + x / 128];
+                let i = ((y % 128 * 2) * 256 + x % 128 * 2) * 4 + c;
+                let sum = u32::from(child[i])
+                    + u32::from(child[i + 4])
+                    + u32::from(child[i + 1024])
+                    + u32::from(child[i + 1028]);
+                out[(y * 256 + x) * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+fn pyramid_children(case: &Case) -> [Case; 4] {
+    std::array::from_fn(|i| {
+        let mut child = case.clone();
+        child.level -= 1;
+        child.tx = case.tx * 2 + (i % 2) as i32;
+        child.ty = case.ty * 2 + (i / 2) as i32;
+        child
+    })
+}
+fn render_pyramid(case: &Case) -> Vec<u8> {
+    if case.level <= 0 {
+        return render_at(case, 3);
+    }
+    downsample_q14(&pyramid_children(case).map(|c| render_pyramid(&c)))
+}
+
 fn render_at(case: &Case, version: u32) -> Vec<u8> {
     render_pair(case, version).0
 }
@@ -2583,11 +2617,168 @@ impl Gpu {
         self.render_version(case, 2)
     }
 
+    fn downsample_q14(&self, children: &[Vec<u8>; 4]) -> Result<Vec<u8>, String> {
+        let device = &self.device;
+        let input = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("integer pyramid parity input"),
+            size: wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (i, child) in children.iter().enumerate() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &input,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: (i as u32 % 2) * 256,
+                        y: (i as u32 / 2) * 256,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                child,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("integer pyramid parity output"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Uint,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("integer pyramid parity"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/downsample-q14.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let config = upload_buffer(
+            device,
+            &self.queue,
+            &[[0u32; 4]],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let input_view = input.create_view(&Default::default());
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: config.as_entire_binding(),
+                },
+            ],
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 1024,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        let bytes = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        Ok(bytes)
+    }
+    fn render_pyramid(&self, case: &Case) -> Result<Vec<u8>, String> {
+        if case.level <= 0 {
+            return self.render_version(case, 3).map(|p| p.0);
+        }
+        let children = pyramid_children(case).map(|c| self.render_pyramid(&c));
+        let [a, b, c, d] = children;
+        self.downsample_q14(&[a?, b?, c?, d?])
+    }
+
     fn render_version(&self, case: &Case, version: u32) -> Result<(Vec<u8>, Vec<f32>), String> {
         let integer = version == 3;
         let mut ops = Vec::new();
         for node in &case.nodes {
             walk(node, ident(), &mut ops);
+        }
+        if integer
+            && ops.iter().any(|op| match op {
+                Op::Pop { mode, .. } | Op::Draw { mode, .. } => *mode >= 17,
+                _ => false,
+            })
+        {
+            return Err("v3 unspecified blend mode".into());
         }
         let mut commands = Vec::new();
         let mut entries = Vec::new();
@@ -4188,6 +4379,26 @@ fn gpu_shader_matches_cpu_reference() {
             }
         }
     }
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.level = 1;
+        case.tx = 0;
+        case.ty = 0;
+        case.name = format!("v3-{}-level1", case.name);
+        let cpu = render_pyramid(&case);
+        match gpu.render_pyramid(&case) {
+            Ok(bytes) => {
+                let row = measure_case(&case, &cpu, &bytes, &[], &[]);
+                if cpu != bytes {
+                    failed.push(format!("{}: {}", case.name, diff_report(&cpu, &bytes)));
+                }
+                measured_v3.push(row);
+            }
+            Err(err) => {
+                v3_errors.push(format!("{}: {err}", case.name));
+                failed.push(format!("{}: {err}", case.name));
+            }
+        }
+    }
     write_v3_measure(&gpu.adapter_name, &measured_v3, &v3_errors);
 
     // Enforced: every byte on every channel must round-trip. Stored first, then failed.
@@ -4266,6 +4477,29 @@ fn composite_v3_rust_and_js_references_agree_byte_for_byte() {
         );
         data = rest;
         count += 1;
+    }
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.level = 1;
+        case.tx = 0;
+        case.ty = 0;
+        let end = data
+            .iter()
+            .position(|b| *b == b'\n')
+            .expect("JS pyramid case name");
+        assert_eq!(
+            std::str::from_utf8(&data[..end]).unwrap(),
+            format!("{}-level1", case.name)
+        );
+        data = &data[end + 1..];
+        let (bytes, rest) = data.split_at(256 * 256 * 4);
+        let rust = render_pyramid(&case);
+        assert!(
+            rust == bytes,
+            "{} level1: {}",
+            case.name,
+            diff_report(&rust, bytes)
+        );
+        data = rest;
     }
     assert!(data.is_empty(), "JS produced extra cases");
     assert!(count >= 37);

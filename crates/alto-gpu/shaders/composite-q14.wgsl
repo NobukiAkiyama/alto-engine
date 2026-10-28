@@ -14,8 +14,8 @@ fn sat_q(c: vec3i) -> i32 {return max(max(c.x,c.y),c.z)-min(min(c.x,c.y),c.z);}
 fn clip_q(c: vec3i) -> vec3i {
   let l=lum_q(c); let n=min(min(c.x,c.y),c.z);let x=max(max(c.x,c.y),c.z);
   var o=c;
-  if n<0 {if l==0 {o=vec3i(0);} else {for(var i=0u;i<3u;i++){o[i]=l+div_q((c[i]-l)*l,l-n);}}}
-  if x>Q && x!=l {for(var i=0u;i<3u;i++){o[i]=l+div_q((o[i]-l)*(Q-l),x-l);}}
+  if n<0 {if l-n<=0 {o=vec3i(l);} else {for(var i=0u;i<3u;i++){o[i]=l+div_q((c[i]-l)*l,l-n);}}}
+  if x>Q {if x-l<=0 {o=vec3i(l);} else {for(var i=0u;i<3u;i++){o[i]=l+div_q((o[i]-l)*(Q-l),x-l);}}}
   return clamp(o,vec3i(0),vec3i(Q));
 }
 fn set_lum_q(c:vec3i,l:i32)->vec3i {return clip_q(c+vec3i(l-lum_q(c)));}

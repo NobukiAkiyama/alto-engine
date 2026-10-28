@@ -910,7 +910,11 @@ async function execute(m: Queued): Promise<unknown> {
       // `fresh` empties the caches in this same step. As a separate request, a frame
       // drawn before the read could cache the tile's children, and the tile would be
       // their 2x2 average instead of a direct composite.
-      if (m.fresh) resetRenderCache(true);
+      if (m.fresh || m.pyramid) resetRenderCache(true);
+      if (m.pyramid) {
+        if (m.level !== 1) throw Error("INVALID_ARGUMENT: parity pyramid level");
+        await runtime.readTiles(0, new Int32Array([m.x*2,m.y*2,m.x*2+1,m.y*2,m.x*2,m.y*2+1,m.x*2+1,m.y*2+1]));
+      }
       return await runtime.readTileLevel(m.level,m.x,m.y);
     case "readTile":
       return await runtime.readTile(m.x, m.y);

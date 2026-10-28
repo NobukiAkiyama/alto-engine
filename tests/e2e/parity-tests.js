@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -298,6 +298,31 @@ export async function runParityTests(engine, log) {
           if (!compositeV3.some((row) => row.name === `v3-${testCase.name}`)) {
             compositeV3.push({ name: `v3-${testCase.name}`, renderPath, enforced: isV3IntegerCase({ renderPath }), status: "error", error: String(error) });
           }
+          throw error;
+        }
+      });
+    }
+    for (const source of alphaMeasureCases()) {
+      const testCase = { ...source, level: 1, tx: 0, ty: 0, name: `v3-${source.name}-level1` };
+      await test(testCase.name, async () => {
+        let renderPath = null;
+        try {
+          const suffix = source.w === 256 && source.h === 256 ? "" : `-${source.w}x${source.h}`;
+          const fixture = await fetch(`../../tests/fixtures/render-v3-empty${suffix}.alto`);
+          assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          for (const node of source.nodes) await addNode(doc, engine, node);
+          renderPath = sceneGap(doc.getSnapshot());
+          const enforced = isV3IntegerCase({ renderPath });
+          // Reset, populate children and read the parent in the same worker request.
+          const gpu = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+          const cpu = renderPyramidCase(testCase);
+          const row = { ...measureRow(testCase,cpu,gpu), renderPath, name: testCase.name, level: 1, enforced, status: same(cpu,gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          if (enforced) assert(same(cpu,gpu),formatMeasure(row));
+          return { detail: formatMeasure(row), renderPath, enforced };
+        } catch (error) {
+          if (!compositeV3.some((r)=>r.name===testCase.name)) compositeV3.push({name:testCase.name,level:1,renderPath,enforced:isV3IntegerCase({renderPath}),status:"error",error:String(error)});
           throw error;
         }
       });

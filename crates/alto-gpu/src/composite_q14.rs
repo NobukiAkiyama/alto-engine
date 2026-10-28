@@ -51,14 +51,18 @@ fn clip(c: [i64; 3]) -> [i64; 3] {
     let x = *c.iter().max().unwrap();
     let mut o = c;
     if n < 0 {
-        o = if l == 0 {
-            [0; 3]
+        o = if l - n <= 0 {
+            [l; 3]
         } else {
             c.map(|v| a(l, d(m(v - l, l), l - n)))
         };
     }
-    if x > Q && x != l {
-        o = o.map(|v| a(l, d(m(v - l, Q - l), x - l)));
+    if x > Q {
+        o = if x - l <= 0 {
+            [l; 3]
+        } else {
+            o.map(|v| a(l, d(m(v - l, Q - l), x - l)))
+        };
     }
     o.map(clamp)
 }
@@ -281,14 +285,7 @@ fn composite_q14_blend_does_not_overflow() {
                 for v in c {
                     assert!(m(v - l, l).abs() <= 1_610_612_736);
                 }
-                // The memo defines no quotient when l == n < 0 (e.g. a constant
-                // negative color). All products above are still checked. Do not
-                // invent an output for this undefined division; it is recorded
-                // in design-questions.md. Valid blend inputs are covered above.
-                let n = *c.iter().min().unwrap();
-                if !(n < 0 && l == n && l != 0) {
-                    assert!(clip(c).iter().all(|v| (0..=Q).contains(v)));
-                }
+                assert!(clip(c).iter().all(|v| (0..=Q).contains(v)));
             }
         }
     }

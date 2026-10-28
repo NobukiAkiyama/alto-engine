@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14 } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -155,4 +155,24 @@ test("v3 isolates from document f32 opacity before Q14 quantization", () => {
   assert.deepEqual(pixel(scene(1 - 2 ** -24)), pixel(scene(1, true)));
   assert.deepEqual(pixel(scene(1 - 1e-9)), pixel(scene(1)));
   assert.notDeepEqual(pixel(scene(1)), pixel(scene(1, true)));
+});
+
+test("v3 rejects unspecified modes before drawing, including hidden nodes", () => {
+  const base=parityCases().find(c=>c.name==="blend-normal");
+  for(const mode of [17,18,255]) {
+    const nodes=[...base.nodes,{...base.nodes[0],mode,visible:false}];
+    assert.throws(()=>renderCase({...base,nodes},3),/unspecified blend mode/);
+  }
+});
+
+test("v3 integer pyramid rounds ties upward and preserves premultiplication across levels", () => {
+  const child=new Uint8Array(256*256*4);
+  for(let y=0;y<256;y++) for(let x=0;x<256;x++) {
+    const i=(y*256+x)*4;
+    child.set([x%2,y%2,(x+y)%2,1],i);
+  }
+  const level1=downsampleQ14([child,child,child,child]);
+  const level2=downsampleQ14([level1,level1,level1,level1]);
+  assert(level1.every(v=>v===1));
+  assert.deepEqual(level2,level1);
 });

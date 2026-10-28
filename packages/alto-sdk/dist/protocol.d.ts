@@ -236,6 +236,7 @@ export interface Requests {
         x: number;
         y: number;
         fresh?: boolean;
+        pyramid?: boolean;
     }, Uint8Array>;
     vectorStats: Q<None, Record<string, number>>;
     setGlyphAtlas: Q<{

@@ -272,6 +272,9 @@ pub struct Renderer {
     composite: wgpu::ComputePipeline,
     composite_q14: wgpu::ComputePipeline,
     downsample: wgpu::ComputePipeline,
+    downsample_q14: wgpu::ComputePipeline,
+    integer_cache: bool,
+    present_q14: wgpu::RenderPipeline,
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
@@ -822,6 +825,11 @@ impl Renderer {
             "display pyramid",
             include_str!("../shaders/downsample.wgsl"),
         );
+        let downsample_q14 = compute(
+            &device,
+            "integer display pyramid",
+            include_str!("../shaders/downsample-q14.wgsl"),
+        );
         let composite_src = crate::shader_with_blend(include_str!("../shaders/composite.wgsl"));
         let composite = compute(&device, "tile compositor", &composite_src);
         let composite_q14 = compute(
@@ -839,6 +847,35 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present.wgsl").into()),
         });
         let present = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("present"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("present"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present-q14.wgsl").into()),
+        });
+        let present_q14 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("present"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -900,6 +937,9 @@ impl Renderer {
             composite,
             composite_q14,
             downsample,
+            downsample_q14,
+            integer_cache: false,
+            present_q14,
             present,
             brush,
             sampler,
@@ -1092,6 +1132,61 @@ impl Renderer {
             self.visible_tile_jobs = enabled;
             self.invalidate(None);
         }
+    }
+    // Validate before cache access or command construction. M5 keeps its existing formats.
+    fn prepare_scene(&mut self, scene: &RenderScene) -> Result<()> {
+        if scene.render_version == 3 && scene.nodes.iter().any(|n| n.blend as u32 >= 17) {
+            return Err(RenderError::InvalidArgument(
+                "v3 unspecified blend mode".into(),
+            ));
+        }
+        let integer = scene.render_version == 3 && crate::damage::plain_scene(scene);
+        if integer == self.integer_cache {
+            return Ok(());
+        }
+        let format = if integer {
+            wgpu::TextureFormat::Rgba8Uint
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let cache = memory::create_texture(
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some("display tiles"),
+                size: self.cache.size(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: self.cache.usage(),
+                view_formats: &[],
+            },
+            Class::Fixed,
+        )?;
+        let scratch = memory::create_texture(
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some("pyramid input"),
+                size: self.scratch.size(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: self.scratch.usage(),
+                view_formats: &[],
+            },
+            Class::Fixed,
+        )?;
+        self.reset_render_cache();
+        self.cache_view = array_view(&cache);
+        let old_cache = std::mem::replace(&mut self.cache, cache);
+        let old_scratch = std::mem::replace(&mut self.scratch, scratch);
+        self.retired.textures.push((old_cache, MemoryClass::Fixed));
+        self.retired
+            .textures
+            .push((old_scratch, MemoryClass::Fixed));
+        self.integer_cache = integer;
+        Ok(())
     }
     /// Diagnostic reset: keep the document, discard all GPU-derived tiles.
     pub fn reset_render_cache(&mut self) {
@@ -1898,6 +1993,7 @@ impl Renderer {
         store: &dyn TileStore,
         view: Viewport,
     ) -> Result<JobStep> {
+        self.prepare_scene(scene)?;
         let now = self.clock;
         if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
             return Ok(JobStep::Idle);
@@ -2119,6 +2215,7 @@ impl Renderer {
         view: Viewport,
         budget_ms: f64,
     ) -> Result<FrameReport> {
+        self.prepare_scene(scene)?;
         if self.is_lost() {
             return Err(RenderError::GpuLost(format!(
                 "device lost ({})",
@@ -2421,27 +2518,35 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE,
         )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
+        let present = if self.integer_cache {
+            &self.present_q14
+        } else {
+            &self.present
+        };
+        let mut present_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&self.cache_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: ub.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: tb.as_entire_binding(),
+            },
+        ];
+        if !self.integer_cache {
+            present_entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            });
+        }
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present"),
-            layout: &self.present.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.cache_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: ub.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: tb.as_entire_binding(),
-                },
-            ],
+            layout: &present.get_bind_group_layout(0),
+            entries: &present_entries,
         });
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -2482,7 +2587,7 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.present);
+            pass.set_pipeline(present);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..6, 0..tiles.len() as u32);
         }
@@ -2920,6 +3025,7 @@ impl Renderer {
         store: &dyn TileStore,
         keys: &[CacheKey],
     ) -> Result<Vec<u8>> {
+        self.prepare_scene(scene)?;
         const TILE_BYTES: u64 = TILE_RGBA_BYTES;
         let total = TILE_BYTES
             .checked_mul(keys.len() as u64)
@@ -3068,6 +3174,11 @@ impl Renderer {
                 },
             );
         }
+        let pipeline = if self.integer_cache {
+            &self.downsample_q14
+        } else {
+            &self.downsample
+        };
         let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
             &self.device,
@@ -3078,7 +3189,7 @@ impl Renderer {
         )?;
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("display pyramid"),
-            layout: &self.downsample.get_bind_group_layout(0),
+            layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -3096,7 +3207,7 @@ impl Renderer {
         });
         {
             let mut p = e.begin_compute_pass(&Default::default());
-            p.set_pipeline(&self.downsample);
+            p.set_pipeline(pipeline);
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups(16, 16, 1);
         }
@@ -3119,6 +3230,14 @@ mod shader_tests {
             ("present", include_str!("../shaders/present.wgsl")),
             ("brush", include_str!("../shaders/brush.wgsl")),
             ("downsample", include_str!("../shaders/downsample.wgsl")),
+            (
+                "integer downsample",
+                include_str!("../shaders/downsample-q14.wgsl"),
+            ),
+            (
+                "integer present",
+                include_str!("../shaders/present-q14.wgsl"),
+            ),
             ("effects", include_str!("../shaders/effects.wgsl")),
             ("vector", include_str!("../shaders/vector.wgsl")),
             ("vector-paint", include_str!("../shaders/vector-paint.wgsl")),

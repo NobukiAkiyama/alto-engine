@@ -569,6 +569,13 @@ function composite(ops, width, height, origin, scale, originPx, scaleI, version)
 }
 
 export function renderCase(testCase, version = RENDER_VERSION) {
+  if (version === 3) {
+    const validate = (nodes) => { for (const node of nodes) {
+      if (node.mode >= 17) throw new Error(`unspecified blend mode ${node.mode}`);
+      if (node.children) validate(node.children);
+    } };
+    validate(testCase.nodes);
+  }
   const ops = [];
   for (const node of testCase.nodes) walk(node, IDENT, ops, version);
   const scaleI = 2 ** testCase.level;
@@ -856,8 +863,8 @@ const cqSat = (c) => cqMax(c) - cqMin(c);
 function cqClip(c) {
   const l = cqLum(c), n = cqMin(c), x = cqMax(c);
   let o = c;
-  if (n < 0n) o = l === 0n ? [0n, 0n, 0n] : c.map((v) => l + cqDiv((v - l) * l, l - n));
-  if (x > CQ && x !== l) o = o.map((v) => l + cqDiv((v - l) * (CQ - l), x - l));
+  if (n < 0n) o = l - n <= 0n ? [l, l, l] : c.map((v) => l + cqDiv((v - l) * l, l - n));
+  if (x > CQ) o = x - l <= 0n ? [l, l, l] : o.map((v) => l + cqDiv((v - l) * (CQ - l), x - l));
   return o.map(cqClamp);
 }
 function cqSetLum(c, l) { const delta = l - cqLum(c); return cqClip(c.map((v) => v + delta)); }
@@ -923,6 +930,7 @@ export function compositeQ14Blend(dst, src, pre, sa, mode) {
 }
 const cqOpacity = (v) => BigInt(Math.trunc(f(f(f(Math.min(1, Math.max(0, f(v)))) * 16384) + 0.5)));
 function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
+  for (const op of ops) if (op.mode >= 17) throw new Error(`unspecified blend mode ${op.mode}`);
   const out = new Uint8Array(256 * 256 * 4);
   // Quantize once on the host, including the inverse, before evaluating pixels.
   const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.inv ? quantizeInverse(op.inv) : null }));
@@ -959,4 +967,19 @@ function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
 /** Reporting only: float fallback rows never enter integer-exact enforcement. */
 export function isV3IntegerCase(row) {
   return row.renderPath !== "v3-m5-float";
+}
+
+/** Integer cached-pyramid reference. Children are TL, TR, BL, BR. */
+export function downsampleQ14(children) {
+  const out = new Uint8Array(256*256*4);
+  for (let y=0;y<256;y++) for(let x=0;x<256;x++) for(let c=0;c<4;c++) {
+    const child=children[Math.floor(y/128)*2+Math.floor(x/128)];
+    const i=((y%128*2)*256+x%128*2)*4+c;
+    out[(y*256+x)*4+c]=Math.floor((child[i]+child[i+4]+child[i+1024]+child[i+1028]+2)/4);
+  }
+  return out;
+}
+export function renderPyramidCase(testCase) {
+  if (testCase.level <= 0) return renderCase(testCase,3);
+  return downsampleQ14(Array.from({length:4},(_,i)=>renderPyramidCase({...testCase,level:testCase.level-1,tx:testCase.tx*2+i%2,ty:testCase.ty*2+Math.floor(i/2)})));
 }
