@@ -4,7 +4,7 @@
 
 状態：設計のみ。この文書は実装しない。ガウスぼかしの v3 は、[v3 整数合成](2026-10-28-v3-integer-compositing.md)（PR [#24](https://github.com/NobukiAkiyama/alto-engine/pull/24)、main の `5ce300e`）と [v3 整数マスク](2026-10-28-v3-integer-mask.md)（PR [#26](https://github.com/NobukiAkiyama/alto-engine/pull/26)、main の `7309b61`）と同じ不安定オプトインの向こうに置く。描画バージョン 1 と 2 のぼかしの式（`exp` の f32 の重み、`rgba16float` の中間、f32 の双線形の拡大）は凍結したままである。
 
-関連：[v3 整数合成](2026-10-28-v3-integer-compositing.md)、[v3 整数マスク](2026-10-28-v3-integer-mask.md)、v3 整数テキスト（PR [#31](https://github.com/NobukiAkiyama/alto-engine/pull/31)、未マージ。`doc/design/2026-10-28-v3-integer-text.md`）、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)、[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)。
+関連：[v3 整数合成](2026-10-28-v3-integer-compositing.md)、[v3 整数マスク](2026-10-28-v3-integer-mask.md)、[v3 整数テキスト](2026-10-28-v3-integer-text.md)（PR [#31](https://github.com/NobukiAkiyama/alto-engine/pull/31)、main の `84d2efd`。粗い倍率 `k` の文は、この PR で下の「粗い倍率」に揃えて直した）、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)、[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)。
 
 ## 前提
 
@@ -66,7 +66,7 @@ v3 のぼかしの重みは、ホスト（Rust と JS）が整数だけで作る
 
 | 部分 | WGSL | Rust | JS |
 | --- | --- | --- | --- |
-| 半径の量子化、`r`、粗い倍率 | — | 本番（`m5.rs`、参照も兼ねる） | 参照（`cpu-composite.js`、新規） |
+| 半径の量子化、`r`、粗い倍率 | — | 本番（`blur_radius_q8_f64`、`blur_radius_q8_f32`、`blur_coarsen_k` は `alto_core::blur`、`blur_taps` と整数の `coarsen` は `m5.rs`。参照も兼ねる） | 参照（`cpu-composite.js`、新規） |
 | 重みの生成と正規化 | — | 本番 `blur_kernel_q16`（`renderer.rs`、新規。参照も兼ねる） | 参照 `blurKernelQ16`（新規） |
 | 水平と垂直の積和、拡大 | 本番（(c) の v3 の効果シェーダの新しいモード） | 参照（`cpu_composite.rs`、テストのみ、新規） | 参照（同上） |
 
@@ -109,7 +109,7 @@ v3 のぼかしの中に浮動小数はない。ホストの算術も含む。�
 
 ### 半径の Q8
 
-文書の半径を一度だけ Q8 の整数 `R`（0..=16384、1/256 画素）にする。新しい関数 `blur_radius_q8_f64`（Rust は `crates/alto-engine/src/m5/mod.rs`、JS は `blurRadiusQ8`）で、定義は実数の `floor(radius * 256 + 1/2)` である。実装はビットだけで行う。
+文書の半径を一度だけ Q8 の整数 `R`（0..=16384、1/256 画素）にする。新しい関数 `blur_radius_q8_f64`（Rust は `crates/alto-core/src/blur.rs`、新規のモジュールで `alto_core::blur` として公開する。JS は `blurRadiusQ8`）で、定義は実数の `floor(radius * 256 + 1/2)` である。実装はビットだけで行う。
 
 ```text
 bits = f64 のビット列（Rust は to_bits、JS は DataView.setFloat64 と getBigUint64）
@@ -122,6 +122,8 @@ s >= 54 なら R = 0                      // m * 2^-s < 1/2
 ```
 
 文書の検証（`finite("radius", *radius, 0.0, 64.0)`）が先に通っているので、符号ビットは 0（`-0.0` は `e == 0` で 0）、`R <= 16384` である。feather は f32 なので、同じ手順を `e = (bits >> 23) & 0xff`、`m = frac | 2^23`、`s = 142 - e`、`s >= 25` なら 0 で行う（`blur_radius_q8_f32`、JS は `blurRadiusQ8F32`。JS は文書のスナップショットの数値を `DataView.setFloat32` で f32 のビットにする。f32 の値は f64 に正確に入っているので、この変換は丸めない）。
+
+**置き場所は `alto-core` である（#32 の Linus の P2）。** `blur_radius_q8_f32` を呼ぶ `path_coverage` は `alto-gpu` の本番コード（`crates/alto-gpu/src/renderer/m5.rs`）で、`alto-gpu` は `alto-engine` に `[dev-dependencies]` でしか依存しない（`crates/alto-gpu/Cargo.toml`）。したがって `alto-engine` の `m5/mod.rs` に置くと、本番の `alto-gpu` から呼べない。`alto-engine`（`render_effect`）と `alto-gpu`（`path_coverage`、`stack`）は、どちらも `alto-core` に通常の `[dependencies]` を持つ。`blur_radius_q8_f64`、`blur_radius_q8_f32`、下の `blur_coarsen_k` の三つを `alto_core::blur` の一か所に置き、両方のクレートが同じ一つのソースを使う。`RENDER_VERSION_EXACT` と同じクレートである。三つとも依存のない整数の関数で、`alto-core` に新しい依存を足さない。
 
 `REffectKind::GaussianBlur` に `radius_q8: u32` を足す（`crates/alto-scene/src/lib.rs`）。`render_effect` と `path_coverage` が作る。v2 は今の `radius: f32` を読み続ける。
 
@@ -156,49 +158,74 @@ rho' = max(rho8, 256)                               // σ = rho' / 768 画素。
 
 ### 粗い倍率
 
-v2 の `coarsen(radius / 64)` は、倍率を `2^ceil(log2(radius / 64))` 以上にする。v3 は同じ意味を整数で書く。`radius / 64 = R / 2^14` なので、
+v2 の `coarsen(radius / 64)` は、倍率を `2^ceil(log2(radius / 64))` 以上にする。v3 は同じ意味を整数で書く。最初に考えたのは、`radius / 64 ≈ R / 2^14` として Q8 の `R` から作る次の式である（**v3 の定義ではない**。下の太字の段落のとおり、v3 は f32 の正確な半径から `k` を決める。この式は下の比較と証明の中でだけ使う）。
 
 ```text
 clog2(R) = R <= 1 ? 0 : bit_length(R - 1)          // 2^k >= R となる最小の k
-L = max(level, clog2(R) - 14)                        // R >= 1 のとき
+L_Q8 = max(level, clog2(R) - 14)                     // R >= 1 のとき。v3 では使わない
 ```
 
-である。`bit_length` は Rust の `u32::BITS - (R - 1).leading_zeros()`、JS は `(R - 1).toString(2).length` である。`R == 0` なら粗くしない（`r = 0` で素通しなので、v2 の `minimum.max(0.000001)` の下限は要らない）。`L == level` なら `coarsen` は ROI をそのまま返す。v2 の `if scale <= self.scale { return self; }` と同じである。
+`clog2` は下の `k` でも使う。`bit_length` は Rust の `u32::BITS - (R - 1).leading_zeros()`、JS は `(R - 1).toString(2).length` である。`R == 0` なら粗くしない（`r = 0` で素通しなので、v2 の `minimum.max(0.000001)` の下限は要らない）。`L == level` なら `coarsen` は ROI をそのまま返す。v2 の `if scale <= self.scale { return self; }` と同じである。
 
-**粗い倍率 `k` は f32 の正確な半径から決める（#31 の Linus の P3、#32 の承認条件）。** 上の `clog2(R) - 14` は Q8 に丸めた `R` を使うため、半径が `64 * 2^n` のすぐ上で v2 とずれる（64.001 なら v2 は k=1、Q8 では k=0）。v3 ではこの式を使わない。`k` は、v2 の `coarsen(radius / 64)` が使うのと同じ f32 の半径 `rf` のビット列から、整数だけで決める。`rf` は f64 の文書値を f32 に変換したもので、変換は作成時に一度だけ行う。
+**粗い倍率 `k` は f32 の正確な半径から決める（#31 の Linus の P3、#32 の承認条件）。** 上の `clog2(R) - 14` は Q8 に丸めた `R` を使うため、半径が `64 * 2^n` のすぐ上で v2 とずれる（64.001 なら v2 は k=1、Q8 では k=0）。v3 ではこの式を使わない（同じずれは文書の定義域の中にもある。半径 32.001 は f32 で `32.00099945…` で v2 は k=0、Q8 では `R = 8192` で k=-1）。`k` は、v2 の `coarsen(radius / 64)` が使うのと同じ f32 の半径 `rf` のビット列から、整数だけで決める。`rf` はシーンの `REffectKind::GaussianBlur { radius: f32 }` そのものである。レイヤーの効果では `render_effect` の `n as f32`（f64 から f32 への IEEE の最近接偶数の変換で、作成時に一度だけ行う。v2 の値と同じ）、feather では文書の f32 の値である。関数は `blur_coarsen_k(bits: u32) -> i32`（`alto_core::blur`、新規。JS は `blurCoarsenK`）で、ぼかしの段も、ぼかしの部分木のテキスト（#31 の「座標の系」）も、この一つの関数を使う。
 
 ```text
-rf のビット: rf = m * 2^e（m は暗黙の 1 を含む 24 ビットの整数、e は整数。非正規化数も同じ形）
-k = 64 * 2^k >= rf となる最小の整数 = clog2(m) + e - 6      // rf > 0。rf == 0（R == 0）は粗くしない
-L = max(level, k)
+E = (bits >> 23) & 0xff;  frac = bits & (2^23 - 1)   // 符号は 0、E == 255 は来ない（検証済み）
+E == 0 かつ frac == 0:  rf = 0。粗くしない（このとき R == 0）
+E == 0（非正規化数）:   m = frac（1 <= m < 2^23。暗黙の 1 はない）、 e = -149
+それ以外（正規化数）:   m = frac | 2^23（2^23 <= m < 2^24）、         e = E - 150
+                        // どちらも rf = m * 2^e
+k = clog2(m) + e - 6                                  // 64 * 2^k >= rf となる最小の整数
+L = max(level, k)                                     // level は先に -6..=12 を検査済み（下の「レベルの検査」）
 ```
 
-`clog2(m) = m <= 1 ? 0 : bit_length(m - 1)` である。`log2`、`powf`、`ceil`、浮動小数の割り算はどれも使わない。v2 の f32 の式は、libm が 2 の冪で正確な値を返すホストでは、すべての f32 でこの `k` と一致する。`k` は Rust と JS で同じビット分解から作る（JS は `Float32Array` / `DataView` でビットを読む）。
+`clog2(m) = m <= 1 ? 0 : bit_length(m - 1)` である。`64 * 2^k >= m * 2^e` は `2^(k + 6 - e) >= m`、すなわち `k + 6 - e >= clog2(m)` と同値なので、`m >= 1` なら正規化数でも非正規化数でも同じ式になる。値の範囲は、`rf <= 64` から `k <= 0`、最小の正の非正規化数 `2^-149`（`m = 1`、`e = -149`）で `k = -155` で、i32 に入る。`log2`、`powf`、`ceil`、浮動小数の割り算はどれも使わない。`k` は Rust と JS で同じビット分解から作る（JS は `Float32Array` / `DataView` でビットを読む）。
 
-`rho <= 64` の下の証明は崩れない。`rf <= 64 * 2^k` で、`64 * 2^k` は `1/256` の整数倍なので、`R = round(rf * 256) <= 2^(14 + k)` となる。したがって `k >= clog2(R) - 14` で、倍率は Q8 の式と同じか、より粗い。`RoiQ` の `coarsen` は、ぼかしの部分木では、テキスト（#31）も含めて、この `L` を使う。
+v2 との関係。v2 の倍率は `2^ceil(log2(max(rf / 64, 0.000001)))` を `scale` と比べた大きい方である。`rf / 64` は `rf >= 2^-120` なら正確（2 の冪の割り算で、結果が正規化数に残る）で、そのとき libm が 2 の冪で正確な値を返すホストでは v2 の指数はこの `k` と一致する。`rf / 64` が非正規化数に丸められる区間と、`0.000001` の下限が効く区間では、v2 の指数は `k` と違い得る（`rf = 2^-149` なら v2 は `rf / 64` が 0 に丸まって下限の -19、v3 の `k` は -155）。しかしそれは `k <= -19` の区間だけで（`ceil(log2(f32(0.000001))) = -19`）、`level >= -6` なので v2 も v3 も `L = level` になる。したがって、そのホストでは `L` はすべての f32 の半径（`0 < rf <= 64`）で v2 と一致する。`k` そのものではなく `L` が一致の対象である。
 
-テストのベクトル（`blur_coarsen_k_exact`、`m5.rs` と JS の参照、新規。enforce）:
+**`R` と `rf` の関係。** 前の版はここで「`64 * 2^k` は 1/256 の整数倍なので `R = round(rf * 256) <= 2^(14 + k)`、したがって `k >= clog2(R) - 14`」と書いた。これは二点で成り立たない（#32 の Linus の P2）。`R` は f64 の `radius` から `blur_radius_q8_f64` で直接作り、`rf` から作らない。また `k < -14` では `64 * 2^k` は 1/256 の整数倍でない。反例は `radius = 1/512` である。`rf = 2^-9` で `k = -15` だが、`R = floor(1/2 + 1/2) = 1`（結びが上へ）で `clog2(R) - 14 = -14 > k`。そこで、`k` ではなく、レベルの検査のあとの `L` について次を示す。定義域は `0 < radius <= 64`（文書の検証）と `level ∈ -6..=12`（下の「レベルの検査」。`L` を作る前に検査する）である。
 
-| 半径（f32） | `rf / 64` | 期待する `k` | v2 |
-|---|---|---|---|
-| 64 | 1 | 0 | 0 |
-| 64.001 | 1.0000156… | 1 | 1 |
-| 128 | 2 | 1 | 1 |
-| 128.001 | 2.0000078… | 2 | 2 |
+```text
+K = max(k, -6) とすると R <= 2^(14 + K)
+L = max(level, k) = max(level, K) >= K       // level >= -6 なので k と K のどちらでも同じ
+したがって R <= 2^(14 + L)
+```
 
-これに、`64 * 2^n` の 1 ULP 下と 1 ULP 上（n = -6..=6）も足す。それぞれ k は n と n+1 である。
+`rf` は `radius` の f32 への最近接偶数の丸めで（feather は `rf = radius`）、`radius <= 64` なので `rf <= 64`、`k <= 0` である。
+
+- `k >= -6`：`rf <= 2^(6 + k)` で、`2^(6 + k)` は f32 の正規化数、仮数は偶数である。`radius` がそれ以下に丸まるのは `radius <= 2^(6 + k) * (1 + 2^-24)` のときだけである（上の隣との中点は偶数側の `2^(6 + k)` へ行く）。したがって `256 * radius <= 2^(14 + k) + 2^(k - 10)` で、`k <= 0` から `2^(k - 10) < 1/2`、`2^(14 + k)` は整数（`>= 2^8`）なので `R = floor(256 * radius + 1/2) <= 2^(14 + k)`。
+- `k < -6`：`rf <= 2^-1` で、同じく `radius <= 2^-1 * (1 + 2^-24)`、`256 * radius <= 128 + 2^-17` なので `R <= 128 <= 2^8 = 2^(14 + K)`。`radius = 1/512` はこの場合で、`R = 1`。
+
+これから `clog2(R) <= 14 + L`、すなわち `L >= max(level, clog2(R) - 14)` で、倍率は Q8 の式と同じか、より粗い（`k` ではなく `L` についての主張である）。`R == 0`（`radius < 1/512`）のとき `rf <= 2^-9` なので `k <= -15` で、上の式でも `L = level` になり、「粗くしない」と同じである。`RoiQ` の `coarsen` は、ぼかしの部分木では、テキスト（#31）も含めて、この `L` を使う。
+
+テストのベクトル（`blur_coarsen_k_exact`、`alto_core::blur` のテストと JS の参照、新規。enforce）。`blur_coarsen_k` はビット列の関数として、文書の定義域の外の値（`64` より大きい半径）も単体で検査する。それらは本番では来ない（検証で拒否される）。上の `rho <= 64` の証明は定義域の中だけで使う。
+
+| 半径 | `rf`（f32） | `rf / 64` | 期待する `k` | v2 の指数 | 備考 |
+|---|---|---|---|---|---|
+| `2^-149` | 最小の非正規化数（`m = 1`、`e = -149`） | `2^-155`（f32 では 0 に丸まる） | -155 | -19（下限） | `L = level` は同じ |
+| `2^-126 - 2^-149` | 最大の非正規化数（`m = 2^23 - 1`） | `2^-132` 弱 | -132 | -19（下限） | 同上 |
+| 1/512 | `2^-9` | `2^-15` | -15 | -15 | `R = 1`、`clog2(R) - 14 = -14`。上の反例 |
+| 32.001 | `32.00099945…` | `0.5000156…` | 0 | 0 | Q8 なら -1 |
+| 64 | 64 | 1 | 0 | 0 | |
+| 64.001 | `64.00099945…` | `1.0000156…` | 1 | 1 | 定義域外。Q8 なら 0 |
+| 128 | 128 | 2 | 1 | 1 | 定義域外 |
+| 128.001 | `128.00100708…` | `2.0000157…` | 2 | 2 | 定義域外。Q8 なら 1 |
+
+v2 の指数は `ceil(log2(max(rf / 64, 0.000001)))` を有理数で計算した値である（libm には依らない）。`128.001` の f32 は `128 + 66 / 65536` で、`rf / 64 = 4194337 / 2097152 = 2.0000157356…` である（前の版の `2.0000078…` は誤り。#32 の Linus の P3）。
+
+これに、`64 * 2^n` ちょうど、その 1 ULP 下、1 ULP 上（n = -15..=1）を足す。期待する `k` はそれぞれ n、n、n + 1 である。n = -15 は `1/512`、n = 0 の 1 ULP 上と n = 1 は定義域外である。
 
 **`rho <= 64` の証明。** 実数の半径を `rho = R / 2^(l + 8)` とする。ぼかしの `stage` は次の三か所からしか呼ばれない。
 
-1. `stack` の末尾のぼかし。`l = L >= clog2(R) - 14` なので `rho = R / 2^(L + 8) <= 2^clog2(R) / 2^(clog2(R) - 6) = 64`。
-2. `path_coverage`。feather の `R` で同じ `L` を作るので、同じく `rho <= 64`。`effects` に渡す効果は一つで、その出力 ROI は `sample` そのものである。
+1. `stack` の末尾のぼかし。`l = L` で、上の「`R` と `rf` の関係」から `R <= 2^(L + 14)` なので `rho = R / 2^(L + 8) <= 64`。
+2. `path_coverage`。feather の `R`（`blur_radius_q8_f32`）と `rf = feather` で同じ `L` を作るので、同じく `rho <= 64`。`effects` に渡す効果は一つで、その出力 ROI は `sample` そのものである。
 3. `children` の `effects`。半径が 0 より大きいぼかしがあれば `stack` を通るので、ここに来るぼかしは `R == 0` の素通しだけである。v3 の判定は `radius > 0.0` ではなく `radius_q8 > 0` にする。`radius = 1e-9` のように f32 で正、`R` で 0 のぼかしは、v3 では背面のハローを作らない。
 
 したがって `r <= ceil(64) = 64`、`rho8 <= 16384` である。ホストは v3 で `r > 64` なら `RenderError::InvalidArgument` を返す（到達しないことを上で示した。v2 のように 64 タップで黙って切らない）。
 
 **レベルの検査。** レベルの範囲は、すべての呼び出し元の不変条件ではない。`Renderer::render` は表示のレベルを切り（`renderer.rs` の `min_level` と `clamp(min_level, 12.0)`）、wasm の `read_tile_level`（`crates/alto-wasm/src/lib.rs`）は `-6..=12` を検査するが、native の公開の `Renderer::read_tile` と `read_tiles` は `(i32, i32, i32)` の鍵をそのまま受け、`copy_display_tile` → `compose` → `compose_m5` が `key.0` を使う。したがって v3 のぼかしの整数の関数（`blur_taps`、整数の `coarsen`、拡大の準備）は、どのシフトや 2 の冪よりも先に、`RoiQ` のレベルが `-6..=12` であることを検査し、外なら `RenderError::InvalidArgument` を返す。`r > 64` と `m > 7` の検査はその後で、溢れるシフトの前に来ることはない。範囲の中では `R << (-l) <= 2^20`、`2^l <= 2^12`、`256 * 2^l <= 2^20` である。#31 のテキストは `L >= -16` まで描くが、v3 ではレベル −7 から −16 のぼかしはエラーになる（「未解決の問題」の 11）。
 
-**拡大の倍率差。** `m = L - level` について、上の検査の `level >= -6` と `clog2(R) <= clog2(16384) = 14`、すなわち `L <= max(level, 0)` から、粗くするのは `level < 0` のときだけで、`m <= 6` である。下の拡大は `m <= 7` を要る。ホストは `m > 7` なら `RenderError::InvalidArgument` を返す。
+**拡大の倍率差。** `m = L - level` について、上の検査の `level >= -6` と `k <= 0`（`rf <= 64`。「粗い倍率」）、すなわち `L <= max(level, 0)` から、粗くするのは `level < 0` のときだけで、`m <= 6` である。下の拡大は `m <= 7` を要る。ホストは `m > 7` なら `RenderError::InvalidArgument` を返す。
 
 ## 重みの生成
 
@@ -380,8 +407,8 @@ WGSL に `Wide` は要らない。積和はすべて u32 に入る。`Wide` が�
 テスト名と場所は次のとおりである。`color_adjust_q14_mix_does_not_overflow` と同じく、`checked_mul` / `checked_add` が `None` を返すか、上の表の上限を超えたら失敗する。
 
 - **`blur_kernel_q16_is_exact`**（`renderer.rs` のテスト、新規）。到達し得る `(r, rho8)` の組をすべて尽くす。組は「`ceil(rho) = r` かつ `floor(256 rho + 1/2) = rho8` となる実数 `rho ∈ (0, 64]` がある」もので、`rho8 ∈ 0..=16384`、`r ∈ 1..=64` から区間の交わりで数え、16_448 組であることも表明する。各組で、`y_i <= 1_207_959_552`、Horner の各段で `0 <= h <= ONE`、`g_0 = 2^32`、`G <= 554_050_781_184`、`w[0] + 2 Σ w[k] = 65536`、`0 <= w[k] < 65536`、`w` が非増加、を表明する。上の「テストのベクトル」の値も表明する。
-- **`blur_radius_q8_matches_rational`**（`m5/mod.rs` のテスト、新規）。`k / 512`（`k = 0..=32768`、偶数番目は正確な値、奇数番目は結び）、`64`、`-0.0`、最小の正規化数と非正規化数で、f64 と f32 の両方の復号が実数の `floor(x * 256 + 1/2)` と一致すること。期待値は整数の有理数で計算する。
-- **`blur_roi_q_matches_f32_roi`**（`m5.rs` のテスト、新規）。レベル `-6..=12`、`|tx|, |ty| <= 2^15`、`R ∈ {1, 2, 255, 256, 257, 4096, 8191, 8192, 8193, 16383, 16384}` で、`RoiQ` の `expand` と `coarsen` と `blur_taps` が、v2 の `Roi` の f32 の結果と同じ ROI になること。その範囲では途中の端点も `2^24` 以下で v2 の f32 は正確なので、これは意味が変わらないことの検査である。上の反例（`ox = 16_776_959`、`w = 258`）で v3 が `w' = 132` を返すことも表明する。v2 の `log2` / `powf` が 2 の冪を返さないホストでは、その組を失敗にせず記録する（それが「今日のずれ」の 5 である）。
+- **`blur_radius_q8_matches_rational`**（`alto_core::blur` のテスト、新規）。`k / 512`（`k = 0..=32768`、偶数番目は正確な値、奇数番目は結び）、`64`、`-0.0`、最小の正規化数と非正規化数で、f64 と f32 の両方の復号が実数の `floor(x * 256 + 1/2)` と一致すること。期待値は整数の有理数で計算する。
+- **`blur_roi_q_matches_f32_roi`**（`m5.rs` のテスト、新規）。レベル `-6..=12`、`|tx|, |ty| <= 2^15`、`R ∈ {1, 2, 255, 256, 257, 4096, 8191, 8192, 8193, 16383, 16384}` で、`RoiQ` の `expand` と `coarsen` と `blur_taps` が、v2 の `Roi` の f32 の結果と同じ ROI になること。上の「整数の ROI」の `2^24` の条件は、文書座標ではなく**レベルの画素の数**についてのものである。この範囲では `|ox| <= 2^15 * 256 = 2^23` で、ハローと `coarsen` の両端を足しても、途中の端点はレベルの画素の数で `2^24` 以下である。文書座標の値そのものは `2^24` を超える（レベル 12 では `|x| = 2^23 * 2^12 = 2^35`）。前の版の「途中の端点も `2^24` 以下」はこの区別をしておらず、レベル 12 では成り立たなかった（#32 の Linus の P3）。それでも v2 の f32 は正確である。v2 の `Roi` の値は、どれも「`2^24` 以下の整数 × `2^level`（または粗い倍率 `2^L`）」で、2 の冪を掛けても仮数は 24 ビットに収まり、レベル `-6..=12` では指数も正規化数の範囲にある。`x / S`、`floor(…) * S`、`- S`、`x + w * scale` も同じ形の値で、丸めは起きない。したがって、これは意味が変わらないことの検査である。上の反例（`ox = 16_776_959`、`w = 258`）で v3 が `w' = 132` を返すことも表明する。v2 の `log2` / `powf` が 2 の冪を返さないホストでは、その組を失敗にせず記録する（それが「今日のずれ」の 5 である）。
 - **`blur_rejects_out_of_range_levels`**（`m5.rs` のテスト、新規）。レベル `{-7, -40, 13, i32::MIN, i32::MAX}` の `RoiQ` で、`blur_taps` と整数の `coarsen` が、シフトの前に `RenderError::InvalidArgument` を返すこと（デバッグビルドで溢れの panic が起きないこと）。
 - **`blur_q14_does_not_overflow`**（`cpu_composite.rs`、新規）。到達し得るすべての重みで、入力が全部 16384 なら `acc = 2^30` ちょうど、出力 16384。入力の画素の RGB とアルファを #24 の `E = {0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384}` の `rgb <= a` の組（55 組）から位置ごとに循環させて取り、`out_rgb <= out_a <= 16384`。拡大は `m ∈ 0..=7`、`fx, fy ∈ 0..=255` の全数で四隅が全部 16384 なら 16384、四隅を `E` の直積と `fx, fy ∈ {0, 1, 127, 128, 255}` で取って `rgb <= a` と 16384 以下。
 - **`blur_pass_order_is_horizontal_first`**（`cpu_composite.rs`、新規）。上の 3×3 の例。
@@ -438,11 +465,11 @@ measure するのは、v2 の `gaussian-blur` と、ぼかしの入力がまだ 
 
 前提は #26 の「実装順」の (b)（#24 の設計を実装する v3 composite、PR #27）と (c)（M5 の Q14 中間）である。1 から 3 と 5 は前提に依らず、どこからも呼ばないので画素を変えない。各項目は main から切った一つの PR である。
 
-1. **整数の核。** `blur_radius_q8_f64` と `blur_radius_q8_f32`（`m5/mod.rs`）、`blur_kernel_q16`（`renderer.rs`）、`RoiQ` と `blur_taps` と整数の `coarsen`（`m5.rs`）。単体テスト `blur_kernel_q16_is_exact`、`blur_radius_q8_matches_rational`、`blur_roi_q_matches_f32_roi`、`blur_rejects_out_of_range_levels`。`RoiQ` は #31 と同じ型で、先に入った PR が定義し、後の PR はそれを使う。
+1. **整数の核。** `blur_radius_q8_f64`、`blur_radius_q8_f32`、`blur_coarsen_k`（`crates/alto-core/src/blur.rs`。`alto-engine` と `alto-gpu` の本番コードが通常の依存で使う）、`blur_kernel_q16`（`renderer.rs`）、`RoiQ` と `blur_taps` と整数の `coarsen`（`m5.rs`）。単体テスト `blur_kernel_q16_is_exact`、`blur_radius_q8_matches_rational`、`blur_coarsen_k_exact`、`blur_roi_q_matches_f32_roi`、`blur_rejects_out_of_range_levels`。`RoiQ` は #31 と同じ型で、先に入った PR が定義し、後の PR はそれを使う。
 2. **シーンの値。** `REffectKind::GaussianBlur` の `radius_q8` と、`render_effect` と `path_coverage` での設定。`blur_radius_q8_refines_scene_equality`。v2 の画素は変わらない。
 3. **Rust の参照。** `cpu_composite.rs` の `blur_pass_q14`、`resample_q14`、`render_blur_v3` と、`blur_q14_does_not_overflow`、`blur_pass_order_is_horizontal_first`、`blur_window_crop`。
 4. **WGSL とホスト。** (c) のシェーダのモード 24 と 25、uniform の整数の宣言、`stage`、`stack`、`effects`、`input_roi`、`crop`、`path_coverage`、`children` の v3 の分岐。native の 2 バックエンドで、上の enforce のケースを Rust の参照と比べる。(c) のあと。
-5. **JS の参照。** `blurRadiusQ8`、`blurRadiusQ8F32`、`blurKernelQ16`、`blurPassQ14`、`resampleQ14`、`renderBlurV3`。ブラウザの実行で、上の「テストのベクトル」の重みを自己検査する（違えば失敗）。
+5. **JS の参照。** `blurRadiusQ8`、`blurRadiusQ8F32`、`blurCoarsenK`、`blurKernelQ16`、`blurPassQ14`、`resampleQ14`、`renderBlurV3`。ブラウザの実行で、上の「テストのベクトル」の重みを自己検査する（違えば失敗）。
 6. **固定。** enforce のケースを 3 バックエンドで流し、一致を記録してから `blur-v3-` の行を `cpu-reference.txt` に足す。同じ PR で `existing_v1_and_v2_hashes_are_unchanged` の追記の規則を広げ、`gaussian-blur` の xfail の隣に v3 のケースを置く（v2 の xfail は残す）。
 7. **measure の行。** v2 の計測と、ベクターとテキストのぼかし。選択つき、背面、グループのケースは、それぞれの前提が入った PR で enforce として足す。
 
@@ -459,4 +486,4 @@ measure するのは、v2 の `gaussian-blur` と、ぼかしの入力がまだ 
 9. **モード番号の調整。** 24 と 25 をここで取った。(d) のマスクと (c) が使う番号は、まだどの文書も固定していない。衝突したら後から入る PR が別の番号を取り、この文書の番号を直す。
 10. **古いメモの指し先。** [正確な CPU 参照](2026-10-27-exact-cpu-references.md) の「gaussian-blur」節は、この文書で置き換えた。あの節からこの文書への指し先は、実装 PR で足す。この変更は文書を一つ足すだけで、既存の文書は触らない。
 11. **レベルの範囲の食い違い。** v3 のぼかしはレベル `-6..=12` だけを受ける（拡大の Q8 が `m <= 7` を要るため）。#31 のテキストは `L >= -16` まで描く。ぼかしの中のテキストをレベル −7 以下で描く呼び出しは、native の `read_tile` からしか来ないが、そのときはエラーになる。拡大の端数を Q8 より細かくしてレベルを広げるかは決めていない。
-12. **`coarsen` の倍率の定義の一本化。** 解決済み。`k` は f32 の正確な半径から決める（「粗い倍率」の節）。#31 の f32 の比較と同じ値であり、Q8 の式は使わない。
+12. **`coarsen` の倍率の定義の一本化。** 解決済み。`k` は f32 の正確な半径から `alto_core::blur::blur_coarsen_k` で決める（「粗い倍率」の節）。Q8 の式は使わない。#31 のテキストのメモ（「座標の系」の整数の ROI）は Q8 の `rq` から `k` を決めていたので、この PR で同じ定義と同じ関数に直した。二つのメモの `k` は同じである。
