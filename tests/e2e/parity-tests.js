@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { measureColorAdjustTies, alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -132,7 +132,7 @@ function square() {
 
 
 // Enforced: all 256 bytes in an Rgba8Unorm texture, read with
-// textureLoad + unorm_byte (the effects.wgsl text). Recorded, then asserted.
+// textureLoad + unorm_byte (the q14.wgsl text). Recorded, then asserted.
 async function measureAtlasRead() {
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -217,7 +217,6 @@ export async function runParityTests(engine, log) {
   };
   const alphaMeasure = [];
   const compositeV3 = [];
-  const tie8192 = [];
   let atlasRead = null;
   try {
     for (const testCase of parityCases()) {
@@ -286,7 +285,9 @@ export async function runParityTests(engine, log) {
           const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
           assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not select integer compositing");
           for (const node of testCase.nodes) await addNode(doc, engine, node);
-          const cpu = renderCase(testCase, 3);
+          // DQ3-1: a v3 tile at level >= 1 is the integer downsample of its children,
+          // even when read cold, never a direct composite at that scale.
+          const cpu = testCase.level ? renderPyramidCase(testCase) : renderCase(testCase, 3);
           const gpu = await gpuTile(engine, testCase);
           renderPath = sceneGap(doc.getSnapshot());
           const enforced = isV3IntegerCase({ renderPath });
@@ -317,10 +318,16 @@ export async function runParityTests(engine, log) {
           const enforced = isV3IntegerCase({ renderPath });
           // Reset, populate children and read the parent in the same worker request.
           const gpu = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+          // DQ3-1: a cold request (empty caches) must give the warm bytes.
+          const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
           const cpu = renderPyramidCase(testCase);
-          const row = { ...measureRow(testCase,cpu,gpu), renderPath, name: testCase.name, level: 1, enforced, status: same(cpu,gpu) ? "exact" : "mismatch" };
+          const coldMatchesWarm = same(cold, gpu);
+          const row = { ...measureRow(testCase,cpu,gpu), renderPath, name: testCase.name, level: 1, enforced, coldMatchesWarm, status: same(cpu,gpu) && coldMatchesWarm ? "exact" : "mismatch" };
           compositeV3.push(row);
-          if (enforced) assert(same(cpu,gpu),formatMeasure(row));
+          if (enforced) {
+            assert(same(cpu,gpu),formatMeasure(row));
+            assert(coldMatchesWarm, `cold level 1 differs from warm: ${diff(gpu, cold)}`);
+          }
           return { detail: formatMeasure(row), renderPath, enforced };
         } catch (error) {
           if (!compositeV3.some((r)=>r.name===testCase.name)) compositeV3.push({name:testCase.name,level:1,renderPath,enforced:isV3IntegerCase({renderPath}),status:"error",error:String(error)});
@@ -386,20 +393,102 @@ export async function runParityTests(engine, log) {
         });
         const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
         const cpu = renderColorAdjustV3(image, settings);
-        // Reporting failures and counts never affect parity enforcement.
-        try {
-          tie8192.push(measureColorAdjustTies(image, settings, gpu, cpu, name));
-        } catch (error) {
-          log(`tie-8192 measurement unavailable: ${error}`);
-        }
         const gap = diff(cpu, gpu);
         log(`${name}: ${gap}`);
         const gapName = sceneGap(doc.getSnapshot());
-        if (gapName !== "adjustment") failures.push(`${name}: scene gap ${gapName}`);
+        if (gapName !== "v3-m5-integer") failures.push(`${name}: scene gap ${gapName}`);
         if (!same(cpu, gpu)) failures.push(`${name}: ${gap}`);
       }
       assert(failures.length === 0, failures.join("\n"));
       return `${colorAdjustGrid().length} settings, 0 pixels differ`;
+    });
+    // v3 M5 at opacity 0.5, integer-exact: a color-adjusted layer and an adjustment
+    // layer, each at half opacity over opaque blue, plus their cold level 1.
+    for (const [name, build] of [
+      ["v3-m5-layer-opacity-half", (image) => [
+        { image: solid(256, 256, [0, 0, 255, 255]) },
+        { image, opacity: 0.5, effects: [{ brightness: 0, contrast: 1.7, saturation: 1.6 }] },
+      ]],
+      ["v3-m5-adjustment-opacity-half", (image) => [
+        { image },
+        { adjust: { brightness: 0, contrast: 1.7, saturation: 1.6 }, opacity: 0.5 },
+      ]],
+    ]) {
+      await test(name, async () => {
+        const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
+        assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
+        const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+        assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not open at version 3");
+        const layers = build(colorAdjustGradient());
+        for (const layer of layers) {
+          if (layer.adjust) {
+            await doc.transact("adjust", (tx) => {
+              const id = tx.addAdjustment({ type: "color_adjust", ...layer.adjust });
+              tx.setProps(id, { opacity: layer.opacity });
+            });
+            continue;
+          }
+          const asset = await imported(engine, layer.image);
+          let id;
+          await doc.transact("raster", (tx) => {
+            id = tx.addRasterFromAsset(asset);
+            tx.setProps(id, { opacity: layer.opacity ?? 1 });
+          });
+          if (layer.effects) await doc.effects.set(id, layer.effects.map((e) => ({ type: "color_adjust", ...e })));
+        }
+        const renderPath = sceneGap(doc.getSnapshot());
+        assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+        const cpu = renderM5V3(layers);
+        const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+        const row = { ...measureRow({ name, nodes: [], level: 0, tx: 0, ty: 0 }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+        compositeV3.push(row);
+        log(`${name} (enforced): ${formatMeasure(row)}`);
+        assert(same(cpu, gpu), formatMeasure(row));
+        const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+        const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
+        assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
+        return formatMeasure(row);
+      });
+    }
+    // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
+    // hierarchy in many steps over several ticks, and still equals the warm pyramid.
+    await test("v3 cold pyramid is built incrementally across ticks", async () => {
+      const fixture = await fetch("../../tests/fixtures/render-v3-empty-4096x256.alto");
+      assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+      const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+      assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not open at version 3");
+      const image = { w: 4096, h: 256, pixels: new Uint8Array(4096 * 256 * 4) };
+      for (let i = 0; i < image.pixels.length; i += 4) {
+        const x = (i / 4) % 4096, y = Math.floor(i / 4 / 4096);
+        image.pixels.set([x & 255, y, (x >> 4) & 255, 128 + (x & 127)], i);
+      }
+      const asset = await imported(engine, image);
+      await doc.transact("raster", (tx) => tx.addRasterFromAsset(asset));
+      // Level 4: one display tile over all 16 level-0 tiles, so 16 leaves and
+      // 15 downsamples (8 + 4 + 2 + 1) once the caches are empty.
+      const view = { center: [2048, 128], zoom: 1 / 16, rotation: 0 };
+      engine.viewport.set(view);
+      await testing(engine).request("setProfiling", { enabled: true });
+      await testing(engine).request("resetRenderCache", { cpu: true });
+      engine.viewport.set(view);
+      let frame;
+      try {
+        frame = await unstable(engine).settle();
+      } finally {
+        await testing(engine).request("setProfiling", { enabled: false });
+        await testing(engine).request("enablePrefetch");
+      }
+      const steps = frame.profile?.steps ?? 0;
+      log(`v3 cold pyramid: ${steps} steps over ${frame.ticks} ticks, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
+      assert(steps >= 31, `cold level 4 built in ${steps} steps; expected one per leaf or downsample`);
+      assert(frame.ticks >= 2, `cold level 4 finished in ${frame.ticks} tick(s); the Worker was not handed back`);
+      const shown = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0 }));
+      const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0, fresh: true }));
+      const cpu = renderPyramidCase({ w: 4096, h: 256, level: 4, tx: 0, ty: 0,
+        nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
+      assert(same(cpu, shown), `displayed level 4: ${diff(cpu, shown)}`);
+      assert(same(cpu, cold), `cold readback level 4: ${diff(cpu, cold)}`);
+      return `${steps} steps, ${frame.ticks} ticks`;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });
@@ -490,9 +579,8 @@ export async function runParityTests(engine, log) {
       alphaMeasure,
       compositeV3Label: "enforced",
       compositeV3: compositeV3.filter(isV3IntegerCase),
-      v3M5Float: compositeV3.filter((row) => !isV3IntegerCase(row)),
+      v3Unsupported: compositeV3.filter((row) => !isV3IntegerCase(row)),
       integerExactCount: compositeV3.filter((row) => isV3IntegerCase(row) && row.status === "exact" && row.count === 0).length,
-      tie8192,
       atlasRead,
       results,
     });

@@ -16,11 +16,11 @@ pub fn shader_with_blend(body: &str) -> String {
     format!("{}{body}", include_str!("../shaders/blend.wgsl"))
 }
 
-/// Assemble v3 from the frozen coordinate implementation and the existing Q14 helpers.
+/// Assemble v3 from the frozen coordinate implementation and the shared Q14 helpers.
 /// The v1/v2 shader sources and their pipelines remain unchanged.
 pub fn integer_composite_shader() -> String {
     let composite = include_str!("../shaders/composite.wgsl");
-    let effects = include_str!("../shaders/effects.wgsl");
+    let q14 = include_str!("../shaders/q14.wgsl");
     let prefix = composite.split("fn sample_texel").next().unwrap();
     let prefix = prefix.replace(
         "struct Command { inv0: vec4f, inv1: vec4f, info: vec4u, trans: vec4u };",
@@ -48,12 +48,11 @@ pub fn integer_composite_shader() -> String {
             "return vec4f(f32(r), f32(g), f32(bl), f32(al)) / 255.0;",
             "return vec4u(r,g,bl,al);",
         );
-    let div =
-        &effects[effects.find("fn div_q(").unwrap()..effects.find("// Same 64-bit pair").unwrap()];
-    let q14 = &effects
-        [effects.find("fn wide_div_q14(").unwrap()..effects.find("fn q14_stored(").unwrap()];
+    // composite.wgsl already defines `Wide`; take only the functions it lacks.
+    let div = &q14[q14.find("fn div_q(").unwrap()..q14.find("// Same 64-bit pair").unwrap()];
+    let q14 = &q14[q14.find("fn wide_div_q14(").unwrap()..];
     format!(
-        "{prefix}\n{div}\n{q14}\n{sample}\n{fetch}\n{}\n{}",
+        "{prefix}\n{div}\n{q14}\n{sample}\n{fetch}\n{}\n{}\n{}",
         r#"
 fn fetch_bytes(c: Command,p:vec2f,ix:vec2i)->vec4u {
   if c.info.w!=0u {return fetch_integer(c,ix);}
@@ -61,7 +60,18 @@ fn fetch_bytes(c: Command,p:vec2f,ix:vec2i)->vec4u {
   return sample_byte(c,i32(floor(q.x)),i32(floor(q.y)));
 }
 "#,
+        include_str!("../shaders/blend-q14.wgsl"),
         include_str!("../shaders/composite-q14.wgsl")
+    )
+}
+
+/// Render version 3 M5 stages: Q14 helpers, the Q14 blend, then the stage modes.
+pub fn integer_effects_shader() -> String {
+    format!(
+        "{}\n{}\n{}",
+        include_str!("../shaders/q14.wgsl"),
+        include_str!("../shaders/blend-q14.wgsl"),
+        include_str!("../shaders/effects-q14.wgsl")
     )
 }
 

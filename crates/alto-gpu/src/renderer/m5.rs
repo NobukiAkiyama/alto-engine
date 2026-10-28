@@ -1,5 +1,8 @@
 //! General M5 tile renderer. Back-propagated ROIs provide the halo for every blur stage.
 //! Temporary targets are pooled and reused in queue order, including between display tiles.
+//! Render version 3 uses `effects-q14.wgsl`: every target is premultiplied Q14 in
+//! `rgba16uint` and the resolve writes `rgba8uint` bytes. The host has already
+//! refused every v3 scene that needs a stage without an integer definition.
 use super::*;
 use std::sync::Weak;
 const POOL_IDLE_FRAMES: u64 = 8;
@@ -71,6 +74,18 @@ struct Params {
     sizes: [u32; 4],
     output_clip: [u32; 4],
 }
+/// Versions 1 and 2 keep f16 targets. Version 3 stores premultiplied Q14 integers.
+fn target_format(exact: bool) -> wgpu::TextureFormat {
+    if exact {
+        wgpu::TextureFormat::Rgba16Uint
+    } else {
+        wgpu::TextureFormat::Rgba16Float
+    }
+}
+/// Q14 integers in the f32 bit patterns of a stage uniform.
+fn q14_settings(values: [i32; 4]) -> [f32; 4] {
+    values.map(|v| f32::from_bits(v as u32))
+}
 #[derive(Clone)]
 struct Target {
     index: usize,
@@ -85,6 +100,8 @@ struct Pooled {
     used: u64,
 }
 pub(super) struct Resources {
+    /// Render version 3: Q14 `rgba16uint` targets and the integer stages.
+    exact: bool,
     pipeline: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     pool: Vec<Pooled>,
@@ -92,20 +109,40 @@ pub(super) struct Resources {
     pub(super) reuses: u64,
 }
 impl Resources {
-    fn new(device: &wgpu::Device) -> Result<Self> {
+    fn new(device: &wgpu::Device, exact: bool) -> Result<Self> {
+        let (pipeline, resolve) = if exact {
+            (
+                compute(
+                    device,
+                    "M5 integer stages",
+                    &crate::integer_effects_shader(),
+                ),
+                compute(
+                    device,
+                    "M5 integer resolve",
+                    include_str!("../../shaders/effects-resolve-q14.wgsl"),
+                ),
+            )
+        } else {
+            (
+                compute(
+                    device,
+                    "M5 effects",
+                    &crate::shader_with_blend(include_str!("../../shaders/effects.wgsl")),
+                ),
+                compute(
+                    device,
+                    "M5 resolve",
+                    include_str!("../../shaders/effects-resolve.wgsl"),
+                ),
+            )
+        };
         Ok(Self {
+            exact,
             allocations: 0,
             reuses: 0,
-            pipeline: compute(
-                device,
-                "M5 effects",
-                &crate::shader_with_blend(include_str!("../../shaders/effects.wgsl")),
-            ),
-            resolve: compute(
-                device,
-                "M5 resolve",
-                include_str!("../../shaders/effects-resolve.wgsl"),
-            ),
+            pipeline,
+            resolve,
             pool: vec![Pooled {
                 texture: memory::create_texture(
                     device,
@@ -119,7 +156,7 @@ impl Resources {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba16Float,
+                        format: target_format(exact),
                         usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::STORAGE_BINDING,
                         view_formats: &[],
@@ -132,6 +169,9 @@ impl Resources {
                 used: 0,
             }],
         })
+    }
+    pub(super) fn exact(&self) -> bool {
+        self.exact
     }
     pub(super) fn expire(&mut self, frame: u64, retired: &mut Retired) {
         let mut kept = Vec::with_capacity(self.pool.len());
@@ -282,7 +322,7 @@ impl Context<'_> {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba16Float,
+                        format: target_format(self.resources.exact),
                         usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::STORAGE_BINDING
                             | wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -380,39 +420,44 @@ impl Context<'_> {
         self.r
             .retired
             .classified_buffer(&uniform, MemoryClass::Effects);
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&av),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&bv),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&self.r.atlas_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&ov),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: tiles.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: uniform.as_entire_binding(),
+            },
+        ];
+        // The integer stages never read the clip base (clipping is refused in
+        // version 3), so the derived layout has no binding 2.
+        if !self.resources.exact {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&cv),
+            });
+        }
         let bg = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("M5 stage"),
             layout: &self.resources.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&av),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&bv),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&cv),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.r.atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&ov),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: tiles.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: uniform.as_entire_binding(),
-                },
-            ],
+            entries: &entries,
         });
         let mut pass = self.encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.resources.pipeline);
@@ -505,6 +550,11 @@ impl Context<'_> {
         roi: Roi,
         batch: bool,
     ) -> Result<Target> {
+        if self.resources.exact {
+            return Err(RenderError::Internal(
+                "v3 vector content reached the M5 renderer".into(),
+            ));
+        }
         let out = self.alloc(roi)?;
         let target = self.resources.pool[out.index].texture.clone();
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
@@ -626,6 +676,10 @@ impl Context<'_> {
         Ok(result)
     }
     fn apply_props(&mut self, source: Target, node: &RNode, world: [f64; 6]) -> Result<Target> {
+        // Version 3 has no masks here (`v3_gap`); `blend` applies the opacity.
+        if self.resources.exact {
+            return Ok(source);
+        }
         if node.features.mask.is_none()
             && node.features.vector_mask.is_none()
             && node.features.clip_path.is_none()
@@ -669,11 +723,21 @@ impl Context<'_> {
         clip: Option<Target>,
     ) -> Result<Target> {
         let out = self.alloc(dst.roi)?;
-        // Version 3 copies an f16 source onto an exact-zero backdrop. Any other
-        // blend falls through to the version 2 formula inside mode 19.
-        let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
-        let mut p = Self::params(if exact { 19 } else { 1 }, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        p.settings = [1.0, mode(node.blend), f32::from(clip.is_some()), 0.0];
+        let mut p;
+        if self.resources.exact {
+            // Version 3 mode 19: the Q14 layer composite with the host-quantized
+            // opacity. `apply_props` left the target unscaled. Clipping is refused.
+            p = Self::params(19, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            p.settings = q14_settings([
+                crate::composite_opacity_q14(node.opacity),
+                node.blend as i32,
+                0,
+                0,
+            ]);
+        } else {
+            p = Self::params(1, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            p.settings = [1.0, mode(node.blend), f32::from(clip.is_some()), 0.0];
+        }
         self.dispatch(&out, &dst, &src, clip.as_ref().unwrap_or(&dst), p, &[])?;
         Ok(out)
     }
@@ -691,6 +755,11 @@ impl Context<'_> {
         roi: Roi,
         world: [f64; 6],
     ) -> Result<Target> {
+        if self.resources.exact && !matches!(effect.kind, REffectKind::ColorAdjust { .. }) {
+            return Err(RenderError::Internal(
+                "v3 effect without an integer stage reached the M5 renderer".into(),
+            ));
+        }
         let filtered = match effect.kind {
             REffectKind::GaussianBlur { radius } => {
                 let r = (radius / roi.scale).ceil() as u32;
@@ -716,15 +785,15 @@ impl Context<'_> {
                 // Version 1 and 2 keep the float formula in mode 3. Version 3
                 // uses the Q14 formula in mode 17. The uniform carries the Q14
                 // integers in the f32 bit patterns.
-                let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
+                let exact = self.resources.exact;
                 let mut p = Self::params(if exact { 17 } else { 3 }, world);
                 p.settings = if exact {
-                    [
-                        f32::from_bits(super::color_adjust_q14(brightness) as u32),
-                        f32::from_bits(super::color_adjust_q14(contrast) as u32),
-                        f32::from_bits(super::color_adjust_q14(saturation) as u32),
-                        0.0,
-                    ]
+                    q14_settings([
+                        super::color_adjust_q14(brightness),
+                        super::color_adjust_q14(contrast),
+                        super::color_adjust_q14(saturation),
+                        0,
+                    ])
                 } else {
                     [brightness, contrast, saturation, 0.0]
                 };
@@ -928,7 +997,18 @@ impl Context<'_> {
                     self.effects(input.clone(), &stack, desired, transform)?
                 };
                 let mut mixed = filtered.clone();
-                if node.features.mask.is_some()
+                if self.resources.exact {
+                    // Version 3 adjustment layers are normal, unmasked and unclipped
+                    // (`v3_gap`). Only the opacity mixes, in Q14 (mode 20).
+                    if node.opacity != 1.0 {
+                        let out = self.alloc(desired)?;
+                        let mut p = Self::params(20, transform);
+                        p.settings =
+                            q14_settings([crate::composite_opacity_q14(node.opacity), 0, 0, 0]);
+                        self.dispatch(&out, &input, &filtered, &input, p, &[])?;
+                        mixed = out;
+                    }
+                } else if node.features.mask.is_some()
                     || node.opacity != 1.0
                     || node.features.clip
                     || node.blend != RenderBlend::Normal
@@ -1095,10 +1175,9 @@ impl Context<'_> {
                         Some(node.key)
                     },
                 )?;
-                // Version 3 premultiplies recovered unorm bytes. Version 1 and 2
-                // keep the float product in mode 0.
-                let exact = self.scene.render_version >= alto_core::RENDER_VERSION_EXACT;
-                let p = Self::params(if exact { 18 } else { 0 }, world);
+                // Version 3 premultiplies recovered unorm bytes into Q14. Version 1
+                // and 2 keep the float product in mode 0.
+                let p = Self::params(if self.resources.exact { 18 } else { 0 }, world);
                 let dummy = self.dummy();
                 self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
                 out
@@ -1126,9 +1205,15 @@ impl Renderer {
         slot: u32,
         store: &dyn TileStore,
     ) -> Result<()> {
+        let exact = scene.render_version >= alto_core::RENDER_VERSION_EXACT;
         let mut resources = match self.m5.take() {
-            Some(r) => r,
-            None => Resources::new(&self.device)?,
+            Some(r) if r.exact() == exact => r,
+            other => {
+                if let Some(old) = other {
+                    old.retire(&mut self.retired);
+                }
+                Resources::new(&self.device, exact)?
+            }
         };
         resources.expire(self.frame, &mut self.retired);
         let mut previews = HashMap::new();

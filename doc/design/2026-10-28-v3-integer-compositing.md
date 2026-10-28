@@ -2,7 +2,7 @@
 
 作成日：2026-10-28（Asia/Tokyo）
 
-状態：設計のみ。この文書は実装しない。描画バージョン 3 は、ここにある整数合成が入り、Metal・lavapipe・SwiftShader で一致するまで不安定なオプトインのままである。描画バージョン 2 の式と、ロック済みハッシュは凍結したままである。
+状態：plain シーンの整数合成（#27）と、color-adjust の整数 M5・ピラミッドの冷温一致（(c)）は実装済み。描画バージョン 3 は、ここにある整数合成が入り、Metal・lavapipe・SwiftShader で一致するまで不安定なオプトインのままである。描画バージョン 2 の式と、ロック済みハッシュは凍結したままである。
 
 関連：[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)。PR [#22](https://github.com/NobukiAkiyama/alto-engine/pull/22) は main の `adf70b3` に入っている。
 
@@ -23,22 +23,34 @@ Q14 の 1.0 は 16384 である。次の名前は main にある。合成もそ�
 | 名前 | 場所 | 役割 |
 | --- | --- | --- |
 | `div_q_i64` | `crates/alto-gpu/src/cpu_composite.rs` の `div_q_i64` | `d > 0` の `(abs(n) + d/2) / d`。符号は結びを 0 から遠い側へ送る |
-| `div_q` | `crates/alto-gpu/shaders/effects.wgsl` の `div_q` | 同じ丸めの i32 除算 |
+| `div_q` | `crates/alto-gpu/shaders/q14.wgsl` の `div_q` | 同じ丸めの i32 除算 |
 | `wide_div_q14` | 同ファイルの `wide_div_q14` | `Wide` を 16384 で割る。絶対値に 8192 を足してからシフトする。負数の算術シフトは使わない |
 | `divQBig` | `tests/e2e/cpu-composite.js` の `divQBig` | 同じ丸めの BigInt 除算 |
-| `Wide` | `effects.wgsl` の `struct Wide`（`lo: u32, hi: u32`）。形は `crates/alto-gpu/shaders/composite.wgsl` の `struct Wide` と同じ | i32 に乗らない積。Rust は i64 の `checked_mul` / `checked_add`、JS は BigInt |
-| `byte_q14` / `premul_byte_q14` | WGSL `effects.wgsl` と Rust `cpu_composite.rs`。JS は `byteQ14` / `premulByteQ14` | unorm バイトから Q14 へ入る。不透明 255 は 1 のまま |
-| 輝度の重み 3483, 11718, 1183 | Rust と JS の `Q14_LUMA`。WGSL は `effects.wgsl` のリテラル | 和は 16384 |
+| `Wide` | `q14.wgsl` の `struct Wide`（`lo: u32, hi: u32`）。形は `crates/alto-gpu/shaders/composite.wgsl` の `struct Wide` と同じ | i32 に乗らない積。Rust は i64 の `checked_mul` / `checked_add`、JS は BigInt |
+| `byte_q14` / `premul_byte_q14` | WGSL `q14.wgsl` と Rust `cpu_composite.rs`。JS は `byteQ14` / `premulByteQ14` | unorm バイトから Q14 へ入る。不透明 255 は 1 のまま |
+| 輝度の重み 3483, 11718, 1183 | Rust と JS の `Q14_LUMA`。WGSL は `effects-q14.wgsl` と `blend-q14.wgsl` のリテラル | 和は 16384 |
 | `color_adjust_q14` | `crates/alto-gpu/src/renderer.rs` の `color_adjust_q14` | 設定値を半整数で 0 から遠い側へ量子化する |
 | `color_adjust_q14_mix_does_not_overflow` | `cpu_composite.rs` の同名テスト | `checked_mul` / `checked_add` が溢れたら失敗する |
 
 丸め規則はこれ一つである。結びは 0 から遠い側へ行く。合成の中に `round_ties_even` は置かない。ハードウェアの unorm 丸めも置かない。
 
-color-adjust のストレート化は `effects.wgsl` の `(u32(q) << 14u) / u32(alpha)` で、切り捨てである。合成の除算は、ストレート化を含めて全部 `div_q` / `wide_div_q14` / `div_q_i64` である。切り捨て除算を合成へコピーしない。color-adjust 側の式は変えない。
+color-adjust のストレート化は `effects-q14.wgsl` の `(u32(q) << 14u) / u32(alpha)` で、切り捨てである。合成の除算は、ストレート化を含めて全部 `div_q` / `wide_div_q14` / `div_q_i64` である。切り捨て除算を合成へコピーしない。color-adjust 側の式は変えない。
 
-color-adjust は、段のあいだを f16 で書き、最後を unorm の偶数丸めで解決する。その解決は color-adjust の範囲であり、この合成はそれを入力の float テクスチャとして読まない。両方が入ったあとの受け渡しは、Q14 の整数か `rgba8uint` のバイトである。モード 19 が「背面が正確な 0 で normal のとき f16 をコピーする」のは color-adjust の記述のまま残す。合成経路が整数になったとき、空の背面への normal は Q14 のコピーになる。color-adjust の式はここで再定義しない。
+color-adjust の段は (c) で整数になった。v3 の M5 は `effects-q14.wgsl` で、段のあいだはプレマルチプライ Q14（0..=16384）を `rgba16uint` に置く。f16 への書き込みも、f16 から Q14 への読み戻しも v3 にはない。最後は `effects-resolve-q14.wgsl` が `div_q(q * 255, 16384)` のバイトを `rgba8uint` のキャッシュへ書く。整数のタイル合成と同じ式である。v1 と v2 の `effects.wgsl`（`rgba16float`）と `effects-resolve.wgsl`（`rgba8unorm`）は変えない。
 
-v3 で整数合成するのは、エフェクトのないシーンだけである。レイヤーエフェクト（color-adjust を含む）またはラスタ／ベクターのマスクを含むシーンは、(c) まで M5 の float 経路のままである。parity ではそのシーンを `v3-m5-float` と表示し、整数一致の数に入れない。
+v3 の M5 の段は次だけである。
+
+- モード 18: アトラスのバイトを `unorm_byte` で戻し、`premul_byte_q14` / `byte_q14` で Q14 にする（最近傍の座標は v2 の M5 のまま）。
+- モード 19: レイヤーをアキュムレータへ合成する。不透明度はホストが `composite_opacity_q14` で量子化する。不透明度が 1 のとき、ソースは格納したプレマルチプライのまま（`src_pre = p`, `sa = p.a`）で、非 normal のストレートは `straight(p)` である。空の背面への normal はこれで Q14 のコピーになる。1 未満のときはグループのポップと同じ順（ストレート化、`sa = mul(p.a, opacity_q)`、`src_pre = mul(straight, sa)`）である。どちらも上の `blend_q` を使う。
+- モード 17: color-adjust。式は上のまま、アルファは入力のまま通す。
+- モード 20: color-adjust の調整レイヤーの不透明度。背面 `o` と調整後 `f` を全チャネル同じ重みで `div_q(o * (16384 - w) + f * w, 16384)` にする。
+- モード 8: 同じ縮尺の切り出し（最近傍のコピー）。
+
+v3 で描くシーンは、ちょうど次の三つに分かれる（DQ3-4）。Rust の `renderer::v3_gap` と JS の `sceneGap` が同じ分類をする。
+
+- `null`: マスク、クリップ、エフェクト、ベクター、テキスト、調整レイヤーのないシーン。整数のタイル合成（`composite-q14.wgsl`）。
+- `v3-m5-integer`: そのほかに、選択範囲のない color-adjust のレイヤーエフェクトか、normal の color-adjust 調整レイヤーだけを含むシーン（不透明度は任意）。上の整数の M5 の段で描き、整数一致を強制する。
+- `v3-unsupported`: それ以外（ラスタ／ベクターのマスク、クリップパス、下のレイヤーでクリップ、color-adjust 以外のエフェクト、選択範囲つきのエフェクト、ベクター、テキスト、color-adjust 以外か normal 以外の調整レイヤー）。整数の定義がまだないので、ホストがコマンドを作る前に `RenderError::GpuUnsupported` で拒否し、何も描かない。非表示のノードも数える。float の経路へ黙って落とすことはしない。マスク、ベクター、ぼかし、テキストは、それぞれのメモが入ったときにこの分類から `v3-m5-integer` へ移す。
 
 v3 を既定の新規文書にはしない。main の不安定ゲートを維持する。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ 3 への更新を受ける。JS は `{ unstableRenderV3: true }` で、出荷定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書はバージョン 2 のままである。`DocumentMeta::validate` が受ける `render_version` は 1、2、3 だけ、という main の制約も維持する。
 
@@ -57,6 +69,10 @@ v2 の出力バインディング `texture_storage_2d_array<rgba8unorm, write>` 
 レベル 1 以上のダウンサンプルも整数である。子レベルの 2×2 の 4 バイトを、チャネルごと（RGB もアルファも）に整数で合計し、`(sum + 2) / 4` とする。合計は非負なので、これは `div_q(sum, 4)` と同じで、結びは 0 から遠い側へ行く。各チャネルに同じ単調な式を使うので、プレマルチプライの `rgb <= a` は保たれる。結果は `rgba8uint` かパック u32 に書く。unorm には書かない。
 
 v2 の `downsample.wgsl` は変えない。v3 は別のシェーダを使う。v3 のピラミッドのキャッシュを下流で読むときも整数で読み、unorm としてサンプルしない。
+
+v3 のレベル 1 以上のタイルは、常に子の整数ダウンサンプルとして定義する（DQ3-1）。そのレベルの縮尺で元のタイルから直接合成することはない。子がキャッシュにない冷えた要求では、ホストがまず足りない子を（再帰的に）作り、それから同じダウンサンプルを行う。したがって冷えた要求と温まった要求のハッシュは必ず一致する。作っている途中の子は追い出さない。決定性を先にし、速度はその次とする。表示中のタイル、先読み、全体表示のどの経路も、この順でしかレベル 1 以上を作らない。
+
+スワップチェーンへの表示（`present-q14.wgsl` の画面だけの bilinear 補間とチェッカーボード）はタイルのバイトを変えず、ハッシュの対象外である（DQ3-2）。
 
 検証では、レベル 1 以上のタイルも 3 バックエンドでバイト一致を強制する（enforced）。
 
@@ -210,7 +226,7 @@ SwiftShader の v2 `blend-color` が 1 画素ずれるのは、この color の�
 
 normal 以外は、宛先をストレート化して `B` を求め、上の三項の和でプレマルチプライへ戻す。
 
-**未定義のモード（17 以上）。** v3 ではホストがエラーとして拒否し、何も描かない。Rust はコマンドを作る前に `RenderError` を返し、JS は投げる。どちらも部分的なタイルを出さない。WGSL は 0..=16 しか受けない前提で、`default` の振る舞いは定義しない。Rust の `unreachable!()` と JS の `unspecified blend mode` は、ホストの検査をすり抜けたときの保険であり、仕様の結果ではない。3 実装とも、17 以上を normal や別のモードへ読み替えない。
+**未定義のモード（17 以上）。** v3 ではホストがエラーとして拒否し、何も描かない（DQ3-3。新しい variant は作らない）。Rust はコマンドを作る前に `RenderError` を返し、JS は投げる。どちらも部分的なタイルを出さない。WGSL は 0..=16 しか受けない前提で、`default` の振る舞いは定義しない。Rust の `unreachable!()` と JS の `unspecified blend mode` は、ホストの検査をすり抜けたときの保険であり、仕様の結果ではない。3 実装とも、17 以上を normal や別のモードへ読み替えない。
 
 ## 溢れの検査
 
@@ -237,7 +253,9 @@ color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は `color
 
 アトラス読み取りも同じ三つで検査する（必須）。256 通りのバイト値を全チャネルに入れた `Rgba8Unorm` テクスチャを `textureLoad` + `unorm_byte` で読み、全値が正確に戻ることをバックエンドごとに記録し、確かめる（Rust `Gpu::atlas_read`、出力 `atlas-read.json` / `atlas-read.md`。ブラウザは `tests/e2e/parity-tests.js` の `measureAtlasRead`、`parity.json` の `atlasRead`）。これは enforced（必須）である。どれかのバックエンドで一つでも戻らない値やエラーがあれば、`gpu_shader_matches_cpu_reference`（Metal、lavapipe）とブラウザのパリティ実行（SwiftShader）が失敗する。結果の JSON は失敗時も残す。不一致が出たら、そのときに `Rgba8Uint` を検討する。
 
-ピラミッドのレベル 1 以上のタイルも、同じ三つで全バイト一致を必須とする。`v3-m5-float` のシーンは整数一致の対象から外す。
+ピラミッドのレベル 1 以上のタイルも、同じ三つで全バイト一致を必須とする。冷えた要求（キャッシュを空にしてから読む）のレベル 1 も、温まった要求とバイト一致を必須とする。`v3-unsupported` のシーンはタイルを出さないので、整数一致の数に入れない。
+
+v3 の M5 も同じ三つで強制する。Rust は `gpu_shader_matches_cpu_reference` が color-adjust の 20 設定と、不透明度 0.5 の M5 の段（normal、multiply、screen、soft-light、color、color-adjust したレイヤー、調整レイヤー）を `effects-q14.wgsl` で描き、整数の CPU 参照と比べる。ブラウザは本物のエンジンで color-adjust の調整レイヤーと、不透明度 0.5 のレイヤーと調整レイヤーを描き、`renderColorAdjustV3` / `renderM5V3` と比べる。
 
 対象は、半透明の `-alpha-measure` ケース全部である。v3 の文書として実行し、一致したら v3 のハッシュとして固定する。v2 の `-alpha-measure` は measured-not-enforced のままである。`tests/parity/render-v1.txt` と `tests/parity/cpu-reference.txt` の既存行は一文字も変えない。`existing_v1_and_v2_hashes_are_unchanged` がそれを見る。
 
