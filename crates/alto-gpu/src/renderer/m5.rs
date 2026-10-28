@@ -1037,6 +1037,9 @@ impl Context<'_> {
             }
             let transform = multiply(world, node.transform);
             if let RContent::Adjustment(effect) = &node.content {
+                if self.resources.exact {
+                    v3_adjustment_blend(node.features.mask.is_some(), node.blend)?;
+                }
                 let mut stack = vec![effect.clone()];
                 stack.extend(node.features.effects.clone());
                 // A backdrop blur needs extra input from the same siblings. The caller renders that halo below.
@@ -1074,10 +1077,9 @@ impl Context<'_> {
                 let mut mixed = filtered.clone();
                 if self.resources.exact {
                     // Version 3 adjustment layers are unclipped (`v3_gap`). A pixel
-                    // mask or a non-normal blend takes mode 23 (mask, opacity and
-                    // blend in one Q28 mix). Otherwise only the opacity mixes, in
-                    // Q14 (mode 20).
-                    if node.features.mask.is_some() || node.blend != RenderBlend::Normal {
+                    // mask takes mode 23 (mask, opacity and blend in one Q28 mix).
+                    // Otherwise only the opacity mixes, in Q14 (mode 20).
+                    if node.features.mask.is_some() {
                         let out = self.alloc(desired)?;
                         let (entries, mask_transform, has_mask) = match &node.features.mask {
                             Some(mask) => {
@@ -1427,6 +1429,17 @@ impl Renderer {
     }
 }
 
+/// Version 3 refuses a non-normal adjustment-layer blend without a pixel mask
+/// (`v3_gap`) before any stage runs: its inputs would come through stages that
+/// still take f32 coordinates. It is never drawn in float (DQ3-4).
+fn v3_adjustment_blend(masked: bool, blend: RenderBlend) -> Result<()> {
+    if masked || blend == RenderBlend::Normal {
+        return Ok(());
+    }
+    Err(RenderError::GpuUnsupported(
+        "v3 adjustment layer blend needs a pixel mask".into(),
+    ))
+}
 #[cfg(test)]
 mod pool_tests {
     use super::*;
@@ -1460,6 +1473,22 @@ mod pool_tests {
             w: 256,
             h: 256,
         }
+    }
+    #[test]
+    fn v3_unmasked_adjustment_blends_are_refused() {
+        for blend in [
+            RenderBlend::Multiply,
+            RenderBlend::Screen,
+            RenderBlend::Overlay,
+        ] {
+            assert!(matches!(
+                v3_adjustment_blend(false, blend),
+                Err(RenderError::GpuUnsupported(_))
+            ));
+            assert!(v3_adjustment_blend(true, blend).is_ok());
+        }
+        assert!(v3_adjustment_blend(false, RenderBlend::Normal).is_ok());
+        assert!(v3_adjustment_blend(true, RenderBlend::Normal).is_ok());
     }
     /// Every input region and mask a v3 mask stage cannot place in integers is
     /// refused with `GpuUnsupported` (DQ3-4); equal regions need no integers.

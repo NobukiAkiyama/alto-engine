@@ -5250,7 +5250,8 @@ fn plain_scene_gaps_are_explicit() {
 
     // Color-adjust layer effects are integer M5, selection-limited ones too (mode
     // 22). Any other effect has no integer stage yet, with or without a selection.
-    // Adjustment-layer blends are mode 23.
+    // Blends of masked adjustment layers are mode 23. Without a mask a non-normal
+    // blend is refused until the stages upstream of mode 23 are integer.
     let color_adjust = REffect {
         kind: REffectKind::ColorAdjust {
             brightness: 0.2,
@@ -5282,7 +5283,11 @@ fn plain_scene_gaps_are_explicit() {
     let mut multiply = adjustment.clone();
     multiply.render_version = 3;
     multiply.nodes[0].blend = RenderBlend::Multiply;
+    assert_eq!(crate::renderer::v3_gap(&multiply), Some("adjustment"));
+    assert_eq!(gap(&multiply), Some("v3-unsupported"));
+    multiply.nodes[0].features.mask = mask.nodes[0].features.mask.clone();
     assert_eq!(crate::renderer::v3_gap(&multiply), None);
+    assert_eq!(gap(&multiply), Some("v3-m5-integer"));
     let mut invert = multiply.clone();
     invert.nodes[0].content = RContent::Adjustment(REffect {
         kind: REffectKind::Invert,

@@ -81,7 +81,7 @@ color-adjust のように f16 の中間（`q14_stored`）と `effects-resolve.wg
 この PR は、マスクのほかに v3 の範囲を二つ広げる。どちらも `effects-q14.wgsl` の整数のモードで描き、`v3_gap`（Rust）と `sceneGap`（JS）が受け入れる。
 
 - **モード 22。選択つきの color-adjust。** v2 のモード 5 にあたる。効果の `selection` を持つ color-adjust を、上の「モード 5」の式で描く。color-adjust 以外の効果の選択は、今までどおり拒否する。
-- **モード 23。normal 以外のブレンドの調整レイヤー。** v2 のモード 7 にあたる。マスクがなくても、ブレンドが normal でない color-adjust の調整レイヤーはこのモードで描く。式は上の「モード 7」である。
+- **モード 23。normal 以外のブレンドの調整レイヤー。** v2 のモード 7 にあたる。マスクがなくても、ブレンドが normal でない color-adjust の調整レイヤーはこのモードで描く。式は上の「モード 7」である。ただし、マスクなしは v3 では拒否する（float purge PR まで。上流のモード 18・17・19 と resolve に f32 が残るため、`v3_gap` / `sceneGap` は v3-unsupported、ホストは GpuUnsupported とし、float では描かない）。
 
 **v3 では、screen 以外のブレンドはすべて multiply で描く。** モード 23 の分岐は screen（2）と multiply の二つだけで、overlay、darken、lighten などのほかのモードも multiply の式を通る。これは v2 のモード 7 の意味をそのまま保ったもので、仕様として凍結する。v3 の調整レイヤーで、ブレンドモードごとの式を後から入れることはしない。入れるなら、新しい描画バージョンの変更として扱う。
 

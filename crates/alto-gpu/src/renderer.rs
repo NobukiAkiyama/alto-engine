@@ -637,8 +637,8 @@ pub(crate) fn mask_grid(
 /// Version 3 draws plain scenes with the integer tile compositor, and with the
 /// integer M5 stages: color-adjust (layer effects and adjustment layers, any
 /// opacity), pixel masks on layers and adjustment layers, selection-limited
-/// color-adjust, and adjustment-layer blends (v2 mode 7: screen, or multiply for
-/// every other non-normal mode). Everything else is refused before any command is
+/// color-adjust, and blends of masked adjustment layers (v2 mode 7: screen, or
+/// multiply for every other non-normal mode). Everything else is refused before any command is
 /// built, so no v3 tile is ever written through a float or unorm target. Every
 /// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
 /// mirrors this.
@@ -662,7 +662,11 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
             RContent::Text(_) => return Some("text"),
-            RContent::Adjustment(e) if !color_adjust(e) => {
+            // Without a pixel mask, a non-normal blend would reach mode 23 through
+            // stages that still take f32 coordinates; refused until they do not.
+            RContent::Adjustment(e)
+                if !color_adjust(e) || (f.mask.is_none() && n.blend != RenderBlend::Normal) =>
+            {
                 return Some("adjustment");
             }
             _ => {}

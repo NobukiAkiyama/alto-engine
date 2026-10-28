@@ -451,8 +451,8 @@ export async function runParityTests(engine, log) {
       });
     }
     // v3 pixel masks (doc/design/2026-10-28-v3-integer-mask.md), integer-exact:
-    // layer masks (mode 21), selection-limited color-adjust (mode 22) and masked or
-    // blended adjustment layers (mode 23), plus their cold level 1. The JS
+    // layer masks (mode 21), selection-limited color-adjust (mode 22) and masked
+    // adjustment layers (mode 23), plus their cold level 1. The JS
     // reference rebuilds the mask bytes with the `selection_ops` rectangle formula.
     {
       const IDENT = [1, 0, 0, 1, 0, 0];
@@ -525,15 +525,6 @@ export async function runParityTests(engine, log) {
           await masked(doc, id, feathered);
           return { layers: [{ image }, { adjust: vivid, opacity, mode, mask: featheredMask }] };
         }]),
-        ["v3-adjustment-screen-unmasked", async (doc) => {
-          const image = opaque();
-          await raster(doc, image);
-          await doc.transact("adjust", (tx) => {
-            const id = tx.addAdjustment({ type: "color_adjust", ...vivid });
-            tx.setProps(id, { opacity: 0.5, blend: "screen" });
-          });
-          return { layers: [{ image }, { adjust: vivid, opacity: 0.5, mode: 2 }] };
-        }],
         // An unlinked mask turned 0.3 rad: the Q16 lookup (`SAMPLE_INTEGER`).
         ["v3-mask-rotated", async (doc) => {
           const image = colorAdjustGradient();
@@ -581,6 +572,28 @@ export async function runParityTests(engine, log) {
           return formatMeasure(row);
         });
       }
+      // An unmasked non-normal adjustment blend would reach mode 23 through the
+      // f32 stages upstream of it; v3 refuses it, and no tile is drawn (DQ3-4).
+      await test("v3-adjustment-screen-unmasked is refused", async () => {
+        const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
+        assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
+        const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+        await raster(doc, opaque());
+        await doc.transact("adjust", (tx) => {
+          const id = tx.addAdjustment({ type: "color_adjust", ...vivid });
+          tx.setProps(id, { opacity: 0.5, blend: "screen" });
+        });
+        const renderPath = sceneGap(doc.getSnapshot());
+        assert(renderPath === "v3-unsupported", `scene gap ${renderPath}`);
+        let refused = false;
+        try {
+          await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+        } catch {
+          refused = true;
+        }
+        assert(refused, "unmasked screen adjustment layer was drawn");
+        return renderPath;
+      });
     }
     // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
     // hierarchy in many steps over several ticks, and still equals the warm pyramid.

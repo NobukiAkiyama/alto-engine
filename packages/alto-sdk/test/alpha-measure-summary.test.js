@@ -61,7 +61,7 @@ test("v3 classification is closed: color-adjust is integer M5, unspecified featu
   assert.equal(sceneGap(adjust), "v3-m5-integer");
   for (const [name, node] of [
     ["selected", { type: "raster", props: { effects: [{ type: "color_adjust", brightness: 0, contrast: 1, saturation: 1, selection: { tiles: {} } }] } }],
-    ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
+    ["masked-multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply", mask: {} } }],
     ["mask", { type: "raster", props: { mask: {} } }],
   ]) {
     const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
@@ -70,6 +70,9 @@ test("v3 classification is closed: color-adjust is integer M5, unspecified featu
   for (const [name, node] of [
     ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
     ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
+    // Unmasked non-normal adjustment blends stay refused until the v3 float purge.
+    ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
+    ["screen-adjust-disabled-mask", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "screen", mask: {}, mask_enabled: false } }],
     ["vector", { type: "vector", props: {} }],
     ["text", { type: "text", props: {} }],
     ["clip", { type: "raster", props: { clip_to_below: true } }],

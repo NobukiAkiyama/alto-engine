@@ -942,8 +942,8 @@ const isColorAdjust = (effect) => effect?.type === "color_adjust";
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
  * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
- * effects, with or without a selection, color-adjust adjustment layers with any
- * blend, and enabled pixel masks) and "v3-unsupported" (the host refuses the
+ * effects, with or without a selection, color-adjust adjustment layers (any
+ * blend with an enabled pixel mask, normal blend without), and enabled pixel masks) and "v3-unsupported" (the host refuses the
  * scene; no tile is drawn).
  */
 export function sceneGap(snapshot) {
@@ -953,7 +953,8 @@ export function sceneGap(snapshot) {
   for (const node of snapshot.nodes.values()) {
     const props = node.props || {};
     if (props.mask) found.add("mask");
-    if (props.mask && props.mask_enabled !== false) pixelMask = true;
+    const enabledMask = Boolean(props.mask && props.mask_enabled !== false);
+    if (enabledMask) pixelMask = true;
     if (props.vector_mask) found.add("vector mask");
     if (props.clip_path) found.add("clip path");
     if (props.clip_to_below) found.add("clip");
@@ -965,7 +966,9 @@ export function sceneGap(snapshot) {
     if (props.vector_mask || props.clip_path || props.clip_to_below ||
         node.type === "vector" || node.type === "text" ||
         (props.effects || []).some((effect) => !isColorAdjust(effect)) ||
-        (node.type === "adjustment" && !isColorAdjust(node.adjustment))) {
+        (node.type === "adjustment" && (!isColorAdjust(node.adjustment) ||
+          // Unmasked non-normal blends reach f32 stages upstream of mode 23.
+          (!enabledMask && (props.blend ?? "normal") !== "normal")))) {
       unsupported = true;
     }
   }
