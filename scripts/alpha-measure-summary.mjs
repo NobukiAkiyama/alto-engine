@@ -63,6 +63,17 @@ if (atlas) {
 }
 
 await mkdir(outDir, { recursive: true });
+if (report.tie8192?.length) {
+  const totals = { tiesReached: 0, gpuEqualsCpu: 0, gpuDiffersCpu: 0, unavailable: 0 };
+  for (const row of report.tie8192) for (const key of Object.keys(totals)) totals[key] += row[key];
+  const tie = { label: "measured-not-enforced", source: "resolve-input-q14", qSource: "cpu-replay-through-f16-store", byteSource: "gpu_tile-readback", cpuByteSource: "cpu-reference", channelOrder: "rgba (adjustOutput8192: rgb)", lossyScope: "input RGBA and adjust output RGB stores; steps 2/4/8", backend, totals, cases: report.tie8192 };
+  await writeFile(`${outDir}/tie-8192.json`, JSON.stringify(tie, null, 2) + "\n");
+  let tieMarkdown = `### Resolve unorm8 ties (${backendLabel})\n\nMeasured-not-enforced. Q14 is CPU-replayed through the adjustment output f16 store and resolve textureLoad; bytes are GPU tile readback and CPU reference. Tie: \`255*q mod 16384 == 8192\`. Old counts are RGB before the adjustment output f16 store. JSON includes every tie and the old-8192 resolve histogram.\n\nTotals (channels): ties reached **${totals.tiesReached}**, GPU == CPU **${totals.gpuEqualsCpu}**, GPU != CPU **${totals.gpuDiffersCpu}**, unavailable **${totals.unavailable}**.\n\n| case | resolve tie pixels | channels r,g,b,a | ties reached | GPU == CPU | GPU != CPU | old 8192 pixels / r,g,b |\n| --- | ---: | --- | ---: | ---: | ---: | --- |\n`;
+  for (const row of tie.cases) tieMarkdown += `| ${row.name} | ${row.resolveInput.pixels} | ${row.resolveInput.channels.join(",")} | ${row.tiesReached} | ${row.gpuEqualsCpu} | ${row.gpuDiffersCpu} | ${row.adjustOutput8192.pixels} / ${row.adjustOutput8192.channels.join(",")} |\n`;
+  await writeFile(`${outDir}/tie-8192.md`, tieMarkdown);
+  markdown += tieMarkdown;
+}
+
 if (atlas) await writeFile(`${outDir}/atlas-read.json`, JSON.stringify({ backend, ...atlas }, null, 2) + "\n");
 await writeFile(`${outDir}/alpha-measure.md`, markdown);
 await writeFile(`${outDir}/alpha-measure.json`, JSON.stringify({

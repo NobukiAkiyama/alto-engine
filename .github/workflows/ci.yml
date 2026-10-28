@@ -115,6 +115,9 @@ jobs:
           if [ -f "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" ]; then
             cat "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f "$RUNNER_TEMP/alto-alpha-measure/tie-8192.md" ]; then
+            cat "$RUNNER_TEMP/alto-alpha-measure/tie-8192.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f "$RUNNER_TEMP/alto-alpha-measure/atlas-read.md" ]; then
             cat "$RUNNER_TEMP/alto-alpha-measure/atlas-read.md" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -315,6 +318,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -f "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" ]; then
             cat "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RUNNER_TEMP/alto-gpu-parity/tie-8192.md" ]; then
+            cat "$RUNNER_TEMP/alto-gpu-parity/tie-8192.md" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f "$RUNNER_TEMP/alto-gpu-parity/atlas-read.md" ]; then
             cat "$RUNNER_TEMP/alto-gpu-parity/atlas-read.md" >> "$GITHUB_STEP_SUMMARY"
