@@ -239,7 +239,7 @@ vello と legacy の AA は異なる。境界の差を無条件のバグとも�
 
 P2 が必要性能を満たせば、P3 は採用しなくてよい。各段階を単独で切り戻せる形にし、既存の変更をまとめて巻き戻さない。
 
-コード変更時の必須確認は Rust / WASM の検査、ブラウザの機能・M5〜M8・SDK 回帰、実 GPU の性能比較。WASM を変更した段階では aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` を実行し、`wasm/SHA256SUMS` と build metadata を更新する。バイナリはコミットしない。
+コード変更時の必須確認は Rust / WASM の検査、ブラウザの機能・M5〜M8・SDK 回帰、実 GPU の性能比較。リリース時に一度 aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` を実行し、`wasm/SHA256SUMS` と build metadata を更新する。バイナリはコミットしない。
 
 ## 10. 根拠となる仕様・ソース
 

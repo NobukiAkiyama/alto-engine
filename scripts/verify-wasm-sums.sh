@@ -57,7 +57,7 @@ hint=0
 note_drift() {
   echo "built WASM does not match wasm/SHA256SUMS ($group)" >&2
   if [ "$hint" -eq 0 ]; then
-    echo "a source change has to update the recorded hash: sh scripts/update-wasm-sums.sh" >&2
+    echo "update release-binary hashes once at release: sh scripts/update-wasm-sums.sh" >&2
     echo "run that on aarch64-apple-darwin, the same host CI uses to rebuild these bytes" >&2
     hint=1
   fi

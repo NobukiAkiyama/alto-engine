@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -99,7 +100,7 @@ jobs:
           components: rustfmt, clippy
       # ~/.cargo registry and git, plus this job's native target/.
       # cache-bin is off: installed binaries are not part of that set.
-      # shared-key keeps this entry off the wasm job's registry-only cache.
+      # shared-key separates native and wasm build caches.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "true"
@@ -133,12 +134,10 @@ jobs:
 
   wasm:
     if: ${{ !inputs.gpu_lifecycle }}
-    # wasm/SHA256SUMS is the arm64 macOS release build. Rebuild and hash-check
-    # on that same host; other hosts do not reproduce those bytes.
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      # ALTO_WASM_TARGET_DIR is set in a step. `runner` is not available in job env.
+      ALTO_WASM_TARGET_DIR: target/wasm-fast
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
@@ -161,25 +160,12 @@ jobs:
           cache-dependency-path: |
             packages/alto-sdk/pnpm-lock.yaml
             examples/*/pnpm-lock.yaml
-      # ~/.cargo registry and git only. No target/ restore, and no ~/.cargo/bin.
-      # The hash-checked release build uses ALTO_WASM_TARGET_DIR under runner
-      # temp, which this action does not see and never saves.
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-targets: "false"
+          cache-targets: "true"
           cache-bin: "false"
-          shared-key: wasm-registry
-      - name: WASM cargo target is outside the cached native target
-        run: |
-          # runner.temp cannot be referenced from job-level env. Export it here
-          # so every later step, including the vector rebuild, uses this path.
-          # rust-cache does not know about it, and the directory starts empty.
-          echo "ALTO_WASM_TARGET_DIR=$RUNNER_TEMP/alto-wasm-target" >> "$GITHUB_ENV"
-          case "$RUNNER_TEMP/alto-wasm-target" in
-            "$RUNNER_TEMP"/*) ;;
-            *) echo "WASM target must live under RUNNER_TEMP" >&2; exit 1 ;;
-          esac
-          echo "uncached wasm target: $RUNNER_TEMP/alto-wasm-target"
+          shared-key: wasm-fast
+          workspaces: ". -> target/wasm-fast"
       - name: Install pinned Chrome for Testing
         shell: bash
         run: |
@@ -193,15 +179,7 @@ jobs:
           "$chrome_executable" --version
           echo "CHROME=$chrome_executable" >> "$GITHUB_ENV"
           echo "ALTO_BROWSER_EXPECTED_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
-      - name: Confirm release build host
-        run: |
-          test "$(uname -m)" = arm64
-          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
-      - run: sh scripts/check.sh wasm
-      - name: Release WASM was built outside target/
-        run: |
-          test -d "$ALTO_WASM_TARGET_DIR/wasm32-unknown-unknown/release"
-          test ! -e target/wasm32-unknown-unknown
+      - run: sh scripts/check.sh wasm-fast
       - name: Run browser correctness suites
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser
@@ -239,18 +217,72 @@ jobs:
           ALTO_VECTOR_FRAMES: '1'
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/vector
         run: |
-          sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed
+          sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed || true
           sh scripts/build-vector-comparison.sh
           node scripts/verify-browser.mjs --vector-optimization
-      - name: Vector WASM stayed outside target/
+      - name: Report proposed release-binary hashes and sizes
         if: ${{ !cancelled() }}
-        run: test ! -e target/wasm32-unknown-unknown
+        run: node scripts/report-wasm-hashes.mjs "$RUNNER_TEMP/wasm-hashes"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: wasm-hashes
+          path: ${{ runner.temp }}/wasm-hashes
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: alto-browser-reports
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
+
+  wasm-release-hashes:
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # Registry only: the release target is newly created under RUNNER_TEMP.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+          cache-bin: "false"
+          shared-key: wasm-registry
+      - name: Check clean arm64 macOS release hashes before slow tests
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+          ALTO_WASM_TARGET_DIR=$(mktemp -d "$RUNNER_TEMP/alto-wasm-release.XXXXXX")
+          export ALTO_WASM_TARGET_DIR
+          sh scripts/check.sh wasm-release
+      - name: Check clean main builds are reproducible
+        if: github.ref == 'refs/heads/main'
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+          for trial in 1 2; do
+            ALTO_WASM_TARGET_DIR=$(mktemp -d "$RUNNER_TEMP/alto-wasm-main.XXXXXX")
+            ALTO_WASM_HASH_REPORT_DIR="$RUNNER_TEMP/wasm-hashes-main-$trial"
+            export ALTO_WASM_TARGET_DIR ALTO_WASM_HASH_REPORT_DIR
+            sh scripts/check.sh wasm-report
+          done
+          status=0
+          for file in SHA256SUMS build-fields.json sizes.json; do
+            diff -u "$RUNNER_TEMP/wasm-hashes-main-1/$file" "$RUNNER_TEMP/wasm-hashes-main-2/$file" || status=1
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        with:
+          name: wasm-hashes-main
+          path: ${{ runner.temp }}/wasm-hashes-main-1
+          if-no-files-found: error
 
   gpu-parity:
     if: ${{ !inputs.gpu_lifecycle }}

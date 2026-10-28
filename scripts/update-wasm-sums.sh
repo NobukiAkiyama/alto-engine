@@ -1,12 +1,15 @@
 #!/bin/sh
 # Rebuild both WASM packages on aarch64-apple-darwin and rewrite wasm/SHA256SUMS
-# plus the hash fields in verification/build.json. CI does not run this.
+# plus the hash fields in verification/build.json, once before tagging.
+# Prefer a PR using the latest wasm-hashes-main artifact; see RELEASING.md.
+# Main checks two clean builds for reproducibility; tags check committed values.
+# CI does not run this script.
 set -eu
 cd "$(dirname "$0")/.."
 host=$(rustc -vV | sed -n 's/^host: //p')
 if [ "$host" != "aarch64-apple-darwin" ]; then
   echo "update-wasm-sums.sh must run on aarch64-apple-darwin (this host is ${host:-unknown})" >&2
-  echo "CI rebuilds the release package on that host and rejects any other bytes" >&2
+  echo "Tag CI rebuilds the release package on that host and rejects any other bytes" >&2
   exit 1
 fi
 rel=$(mktemp -d)
