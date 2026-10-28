@@ -49,8 +49,9 @@ v3 のテキストは、カバレッジを CPU の整数ラスタライザ一つ
 
 | 部分 | WGSL | Rust | JS |
 | --- | --- | --- | --- |
-| 字形の取り出しと整形 | — | 本番（native と wasm で同じコード） | 受け取るだけ（下の「JS の入力」） |
-| 配置、Q8 の量子化、分割、カバレッジ、バイト | — | 本番 `glyph_atlas.rs`（参照も兼ねる） | 参照（`cpu-composite.js`、新規） |
+| 字形の取り出しと整形 | — | 編集（`bake_text` が焼き込みを作る）。v3 の描画にはない | — |
+| 焼き込みの検証、node 変換の Q16 と合成、帯、`place_q` | — | 本番 | 参照（`cpu-composite.js`、新規） |
+| Q8 の点、分割、カバレッジ、バイト | — | 本番 `glyph_atlas.rs`（参照も兼ねる） | 参照（`cpu-composite.js`、新規） |
 | アトラスの読み、着色、重ね | 本番（新しい `glyph-q14.wgsl`） | 参照（`cpu_composite.rs`、テストのみ、新規） | 参照（同上） |
 
 ラスタ化の Rust は参照と本番が同じ関数である。参照として独立なのは JS である。WGSL がラスタ化を持たないことは、「各経路を三度実装する」の例外ではなく、その経路が GPU に存在しないということである。
@@ -59,10 +60,10 @@ v3 のテキストは、カバレッジを CPU の整数ラスタライザ一つ
 
 | 対象 | 対象外 |
 | --- | --- |
-| テキストノードのカバレッジ（全サイズ、横組・縦組・縦中横・回転・水平比率） | 整形そのもの（rustybuzz、改行、禁則）。整数のフォント単位と f64 の加減乗除で、native と wasm で同じコードである |
-| アトラスの鍵、追い出し、満杯時の扱い | テキストノードを親へ載せる合成。M5 の v3（#26 の「実装順」の (c)）と #24 のブレンドの範囲 |
-| 着色（文字色の Q14）と、ノード内の字形の重ね | 可変フォント、カラーフォント（COLR、sbix）。main にない（`set_variation` を呼ぶ箇所はない） |
-| ノードの Q14 中間（`rgba16uint`）への書き込み | テキストの選択範囲やキャレットの描画。UI であり、タイルに入らない |
+| 焼き込み（下の「焼き込み」）の形式、検証、字形の同一性 | 焼き込みを作る整形そのもの（rustybuzz、改行、禁則）の式。編集であり、結果のバイトが文書に入る |
+| テキストノードのカバレッジ（全サイズ、横組・縦組・縦中横・回転・水平比率） | テキストノードを親へ載せる合成。M5 の v3（#26 の「実装順」の (c)）と #24 のブレンドの範囲 |
+| アトラスの鍵、追い出し、満杯時の扱い | 可変フォント、カラーフォント（COLR、sbix）。main にない（`set_variation` を呼ぶ箇所はない） |
+| 着色（文字色の Q14）と、ノード内の字形の重ね、ノードの Q14 中間（`rgba16uint`）への書き込み | テキストの選択範囲やキャレットの描画。UI であり、タイルに入らない |
 
 ## main と #24・#26 から使うもの
 
@@ -70,76 +71,165 @@ v3 のテキストは、カバレッジを CPU の整数ラスタライザ一つ
 
 | 名前 | 場所 | ここでの役割 |
 | --- | --- | --- |
-| `div_q_i64` / `divQBig` | `cpu_composite.rs` / `cpu-composite.js` | 曲線の評価の除算（符号あり）。カバレッジの分割の除算（非負） |
+| `div_q_i64` / `divQBig` | `cpu_composite.rs` / `cpu-composite.js` | 行列の合成、点の Q8、曲線の評価、帯、位相の除算（符号あり）。カバレッジの分割の除算（非負） |
+| `round_half_away`、`quantize_q16` | `crates/alto-gpu/src/sample.rs` | 文書の f64 の node 変換を Q16 にする（下の「数の境」） |
 | `div_q`、`Wide`、`wide_mul_u32`、`wide_add` | `crates/alto-gpu/shaders/effects.wgsl` | 着色と source-over。`glyph-q14.wgsl` は別シェーダなので文を写す |
 | `unorm_byte` | `effects.wgsl`。Rust の計測側は `cpu_composite.rs` の `UNORM_BYTE_WGSL` | アトラスの `.r` をバイトに戻す |
 | `byte_q14` / `byteQ14` | `effects.wgsl`、`cpu_composite.rs`、`cpu-composite.js` | カバレッジのバイトを Q14 にする |
 | `div28`（#26） | #24 の 16384² 除算。`(n + 2^27) >> 28`、`n >= 0` | 着色の一回丸め |
 | `Gpu::atlas_read`、`atlas_read_shader`、`measureAtlasRead` | `cpu_composite.rs`、`tests/e2e/parity-tests.js` | アトラス読み取りの必須検査。ここで `R8Unorm` を足す |
 | `measureRow`、`formatMeasure` | `parity-tests.js` | measured-not-enforced の行 |
-| `multiply` | `renderer.rs`（`alto_core::Affine2::concat`、`crates/alto-core/src/lib.rs`） | 字形の行列。JS は同じ項の順で写す |
-| `max_scale`、`place`、`GlyphKey`、`GlyphAtlas` | `glyph_atlas.rs` | 帯の選択、アトラスの配置と鍵 |
+| `GlyphKey`、`GlyphAtlas`、`ATLAS_MAX_EM_PX`、`STEPS`、`PHASES`、`MAX_GLYPH_PX` | `glyph_atlas.rs` | アトラスの鍵と割り当て、帯の定数。v2 の `place` と `max_scale` は v3 で呼ばない（下の `place_q`） |
+| `ContentHash::of`（blake3） | `crates/alto-core/src/lib.rs` | フォントと焼き込みの同一性。フォントのアセットの `hash` は `put_blob`（`crates/alto-engine/src/lib.rs`）がこれで作る |
 | `RENDER_VERSION_EXACT` | `crates/alto-core/src/lib.rs` | `m5.rs` の `blend`、`stage`、`raw_node` と同じ分岐 |
 
 前提の PR は二つある。#24 の v3 composite の実装（ホストの Q14 量子化と WGSL の 16384² 除算）と、#26 の「実装順」の (c)（M5 の v3 の中間を `rgba16uint` にし、タイル出力を `div_q_i64(q * 255, 16384)` の `rgba8uint` にする）である。テキストはそれを共有し、別の版を書かない。
 
-## 何を整数にするか
+## 数の境
 
-境は **Q8 の頂点**である。そこから先は全部整数で、そこより前は f64 の加減乗除と、正しく丸められる演算だけである。
+v3 の契約は「描画の経路（文書のバイトからタイルのバイトまで）に浮動小数の演算を置かない」である。テキストでこれを守るため、描画と編集を分ける。
 
-| 段 | 型 | 一致の根拠 |
+- **描画（v3 の範囲）。** 入力は文書のバイトだけである。テキストノードの焼き込み（整数の輪郭、整数の配置、Q14 の色）、node 変換、タイルの鍵。浮動小数の**算術**は一つもない。文書が f64 で持つ node 変換は、正確な演算だけで整数に入る。`v * 65536` は 2 の冪の積で正確、`round_half_away` は正確な値の丸め、残りは有限性と大小の比較である（`quantize_q16` の文そのもの）。合成は整数で行う（下の「座標の系」）。`alto-text` の `layout`、`glyph_runs`、`OutlineCache`、`ttf_parser`、rustybuzz、unicode の各クレートは、v3 の描画から一度も呼ばない。
+- **編集（v3 の範囲外）。** 焼き込みは、テキストの編集操作が作るバイトである。作る過程は今の `layout`（f64）と `ttf_parser`（f32）を使ってよい。#26 のマスクの生成（`selection_ops` の f64、ブラシの GPU）と同じ扱いである。ピアは式ではなく、内容ハッシュを持つバイトを受け取る。同じ編集を二つのピアが別々に焼いても、文書に入るのは操作に載った一つの焼き込みだけである。
+
+したがって、整形と字形の取り出しの f32 / f64 は v3 の描画に残らない。v3 の描画の決定性は、焼き込みのバイトから始まる。焼き込みを作る側を整数の整形器に替えても、描画の式は変わらない（「未解決の問題」の 3）。
+
+禁止するもの。v3 の描画での f32 / f64 の算術（加減乗除、`sqrt`、`hypot`、libm）、`OutlineCache` と `TextRun` の読み、焼き込みが無いときの描画時の焼き直し、`textureSample`、MSAA、ハードウェアのブレンド。JS の参照は BigInt だけで、`Number` の算術は配列の添字と比較にしか使わない。
+
+| 段 | 型 | 根拠 |
 | --- | --- | --- |
-| フォント単位の座標 | f32 を f64 に広げたもの | `ttf_parser` が Rust の一つのソースで作る。JS は数値を受け取る（下の「JS の入力」） |
-| 配置行列、`multiply`、`/ scale` | f64 | 加減乗除だけ。Rust は `mul_add` を書かない限り融合しない。JS も融合しない。IEEE 754 で一意 |
-| `max_scale` | f64 | 加減乗と `sqrt`。`sqrt` は IEEE 754 が正しい丸めを要求し、Rust、wasm、JS の `Math.sqrt` で同じ |
-| 帯と端数の量子化（`place`） | f64 → i32 / u8 | `round`、`floor`、`ceil` だけ。丸めの規則は下で固定する |
-| 頂点の Q8 | f64 → i64 | 下の `q8`。2 の冪の積は正確 |
-| 曲線の分割数、分割点、セル積分、バイト | i64 | 整数 |
-| 文字色と着色、重ね | Q14 の u32 / i32、`Wide` | 整数 |
+| 焼き込みの輪郭 | フォント単位の Q6、i32 | 文書のバイト |
+| 焼き込みの配置 | 係数 Q24（node 画素／フォント単位）i32、平行移動 Q30（node 画素）i64 | 文書のバイト |
+| 文字色 | Q14 の u16 | 文書のバイト |
+| node 変換 | 文書の f64 → Q16 の i64（正確な演算だけ） | 上のとおり |
+| 行列の合成、帯、位相、点の Q8 | i128 の積、`div_q_i64` | 整数 |
+| 曲線の分割数、分割点、セル積分、バイト | i64 / u64 | 整数 |
+| 着色と重ね | Q14 の u32 / i32、`Wide` | 整数 |
 
-禁止するもの。f32 の `acc` と走行和、`hypot`、曲線の分割での `sqrt`、`exp` などの libm、`Math.round` を負の値に使うこと（JS の `Math.round` は負の結びを +∞ 側へ送り、Rust の `round` は 0 から遠い側へ送る）、テキストの v3 での `textureSample`、MSAA、ハードウェアのブレンド。
+## 焼き込み
 
-JS の丸めは `roundAway(x) = Math.sign(x) * Math.round(Math.abs(x))` とする（結果の `-0` は 0 として扱う）。`Math.round` は仕様で「最も近い整数、結びは +∞ 側」で、非負の値では Rust の `round` と一致する。`Math.floor(x + 0.5)` は使わない。`0.49999999999999994 + 0.5` が 1 に丸まるからである。
+v3 の文書のテキストノードは、`NodeKind::Text`（`crates/alto-doc/src/lib.rs`）に `bake: Option<ContentHash>` を持つ。`SetText` も同じ欄を持ち、内容と焼き込みを**一つの操作**で置く。v1 / v2 の文書では常に None で、直列化では欄ごと省く。v1 / v2 の文書の JSON と内容ハッシュは変わらない。`DocumentMeta::validate` は `render_version` が 3 未満の文書に `bake` があれば拒否する。
+
+焼き込みの本体はブロブで、ハッシュは `ContentHash::of(bytes)`、置き場はラスタのタイルと同じブロブの保管である。形式は次のとおり（すべてリトルエンディアン）。
+
+```text
+magic        "ALTB"            4 bytes
+version      u16 = 1
+baker        u16               焼いたビルドの BAKER_VERSION。描画は読まない（診断用）
+font_count   u32
+  font[i]    hash [u8; 32]     フォントのアセットの ContentHash（blake3）
+             face_index u32
+outline_count u32
+  outline[j] font u32          font の添字。0xFFFFFFFF はプレースホルダ
+             glyph u16         字形 ID（プレースホルダは 0）
+             upem u16          1..=16384
+             cmd_count u32     <= 4000（CHUNK）
+             cmd[k]            tag u8（0 Move、1 Line、2 Quad、3 Cubic、4 Close）+ i32 の座標を 2、2、4、6、0 個
+glyph_count  u32
+  glyph[g]   outline u32       outline の添字
+             m [i32; 4]        Q24。font units -> node 画素の [a, b, c, d]（列優先、Affine2 と同じ）
+             t [i64; 2]        Q30。node 画素
+             color [u16; 4]    Q14 のストレート RGBA
+```
+
+字形の並びは描く順（今の `layout.glyphs` の順）である。輪郭は `(font, glyph)` で重複を除き、最初に出た順に並べる。
+
+**描画時の検証。** 描画は焼き込みを読む前に、magic、version、各数の上限（`upem` が 1..=16384、`cmd_count <= 4000`、輪郭の座標が `|v| <= 2^22`、`t` が `|t| <= 2^60`、添字が範囲内、ブロブの末尾がちょうど尽きる）を検査する。一つでも外れたら、そのノードは透明に描き、診断に `TEXT_BAKE_INVALID` を出す。焼き込みが None の v3 のテキストノードも透明で、`TEXT_UNBAKED` を出す。どちらもどのピアでも同じ画素である。描画時に焼き直すことはしない。焼き直しは `render.upgrade`（`upgrade_render_version` / `upgradeRenderVersion`）と `SetText` の編集だけが行い、どちらも取り消せる一つの編集である。
+
+**焼き方（編集側、参考）。** エンジンの新しい `bake_text`（`crates/alto-engine/src/text.rs`）が、`layout` の結果から作る。
+
+- フォントは `font_set` と同じく `(hash, face_index)` で読む。輪郭は `ttf_parser::Face::outline_glyph` を自前の `OutlineBuilder` で受ける。`alto-text` の `OutlineCache` は使わない。あれは `(AssetId, u16)` を鍵にし、`key()` も同じ値を `DefaultHasher` で混ぜるだけで、フォントのバイトも `face_index` も含まない。
+- 座標は `q6(v) = round_half_away(v as f64 * 64)`、係数は `round_half_away(v * 2^24)`、平行移動は `round_half_away(v * 2^30)`、色は下の `text_color_q14` である。輪郭の上限（`CHUNK`）と配置の上限（`LIMIT`）は `placed`（`outline.rs`）と同じ判定を写す。
+- 焼き込みの鍵（同じ内容を二度焼かないためのキャッシュ）は `text_entry` の鍵に各フォントの `face_index` を足したものにする。今の `text_entry` はアセットの `hash` だけを足しており、同じバイトで `face_index` だけが変わると古いレイアウトを返す。v3 の焼き込みはその鍵を使わない。
+
+## 字形の同一性
+
+v3 の描画の入力は焼き込みのバイトだけなので、字形の同一性はそこで閉じる。
+
+- **フォント。** 焼き込みの `font[i]` が `(hash, face_index)` を持つ。`SetAsset` は同じ `AssetId` の記録を置き換えられる（`Op::SetAsset`、`alto-doc`）が、v3 の描画はアセットの表もフォントのバイトも読まないので、置き換えは焼き込みを変えない限り画素を変えない。v3 の文書で、焼き込みが参照するフォントのアセットを `SetAsset` が置き換えるとき、エンジンはその文書の該当するテキストノードの `SetText`（焼き直し）を**同じ取引**に入れる。焼き直さない古いクライアントの操作が来ても、全ピアは同じ古い焼き込みで描く。
+- **フォールバックの順。** スタイルの `fonts`（`TextStyle.fonts`、スパンの上書きを含む）の順が、焼いたときの順である。焼き込みには、実際に使われたフォントだけが `font[i]` として入る。
+- **輪郭と鍵。** アトラスの v3 の鍵は `GlyphKey` に足す `raster: u8`（v1 / v2 は 0、v3 は 1）と `outline_hash: [u8; 32]` である。`outline_hash` は `ContentHash::of` を、その輪郭の記録のバイト（`upem` から最後の `cmd` まで、`font` と `glyph` を除く）に掛けたものである。同じ形の輪郭は同じエントリを共有し、違う形は違うエントリになる。v3 では `outline: u64` は 0 にする。v1 / v2 の `GlyphKey` の値は `raster = 0`、`outline_hash = [0; 32]` で、今と同じ分かれ方をする。
+- **parity のフォント。** `tests/fonts/AltoTestLatin.ttf` は blake3 `cecfaa71790a6d0aa8744ddfdb3cb9fd6fbac9e2f8e0db476827710df1e0dbc3`（SHA-256 `47829824d7f0ddb6e79d20daa796651b80642643adf358dd73bcb5666f93e5f2`）、TrueType、face 0。`tests/fonts/AltoTestJP.otf` は blake3 `5e2213b3dfdcc9736b3bd951f51ec58935a3bde47bc4f9521838f042c0db8981`（SHA-256 `55d67c5374912f2cb5296e14ceae8c1d29f22df1ddccb0cf023b0be0f2ce71c9`）、CFF、face 0。parity は読み込んだアセットの `hash` がこの blake3 と等しいことを表明し、違えば失敗する。
+
+## 依存の版
+
+v3 の描画は `ttf_parser`、rustybuzz、unicode の各クレートを呼ばないので、版を上げても**既存の v3 文書の画素は変わらない**。版が変えるのは、新しい編集が作る焼き込みのバイトだけである。それは新しい内容ハッシュの新しい文書の状態で、ピアへはバイトとして届く。
+
+それでも焼き込みの再現性のために、版を固定する。
+
+- `crates/alto-text/Cargo.toml` の `rustybuzz = "0.20.1"` を `"=0.20.1"` にする。
+- 新しい検査 `text_bake_dependencies_are_pinned`（`alto-engine` のテスト）が `Cargo.lock` を読み、`rustybuzz 0.20.1`、`ttf-parser 0.25.1`、`unicode-bidi 0.3.18`、`unicode-linebreak 0.1.5`、`unicode-segmentation 1.13.3`、`unicode-script 0.5.8`、`unicode-ccc 0.4.0`、`unicode-properties 0.1.4` であることを確かめる。
+- 新しいフィクスチャ `tests/parity/text-bake.txt` に、parity の各テキストを焼いた焼き込みの blake3 を置く。native と wasm の両方で焼き、どちらもこの値に一致しなければ失敗する。依存の版を上げてこの値が変わる PR は、`BAKER_VERSION` を上げ、フィクスチャを更新し、その理由を書く。既存の v3 の描画のハッシュ（`cpu-reference.txt` の `text-v3-` の行）は、焼き込みのフィクスチャから描くので、その PR でも変わらない。
 
 ## 座標の系
 
-ホストは ROI の原点を整数の出力画素で持つ。`render_text` の `roi = [x, y, scale, w, h]` について、`ox = x / scale`、`oy = y / scale` が f64 でちょうど整数で、絶対値が 2^24 以下なら、v3 は**レベル全体の画素座標**で配置と量子化を行い、整数の `ox`、`oy` は窓の位置を決めるときだけ引く。こうすると、アトラスの鍵と Q8 の頂点が ROI に依らない。
+v3 のテキストは、M5 の f32 の `Roi` と f64 の `world` を使わない。ホストは同じ再帰（`compose_m5` → `node` → `raw_node`）の中で、整数の二つを並べて運ぶ。
 
-この条件は自動ではない。タイルの ROI は `compose_m5`（`m5.rs`）が `x: key.1 as f32 * 256.0 * scale` の f32 で作り、`TileKey` の `tx`、`ty` は i32 である（`crates/alto-core/src/lib.rs`）。`ox = tx * 256` なので、条件が成り立つのは `|tx|, |ty| <= 65536` のときである。その範囲では f32 の積も正確である。今の M5 が ROI を変える二つの関数は、整数の原点を保つ。`input_roi` はガウスぼかしの半径を `ceil` した整数の画素数だけ `Roi::expand` で広げ、`Roi::coarsen` は原点を新しい倍率の格子へ `floor` で揃える。
-
-条件が成り立たない ROI（`|tx|` か `|ty|` が 65536 を超えるタイル）では、今の `render_text` と同じ `(t[4] - x) / scale` を使う。式は同じで決定的だが、継ぎ目の一致は主張せず、parity にも入れない。
-
-v3 の配置行列は次である。`t = multiply(world, g.transform)`、`s = scale`。
+- **整数の ROI。** `RoiQ { level: i32, ox: i64, oy: i64, w: u32, h: u32 }`。タイルでは `TileKey` の i32 から `ox = tx * 256`、`oy = ty * 256` で、浮動小数を通らない。`input_roi` の `Roi::expand` は整数の画素数だけ広げるので、`ox -= r`、`w += 2r` と同じ整数で運ぶ。`Roi::coarsen` は倍率を変える。ガウスぼかしの `stack`（`m5.rs`、`desired.coarsen(radius / 64.0)`）がテキストを含む部分木をこの ROI で描くので、v3 は同じ写像を整数で持つ。新しいレベル `L'` は `max(L, k)` で、`k` は `2^k >= minimum` を満たす最小の整数である。`k` は f32 の `minimum`（文書の半径 / 64）を 2 の冪と大小比較するだけで決め、`log2` と `ceil` は呼ばない（比較は正確）。原点と大きさは `coarsen` の式の整数形で、文書画素の `X = ox * 2^L` から `ox' = floor_div(X, 2^L') - 1`、`w' = ceil_div((ox + w) * 2^L - ox' * 2^L', 2^L') + 1`（y も同じ）。ぼかし自体は v2 のままなので、その出力は enforce しない（「一致の期待」のテキストに効果を重ねた行）。テキストノードの Q14 は決定的である。
+- **整数の変換。** `WorldQ { m: [i64; 4], t: [i64; 2] }`。node 画素からレベルの出力画素への写像で、係数も平行移動も Q16 である。根は恒等 `[65536, 0, 0, 65536]`、`[0, 0]` で、レベル `L` の倍率 `2^L` は最後に掛ける（下）。各 node で、文書の f64 の node 変換 `n` を `quantize_q16`（`sample.rs`）で Q16 にし（係数が `|q| >= 2^31` か有限でなければ、その部分木のテキストは描かずに `TEXT_TRANSFORM_RANGE` を出す）、親と整数で合成する。
 
 ```text
-m = [t0 / s, t1 / s, t2 / s, t3 / s, t4 / s, t5 / s]     // レベル全体の出力画素
+child.m[a] = div_q_i64(p.m[0] * n.m[0] + p.m[2] * n.m[1], 2^16)    // a, b, c, d も Affine2::concat と同じ項
+child.t[x] = div_q_i64(p.m[0] * n.t[0] + p.m[2] * n.t[1], 2^16) + p.t[0]
 ```
+
+積は i128 で計算する。合成の結果の係数が `|m| >= 2^31` か、平行移動が `|t| >= 2^47`（2^31 画素）なら、同じく描かない。レベルの倍率は、テキストノードで一度だけ `m`、`t` の各成分を `L >= 0` なら `div_q_i64(v, 2^L)`、`L < 0` なら `v * 2^-L`（`L >= -16`）にする。ここまで浮動小数の算術はない。合成の丸めは段ごとに一回で、深さは `MAX_TREE_DEPTH` が抑える。
+
+**字形の写像。** 字形 `g` の焼き込みの配置 `P = (g.m, g.t)`（Q24 と Q30）と `W`（Q16）から、フォント単位をレベルの画素へ送る `C` を作る。
+
+```text
+C.m[a] = div_q_i64(W.m[0] * P.m[0] + W.m[2] * P.m[1], 2^16)        // Q24。レベル画素／フォント単位
+C.t[x] = div_q_i64(W.m[0] * P.t[0] + W.m[2] * P.t[1], 2^16) + W.t[0] * 2^14     // Q30。レベル画素
+```
+
+`b`、`c`、`d` と `y` も `Affine2::concat` と同じ項である。積は i128。`|C.m| >= 2^31` か `|C.t| >= 2^60` の字形は描かない。
 
 ## 帯の選び方
 
-`em_px = run.em * (max_scale([w0, w1, w2, w3]) / scale)` は今と同じ式、同じ順である。帯は字形ごとに、次の順で決まる。
+帯は字形ごとに、`C` と輪郭の `upem` だけで決まる。
 
-1. `m` の六つの値のどれかが有限でなければ、その字形は描かない。三実装で同じ判定である。
-2. `em_px` が有限で `em_px < ATLAS_MAX_EM_PX`、かつ `place(&g.outline, m)` が Some なら、**アトラス帯**。`use_atlas` には依らない。ビットマップは `p.raster`、大きさ `p.w × p.h`、置き場所はレベル座標の `p.dst` から `(ox, oy)` を引いたもの。
-3. それ以外はすべて**直接帯**。量子化しない `m` をそのまま使い、ROI の窓へ切り抜いてラスタ化する。帯の量子化（`STEPS`、`PHASES`）はしない。
+```text
+frob = C.m[0]^2 + C.m[1]^2 + C.m[2]^2 + C.m[3]^2            // u128
+atlas の条件: frob * upem^2 < 2 * 24^2 * 2^48
+```
 
-`place`（`glyph_atlas.rs`）が None を返す理由は、`upem` が有限でないか 0 以下、`m` が有限でない、丸めた帯の絶対値が 1e6 を超える、**量子化したあとの**線形部分の行列式が `1e-12` 未満、整数の原点の絶対値が 1e15 を超える、ビットマップの幅か高さが 1 未満か `MAX_GLYPH_PX` を超える、の六つである。v3 は理由を区別しない。どれも直接帯へ送る。行列式の判定は量子化した帯についてのもので、元の `m` が正則でも帯が退化することがある（たとえば `upem = 1000`、`m = [0.012, 0, 0, 0.00001, 0, 0]` の帯は `[48, 0, 0, 0]`）。直接帯は `upem` も行列式も使わないので、細い字形もそのまま描く。元の `m` が本当に退化していれば、頂点が一本の線に潰れ、下のセル積分が 0 の被覆を出す。特別な扱いは要らない。v2 の `fallback.push(g.to_path())` は v3 にない。
+これは「Frobenius ノルムを √2 で割った em の画素数が `ATLAS_MAX_EM_PX` 未満」である。回転と一様な倍率では v2 の `max_scale` と同じ値で、異方的な行列では最大と最小の特異値の間に来る。v3 は v2 の `max_scale`（f64 の `sqrt`）を呼ばず、この整数の判定を帯の定義にする。`run.em` も使わない。
 
-`use_atlas` が偽でも、アトラス帯の字形は同じ `p.raster` と同じ大きさでラスタ化し、キャッシュせずにスクラッチへ置く（下の「アトラスとスクラッチ」）。アトラスが満杯で `insert` が None のときも同じである。どちらも、アトラスに入った場合と同じバイトが同じ画素に載る。**キャッシュの状態と描画設定は画素を変えない。** これが v3 の不変条件である。
+1. 条件を満たし、下の `place_q` が Some なら**アトラス帯**。`use_atlas` には依らない。
+2. それ以外はすべて**直接帯**。`C` をそのまま使い、ROI の窓へ切り抜いてラスタ化する。帯の量子化（`STEPS`、`PHASES`）はしない。
 
-`place` の丸めは今の Rust の文のままで、JS は次のように写す。`band = roundAway(m[i] * upem * STEPS)`（帯は負になり得て、`-x.5` の結びがある）、`i = Math.floor(o)`、`p = Math.round((o - i) * PHASES)`（非負）、`p >= PHASES` なら `i += 1, p = 0`。上の六つの None の判定、角の min / max、`floor`、`ceil` と ±1 のパディングも同じ順である。`place` は f64 の `x0 as i64` で `dst` を作る。v3 ではこの `o` が上のレベル座標の `t4 / s` である。
+**`place_q`（新規、`glyph_atlas.rs`）。** v2 の `place` は f64 で、`o.floor()` のあとの非負の端数を `round` するので、負の位置の結びが 0 から遠い側へ行かない（`o = -0.125` で `i = -1`、`p = round(3.5) = 4` が繰り上がって `(0, 0)` になる。0 から遠い丸めなら `-0.25`）。v3 は `place` を呼ばず、整数の `place_q` を使う。`place` の文は変えない。
 
-アトラスの鍵 `GlyphKey` に `raster: u8` を足す。v1 / v2 は 0、v3 は 1 である。同じ字形の v2 と v3 のビットマップは違うので、同じアトラスに二つの文書が開いていても混ざらない。v2 の鍵の値は変わらず、画素も変わらない。
+```text
+band[i]  = div_q_i64(C.m[i] * upem * 4, 2^24)                       // 1/4 px/em の帯。符号あり、0 から遠い丸め
+q[k]     = div_q_i64(C.t[k], 2^28)                                  // 1/4 px の位置。符号あり、0 から遠い丸め
+origin[k] = q[k].div_euclid(4)
+phase[k]  = q[k].rem_euclid(4)                                      // 0..=3
+```
+
+`o = -0.125` は `q = div_q_i64(-2^27, 2^28) = -1` で、`origin = -1`、`phase = 3`（`-0.25`）である。`o = -0.375` は `-1.5` から `q = -2`、`origin = -1`、`phase = 2`。`o = 0.125` は `q = 1`、`(0, 1)`。帯が退化（`band[0] * band[3] - band[1] * band[2] == 0`、整数で正確）なら None。
+
+ビットマップの大きさは、焼き込みの輪郭の制御点の境界（Q6、整数）の四隅を帯で写して決める。点 `(X, Y)`（Q6）の、原点からの Q8 は
+
+```text
+bx = div_q_i64(band[0] * X + band[2] * Y, upem) + 64 * phase[0]
+by = div_q_i64(band[1] * X + band[3] * Y, upem) + 64 * phase[1]
+```
+
+である（`band / (4 upem)` 画素／フォント単位 × `X / 64` を Q8 にすると `band * X / upem`）。四隅の最小と最大から、`x0 = floor_div(min bx, 256) - 1`、`x1 = ceil_div(max bx, 256) + 1`（y も同じ）、`w = x1 - x0`、`h = y1 - y0`。`w` か `h` が 1 未満か `MAX_GLYPH_PX` を超えれば None。`dst = origin + (x0, y0)`（レベル画素）、ROI の中では `dst - (ox, oy)`。
+
+`place_q` が None なら直接帯である。v2 の `fallback.push(g.to_path())` は v3 にない。
+
+`use_atlas` が偽でも、アトラス帯の字形は同じ点と同じ大きさでラスタ化し、キャッシュせずにスクラッチへ置く（下の「アトラスとスクラッチ」）。アトラスが満杯で `insert` が None のときも同じである。どちらも、アトラスに入った場合と同じバイトが同じ画素に載る。**キャッシュの状態と描画設定は画素を変えない。** これが v3 の不変条件である。
 
 ## 頂点の Q8
 
-```text
-q8(v) = roundAway(v * 256)      // Rust は (v * 256.0).round() as i64
-```
+点は `Move`、`Line`、`Quad` の制御点と終点、`Cubic` の二つの制御点と終点で、焼き込みの Q6 の整数 `(X, Y)` である。Q8 の点 `G` は次のとおり。
 
-`v * 256` は 2 の冪の積で正確である。`|v * 256| >= 2^52` の点を持つ字形はラスタ化しない（どの実装でも描かない）。
+- アトラス帯。ビットマップの左上を原点として、上の `bx - 256 x0`、`by - 256 y0`。
+- 直接帯。レベル全体の画素で `G_x = div_q_i64(C.m[0] * X + C.m[2] * Y + C.t[0], 2^22)`、`G_y` も同じ（Q30 から Q8）。積は i128。
 
-点は `Move`、`Line`、`Quad` の制御点と終点、`Cubic` の二つの制御点と終点である。すべて、行列を掛けた直後に `q8` を通す。行列の掛け方は今の `rasterize` の `tf` と同じ `m0 * x + m2 * y + m4`、`m1 * x + m3 * y + m5` の順である。アトラス帯は `p.raster`（ビットマップの左上が原点）、直接帯は `m`（レベル全体の画素）を掛ける。この Q8 を `G` と呼ぶ。`G` は窓に依らない。
+どちらも浮動小数を通らず、窓に依らない。
 
 **字形の原点。** 一つの字形の全部の点について、
 
@@ -152,7 +242,7 @@ L = G - 256 * A                                            // 字形の座標。
 
 **前提の検査。** すべての点で `L_x <= 2^24` かつ `L_y <= 2^24`（字形の広がりが約 65536 画素以下）であること。満たさない字形は描かない。判定は字形だけで決まり、窓に依らないので、ある窓で描かれ別の窓で落ちる、ということは起きない。
 
-**窓。** 窓は、アトラス帯ではビットマップの `[0, p.w) × [0, p.h)`、直接帯では、字形の `bounds` の四隅を `m` で写した箱を外側へ整数に丸め、ROI の `[0, w) × [0, h)` と交わらせた矩形である。交わりが空なら描かない。窓の幅と高さを `ww`、`wh`、窓の左上を字形の画素座標で `(lx, ly)` とする。直接帯では `lx = wx + ox - A_x`（`wx` は ROI の中の窓の左端）、アトラス帯では `lx = -A_x` で、`ly` も同じである。どれも整数の画素なので、窓の境は字形の座標でも 256 の倍数である。
+**窓。** 窓は、アトラス帯ではビットマップの `[0, w) × [0, h)`、直接帯では、輪郭の境界の四隅を `C` で写した Q8 の箱を外側へ画素に丸め（`floor_div` と `ceil_div`）、ROI のレベル画素の `[ox, ox + w) × [oy, oy + h)` と交わらせた矩形である。交わりが空なら描かない。窓の幅と高さを `ww`、`wh`、窓の左上を字形の画素座標で `(lx, ly)` とする。直接帯では `lx = (窓の左端のレベル画素) - A_x`、アトラス帯では `lx = -A_x` で、`ly` も同じである。どれも整数の画素なので、窓の境は字形の座標でも 256 の倍数である。
 
 ## 曲線の分割
 
@@ -224,7 +314,7 @@ N  = S * 512 - area[cx, cy]          // 1 画素の完全な被覆が 131072
 
 `N / 131072` が、その画素の符号付きの被覆である。導出は、セル内の小片の右側の面積が `dy * (256 - (fa + fb) / 2) / 65536` 画素、左のセルの小片がこのセルへ `dy / 256` 画素ずつ寄与する、ということである。和に 131072 を掛けると上の式になる。
 
-**窓の独立性。** 点の Q8（`G`）、字形の原点 `A`、前提の検査、曲線の分割点、行と列の境での値は、どれも字形だけで決まり、窓に依らない。窓が変えるのは、どの境で分けるか、どこで切るかだけで、窓の左の小片は前置和へ同じだけ入り、右の小片は寄与しない。したがって直接帯の窓のバイトは、同じ字形を十分大きな窓でラスタ化した結果の切り出しと全バイト一致する。タイルの継ぎ目で字形が割れても、両側の画素は一枚で描いた場合と同じである（上の「座標の系」の条件のもとで）。
+**窓の独立性。** 点の Q8（`G`）、字形の原点 `A`、前提の検査、曲線の分割点、行と列の境での値は、どれも字形だけで決まり、窓に依らない。窓が変えるのは、どの境で分けるか、どこで切るかだけで、窓の左の小片は前置和へ同じだけ入り、右の小片は寄与しない。したがって直接帯の窓のバイトは、同じ字形を十分大きな窓でラスタ化した結果の切り出しと全バイト一致する。タイルの継ぎ目で字形が割れても、両側の画素は一枚で描いた場合と同じである。
 
 曲線の分割を窓の座標でしてはいけない。`div_q_i64` の丸めは 0 をまたぐ平行移動で変わる。二次の Q8 の点 `P0 = (255, 0)`、`C = (256, 15)`、`P1 = (255, 0)` は `D = 904` で `n = 2` になり、中点の x は `div_q_i64(1022, 4) = 256` である。窓を 1 画素右へずらすと x は `(-1, 0, -1)` で、中点は `div_q_i64(-2, 4) = -1`、戻すと 255 になる。字形の座標 `L` は 0 以上なので、分子はいつも非負で、この問題は起きない。
 
@@ -257,7 +347,7 @@ v2 の `glyph-atlas.wgsl` は、同じアトラスを f32 の `.r` で読み続�
 
 v3 はノードの中で字形を、インスタンスの順（`runs` の順、ラン内の `glyphs` の順。今の `instances` と同じ）に、透明な Q14 のアキュムレータへ #24 の normal で重ねる。整数のテクスチャはハードウェアでブレンドできないので、重ねは計算シェーダの中で行う。
 
-**文字色。** `style.color` は f32 のストレート RGBA である。ホスト（Rust と JS）は各チャネルを Q14 の `c_r, c_g, c_b, c_a`（0..=16384）にする。新しい関数 `text_color_q14`（Rust は `renderer.rs`、JS は `textColorQ14`）で、定義は実数の `floor(clamp(c, 0, 1) * 16384 + 1/2)` である（有限でない値は 0）。実装は、f32 を **先に f64 へ広げて**から `clamp`、16384 倍、0.5 の加算、`floor` を f64 で行う。`color_adjust_q14`（同ファイル）は積と和を f32 で行うので、使わない。f32 の和は丸めが入り、f64 の JS と一致しない（例：`c = (0.5 - 2^-25) / 16384` は f32 の和が 1 に丸まって 1、実数では 0）。f64 では、`x = c * 16384` は 2 の冪の積で正確で、`x + 0.5` も正確である（`x >= 2^-29` なら `x` の 24 ビットの仮数と 0.5 が 53 ビットに収まり、`x < 2^-29` なら和は 1 未満で床は 0）。したがって Rust と JS は同じ整数を得る。JS は `textGlyphs` から f32 の値をそのまま f64 で受け取るので、`Math.fround` は要らない。WGSL に f32 の色はない。
+**文字色。** 描画が読むのは焼き込みの `color`（Q14 のストレート RGBA、0..=16384）だけである。WGSL にも Rust と JS の描画にも f32 の色はない。焼くとき（編集側）は、`style.color` の f32 を新しい `text_color_q14`（`crates/alto-engine/src/text.rs`）で Q14 にする。定義は実数の `floor(clamp(c, 0, 1) * 16384 + 1/2)` で、有限でない値は 0 である。実装は f32 を先に f64 へ広げ、`clamp`、16384 倍、0.5 の加算、`floor` を f64 で行う。f64 では `c * 16384` は 2 の冪の積で正確で、`+ 0.5` も正確である（`x >= 2^-29` なら 24 ビットの仮数と 0.5 が 53 ビットに収まり、`x < 2^-29` なら和は 1 未満で床は 0）。したがって実数の定義と一致する。`color_adjust_q14`（`renderer.rs`）は積と和を f32 で行い、`c = (0.5 - 2^-25) / 16384` で 1 を返す（実数では 0）ので使わない。
 
 **一つの字形の画素。** `b` はカバレッジのバイト、`k = byte_q14(b)`。#26 のモード 4 と同じく、係数を Q28 の一つの整数にまとめる。
 
@@ -300,11 +390,11 @@ struct GlyphQ14 { dst: vec4<i32>, src: vec2<u32>, tex: u32, pad: u32, color: vec
 
 ## JS の入力
 
-JS は整形を持たない。rustybuzz、`ttf_parser`、改行、禁則を JS に書き直すのは、この経路の決定性の論点ではない（native と wasm が同じ Rust で作る）。JS が受け取るのは整形の結果である。
+JS の参照は、v3 の描画と同じく焼き込みのバイトから始まる。整形も字形の取り出しも持たない。それは描画の範囲ではないので（上の「数の境」）、JS の参照の独立性は描画の全体に及ぶ。
 
-wasm にテスト用の要求 `textGlyphs`（`#[wasm_bindgen(js_name=textGlyphsForTesting)]`、`packages/alto-sdk/src/worker.ts` の `readTileLevel` と同じ並びに case を足す）を足す。返すのは、テキストノードごとの `runs` の配列で、各ランの `em` と、各字形の `outline`（`key`、`upem`、`bounds`、`commands`）、`transform`、`color` である。数値は serde_json の f64 で、最短の往復表現なので、JS の `JSON.parse` で同じビットに戻る。`world` と ROI は JS が文書のスナップショットとタイルから作り、`multiply` を `Affine2::concat` と同じ項の順で書く。
+wasm にテスト用の要求 `textBake`（`#[wasm_bindgen(js_name=textBakeForTesting)]`、`packages/alto-sdk/src/worker.ts` の `readTileLevel` と同じ並びに case を足す）を足す。引数はノードの ID で、返すのはそのノードの焼き込みのブロブのバイト（`Uint8Array`）と、その `ContentHash` である。JS は blake3 を計算せず、受け取ったハッシュが文書のスナップショットの `bake` と等しいことだけを確かめる。
 
-その先、帯の選択、`place`、`q8`、分割、セル積分、バイト、着色、重ね、出力のバイトはすべて JS が独立に計算する。整数はすべて BigInt で、除算は `divQBig` である。
+その先、焼き込みの検証と読み、node 変換の Q16（文書のスナップショットの f64 に、`v * 65536`、`Math.sign(x) * Math.round(Math.abs(x))`、有限性と大小の比較だけを使い、すぐ BigInt にする。どれも正確な演算である）、`WorldQ` と `C` の合成、帯、`place_q`、Q8、分割、セル積分、バイト、着色、重ね、出力のバイトはすべて JS が独立に計算する。整数はすべて BigInt で、除算は `divQBig` である。
 
 ## ヒンティングと AA のリスク
 
@@ -312,21 +402,26 @@ wasm にテスト用の要求 `textGlyphs`（`#[wasm_bindgen(js_name=textGlyphsF
 
 - TrueType のバイトコード、オートヒンタ、FreeType、CoreText、DirectWrite、canvas の `fillText` を、タイルに入る画素の経路で使わない。ヒンティングの結果はインタプリタの版と実装で変わり、OS ごとに違う。ピアは文書のバイトから同じ画素を作れなくなる。
 - ステムダークニング、ガンマやコントラストの補正、LCD のサブピクセル AA を入れない。どれもカバレッジのバイトの後に表示の都合で入る非線形の変換で、タイルの内容ハッシュに入るべきではない。入れるなら表示（`present.wgsl`）の側で、タイルの外である。
-- フォントは文書のアセット（`FontSet`）だけである。システムフォントへのフォールバックはない。欠けた字形は `OutlineCache::outline` の固定のプレースホルダ（1000 単位の箱）で、どこでも同じである。
+- フォントは文書のアセット（`FontSet`）だけである。システムフォントへのフォールバックはない。字形の代わりは、今の `layout` で二種類あり、v3 はどちらも焼き込みにそのまま入れる。新しい振る舞いは足さない。
+  - **使えるフォントが一つもない**（スタイルの `fonts` のどれも読めない）とき。`Itemizer` の `faces` に何もなく、`layout.rs` は書記素ごとに `GlyphRef { font: None, glyph: 0 }` を置く。輪郭は `OutlineCache::outline` の固定のプレースホルダ（1000 単位の箱と穴）で、焼き込みでは `font = 0xFFFFFFFF`、`upem = 1000` の輪郭になる。
+  - **フォントはあるが、どれもその書記素を持たない**とき。`Itemizer::font_for` は `fonts` の順で最初に読めるフォントを返し、rustybuzz はそのフォントで整形して字形 0（`.notdef`）を出す。`layout` は `missing` に記録するだけで、字形はそのまま残る。描かれるのはそのフォントの `.notdef` の輪郭で、箱とは限らず、空のこともある。焼き込みにはその輪郭がそのまま入る。
+  どちらも焼き込みのバイトで決まるので、ピアによって変わらない。
 
 **AA。** v3 のアンチエイリアスは上のセル積分（面積被覆）だけで、ハードウェアの MSAA を使わない。理由は「前提」の 1 と「決定」の 3 である。整数の頂点を渡しても、サンプル位置（Vulkan の `standardSampleLocations` は必須でない）、ラスタライザの固定小数の精度（`subPixelPrecisionBits` は 4 以上なら何でもよい）、上と左の規則の実装、resolve の平均と丸めは、Metal、lavapipe、SwiftShader で揃う保証がない。
 
-**残るリスク。** 次の二つは、整数化の外にある。
-
-1. **整形と配置の f64。** 加減乗除だけで、Rust の一つのソースである。Rust がこれを融合しない（`mul_add` を書かない限り）ことと、wasm の f64 が IEEE 754 であることに依る。3 バックエンドが同じ v3 のハッシュに一致することが、この部分の native と wasm の一致の検査を兼ねる（Metal と lavapipe は native、SwiftShader は wasm）。
-2. **`ttf_parser` の CFF の解釈。** チャーストリングは f32 で解釈され、`ttf_parser` の版で結果が変わり得る。版を上げれば v3 の画素が変わる。`Cargo.lock` の版は、v3 のロック済みハッシュの一部とみなす（「未解決の問題」の 3）。
+**整数化の外に残るもの。** v3 の描画にはない。整形（rustybuzz）、字形の取り出し（`ttf_parser` の CFF の f32 を含む）、`layout` の f64 は、焼き込みを作る編集の中だけにある。版や算術の違いは新しい焼き込みのバイトを変え得るが、既存の文書の画素は変えない（上の「依存の版」）。
 
 ## 溢れの上限
 
-上限は解析で、標本ではない。前提は二つで、どちらもラスタ化の前に三実装が同じ判定で検査する。字形の座標の点は `0 <= L <= 2^24`（窓に依らない）。一つの字形の線分の数 `L` は、`placed` の `CHUNK`（4000 コマンド）と分割数の上限 64 から `L <= 4000 * 64 = 256_000` である（`Close`、`Move`、末尾の閉じる線は、それぞれ一つのコマンドが一本だけ出す）。
+上限は解析で、標本ではない。変換と配置の上限は、上の「座標の系」と「焼き込み」の検査が先に押さえる。`WorldQ` の係数 `|m| < 2^31`、平行移動 `|t| < 2^47`、焼き込みの係数は i32、平行移動 `|t| <= 2^60`、`C` の係数 `|C.m| < 2^31`、平行移動 `|C.t| < 2^60`、輪郭の座標 `|X|, |Y| <= 2^22`、`upem <= 16384 = 2^14` である。ラスタ化の前提は二つで、どちらもラスタ化の前に三実装が同じ判定で検査する。字形の座標の点は `0 <= L <= 2^24`（窓に依らない）。一つの字形の線分の数 `L` は、`placed` の `CHUNK`（4000 コマンド）と分割数の上限 64 から `L <= 4000 * 64 = 256_000` である（`Close`、`Move`、末尾の閉じる線は、それぞれ一つのコマンドが一本だけ出す）。
 
 | 項 | 上限 | 入る型 |
 | --- | --- | --- |
+| `WorldQ` と `C` の合成の積の和 | `2 * 2^31 * 2^31 = 2^63`（係数）、`2 * 2^31 * 2^60 = 2^92`（平行移動） | i128 |
+| `frob * upem^2` | `4 * 2^62 * 2^28 = 2^92` | u128 |
+| `place_q` の `C.m * upem * 4` | `2^31 * 2^14 * 4 = 2^47` | i64 |
+| `place_q` の `band * X`（アトラス帯は `band` が約 136 以下） | `2 * 2^8 * 2^22 = 2^31` | i64 |
+| 直接帯の `C.m * X + C.m * Y + C.t` | `2 * 2^31 * 2^22 + 2^60 < 2^61` | i128（i64 にも入る） |
 | 二階差分の成分 | 点が 0..=2^24 なので `|P0 - 2C + P1| <= 2 * 2^24 = 2^25` | i64 |
 | `D = ddx^2 + ddy^2` | `2 * 2^50 = 2^51` | u64 |
 | `K^2 * D`（三次、`K = 30`） | `900 * 2^51 = 2_026_619_832_316_723_200` | u64、i64（`2^63 - 1 = 9_223_372_036_854_775_807` 未満） |
@@ -355,6 +450,8 @@ wasm にテスト用の要求 `textGlyphs`（`#[wasm_bindgen(js_name=textGlyphsF
 - 行と列の分割の積を、同じ端点の直積で見る。
 - `L = 256_000` 本の線分を一つのセルに重ねる最悪の場合（同じ縦線を往復させる）を構成し、`area`、`S`、`N` が上限以下であること。
 - バイトの式を `N` の `{0, 1, 65535, 65536, 65537, 131071, 131072, 131073, 67_108_864_000}` とその符号反転で見る。65536 は 128、131072 以上は 255。
+- `WorldQ` と `C` の合成、`frob * upem^2`、`place_q`、直接帯の点を、上の各上限の端点（`{-(2^31 - 1), -1, 0, 1, 2^31 - 1}` と `{0, ±2^60}`、`upem ∈ {1, 1000, 2048, 16384}`）の直積で checked に計算する。i128 の結果が i64 に戻る箇所（`C`、`G`）は、上限の検査で None になる入力だけが i64 を超えること。
+- `place_q` の位相。`C.t` の `{-3 * 2^27, -2^27, -1, 0, 1, 2^27, 3 * 2^27}`（−0.375、−0.125、…、0.375 画素）で、`(origin, phase)` が `(-1, 2)`、`(-1, 3)`、`(0, 0)`、`(0, 0)`、`(0, 0)`、`(0, 1)`、`(0, 2)` になること。`-2^27` の結びは `-0.25` へ行き、v2 の `place` の `(0, 0)` と違うことを表明する。
 - 着色と重ねは `cpu_composite.rs` の `glyph_q14_does_not_overflow`（新規）。`b` の 256 通りすべて × `c_a ∈ E` × `c_rgb ∈ E` × `acc` の `rgb <= a` の `E` の組（55 組）で、`out_a <= 16384` と `out_rgb <= out_a` を表明する。`out_a > 16384` か `out_rgb > out_a` になったら失敗する。`E` は #24 の `{0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384}` である。
 
 単体テストはほかに四つ足す。
@@ -362,13 +459,15 @@ wasm にテスト用の要求 `textGlyphs`（`#[wasm_bindgen(js_name=textGlyphsF
 - `rasterizer_q8_matches_exact_area`。v2 の `rasterizer_matches_exact_area` と同じ正方形と円で、3/4 被覆の列が 191、内側が 255、円のインクが πr² の 1% 以内。
 - `rasterizer_q8_window_crop`。一つの字形を大きな窓で描いた結果と、それを 2×2 に割った四つの窓で描いた結果の切り出しが全バイト一致する。窓の境が字形の中を通る場合、曲線の分割点が境の上に乗る場合、窓の左端が字形の点の 1 画素右にある場合（「カバレッジ」の最後の段落の `P0 = (255, 0)`、`C = (256, 15)`、`P1 = (255, 0)`）、字形の広がりがちょうど `2^24` の場合（どの窓でも描かれる）と `2^24 + 1` の場合（どの窓でも描かれない）を含む。
 - `atlas_state_does_not_change_v3_pixels`。`GlyphAtlas::new` を小さくして満杯にし、追い出しと None を起こしても、`use_atlas` を偽にしても、ノードの Q14 が通常のアトラスの場合と全バイト一致する。
-- `glyph_key_separates_raster_versions`。同じ字形と行列で `raster` が 0 と 1 の鍵が別のエントリになる。
+- `glyph_key_separates_raster_versions`。同じ字形と行列で `raster` が 0 と 1 の鍵が別のエントリになり、v3 で形の違う輪郭（`outline_hash` が違う）が同じ `(AssetId, glyph)` から来ても別のエントリになる。
+- `text_bake_roundtrip_and_validation`（`alto-engine`）。焼き込みの直列化が往復し、上限を一つずつ外したブロブが `TEXT_BAKE_INVALID` になる。
+- `text_bake_ignores_asset_replacement`。焼いたあとで `SetAsset` が同じ `AssetId` に別のフォントを置いても、焼き直しの `SetText` がない限り v3 の画素が変わらない。エンジンが同じ取引で焼き直すことも見る。暖まったエンジンと開き直したエンジンで同じ画素になること。
 
 ## 一致の期待
 
-一致は全バイト一致である。バックエンドは #24 と同じ三つである。Metal は native ジョブ（`Apple Paravirtual device`、実機は未検証）、lavapipe は gpu-parity ジョブ、SwiftShader は wasm ジョブ（アダプタの architecture に `swiftshader`）。ブラウザは `tests/fixtures/render-v3-empty.alto` を開いて v3 の文書にし、そこへテキストを足す。
+一致は全バイト一致である。バックエンドは #24 と同じ三つである。Metal は native ジョブ（`Apple Paravirtual device`、実機は未検証）、lavapipe は gpu-parity ジョブ、SwiftShader は wasm-browser ジョブ（PR #30、main の `db6e471` で wasm から分かれた。アダプタの architecture に `swiftshader`）。ブラウザは `tests/fixtures/render-v3-empty.alto` を開いて v3 の文書にし、そこへテキストを足す。テキストの追加は焼き込みを作り、その blake3 は `tests/parity/text-bake.txt` と一致しなければならない（上の「依存の版」）。
 
-一致を期待する理由は一つである。カバレッジのバイトは Rust の一つのソースの整数で、GPU が受け取る前に決まる。GPU は `unorm_byte` のあと整数の加減乗と非負の除算だけを行い、上の表で溢れがないことを示した。残る f64 はホストの加減乗除と `sqrt`、`floor`、`ceil`、規則を固定した `round` で、IEEE 754 で一意である。
+一致を期待する理由は一つである。描画の入力は焼き込みのバイトと文書の node 変換だけで、node 変換は正確な演算で Q16 に入る。その先は CPU も GPU も整数で、GPU は `unorm_byte` のあと整数の加減乗と非負の除算だけを行い、上の表で溢れがないことを示した。描画に浮動小数の算術はない。
 
 | ケース | 中身 | WGSL = Rust = JS | Metal | lavapipe | SwiftShader | 扱い |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -380,15 +479,17 @@ wasm にテスト用の要求 `textGlyphs`（`#[wasm_bindgen(js_name=textGlyphsF
 | アトラスを切る | 小さい文字のケースを `setGlyphAtlas(false)` で | 一致（アトラスありと同じバイト） | 一致 | 一致 | 一致 | enforce |
 | タイルの継ぎ目 | 72px の字形を `(250, 250)` に置き、タイル (0,0)、(1,0)、(0,1)、(1,1) | 一致 | 一致 | 一致 | 一致 | enforce。Rust は `rasterizer_q8_window_crop` でも見る |
 | テキストにマスクや効果 | マスク、ぼかし、調整レイヤー | 期待しない | — | — | — | 各経路の v3 が入るまで measured-not-enforced |
-| 原点の条件を外れる ROI | `|tx|` か `|ty|` が 65536 を超えるタイル | 決定的だが継ぎ目は主張しない | — | — | — | parity に入れない |
+| `.notdef` | `AltoTestLatin.ttf` だけで "Aあ"。"あ" はそのフォントの字形 0 | 一致 | 一致 | 一致 | 一致 | enforce。`text-v3-notdef` |
+| フォントなし | スタイルの `fonts` が空で "Ag"。プレースホルダの箱 | 一致 | 一致 | 一致 | 一致 | enforce。`text-v3-nofont` |
+| 負の位相の結び | 12px の "A" を原点 `(-0.125, 80)` の node 変換で、タイル (-1, 0) と (0, 0) | 一致 | 一致 | 一致 | 一致 | enforce。`text-v3-negative-phase` |
 | v2 の `text` | `createDocument` のまま | — | — | — | — | xfail のまま |
 | v2 の `text` の計測 | 同じ "Ag" を v2 で、3 バックエンドの差の画素数 | — | 計測 | 計測 | 計測 | measured-not-enforced |
 
-Rust の参照は、`TextRun` を `RContent::Text` としてシーンに直接置ける（`plain_scene_gaps_are_explicit` が `RContent::Text(Arc::new(Vec::new()))` を置くのと同じ組み方）。字形は `alto-engine` の `text_entry`（`crates/alto-engine/src/text.rs`）と同じく `glyph_runs` で作る。JS は上の `textGlyphs` を使う。
+Rust の参照は、焼き込みのブロブと node 変換だけから描く。`TextRun` も `layout` も読まない。シーンの組み方は `plain_scene_gaps_are_explicit` が `RContent::Text(Arc::new(Vec::new()))` を置くのと同じで、v3 では `RContent::Text` に焼き込みのハッシュが付く。焼き込みのバイトは `tests/parity/text-bake.txt` が固定したものである。JS は上の `textBake` を使う。
 
 テキストの新しいケースはレベル 0 だけにする。これはこの文書の制限で、parity 全体の性質ではない（`parityCases` にはレベル 1 の `level1-centers` があり、`readTileLevel` で読む）。レベルが違うと `em_px` が変わり、帯が切り替わる。レベル 1 と負のレベルのテキストのケースは、レベル 0 が固定されてから足す（「未解決の問題」の 10）。
 
-ケースの名前は `text-v3-` で始める（`text-v3-ag`、`text-v3-small`、`text-v3-vertical`、`text-v3-overlap`、`text-v3-rotated`、`text-v3-atlas-off`、`text-v3-seam`）。
+ケースの名前は `text-v3-` で始める（`text-v3-ag`、`text-v3-small`、`text-v3-vertical`、`text-v3-overlap`、`text-v3-rotated`、`text-v3-atlas-off`、`text-v3-seam`、`text-v3-notdef`、`text-v3-nofont`、`text-v3-negative-phase`）。
 
 ## enforce と measure
 
@@ -398,37 +499,39 @@ measure するのは、v2 の `text` と、テキストに v3 がまだない経
 
 ## v1 / v2 を動かさない
 
-- `glyph-atlas.wgsl`、`vector.wgsl`、`vector-paint.wgsl`、`rasterize`、`accumulate`、`place` の文は一文字も変えない。v3 は `rasterize_q8`（新規）と `glyph-q14.wgsl`（新規）を使う。`place` は v3 でもそのまま呼ぶ（入力の `m` がレベル座標になるだけである）。
-- `GlyphKey` の `raster` は v1 / v2 で 0 である。鍵の型が変わるだけで、v2 のビットマップの中身と置き場所の規則は変わらない。
+- `glyph-atlas.wgsl`、`vector.wgsl`、`vector-paint.wgsl`、`rasterize`、`accumulate`、`place` の文は一文字も変えない。v3 は `place_q`、`rasterize_q8`、`glyph-q14.wgsl`（いずれも新規）を使い、`place` と `max_scale` を呼ばない。
+- `NodeKind::Text` と `SetText` の `bake` は v1 / v2 で常に None で、直列化では省く。v1 / v2 の文書の JSON、内容ハッシュ、レイアウトのキャッシュは変わらない。v1 / v2 は今の `text_entry` と `OutlineCache` と `render_text` で描く。
+- `GlyphKey` の `raster` と `outline_hash` は v1 / v2 で 0 である。鍵の型が変わるだけで、v2 のビットマップの中身と置き場所の規則は変わらない。
 - ホストの分岐は `self.scene.render_version >= alto_core::RENDER_VERSION_EXACT` である。`render_text` は v2 の経路として残し、v3 は `raw_node` の `RContent::Text` から新しい `text_q14`（`m5.rs`）を呼ぶ。
 - v2 の「アトラスが満杯ならベクター経路」と `setGlyphAtlas` の効果は v2 に残す。v2 はこの既知の非決定性を持ったまま凍結する。既存文書の対処は `render.upgrade` である。
 - `tests/parity/render-v1.txt` と `tests/parity/cpu-reference.txt` の既存行は一文字も変えない。v3 の行を足すだけである。ただし今の `existing_v1_and_v2_hashes_are_unchanged`（`cpu_composite.rs`）は、`cpu-reference-v2-before-alpha.txt` より後の行に `-alpha-measure ` を含むことを要求し、`render-v1.txt` 全体が `render-v1-before-alpha.txt` と等しいことを要求する。`text-v3-` の行はそのままでは落ちる。実装順の 6 で、後ろに足せる行を「`-alpha-measure ` を含む、または名前が `text-v3-` で始まる」に広げる。前置の一致と v1 の全体の一致の検査は残す。v2 のテキストにはロック済みのハッシュがない（xfail）が、出荷済みの v2 の文書の画素は、文を変えないことで守る。
 - `plain_scene` と `gap` は変えない。テキストは v3 でも合成パスに乗らない。
 - ゲートは今のまま使う。Rust は `allow_unstable_render_v3`（`crates/alto-engine/src/unstable_render.rs`）で、デバッグビルド（`cfg!(debug_assertions)`）、コンパイル時の許可（このクレートのテストかフィーチャ `unstable-render-v3`）、実行時の要求の三つがすべて要る。リリースの成果物はフィーチャがあっても拒否する。JS は `renderVersionUpgrade`（`packages/alto-sdk/src/render-version.ts`）で、`{ unstableRenderV3: true }` を渡しても、ビルドの許可 `buildEnabled`（既定は出荷定数 `UNSTABLE_RENDER_V3` で false）がなければ `rejected` になる。オプションだけでは v3 にならない。
-- alto-text は変えない。整形、配置、字形の取り出しは全バージョンで共通である。
+- alto-text のコードは変えない。変えるのは `Cargo.toml` の `rustybuzz` の版の固定（`"0.20.1"` から `"=0.20.1"`、`Cargo.lock` は同じ）だけで、v1 / v2 の画素は変わらない。焼き込みは `alto-engine` が `layout` の結果から作る。
 - シェーダが変わるのでリリース WASM のバイナリのハッシュとサイズは動く。PR #29（main の `ffdc1bf`）以降、`wasm/SHA256SUMS` と `verification/build.json` は各 PR では更新しない。`RELEASING.md` のとおり、タグの前に main の `wasm-hashes-main` から一度だけ更新し、main ではずれは報告だけである。描画のハッシュとは独立である。
 
 ## 実装順
 
 前提は #26 の「実装順」の (b)（v3 composite）と (c)（M5 の Q14 中間）である。(a) の measure-only は PR #28（main の `feb1d67`）で入った。テキストはそれに依らない。テキストはマスク (d) と独立で、(c) のあとならどちらが先でもよい。各項目は main から切った一つの PR である。
 
-1. **ラスタ化の核。** `glyph_atlas.rs` に `q8`、分割数の判定、`flatten_q8`、`rasterize_q8`（窓とオフセットを受ける）を足す。単体テスト `rasterizer_q8_matches_exact_area`、`rasterizer_q8_window_crop`、`text_q8_raster_does_not_overflow`。どこからも呼ばないので、画素は変わらない。
+0. **焼き込み。** `alto-doc` の `NodeKind::Text` と `SetText` に `bake`、`validate` の検査。`alto-engine` の `bake_text`、`text_color_q14`、焼き込みの形式、`SetAsset` での同じ取引の焼き直し、`render.upgrade` での焼き込み。`rustybuzz` の `=0.20.1`、`text_bake_dependencies_are_pinned`、`text_bake_roundtrip_and_validation`、`text_bake_ignores_asset_replacement`、`tests/parity/text-bake.txt`。描画は変えないので、画素は変わらない。
+1. **ラスタ化の核。** `glyph_atlas.rs` に `place_q`、字形の原点、分割数の判定、`flatten_q8`、`rasterize_q8`（窓を受ける）を足す。単体テスト `rasterizer_q8_matches_exact_area`、`rasterizer_q8_window_crop`、`text_q8_raster_does_not_overflow`。どこからも呼ばないので、画素は変わらない。
 2. **アトラスの鍵と `R8Unorm` の読み取り検査。** `GlyphKey` に `raster` を足し、`glyph_key_separates_raster_versions`。`Gpu::atlas_read` と `measureAtlasRead` に `R8Unorm` の 256 値を足し、必須にする。v2 の画素は変わらない。
-3. **Rust の参照。** `cpu_composite.rs` に `text_q14` と `glyph_q14_does_not_overflow`。帯の選択、レベル座標の `m`、アトラス帯と直接帯、着色と重ねを、本番の `rasterize_q8` の上に書く。
-4. **WGSL とホスト。** `glyph-q14.wgsl`、`GlyphQ14` のインスタンス、スクラッチの `R8Unorm`、チャンクのディスパッチ、`m5.rs` の `text_q14` と分岐。`glyph_q14_uses_effects_helpers` と `atlas_state_does_not_change_v3_pixels`。native の 2 バックエンドで、上の enforce のケースを Rust の参照と比べる。
-5. **JS の参照。** wasm の `textGlyphsForTesting`、worker の `textGlyphs`、`cpu-composite.js` の `rasterizeQ8` と `renderTextV3`（BigInt、`divQBig`、`roundAway`）。
-6. **固定。** enforce のケースを 3 バックエンドで流し、一致を記録してから v3 のハッシュとして `cpu-reference.txt` に `text-v3-` の行を足す。同じ PR で `existing_v1_and_v2_hashes_are_unchanged` の追記の規則を広げる（上の「v1 / v2 を動かさない」）。ハッシュの行が要るのは、各ジョブの CPU 参照との比較だけでは native と wasm の整形の一致が見えないからである。Metal と lavapipe は native の整形を、SwiftShader と JS は wasm の整形を使う。
+3. **Rust の参照。** `cpu_composite.rs` に `text_q14` と `glyph_q14_does_not_overflow`。焼き込みの読み、`WorldQ` と `C`、帯の選択、アトラス帯と直接帯、着色と重ねを、本番の `place_q` と `rasterize_q8` の上に書く。
+4. **WGSL とホスト。** `glyph-q14.wgsl`、`GlyphQ14` のインスタンス、スクラッチの `R8Unorm`、チャンクのディスパッチ、`m5.rs` の `RoiQ` と `WorldQ` の受け渡し、`text_q14` と分岐。`glyph_q14_uses_effects_helpers` と `atlas_state_does_not_change_v3_pixels`。native の 2 バックエンドで、上の enforce のケースを Rust の参照と比べる。
+5. **JS の参照。** wasm の `textBakeForTesting`、worker の `textBake`、`cpu-composite.js` の焼き込みの読み、`placeQ`、`rasterizeQ8`、`renderTextV3`（BigInt、`divQBig`）。
+6. **固定。** enforce のケースを 3 バックエンドで流し、一致を記録してから v3 のハッシュとして `cpu-reference.txt` に `text-v3-` の行を足す。同じ PR で `existing_v1_and_v2_hashes_are_unchanged` の追記の規則を広げる（上の「v1 / v2 を動かさない」）。各ジョブは CPU 参照との比較に加え、焼き込みの blake3（`text-bake.txt`）と描画のハッシュ（`cpu-reference.txt`）の両方に一致しなければならない。Metal と lavapipe は native で、SwiftShader は wasm で焼くので、焼き込みの native と wasm の一致もここで見る。
 7. **measure の行。** v2 の `text` の計測と、マスクや効果を重ねたケース。
 
 ## 未解決の問題
 
 1. **アトラス帯の量子化の画質。** アトラス帯は今と同じく、行列の四つの係数を 1/4 px/em の帯に、原点を 1/4 px の位相に量子化する。決定性には関係しないが、直接帯との境（`em_px = 24`）で字形が跳ぶ。跳びに一律の上限はない。位相の誤差は軸ごとに 1/8 px 以下だが、係数の誤差は係数ごとに `1 / (8 upem)` px／フォント単位で、点のフォント単位の座標 `(x, y)` に比例する。一つの軸で `(|x| + |y|) / (8 upem) + 1/8` px まで足し合わさり、`x = upem` の点は係数 a だけで 1/8 px 近く、位相とで 1/4 px 近く動く。字形の大きさで変わる。境で跳ばないように帯をやめ、全字形を直接帯にするか（アトラスの再利用を捨てる）は決めていない。
 2. **直接帯の CPU の費用。** 72px 以上の大きな字形は、タイルごと、レベルごとに CPU でラスタ化し直す。タイルのキャッシュが内容ハッシュで再利用するが、ズーム中の初回の描画は遅くなり得る。窓をまたいだ字形のキャッシュ（窓の独立性があるので、字形ごとの大きなビットマップを切り出してよい）を足すかは、計測してから決める。
-3. **`ttf_parser` と rustybuzz の版。** CFF の f32 の解釈と整形の結果は、依存の版で変わり得る。版を上げると v3 のハッシュが変わる。版の更新を「描画バージョンを上げる変更」として扱うか、字形の Q8 の輪郭を文書に焼くか（マスクのように、ピアが式ではなくバイトを受け取る）は決めていない。
+3. **整数の整形器。** 決定済みの部分：v3 の描画は焼き込みのバイトだけを読み、整形器の版に依らない（「数の境」「依存の版」）。開いている部分：焼き込みを作る側も整数の整形と配置（rustybuzz の整数の位置、Q24 の配置）に替え、同じ編集を二つのピアが別々に焼いても同じバイトにするかは決めていない。替えても描画の式と既存文書の画素は変わらない。
 4. **ヒンティングを将来入れるか。** 小さい文字の画質のために、整数で決定的なヒンティング（たとえば y 方向だけの整数スナップ）を v4 で入れる余地はある。v3 には入れない。
 5. **可変フォント。** main にない。入れるなら、F2Dot14 の差分の補間を整数で行い、Q8 の前の f32 を作らない規則が要る。
 6. **巨大な字形。** 広がりが約 65536 画素を超える字形（字形の座標で `2^24` を超える点を持つもの）は v3 で描かない。判定は字形だけで決まり、窓に依らない。極端なズームで実際に現れるかは調べていない。現れるなら、点の上限を i128 で広げるか、直線の切り詰めを先に行う。
-7. **ブラウザの入力の重複。** `textGlyphs` はテストのための wasm の出口である。JS の参照が整形を持たないので、整形の native と wasm の一致は 3 バックエンドのハッシュの一致だけが間接に見る。整形の結果（字形 ID と行列）のハッシュを native と wasm で直接比べる検査を足すかは決めていない。
+7. **焼き込みの大きさ。** 焼き込みは字形の輪郭を文書へ複製する。長い文章では、フォントのバイトより大きくなり得る。輪郭を `(font hash, face_index, glyph)` ごとの別ブロブに分けて共有するかは、実装 PR で大きさを計測してから決める。形式の `version` を上げれば足せる。
 8. **チャンクと binning。** `GLYPH_Q14_CHUNK` の 1024 と、画素ごとに全インスタンスを見るループは、文字の多いタイルで遅い。16×16 のビンに分けても順を保てば結果は変わらないが、いつ入れるかは計測してから決める。
 9. **古いメモの指し先。** [正確な CPU 参照](2026-10-27-exact-cpu-references.md) の「text」節は、この文書で置き換えた。あの節からこの文書への指し先は、実装 PR で足す。この変更は文書を一つ足すだけで、既存の文書は触らない。
-10. **レベル 0 以外のケース。** テキストの新しい parity はレベル 0 だけである。帯の切り替わり（`em_px` が 24 をまたぐ）をレベル 1 と負のレベルで固定するケースを、いつ足すかは決めていない。
+10. **レベル 0 以外のケース。** テキストの新しい parity はレベル 0 だけである。帯の切り替わり（`frob * upem^2` の条件がレベルで変わる）をレベル 1 と負のレベルで固定するケースを、いつ足すかは決めていない。
