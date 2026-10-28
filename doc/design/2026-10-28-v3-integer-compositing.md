@@ -38,6 +38,8 @@ color-adjust のストレート化は `effects.wgsl` の `(u32(q) << 14u) / u32(
 
 color-adjust は、段のあいだを f16 で書き、最後を unorm の偶数丸めで解決する。その解決は color-adjust の範囲であり、この合成はそれを入力の float テクスチャとして読まない。両方が入ったあとの受け渡しは、Q14 の整数か `rgba8uint` のバイトである。モード 19 が「背面が正確な 0 で normal のとき f16 をコピーする」のは color-adjust の記述のまま残す。合成経路が整数になったとき、空の背面への normal は Q14 のコピーになる。color-adjust の式はここで再定義しない。
 
+v3 で整数合成するのは、エフェクトのないシーンだけである。レイヤーエフェクト（color-adjust を含む）またはラスタ／ベクターのマスクを含むシーンは、(c) まで M5 の float 経路のままである。parity ではそのシーンを `v3-m5-float` と表示し、整数一致の数に入れない。
+
 v3 を既定の新規文書にはしない。main の不安定ゲートを維持する。Rust はデバッグビルドで、このクレートのテストかフィーチャ `unstable-render-v3` があるときだけ 3 への更新を受ける。JS は `{ unstableRenderV3: true }` で、出荷定数 `UNSTABLE_RENDER_V3` は false である。既定の新規文書はバージョン 2 のままである。`DocumentMeta::validate` が受ける `render_version` は 1、2、3 だけ、という main の制約も維持する。
 
 ## 値の置き場
@@ -49,6 +51,14 @@ v3 を既定の新規文書にはしない。main の不安定ゲートを維持
 v2 の出力バインディング `texture_storage_2d_array<rgba8unorm, write>` は v2 のシェーダに残す。v3 のシェーダは別で、出力は `rgba8uint` かパック u32 である。読み戻しもその整数を読む。unorm としてサンプルしない。
 
 タイル出力はプレマルチプライである。`div_q_i64(q * 255, 16384)` の `q` はプレマルチプライ Q14 アキュムレータのそのチャネル（RGB もアルファも同じ）で、0..=255 に切ったバイトを `rgba8uint` に書く。ストレート化してからバイトにはしない。この順だけを Rust、WGSL、JS が使う。
+
+## ピラミッド
+
+レベル 1 以上のダウンサンプルも整数である。子レベルの 2×2 の 4 バイトを、チャネルごと（RGB もアルファも）に整数で合計し、`(sum + 2) / 4` とする。合計は非負なので、これは `div_q(sum, 4)` と同じで、結びは 0 から遠い側へ行く。各チャネルに同じ単調な式を使うので、プレマルチプライの `rgb <= a` は保たれる。結果は `rgba8uint` かパック u32 に書く。unorm には書かない。
+
+v2 の `downsample.wgsl` は変えない。v3 は別のシェーダを使う。v3 のピラミッドのキャッシュを下流で読むときも整数で読み、unorm としてサンプルしない。
+
+検証では、レベル 1 以上のタイルも 3 バックエンドでバイト一致を強制する（enforced）。
 
 ## 座標と重み（v2 整数 4 タップ）
 
@@ -94,9 +104,12 @@ v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_
 
 孤立するグループは、透明なアキュムレータへ子を合成し、ポップで親へ戻す。ポップは次の順である。
 
-1. 子のプレマルチプライ Q14 を、上の `div_q` でストレート化する。
-2. アルファを `div_q(alpha * opacity_q, 16384)` にする。
-3. グループのブレンドモードで親へ合成する。
+1. 子のプレマルチプライ Q14 を、上の `div_q` でストレート化する。`straight = clamp(div_q(child_pre * 16384, child_a), 0, 16384)`、`child_a == 0` なら 0。
+2. `sa = div_q(child_a * opacity_q, 16384)`。
+3. `src_pre = mul(straight, sa)`（チャネルごとに `div_q(straight * sa, 16384)`）。
+4. `straight`、`src_pre`、`sa` をグループのブレンドモードで親へ合成する。normal でも同じ `src_pre` を使う。
+
+ポップの `src_pre` はこの一つだけである。子のプレマルチプライに不透明度を直接掛ける `mul(child_pre, opacity_q)` は使わない。丸めの位置が違い、1 ずれ得る。WGSL `composite-q14.wgsl`、Rust `composite_q14.rs` の `pop`、JS `cpu-composite.js` はすでにこの順である。
 
 `opacity == 1` かつ normal かつ非孤立のグループはプッシュしない。子は親のアキュムレータへ直接合成する。非表示、または不透明度 0 は、v2 と同じく落とす。
 
@@ -178,9 +191,11 @@ out_a   = div_q(src_a * 16384 + dst_a * (16384 - src_a), 16384)
 
 `clip` は次のとおり。`n` は最小、`x` は最大、`l` はその色の輝度である。
 
-- `n < 0` のとき、`l == 0` なら結果は 0。そうでなければ `l + div_q((c - l) * l, l - n)`。
-- `x > 16384` のとき、`x == l` ならそのまま。そうでなければ `l + div_q((o - l) * (16384 - l), x - l)`。
+- `n < 0` のとき、`l - n <= 0` なら各チャネルは `l`。そうでなければ `l + div_q((c - l) * l, l - n)`。
+- `x > 16384` のとき、`x - l <= 0` なら各チャネルは `l`。そうでなければ `l + div_q((o - l) * (16384 - l), x - l)`。`o` は前の段の結果である。
 - 各チャネルを 0..=16384 に切る。
+
+分母が 0 以下の枝は一つの規則で、そのチャネルを `l` にする。`div_q` は呼ばない。`l == 0` の特別扱いは置かない（`l == 0` かつ `n < 0` は分母が正で、式がそのまま 0 を返す）。有効入力ではこの枝に届かない。`lum` は重みの和が 16384 の整数平均を `div_q` したものなので `n <= l <= x` であり、`set_lum` が渡す `l` は 0..=16384 なので、`n < 0` なら `l - n > 0`、`x > 16384` なら `x - l > 0` である。それでも 3 実装は同じ比較 `l - n <= 0` / `x - l <= 0` を書き、0 除算を値として定義する。WGSL の `x != l` と `l == 0` の分岐は、この形に合わせる。
 
 `(c - l) * l` の絶対値は、この範囲で `6 * 16384² = 1_610_612_736` までで、i32 に入る。これも i64 の `checked_mul` で計算する。
 
@@ -194,6 +209,8 @@ out_a   = div_q(src_a * 16384 + dst_a * (16384 - src_a), 16384)
 SwiftShader の v2 `blend-color` が 1 画素ずれるのは、この color の経路である。v3 では f32 のストレート化と f32 の輝度除算を通さない。
 
 normal 以外は、宛先をストレート化して `B` を求め、上の三項の和でプレマルチプライへ戻す。
+
+**未定義のモード（17 以上）。** v3 ではホストがエラーとして拒否し、何も描かない。Rust はコマンドを作る前に `RenderError` を返し、JS は投げる。どちらも部分的なタイルを出さない。WGSL は 0..=16 しか受けない前提で、`default` の振る舞いは定義しない。Rust の `unreachable!()` と JS の `unspecified blend mode` は、ホストの検査をすり抜けたときの保険であり、仕様の結果ではない。3 実装とも、17 以上を normal や別のモードへ読み替えない。
 
 ## 溢れの検査
 
@@ -219,6 +236,8 @@ color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は `color
 - SwiftShader。wasm ジョブ。`ALTO_BROWSER_GPU=swiftshader` で、アダプタの architecture に `swiftshader` が含まれること。
 
 アトラス読み取りも同じ三つで検査する（必須）。256 通りのバイト値を全チャネルに入れた `Rgba8Unorm` テクスチャを `textureLoad` + `unorm_byte` で読み、全値が正確に戻ることをバックエンドごとに記録し、確かめる（Rust `Gpu::atlas_read`、出力 `atlas-read.json` / `atlas-read.md`。ブラウザは `tests/e2e/parity-tests.js` の `measureAtlasRead`、`parity.json` の `atlasRead`）。これは enforced（必須）である。どれかのバックエンドで一つでも戻らない値やエラーがあれば、`gpu_shader_matches_cpu_reference`（Metal、lavapipe）とブラウザのパリティ実行（SwiftShader）が失敗する。結果の JSON は失敗時も残す。不一致が出たら、そのときに `Rgba8Uint` を検討する。
+
+ピラミッドのレベル 1 以上のタイルも、同じ三つで全バイト一致を必須とする。`v3-m5-float` のシーンは整数一致の対象から外す。
 
 対象は、半透明の `-alpha-measure` ケース全部である。v3 の文書として実行し、一致したら v3 のハッシュとして固定する。v2 の `-alpha-measure` は measured-not-enforced のままである。`tests/parity/render-v1.txt` と `tests/parity/cpu-reference.txt` の既存行は一文字も変えない。`existing_v1_and_v2_hashes_are_unchanged` がそれを見る。
 
