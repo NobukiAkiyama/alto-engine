@@ -63,7 +63,16 @@ v2 の出力バインディング `texture_storage_2d_array<rgba8unorm, write>` 
 - 重みは Q8 の下位 8 ビット `fx, fy`（0..=255）。`floor_frac_q8` と WGSL の `qx.v - (x << 8)`。
 - 4 タップは `channel_byte`（WGSL）と `bilinear_byte`（Rust、JS）。`(acc + 32768) >> 16`。
 
-v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_byte` は `Rgba8Unorm` の `textureLoad` を `round(s * 255)` でバイトに戻している。アトラスの形式は `texture`（`crates/alto-gpu/src/renderer.rs`）の `Rgba8Unorm` である。CPU の `sample_u8` と JS の `sampleU8` はバイト列を直接読む。この float の往復は位置でも重みでもない。v3 はこの `round` を使わず、バイトを整数のまま読む。位置と重みの式は上のままである。
+v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_byte` は `Rgba8Unorm` の `textureLoad` を `round(s * 255)` でバイトに戻している。アトラスの形式は `texture`（`crates/alto-gpu/src/renderer.rs`）の `Rgba8Unorm` である。CPU の `sample_u8` と JS の `sampleU8` はバイト列を直接読む。この float の往復は位置でも重みでもない。位置と重みの式は上のままである。
+
+### アトラスの読み方
+
+アトラスは `Rgba8Unorm` のテクスチャ一枚のままにする。v3 用の二枚目は作らない。
+
+- v3 は `textureLoad` で読み、その場で `unorm_byte`（`u32(clamp(v, 0, 1) * 255 + 0.5)`、`effects.wgsl`）でバイトに戻す。`round(s * 255)` は使わない。`unorm_byte` は #22 の color-adjust モード 18 がすでに使い、3 バックエンドで差 0 だった関数である。
+- その後はすべて整数である。`textureSample` もハードウェアのフィルタも使わない。4 タップの補間は上の `channel_byte` が整数で行う。
+- 二枚目のアトラス（たとえば `Rgba8Uint`）を並べない理由は三つ。VRAM が倍になる。アップロードが倍になる。内容ハッシュをキーにするタイルキャッシュが二つになる。
+- `Rgba8Uint` へ切り替えるのは、どれかのバックエンドで `unorm_byte` の不一致が計測されたときだけである。その計測が下の「検証」のアトラス読み取り項目である。
 
 ## ストレートとプレマルチプライ
 
@@ -208,6 +217,8 @@ color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は `color
 - Metal。native ジョブ（macOS）の `cargo test`。CI のアダプタは `Apple Paravirtual device` である。実機の Apple GPU では未検証であり、ここでの一致は実機の挙動を主張しない。
 - lavapipe。gpu-parity ジョブ。
 - SwiftShader。wasm ジョブ。`ALTO_BROWSER_GPU=swiftshader` で、アダプタの architecture に `swiftshader` が含まれること。
+
+アトラス読み取りも同じ三つで計測する。256 通りのバイト値を全チャネルに入れた `Rgba8Unorm` テクスチャを `textureLoad` + `unorm_byte` で読み、全値が正確に戻るかをバックエンドごとに記録する（Rust `Gpu::atlas_read`、出力 `atlas-read.json` / `atlas-read.md`。ブラウザは `tests/e2e/parity-tests.js` の `measureAtlasRead`、`parity.json` の `atlasRead`）。measured-not-enforced であり、不一致でテストは落ちない。不一致が出たら、そのときに `Rgba8Uint` を検討する。
 
 対象は、半透明の `-alpha-measure` ケース全部である。v3 の文書として実行し、一致したら v3 のハッシュとして固定する。v2 の `-alpha-measure` は measured-not-enforced のままである。`tests/parity/render-v1.txt` と `tests/parity/cpu-reference.txt` の既存行は一文字も変えない。`existing_v1_and_v2_hashes_are_unchanged` がそれを見る。
 

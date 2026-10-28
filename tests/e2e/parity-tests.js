@@ -130,6 +130,61 @@ function square() {
   return image;
 }
 
+
+// Measured-not-enforced: all 256 bytes in an Rgba8Unorm texture, read with
+// textureLoad + unorm_byte (the effects.wgsl text). Records, never fails.
+async function measureAtlasRead() {
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const texel = (i) => [i, 255 - i, i ^ 0x55, (i + 128) & 255];
+    const data = new Uint8Array(1024);
+    for (let i = 0; i < 256; i++) data.set(texel(i), i * 4);
+    const texture = device.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    device.queue.writeTexture({ texture }, data, { bytesPerRow: 1024 }, [256, 1]);
+    const code = `@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> out: array<u32, 1024>;
+fn unorm_byte(v: f32) -> u32 {
+  return u32(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= 256u) { return; }
+  let v = textureLoad(atlas, vec2u(id.x, 0u), 0);
+  out[id.x * 4u] = unorm_byte(v.r);
+  out[id.x * 4u + 1u] = unorm_byte(v.g);
+  out[id.x * 4u + 2u] = unorm_byte(v.b);
+  out[id.x * 4u + 3u] = unorm_byte(v.a);
+}`;
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const out = device.createBuffer({ size: 4096, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const read = device.createBuffer({ size: 4096, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: texture.createView() }, { binding: 1, resource: { buffer: out } }] });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind);
+    pass.dispatchWorkgroups(4);
+    pass.end();
+    encoder.copyBufferToBuffer(out, 0, read, 0, 4096);
+    device.queue.submit([encoder.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const got = new Uint32Array(read.getMappedRange().slice(0));
+    read.unmap();
+    device.destroy();
+    const mismatches = [];
+    for (let i = 0; i < 256; i++) {
+      const want = texel(i);
+      for (let ch = 0; ch < 4; ch++) {
+        if (got[i * 4 + ch] !== want[ch]) mismatches.push({ texel: i, channel: ch, byte: want[ch], read: got[i * 4 + ch] });
+      }
+    }
+    return { label: "measured-not-enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
+  } catch (error) {
+    return { label: "measured-not-enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
+  }
+}
+
 export async function runParityTests(engine, log) {
   const results = [];
   const test = async (name, fn) => {
@@ -161,6 +216,7 @@ export async function runParityTests(engine, log) {
     }
   };
   const alphaMeasure = [];
+  let atlasRead = null;
   try {
     for (const testCase of parityCases()) {
       await test(testCase.name, async () => {
@@ -174,6 +230,8 @@ export async function runParityTests(engine, log) {
         return gap;
       });
     }
+    atlasRead = await measureAtlasRead();
+    log(`atlas-read (measured-not-enforced): ${atlasRead.status} ${atlasRead.mismatchedChannels} channel mismatches${atlasRead.error ? ` ${atlasRead.error}` : ""}`);
     await test("alpha-measure layers are distinct", async () => {
       assertDistinctAlphaLayers();
     });
@@ -365,6 +423,7 @@ export async function runParityTests(engine, log) {
       userAgent: navigator.userAgent,
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
+      atlasRead,
       results,
     });
   }

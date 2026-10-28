@@ -1685,6 +1685,101 @@ fn json_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// The `unorm_byte` that color-adjust mode 18 uses (`effects.wgsl`). The atlas-read
+/// measurement runs this exact text; `atlas_read_uses_effects_unorm_byte` checks it.
+const UNORM_BYTE_WGSL: &str = "fn unorm_byte(v: f32) -> u32 {
+  return u32(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+}";
+
+/// Texel `i` of the 256x1 atlas-read texture. Every channel sweeps all 256 bytes.
+fn atlas_read_texel(i: usize) -> [u8; 4] {
+    let i = i as u8;
+    [i, 255 - i, i ^ 0x55, i.wrapping_add(128)]
+}
+
+fn atlas_read_shader() -> String {
+    format!(
+        "@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> out: array<u32, 1024>;
+{UNORM_BYTE_WGSL}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {{
+  if (id.x >= 256u) {{ return; }}
+  let v = textureLoad(atlas, vec2u(id.x, 0u), 0);
+  out[id.x * 4u] = unorm_byte(v.r);
+  out[id.x * 4u + 1u] = unorm_byte(v.g);
+  out[id.x * 4u + 2u] = unorm_byte(v.b);
+  out[id.x * 4u + 3u] = unorm_byte(v.a);
+}}
+"
+    )
+}
+
+/// Result of reading all 256 bytes from an `Rgba8Unorm` texture with
+/// `textureLoad` + `unorm_byte`. Measured-not-enforced.
+struct AtlasRead {
+    mismatches: Vec<(usize, usize, u8, u32)>,
+}
+
+impl AtlasRead {
+    fn line(&self) -> String {
+        if self.mismatches.is_empty() {
+            "atlas-read (measured-not-enforced): 256/256 byte values round-trip exactly on all 4 channels".into()
+        } else {
+            let shown: Vec<String> = self
+                .mismatches
+                .iter()
+                .take(8)
+                .map(|(t, c, want, got)| format!("texel {t} ch {c} byte {want} read {got}"))
+                .collect();
+            format!(
+                "atlas-read (measured-not-enforced): {} channel mismatches: {}",
+                self.mismatches.len(),
+                shown.join("; ")
+            )
+        }
+    }
+}
+
+fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
+    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create alpha measure directory");
+    let (status, count, error) = match result {
+        Ok(r) if r.mismatches.is_empty() => ("exact", 0, String::new()),
+        Ok(r) => ("mismatch", r.mismatches.len(), String::new()),
+        Err(e) => ("error", 0, e.clone()),
+    };
+    let mut list = String::new();
+    if let Ok(r) = result {
+        for (n, (t, c, want, got)) in r.mismatches.iter().enumerate() {
+            if n > 0 {
+                list.push_str(", ");
+            }
+            list.push_str(&format!(
+                "{{\"texel\": {t}, \"channel\": {c}, \"byte\": {want}, \"read\": {got}}}"
+            ));
+        }
+    }
+    let json = format!(
+        "{{\n  \"label\": \"measured-not-enforced\",\n  \"backend\": \"{}\",\n  \"format\": \"Rgba8Unorm\",\n  \"read\": \"textureLoad + unorm_byte\",\n  \"values\": 256,\n  \"status\": \"{status}\",\n  \"mismatchedChannels\": {count},\n  \"error\": \"{}\",\n  \"mismatches\": [{list}]\n}}\n",
+        json_escape(adapter),
+        json_escape(&error)
+    );
+    std::fs::write(dir.join("atlas-read.json"), json).expect("write atlas read json");
+    let line = match result {
+        Ok(r) => r.line(),
+        Err(e) => format!("atlas-read (measured-not-enforced): GPU error: {e}"),
+    };
+    let markdown = format!(
+        "### Atlas read (`Rgba8Unorm` + `textureLoad` + `unorm_byte`)\n\nBackend: `{}`\n\n{line}\n",
+        adapter
+    );
+    std::fs::write(dir.join("atlas-read.md"), markdown).expect("write atlas read markdown");
+}
+
 fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
     let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
         return;
@@ -2177,6 +2272,118 @@ impl Gpu {
                 adapter_name: info.name,
             }))
         })
+    }
+
+    /// Upload all 256 byte values to an `Rgba8Unorm` texture and read them back
+    /// with `textureLoad` + `unorm_byte`. Returns every channel that does not
+    /// round-trip. Measured-not-enforced: the caller records, it does not fail.
+    fn atlas_read(&self) -> Result<AtlasRead, String> {
+        let device = &self.device;
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atlas read"),
+            source: wgpu::ShaderSource::Wgsl(atlas_read_shader().into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atlas read"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas read"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let data: Vec<u8> = (0..256).flat_map(atlas_read_texel).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atlas read out"),
+            size: 4096,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atlas read readback"),
+            size: 4096,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas read"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(4, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&out, 0, &read, 0, 4096);
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            return Err(format!("validation: {err}"));
+        }
+        let raw = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        let got: &[u32] = bytemuck::cast_slice(&raw);
+        let mut mismatches = Vec::new();
+        for texel in 0..256 {
+            let want = atlas_read_texel(texel);
+            for ch in 0..4 {
+                let value = got[texel * 4 + ch];
+                if value != u32::from(want[ch]) {
+                    mismatches.push((texel, ch, want[ch], value));
+                }
+            }
+        }
+        Ok(AtlasRead { mismatches })
     }
 
     fn render(&self, case: &Case) -> Result<(Vec<u8>, Vec<f32>), String> {
@@ -3521,6 +3728,19 @@ fn lavapipe_adapter_names() {
 }
 
 #[test]
+fn atlas_read_uses_effects_unorm_byte() {
+    let effects = include_str!("../shaders/effects.wgsl");
+    assert!(effects.contains(UNORM_BYTE_WGSL));
+    let mut seen = [[false; 256]; 4];
+    for i in 0..256 {
+        for (ch, &b) in atlas_read_texel(i).iter().enumerate() {
+            seen[ch][b as usize] = true;
+        }
+    }
+    assert!(seen.iter().all(|c| c.iter().all(|&v| v)));
+}
+
+#[test]
 fn alpha_measure_cases_are_not_enforced() {
     let all = cases();
     let measured: Vec<_> = all.iter().filter(|case| case.measure).collect();
@@ -3701,6 +3921,13 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
+    // Measured-not-enforced: printed and stored, never pushed to `failed`.
+    let atlas = gpu.atlas_read();
+    match &atlas {
+        Ok(r) => println!("{}", r.line()),
+        Err(e) => println!("atlas-read (measured-not-enforced): GPU error: {e}"),
+    }
+    write_atlas_read(&gpu.adapter_name, &atlas);
     let src = color_adjust_gradient();
     let grid = color_adjust_grid();
     match gpu.render_color_adjust(&src, &grid) {

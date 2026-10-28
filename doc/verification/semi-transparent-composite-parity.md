@@ -104,3 +104,12 @@ On Metal in the same run, 8217 channels differ. 8208 of them are bit-identical b
 Metal exact-half count, [CI run 40593541861](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40593541861) on `30a4437` (`Apple Paravirtual device`, not real Apple hardware; real hardware is unverified): of 8208 bit-identical pre-store channels, 8208 have `v*255` exactly equal to `n+0.5` and 0 do not; 8201 differ as CPU `round_ties_even` versus `round-half-up`, and 7 are exact halves where those two rules agree but the GPU byte is the other integer (all 8208 GPU bytes match round-ties-to-odd).
 
 `rgba8unorm` store versus CPU `round_ties_even` is the step that turns a tie, or a one-ulp gap on that tie, into a byte. It is not a second formula.
+
+## Atlas read (measured-not-enforced)
+
+Render version 3 keeps the atlas as one `Rgba8Unorm` texture and reads it with `textureLoad` followed by `unorm_byte` (`u32(clamp(v, 0, 1) * 255 + 0.5)`, the `effects.wgsl` function color-adjust mode 18 already uses). The same jobs measure that read: a 256x1 `Rgba8Unorm` texture holds every byte value on every channel (R = i, G = 255 − i, B = i ^ 0x55, A = i + 128), a compute shader reads it back, and each backend records whether all 1024 channels round-trip exactly.
+
+- Metal (native job) and lavapipe (gpu-parity job): `Gpu::atlas_read` in `crates/alto-gpu/src/cpu_composite.rs`, run at the end of `gpu_shader_matches_cpu_reference`. Output `atlas-read.json` and `atlas-read.md` beside `alpha-measure.json`, plus an `atlas-read (measured-not-enforced): …` log line. `atlas_read_uses_effects_unorm_byte` checks the shader text matches `effects.wgsl`.
+- SwiftShader (wasm job): `measureAtlasRead` in `tests/e2e/parity-tests.js`, stored as `atlasRead` in `parity.json` and summarized by `scripts/alpha-measure-summary.mjs`.
+
+A mismatch is recorded and does not fail the job. A measured mismatch on some backend is the only reason to switch the atlas to `Rgba8Uint`.
