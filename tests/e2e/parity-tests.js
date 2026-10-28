@@ -216,6 +216,7 @@ export async function runParityTests(engine, log) {
     }
   };
   const alphaMeasure = [];
+  const compositeV3 = [];
   let atlasRead = null;
   try {
     for (const testCase of parityCases()) {
@@ -273,6 +274,30 @@ export async function runParityTests(engine, log) {
         });
         log(`FAIL ${testCase.name} ${error}`);
       }
+    }
+    for (const testCase of alphaMeasureCases()) {
+      await test(`v3-${testCase.name}`, async () => {
+        try {
+          const suffix = testCase.w === 256 && testCase.h === 256 ? "" : `-${testCase.w}x${testCase.h}`;
+          const fixture = await fetch(`../../tests/fixtures/render-v3-empty${suffix}.alto`);
+          assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not select integer compositing");
+          for (const node of testCase.nodes) await addNode(doc, engine, node);
+          const cpu = renderCase(testCase, 3);
+          const gpu = await gpuTile(engine, testCase);
+          const row = { ...measureRow(testCase, cpu, gpu), name: `v3-${testCase.name}`, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`v3 composite (enforced): ${formatMeasure(row)}`);
+          assert(same(cpu, gpu), formatMeasure(row));
+          return formatMeasure(row);
+        } catch (error) {
+          if (!compositeV3.some((row) => row.name === `v3-${testCase.name}`)) {
+            compositeV3.push({ name: `v3-${testCase.name}`, enforced: true, status: "error", error: String(error) });
+          }
+          throw error;
+        }
+      });
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
@@ -428,6 +453,8 @@ export async function runParityTests(engine, log) {
       userAgent: navigator.userAgent,
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
+      compositeV3Label: "enforced",
+      compositeV3,
       atlasRead,
       results,
     });

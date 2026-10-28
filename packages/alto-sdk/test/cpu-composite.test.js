@@ -127,3 +127,32 @@ test("opaque blue under half-red normal blend is the known pixel", () => {
   const level = renderCase(parityCases().find((item) => item.name === "level1-centers"));
   assert.deepEqual([level[0], level[1], level[2], level[3]], [1, 1, 8, 255]);
 });
+
+test("v3 compositing resolves the former blend-color and half-opacity boundaries", async () => {
+  const { alphaMeasureCases, compositeQ14Blend } = await import("../../../tests/e2e/cpu-composite.js");
+  const cases = new Map(alphaMeasureCases().map((c) => [c.name, c]));
+  for (const name of ["blend-color", "opacity-half", "nested-groups"]) {
+    const tile = renderCase(cases.get(`${name}-alpha-measure`), 3);
+    for (let i = 0; i < tile.length; i += 4) {
+      assert.ok(tile[i] <= tile[i + 3] && tile[i + 1] <= tile[i + 3] && tile[i + 2] <= tile[i + 3], `${name} premultiplied at ${i / 4}`);
+    }
+    if (name === "blend-color") {
+      const i = (82 * 256 + 181) * 4;
+      assert.deepEqual([...tile.slice(i, i + 4)], [105, 107, 156, 255]);
+    }
+  }
+  // Half-away division, including the premultiplied normal path.
+  assert.deepEqual(compositeQ14Blend([0n, 0n, 0n, 0n], [16384n, 0n, 0n], [8192n, 0n, 0n], 8192n, 0), [8192n, 0n, 0n, 8192n]);
+});
+
+test("v3 isolates from document f32 opacity before Q14 quantization", () => {
+  const raster = (rgba, mode = 0) => ({ type: "raster", image: solid(1, 1, rgba), visible: true, opacity: 1, mode, transform: [1, 0, 0, 1, 0, 0] });
+  const scene = (opacity, isolated = false) => ({ w: 1, h: 1, tx: 0, ty: 0, level: 0, nodes: [
+    raster([100, 150, 200, 255]),
+    { type: "group", opacity, isolated, visible: true, mode: 0, transform: [1, 0, 0, 1, 0, 0], children: [raster([200, 100, 50, 255], 1)] },
+  ] });
+  const pixel = (s) => [...renderCase(s, 3).slice(0, 4)];
+  assert.deepEqual(pixel(scene(1 - 2 ** -24)), pixel(scene(1, true)));
+  assert.deepEqual(pixel(scene(1 - 1e-9)), pixel(scene(1)));
+  assert.notDeepEqual(pixel(scene(1)), pixel(scene(1, true)));
+});

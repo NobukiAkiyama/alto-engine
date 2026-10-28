@@ -49,6 +49,16 @@ for (const row of rows) {
   markdown += "\n";
 }
 
+const integerRows = report.compositeV3 || [];
+if (integerRows.length) {
+  markdown += `### v3 integer composite (${backendLabel})\n\nEnforced: every byte must match the CPU reference.\n\n`;
+  markdown += "| case | status | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | --- | ---: | --- | --- |\n";
+  for (const row of integerRows) {
+    markdown += `| ${row.name} | ${row.status} | ${row.count ?? "error"} | ${(row.maxAbs || []).join(",")} | ${row.error || cell(row)} |\n`;
+  }
+  markdown += "\n";
+}
+
 const atlas = report.atlasRead;
 if (atlas) {
   markdown += `### Atlas read (\`Rgba8Unorm\` + \`textureLoad\` + \`unorm_byte\`, ${backendLabel})\n\n`;
@@ -63,6 +73,9 @@ if (atlas) {
 }
 
 await mkdir(outDir, { recursive: true });
+if (integerRows.length) {
+  await writeFile(`${outDir}/composite-v3.json`, JSON.stringify({ label: "enforced", backend, status: integerRows.some((r) => r.status === "error") ? "error" : integerRows.some((r) => r.status !== "exact" || r.count !== 0) ? "mismatch" : "exact", cases: integerRows }, null, 2) + "\n");
+}
 if (atlas) await writeFile(`${outDir}/atlas-read.json`, JSON.stringify({ backend, ...atlas }, null, 2) + "\n");
 await writeFile(`${outDir}/alpha-measure.md`, markdown);
 await writeFile(`${outDir}/alpha-measure.json`, JSON.stringify({
@@ -75,3 +88,5 @@ if (process.env.GITHUB_STEP_SUMMARY) {
   await appendFile(process.env.GITHUB_STEP_SUMMARY, markdown);
 }
 console.log(`wrote ${rows.length} measured-not-enforced cases for ${backend}`);
+
+if (integerRows.some((r) => r.status !== "exact" || r.count !== 0)) process.exitCode = 1;

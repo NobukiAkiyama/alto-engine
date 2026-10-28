@@ -472,7 +472,7 @@ function bilinearByte(a, b, d, e, fx, fy) {
   const de = d * (256 - fx) + e * fx;
   return (ab * (256 - fy) + de * fy + 32768) >> 16;
 }
-function fetchInteger(tiles, q, originPx, scale, x, y) {
+function fetchInteger(tiles, q, originPx, scale, x, y, bytes = false) {
   const clear = [f(0), f(0), f(0), f(0)];
   const px = pixelQ8(originPx[0], x, scale);
   const py = pixelQ8(originPx[1], y, scale);
@@ -485,7 +485,7 @@ function fetchInteger(tiles, q, originPx, scale, x, y) {
   const b = sampleU8(tiles, ix + 1, iy);
   const d = sampleU8(tiles, ix, iy + 1);
   const e = sampleU8(tiles, ix + 1, iy + 1);
-  return [0, 1, 2, 3].map((i) => div(f(bilinearByte(a[i], b[i], d[i], e[i], fx, fy)), f(255)));
+  return [0, 1, 2, 3].map((i) => { const value = bilinearByte(a[i], b[i], d[i], e[i], fx, fy); return bytes ? value : div(f(value), f(255)); });
 }
 function axisUnit(inv) {
   return Math.abs(inv[1]) < AXIS && Math.abs(inv[2]) < AXIS
@@ -526,13 +526,14 @@ function inverseF64(m) {
   if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
   return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
 }
-function walk(node, parent, ops) {
-  if (!node.visible || node.opacity <= 0) return;
+function walk(node, parent, ops, version = RENDER_VERSION) {
+  const opacity = version === 3 ? f(node.opacity) : node.opacity;
+  if (!node.visible || opacity <= 0) return;
   const world = multiply(parent, node.transform);
   if (node.type === "group") {
-    const isolate = node.isolated || node.opacity < 1 || node.mode !== 0;
+    const isolate = node.isolated || opacity < 1 || node.mode !== 0;
     if (isolate) ops.push({ t: "push" });
-    for (const child of node.children) walk(child, world, ops);
+    for (const child of node.children) walk(child, world, ops, version);
     if (isolate) ops.push({ t: "pop", opacity: f(node.opacity), mode: node.mode });
   } else {
     const inv = inverseF64(world);
@@ -541,6 +542,7 @@ function walk(node, parent, ops) {
   }
 }
 function composite(ops, width, height, origin, scale, originPx, scaleI, version) {
+  if (version === 3) return compositeInteger(ops, width, height, origin, scale, originPx, scaleI);
   const out = new Uint8Array(256 * 256 * 4);
   const w = f(width);
   const h = f(height);
@@ -568,7 +570,7 @@ function composite(ops, width, height, origin, scale, originPx, scaleI, version)
 
 export function renderCase(testCase, version = RENDER_VERSION) {
   const ops = [];
-  for (const node of testCase.nodes) walk(node, IDENT, ops);
+  for (const node of testCase.nodes) walk(node, IDENT, ops, version);
   const scaleI = 2 ** testCase.level;
   const scale = f(scaleI);
   const origin = [f(testCase.tx * 256 * scale), f(testCase.ty * 256 * scale)];
@@ -838,4 +840,116 @@ export function sceneGap(snapshot) {
     if (node.type === "unsupported") found.add("unsupported");
   }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
+}
+
+// v3: all color arithmetic is BigInt Q14; coordinates retain the v2 sampler.
+const CQ = 16384n;
+const cqDiv = (n, d = CQ) => divQBig(n, d);
+const cqClamp = (v) => v < 0n ? 0n : v > CQ ? CQ : v;
+const cqMul = (a, b) => cqDiv(a * b);
+const cqLum = (c) => cqDiv(c[0] * 3483n + c[1] * 11718n + c[2] * 1183n);
+const cqMin = (c) => c.reduce((a, b) => a < b ? a : b);
+const cqMax = (c) => c.reduce((a, b) => a > b ? a : b);
+const cqSat = (c) => cqMax(c) - cqMin(c);
+function cqClip(c) {
+  const l = cqLum(c), n = cqMin(c), x = cqMax(c);
+  let o = c;
+  if (n < 0n) o = l === 0n ? [0n, 0n, 0n] : c.map((v) => l + cqDiv((v - l) * l, l - n));
+  if (x > CQ && x !== l) o = o.map((v) => l + cqDiv((v - l) * (CQ - l), x - l));
+  return o.map(cqClamp);
+}
+function cqSetLum(c, l) { const delta = l - cqLum(c); return cqClip(c.map((v) => v + delta)); }
+function cqSetSat(c, s) {
+  const n = cqMin(c), x = cqMax(c);
+  return c.map((v) => x === n ? 0n : cqDiv((v - n) * s, x - n));
+}
+function floorIsqrt(n) {
+  let lo = 0, hi = 16384;
+  while (lo < hi) { const mid = Math.floor((lo + hi + 1) / 2); if (mid * mid <= n) lo = mid; else hi = mid - 1; }
+  return lo;
+}
+function cqChannel(d, s, mode) {
+  const overlay = (s, d) => d < 8192n ? cqDiv(2n * s * d) : CQ - cqDiv(2n * (CQ - s) * (CQ - d));
+  let b;
+  switch (mode) {
+    case 0: b = s; break;
+    case 1: b = cqMul(d, s); break;
+    case 2: b = CQ - cqMul(CQ - d, CQ - s); break;
+    case 3: b = overlay(s, d); break;
+    case 4: b = d < s ? d : s; break;
+    case 5: b = d > s ? d : s; break;
+    case 6: b = s >= CQ ? CQ : cqClamp(cqDiv(d * CQ, CQ - s)); break;
+    case 7: b = s === 0n ? 0n : CQ - cqClamp(cqDiv((CQ - d) * CQ, s)); break;
+    case 8: b = overlay(d, s); break;
+    case 9:
+      if (s <= 8192n) b = d - cqDiv((CQ - 2n * s) * d * (CQ - d), CQ * CQ);
+      else {
+        let d2;
+        if (d <= 4096n) d2 = cqDiv(16n * d * d * d - 12n * d * d * CQ + 4n * d * CQ * CQ, CQ * CQ);
+        else {
+          const n = Number(d * CQ), r = floorIsqrt(n);
+          d2 = BigInt(r + (n - r * r >= r + 1 ? 1 : 0));
+        }
+        b = d + cqDiv((2n * s - CQ) * (d2 - d));
+      }
+      break;
+    case 10: b = d > s ? d - s : s - d; break;
+    case 11: b = d + s - cqDiv(2n * d * s); break;
+    case 16: b = d + s; break;
+    default: throw new Error(`unspecified blend mode ${mode}`);
+  }
+  return cqClamp(b);
+}
+function cqMix(d, s, mode) {
+  switch (mode) {
+    case 12: return cqSetLum(cqSetSat(s, cqSat(d)), cqLum(d));
+    case 13: return cqSetLum(cqSetSat(d, cqSat(s)), cqLum(d));
+    case 14: return cqSetLum(s, cqLum(d));
+    case 15: return cqSetLum(d, cqLum(s));
+    default: return s.map((v, i) => cqChannel(d[i], v, mode));
+  }
+}
+const cqStraight = (p) => p.slice(0, 3).map((v) => p[3] === 0n ? 0n : cqClamp(cqDiv(v * CQ, p[3])));
+export function compositeQ14Blend(dst, src, pre, sa, mode) {
+  const da = dst[3], oa = cqDiv(sa * CQ + da * (CQ - sa));
+  const b = mode === 0 ? src : cqMix(cqStraight(dst), src, mode);
+  const out = src.map((s, i) => mode === 0
+    ? cqDiv(pre[i] * CQ + dst[i] * (CQ - sa))
+    : cqDiv((CQ - sa) * dst[i] * CQ + (CQ - da) * s * sa + da * sa * b[i], CQ * CQ));
+  if (out.some((v) => v > oa)) throw new Error("Q14 RGB exceeds alpha");
+  return [...out, oa];
+}
+const cqOpacity = (v) => BigInt(Math.trunc(f(f(f(Math.min(1, Math.max(0, f(v)))) * 16384) + 0.5)));
+function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
+  const out = new Uint8Array(256 * 256 * 4);
+  // Quantize once on the host, including the inverse, before evaluating pixels.
+  const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.inv ? quantizeInverse(op.inv) : null }));
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const p = [add(origin[0], mul(add(f(x), f(0.5)), scale)), add(origin[1], mul(add(f(y), f(0.5)), scale))];
+    const stack = []; let accum = [0n, 0n, 0n, 0n];
+    if (p[0] >= 0 && p[1] >= 0 && p[0] < width && p[1] < height) for (const op of prepared) {
+      if (op.t === "push") { stack.push(accum); accum = [0n, 0n, 0n, 0n]; }
+      else if (op.t === "pop") {
+        const s = cqStraight(accum), sa = cqMul(accum[3], op.opacityQ);
+        accum = compositeQ14Blend(stack.pop(), s, s.map((v) => cqMul(v, sa)), sa, op.mode);
+      } else {
+        const inv = op.inv.map(f);
+        let bytes;
+        if (axisUnit(inv)) {
+          const q = [add(add(mul(inv[0], p[0]), mul(inv[2], p[1])), inv[4]), add(add(mul(inv[1], p[0]), mul(inv[3], p[1])), inv[5])];
+          bytes = sampleU8(op.tiles, Math.floor(q[0]), Math.floor(q[1]));
+        } else {
+          if (!op.q) throw new Error("v3 filtered f32 fallback is unspecified");
+          bytes = fetchInteger(op.tiles, op.q, originPx, scaleI, x, y, true);
+        }
+        const s = bytes.slice(0, 3).map((v) => BigInt(byteQ14(v)));
+        const pre = bytes.slice(0, 3).map((v) => cqMul(BigInt(premulByteQ14(v, bytes[3])), op.opacityQ));
+        const sa = cqMul(BigInt(byteQ14(bytes[3])), op.opacityQ);
+        accum = compositeQ14Blend(accum, s, pre, sa, op.mode);
+      }
+    }
+    const i = (y * 256 + x) * 4;
+    for (let c = 0; c < 4; c++) out[i + c] = Math.min(255, Math.max(0, Number(cqDiv(accum[c] * 255n))));
+  }
+  return out;
 }

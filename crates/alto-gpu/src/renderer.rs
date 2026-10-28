@@ -270,6 +270,7 @@ pub struct Renderer {
     visible_job: Option<TileJob>,
     visible_tile_jobs: bool,
     composite: wgpu::ComputePipeline,
+    composite_q14: wgpu::ComputePipeline,
     downsample: wgpu::ComputePipeline,
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
@@ -791,6 +792,7 @@ impl Renderer {
             display_layers,
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC,
         )?;
         let scratch = memory::create_texture(
@@ -822,6 +824,11 @@ impl Renderer {
         );
         let composite_src = crate::shader_with_blend(include_str!("../shaders/composite.wgsl"));
         let composite = compute(&device, "tile compositor", &composite_src);
+        let composite_q14 = compute(
+            &device,
+            "integer tile compositor",
+            &crate::integer_composite_shader(),
+        );
         let brush = compute(
             &device,
             "brush coverage",
@@ -891,6 +898,7 @@ impl Renderer {
             visible_job: None,
             visible_tile_jobs: true,
             composite,
+            composite_q14,
             downsample,
             present,
             brush,
@@ -1637,11 +1645,48 @@ impl Renderer {
         scene: &RenderScene,
         key: CacheKey,
         slot: usize,
-        commands: Vec<Command>,
+        mut commands: Vec<Command>,
         entries: Vec<Entry>,
         mut encoder: wgpu::CommandEncoder,
         prefetch: bool,
     ) -> Result<bool> {
+        let integer = scene.render_version == 3;
+        if integer {
+            for c in &mut commands {
+                if c.info[0] == 0
+                    && c.info[3] == 0
+                    && !crate::sample::axis_unit([
+                        c.inv0[0], c.inv0[1], c.inv0[2], c.inv0[3], c.inv1[0], c.inv1[1],
+                    ])
+                {
+                    return Err(RenderError::GpuUnsupported(
+                        "v3 filtered f32 fallback is not specified".into(),
+                    ));
+                }
+                c.inv1[2] = f32::from_bits(crate::composite_opacity_q14(c.inv1[2]) as u32);
+                c.inv1[3] = f32::from_bits(c.inv1[3] as u32);
+            }
+        }
+        let pipeline = if integer {
+            &self.composite_q14
+        } else {
+            &self.composite
+        };
+        let integer_output = if integer {
+            Some(memory::create_buffer(
+                &self.device,
+                &wgpu::BufferDescriptor {
+                    label: Some("integer composite bytes"),
+                    size: 256 * 256 * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                },
+                Class::Fixed,
+                true,
+            )?)
+        } else {
+            None
+        };
         let cb = buffer(
             &self.device,
             &self.queue,
@@ -1682,7 +1727,7 @@ impl Renderer {
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
-            layout: &self.composite.get_bind_group_layout(0),
+            layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1690,7 +1735,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.cache_view),
+                    resource: match &integer_output {
+                        Some(out) => out.as_entire_binding(),
+                        None => wgpu::BindingResource::TextureView(&self.cache_view),
+                    },
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1711,9 +1759,37 @@ impl Renderer {
                 label: Some("composite"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.composite);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(16, 16, 1);
+        }
+        if let Some(out) = integer_output {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &out,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(1024),
+                        rows_per_image: Some(256),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.cache,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.retired.classified_buffer(&out, MemoryClass::Fixed);
         }
         self.queue.submit(Some(encoder.finish()));
         self.release_retired();
@@ -3036,7 +3112,9 @@ impl Renderer {
 mod shader_tests {
     #[test]
     fn shaders_validate() {
+        let integer = crate::integer_composite_shader();
         for (name, text) in [
+            ("integer composite", integer.as_str()),
             ("composite", include_str!("../shaders/composite.wgsl")),
             ("present", include_str!("../shaders/present.wgsl")),
             ("brush", include_str!("../shaders/brush.wgsl")),
