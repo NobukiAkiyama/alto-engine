@@ -239,7 +239,8 @@ pub struct GpuStroke {
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    /// `None` only for the test renderer (`headless`), which never presents.
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     atlas: wgpu::Texture,
     atlas_view: wgpu::TextureView,
@@ -564,6 +565,41 @@ pub(crate) fn mask_sampler(
         inverse: q.m,
         translation: crate::sample::pack_wide(q.tx, q.ty),
     })
+}
+
+/// The mask tile keys a v3 mask stage with sampler `s` can read over an output
+/// of `size` pixels, as `[min tx, min ty, max tx, max ty]` (inclusive). Each
+/// corner pixel is evaluated with the shader's own integers (`pixel_q8`,
+/// `coord_q8` on the packed Q16 bits) and its texel `q >> 8` taken to its tile
+/// `>> 8`. The Q24 sum is exact and affine in the pixel index, and the rounding
+/// and the shifts are monotone, so the four corners bound every pixel of the
+/// output. `None` when a corner leaves the integer range (the shader would read
+/// byte 0 there instead of a texel): the host refuses the render (DQ3-4).
+pub(crate) fn mask_tile_range(s: &MaskSampler, size: [u32; 2]) -> Option<[i32; 4]> {
+    let [ox, oy, scale] = s.origin;
+    let wide = |lo: u32, hi: u32| ((u64::from(hi) << 32) | u64::from(lo)) as i64;
+    let t = s.translation;
+    let inv = crate::sample::IntegerInverse {
+        m: s.inverse,
+        tx: wide(t[0], t[1]),
+        ty: wide(t[2], t[3]),
+    };
+    let last = |n: u32| i32::try_from(n.checked_sub(1)?).ok();
+    let (w, h) = (last(size[0])?, last(size[1])?);
+    let mut range = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for (x, y) in [(0, 0), (w, 0), (0, h), (w, h)] {
+        let px = crate::sample::pixel_q8(ox, x, scale)?;
+        let py = crate::sample::pixel_q8(oy, y, scale)?;
+        let [qx, qy] = crate::sample::source_q8(&inv, px, py)?;
+        let (kx, ky) = ((qx >> 8) >> 8, (qy >> 8) >> 8);
+        range = [
+            range[0].min(kx),
+            range[1].min(ky),
+            range[2].max(kx),
+            range[3].max(ky),
+        ];
+    }
+    Some(range)
 }
 
 /// The integer texel map of one input of a v3 mask stage (`effects-q14.wgsl`
@@ -915,6 +951,26 @@ impl Renderer {
             })
             .await
             .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
+        Self::with_adapter(instance, adapter, Some(surface), width, height, budget_mb).await
+    }
+    /// A renderer without a surface, for tests that compose display tiles and
+    /// read them back (`read_tiles`). It cannot present.
+    #[cfg(test)]
+    pub(crate) async fn headless(instance: &wgpu::Instance, budget_mb: u32) -> Result<Self> {
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .await
+            .map_err(|e| RenderError::GpuUnsupported(e.to_string()))?;
+        Self::with_adapter(instance, adapter, None, 256, 256, budget_mb).await
+    }
+    async fn with_adapter(
+        instance: &wgpu::Instance,
+        adapter: wgpu::Adapter,
+        surface: Option<wgpu::Surface<'static>>,
+        width: u32,
+        height: u32,
+        budget_mb: u32,
+    ) -> Result<Self> {
         let (slots, display_layers) =
             cache_layers(budget_mb, adapter.limits().max_texture_array_layers)?;
         let limits = wgpu::Limits {
@@ -934,18 +990,34 @@ impl Renderer {
         );
         memory::install(&device, &governor);
         let readback = readback::Pool::new(&device, &governor).await?;
-        let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
-        if let Some(f) = surface
-            .get_capabilities(&adapter)
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-        {
-            config.format = *f;
-        }
-        surface.configure(&device, &config);
+        let config = match &surface {
+            Some(surface) => {
+                let mut config = surface
+                    .get_default_config(&adapter, width.max(1), height.max(1))
+                    .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
+                if let Some(f) = surface
+                    .get_capabilities(&adapter)
+                    .formats
+                    .iter()
+                    .find(|f| !f.is_srgb())
+                {
+                    config.format = *f;
+                }
+                surface.configure(&device, &config);
+                config
+            }
+            None => wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                width: width.max(1),
+                height: height.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
+                color_space: Default::default(),
+            },
+        };
         let lost = Arc::new(AtomicBool::new(false));
         let lost_detail = Arc::new(std::sync::Mutex::new(String::new()));
         let (flag, detail) = (lost.clone(), lost_detail.clone());
@@ -1114,7 +1186,9 @@ impl Renderer {
             self.presentation.resized();
             self.config.width = w.max(1);
             self.config.height = h.max(1);
-            self.surface.configure(&self.device, &self.config);
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
     }
     pub fn vector_stats(&self) -> (u64, u64, usize, u64) {
@@ -2809,11 +2883,20 @@ impl Renderer {
             layout: &present.get_bind_group_layout(0),
             entries: &present_entries,
         });
-        let frame = match self.surface.get_current_texture() {
+        let Some(current) = self
+            .surface
+            .as_ref()
+            .map(wgpu::Surface::get_current_texture)
+        else {
+            return Err(RenderError::Internal("renderer has no surface".into()));
+        };
+        let frame = match current {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                if let Some(surface) = &self.surface {
+                    surface.configure(&self.device, &self.config);
+                }
                 self.present_deferred = true;
                 let mut r = self.frame_report(composed, pending)?;
                 r.deferred = true;

@@ -491,6 +491,21 @@ impl Context<'_> {
             .iter()
             .map(|p| p[1])
             .fold(f64::NEG_INFINITY, f64::max);
+        self.upload_entries(map, layer, |key| {
+            !(key.tx as f64 * 256.0 >= maxx
+                || (key.tx + 1) as f64 * 256.0 <= minx
+                || key.ty as f64 * 256.0 >= maxy
+                || (key.ty + 1) as f64 * 256.0 <= miny)
+        })
+    }
+    /// Uploads the tiles of `map` (with the stroke overrides of `layer`) that
+    /// `keep` selects, in key order.
+    fn upload_entries(
+        &mut self,
+        map: &[crate::RenderTile],
+        layer: Option<NodeId>,
+        keep: impl Fn(TileKey) -> bool,
+    ) -> Result<Vec<Entry>> {
         let mut map: BTreeMap<_, _> = map.iter().map(|t| (t.key, t.hash)).collect();
         if let Some(layer) = layer {
             for ((l, key), hash) in &self.overrides {
@@ -501,11 +516,7 @@ impl Context<'_> {
         }
         let mut entries = vec![];
         for (key, hash) in map {
-            if key.tx as f64 * 256.0 >= maxx
-                || (key.tx + 1) as f64 * 256.0 <= minx
-                || key.ty as f64 * 256.0 >= maxy
-                || (key.ty + 1) as f64 * 256.0 <= miny
-            {
+            if !keep(key) {
                 continue;
             }
             let slot = self.r.upload(
@@ -580,7 +591,22 @@ impl Context<'_> {
         } else {
             mask.transform
         };
-        Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform))
+        if !self.resources.exact {
+            return Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform));
+        }
+        // Version 3 reads the mask through `mask_sampler` (modes 21 to 23), so its
+        // tiles are selected with the same Q16 inverse and Q8 pixel centers, not
+        // with the f64 inverse: the two differ by the quantization error, which
+        // grows with the distance from the origin.
+        let range = super::mask_sampler(transform, [roi.x, roi.y], roi.scale)
+            .and_then(|s| super::mask_tile_range(&s, [roi.w, roi.h]))
+            .ok_or_else(|| {
+                RenderError::GpuUnsupported("v3 mask ROI has no integer tile range".into())
+            })?;
+        let entries = self.upload_entries(&mask.tiles, layer, |key| {
+            (range[0]..=range[2]).contains(&key.tx) && (range[1]..=range[3]).contains(&key.ty)
+        })?;
+        Ok((entries, transform))
     }
     fn vector(
         &mut self,

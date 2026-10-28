@@ -1231,12 +1231,25 @@ fn mask_adjust_q14(orig: [i64; 4], filt: [i64; 4], f: i64, blend: u32) -> Option
 
 /// The byte a v3 mask stage reads at pixel (x, y) of a target with the integer
 /// ROI `region` (`[x, y, level scale]`), from one mask tile at key (0, 0) whose
-/// R channel is the byte. As the host (`renderer::mask_sampler`), every mask
-/// takes the Q16 lookup; it is evaluated here from `integer_inverse` and
-/// `source_q8`, not from the packed bits. `None` when the host refuses the mask
-/// (no Q16 lookup).
+/// R channel is the byte. See [`mask_tiles_byte_cpu`].
 fn mask_byte_cpu(
     image: &[u8],
+    transform: [f64; 6],
+    region: [i32; 3],
+    x: i32,
+    y: i32,
+) -> Option<u8> {
+    mask_tiles_byte_cpu(&[([0, 0], image)], transform, region, x, y)
+}
+
+/// The byte a v3 mask stage reads at pixel (x, y) of a target with the integer
+/// ROI `region` (`[x, y, level scale]`), from the mask tiles `tiles` by tile
+/// key, each with the byte in its R channel. A texel in no listed tile is 0. As
+/// the host (`renderer::mask_sampler`), every mask takes the Q16 lookup; it is
+/// evaluated here from `integer_inverse` and `source_q8`, not from the packed
+/// bits. `None` when the host refuses the mask (no Q16 lookup).
+fn mask_tiles_byte_cpu(
+    tiles: &[([i32; 2], &[u8])],
     transform: [f64; 6],
     region: [i32; 3],
     x: i32,
@@ -1252,11 +1265,15 @@ fn mask_byte_cpu(
         return Some(0);
     };
     let (tx, ty) = (floor_frac_q8(q[0]).0, floor_frac_q8(q[1]).0);
-    Some(if (tx >> 8, ty >> 8) != (0, 0) {
-        0
-    } else {
-        image[((ty * 256 + tx) * 4) as usize]
-    })
+    let key = [tx >> 8, ty >> 8];
+    Some(
+        tiles
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map_or(0, |(_, image)| {
+                image[(((ty - key[1] * 256) * 256 + tx - key[0] * 256) * 4) as usize]
+            }),
+    )
 }
 
 /// One `effects-q14.wgsl` dispatch over 256² targets with the identity ROI.
@@ -1411,11 +1428,31 @@ impl Q14Stage {
 /// CPU reference for a [`Q14Program`], one stage at a time, with the checked
 /// Q14 functions of the integer tile compositor. A stage reads each input at
 /// the texel under its output pixel (`input_texel_cpu`); mode 18 writes the
-/// atlas layer as it is, whatever the target's ROI.
+/// atlas layer as it is, whatever the target's ROI. A mask stage's mask is the
+/// one tile at key (0, 0) in its `slot`.
 fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
+    q14_program_masks_cpu(images, program, &[])
+}
+
+/// [`q14_program_cpu`] with every mask stage reading the mask tiles
+/// `mask_tiles` (tile key, layer of `images`) instead, when it is not empty.
+fn q14_program_masks_cpu(
+    images: &[Vec<u8>],
+    program: &Q14Program,
+    mask_tiles: &[([i32; 2], usize)],
+) -> Vec<u8> {
     let mut t = vec![vec![[0i64; 4]; 256 * 256]; program.targets];
     for stage in &program.stages {
         let region = program.region(stage.out);
+        let one = [([0, 0], stage.slot as usize)];
+        let tiles: Vec<([i32; 2], &[u8])> = if mask_tiles.is_empty() {
+            &one[..]
+        } else {
+            mask_tiles
+        }
+        .iter()
+        .map(|(key, layer)| (*key, &images[*layer][..]))
+        .collect();
         let read = |target: usize, x, y| {
             input_texel_cpu(region, program.region(target), x, y).map_or([0; 4], |j| t[target][j])
         };
@@ -1458,10 +1495,9 @@ fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
                         div_q_i64(a[c] * (q14::Q - w) + b[c] * w, q14::Q).unwrap()
                     }),
                     21..=23 => {
-                        let image = &images[stage.slot as usize];
                         let m = || {
                             i64::from(byte_q14(u32::from(
-                                mask_byte_cpu(image, stage.transform, region, x, y)
+                                mask_tiles_byte_cpu(&tiles, stage.transform, region, x, y)
                                     .expect("v3 refuses a mask without a Q16 lookup"),
                             )))
                         };
@@ -1913,6 +1949,184 @@ fn mask_origin_programs() -> Vec<Q14Program> {
         });
     }
     out
+}
+
+/// A masked raster drawn through the renderer for render version 3
+/// (`Renderer::read_tile`), so its mask tiles are the ones
+/// `Context::mask_entries` selects and uploads. The raster is the opaque
+/// gradient (`mask_images` 4) in the display tile `key` at level 0, under a
+/// root group; the mask spans several tiles.
+struct RendererMaskCase {
+    name: &'static str,
+    key: [i32; 2],
+    linked: bool,
+    transform: [f64; 6],
+    opacity: f32,
+    /// R8 mask tiles by tile key.
+    mask: Vec<([i32; 2], Vec<u8>)>,
+}
+
+impl RendererMaskCase {
+    fn region(&self) -> [i32; 3] {
+        [self.key[0] * 256, self.key[1] * 256, 1]
+    }
+    /// The mask's document transform as `apply_props` links it (world = identity).
+    fn document_transform(&self) -> [f64; 6] {
+        if self.linked {
+            crate::renderer::multiply(ident(), self.transform)
+        } else {
+            self.transform
+        }
+    }
+}
+
+/// R8 mask bytes below 255 (so a 255 tile is told apart), different for each `seed`.
+fn mask_tile_bytes(seed: i32) -> Vec<u8> {
+    (0..256 * 256)
+        .map(|i: i32| ((i % 256) * 7 + (i / 256) * 13 + seed * 31).rem_euclid(200) as u8)
+        .collect()
+}
+
+fn renderer_mask_cases() -> Vec<RendererMaskCase> {
+    // At origin 999936 the Q16 inverse (x coefficient 65537) reads texel
+    // 1000195 at pixel (255, 0), in tile (3907, 0). The f64 inverse puts the
+    // ROI's right edge at 1000191.0000000001, before that tile.
+    let far = RendererMaskCase {
+        name: "renderer-mask-origin-999936",
+        key: [3906, 0],
+        linked: false,
+        transform: [0.9999900000999989, 0.0, 0.0, 1.0, 11.00180998190018, 0.0],
+        opacity: 1.0,
+        mask: vec![
+            ([3905, 0], mask_tile_bytes(1)),
+            ([3906, 0], mask_tile_bytes(2)),
+            ([3907, 0], vec![255; 256 * 256]),
+        ],
+    };
+    // A linked mask shrunk by 0.8 and rotated by 0.3 rad about the center of
+    // display tile (5, 3): the tile reads mask tiles (4..=6, 2..=4).
+    let (s, c) = 0.3f64.sin_cos();
+    let (k, cx, cy) = (0.8, 5.0 * 256.0 + 128.0, 3.0 * 256.0 + 128.0);
+    let rotated = RendererMaskCase {
+        name: "renderer-mask-rotated-3x3",
+        key: [5, 3],
+        linked: true,
+        transform: [
+            k * c,
+            k * s,
+            -k * s,
+            k * c,
+            cx - k * (c * cx - s * cy),
+            cy - k * (s * cx + c * cy),
+        ],
+        opacity: 0.5,
+        mask: (2..=4)
+            .flat_map(|ty| (4..=6).map(move |tx| ([tx, ty], mask_tile_bytes(tx * 3 + ty))))
+            .collect(),
+    };
+    vec![far, rotated]
+}
+
+/// CPU reference for a [`RendererMaskCase`]: mode 18, mode 21 with the mask
+/// tiles, then mode 19 at opacity 1 onto the empty root group, all at the
+/// display tile's ROI.
+fn renderer_mask_cpu(case: &RendererMaskCase) -> Vec<u8> {
+    let mut images = vec![mask_images().swap_remove(4)];
+    let mut tiles = Vec::new();
+    for (key, bytes) in &case.mask {
+        tiles.push((*key, images.len()));
+        images.push(bytes.iter().flat_map(|v| [*v, *v, *v, 255]).collect());
+    }
+    let program = Q14Program {
+        name: case.name.into(),
+        targets: 4,
+        regions: vec![case.region(); 4],
+        stages: vec![
+            Q14Stage::ingress(0, 1),
+            Q14Stage::mask(1, 0, case.opacity, case.document_transform(), 2),
+            Q14Stage::layer(0, 2, 1.0, 0, 3),
+        ],
+        result: 3,
+    };
+    q14_program_masks_cpu(&images, &program, &tiles)
+}
+
+/// [`renderer_mask_cases`] composed by a headless `Renderer` and read back.
+fn renderer_mask_gpu(cases: &[RendererMaskCase]) -> Result<Vec<Vec<u8>>, String> {
+    use alto_core::{PixelFormat, TileKey};
+    use alto_raster::{ObjectStore, TileData};
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+    let instance = wgpu::Instance::new(descriptor);
+    let mut renderer = pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
+        .map_err(|e| format!("headless renderer: {e}"))?;
+    // Native `map_async` completes only while the device is polled.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let (device, done) = (renderer.device.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = device.poll(wgpu::PollType::Poll);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    let result = cases
+        .iter()
+        .map(|case| {
+            let mut store = ObjectStore::default();
+            let mut insert = |format, pixels| {
+                store.insert_tile(&TileData::new(format, pixels).expect("tile size"))
+            };
+            let tile = |key: [i32; 2], hash| crate::RenderTile {
+                key: TileKey {
+                    tx: key[0],
+                    ty: key[1],
+                },
+                hash,
+            };
+            let raster = tile(
+                case.key,
+                insert(PixelFormat::Rgba8, mask_images().swap_remove(4)),
+            );
+            let mask = RMask {
+                tiles: case
+                    .mask
+                    .iter()
+                    .map(|(key, bytes)| tile(*key, insert(PixelFormat::R8, bytes.clone())))
+                    .collect(),
+                linked: case.linked,
+                transform: case.transform,
+            };
+            let mut scene = scene(
+                RContent::Group {
+                    children: vec![1],
+                    isolated: false,
+                },
+                RFeatures::default(),
+            );
+            scene.render_version = alto_core::RENDER_VERSION_EXACT;
+            scene.canvas = IRect {
+                x0: 0,
+                y0: 0,
+                x1: (case.key[0] + 1) * 256,
+                y1: (case.key[1] + 1) * 256,
+            };
+            let mut node = scene.nodes[0].clone();
+            node.key = NodeId::new();
+            node.opacity = case.opacity;
+            node.content = RContent::Tiles(vec![raster]);
+            node.features.mask = Some(mask);
+            scene.nodes.push(node);
+            pollster::block_on(renderer.read_tile(&scene, &store, (0, case.key[0], case.key[1])))
+                .map_err(|e| format!("{}: {e}", case.name))
+        })
+        .collect();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    poller
+        .join()
+        .map_err(|_| "device poller panicked".to_string())?;
+    result
 }
 
 fn color_adjust_image(src: &[u8], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
@@ -4500,6 +4714,73 @@ fn mask_origin_programs_place_inputs_and_masks_by_integers() {
     }
 }
 
+/// The v3 mask tiles `Context::mask_entries` uploads (`mask_tile_range`) are
+/// the tiles the Q16 lookup reads: the four corners bound every pixel. At
+/// origin 999936 that includes tile (3907, 0), which the f64 inverse misses.
+/// A corner outside the integer range has no range (the render is refused).
+#[test]
+fn v3_mask_tile_range_is_the_q16_lookup() {
+    let renderer_cases = renderer_mask_cases();
+    let mut cases: Vec<([i32; 3], [f64; 6])> = renderer_cases
+        .iter()
+        .map(|c| (c.region(), c.document_transform()))
+        .collect();
+    cases.extend(mask_origin_cases());
+    cases.push(([0, 0, 1], tie_mask_transform()));
+    cases.push(([512, -768, 2], rotated_mask_transform()));
+    let range_of = |region: [i32; 3], t: [f64; 6]| {
+        let at = [region[0] as f32, region[1] as f32];
+        let sampler = crate::renderer::mask_sampler(t, at, region[2] as f32).unwrap();
+        crate::renderer::mask_tile_range(&sampler, [256, 256])
+    };
+    for (region, t) in cases {
+        let inv = integer_inverse(crate::renderer::inverse(t).unwrap()).unwrap();
+        let mut every = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for y in 0..256 {
+            for x in 0..256 {
+                let px = pixel_q8(region[0], x, region[2]).unwrap();
+                let py = pixel_q8(region[1], y, region[2]).unwrap();
+                let q = source_q8(&inv, px, py).unwrap();
+                let key = [(q[0] >> 8) >> 8, (q[1] >> 8) >> 8];
+                every = [
+                    every[0].min(key[0]),
+                    every[1].min(key[1]),
+                    every[2].max(key[0]),
+                    every[3].max(key[1]),
+                ];
+            }
+        }
+        assert_eq!(range_of(region, t), Some(every), "{region:?} {t:?}");
+    }
+    let far = &renderer_cases[0];
+    let t = far.document_transform();
+    assert_eq!(range_of(far.region(), t), Some([3906, 0, 3907, 0]));
+    let right = crate::renderer::point(crate::renderer::inverse(t).unwrap(), [1_000_192.0, 0.0]);
+    assert!(
+        right[0] <= 3907.0 * 256.0,
+        "the f64 bound reaches tile 3907"
+    );
+    let tiles: Vec<_> = far.mask.iter().map(|(k, b)| (*k, &b[..])).collect();
+    assert_eq!(
+        mask_tiles_byte_cpu(&tiles, t, far.region(), 255, 0),
+        Some(255),
+        "pixel (255, 0) reads the white tile (3907, 0)"
+    );
+    let rotated = &renderer_cases[1];
+    assert_eq!(
+        range_of(rotated.region(), rotated.document_transform()),
+        Some([4, 2, 6, 4])
+    );
+    // 0.01x inverts to 100x: the Q8 source of a corner leaves i32.
+    assert_eq!(
+        range_of([8_000_000, 0, 1], [0.01, 0.0, 0.0, 0.01, 0.0, 0.0]),
+        None
+    );
+    // The Q8 pixel center of the right corners leaves i32 (pixel 0 fits).
+    assert!(pixel_q8(8_388_480, 0, 1).is_some() && pixel_q8(8_388_480, 255, 1).is_none());
+    assert_eq!(range_of([8_388_480, 0, 1], ident()), None);
+}
+
 /// Rust = JS away from the origin: `tests/e2e/mask-v3-origin-reference.mjs`
 /// draws the `origin ...` programs of [`mask_origin_programs`] with
 /// `renderM5V3` at the same ROIs, and every byte must equal `q14_program_cpu`.
@@ -5623,6 +5904,25 @@ fn gpu_shader_matches_cpu_reference() {
                 println!("q14 stages: GPU render failed: {err}");
                 failed.push(format!("q14 stages: {err}"));
             }
+        }
+    }
+    // Enforced: v3 masks over several tiles through the renderer, so the mask
+    // tiles are the ones `Context::mask_entries` selects and uploads.
+    let cases = renderer_mask_cases();
+    match renderer_mask_gpu(&cases) {
+        Ok(tiles) => {
+            for (tile, case) in tiles.iter().zip(&cases) {
+                let cpu = renderer_mask_cpu(case);
+                let report = diff_report(&cpu, tile);
+                println!("{} (v3 renderer mask, enforced): {report}", case.name);
+                if cpu != *tile {
+                    failed.push(format!("{}: {report}", case.name));
+                }
+            }
+        }
+        Err(err) => {
+            println!("renderer masks: GPU render failed: {err}");
+            failed.push(format!("renderer masks: {err}"));
         }
     }
     assert!(
