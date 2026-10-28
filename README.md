@@ -296,7 +296,7 @@ sh scripts/build.sh
 sh scripts/check.sh
 ```
 
-`ALTO_TARGET_DIR=/任意のビルド先 sh scripts/build.sh` でRustの成果物を外に置けます。ブラウザ検証は画面から実行でき、`ALTO_BROWSER_REPORT_DIR=/任意の出力先 node scripts/verify-browser.mjs --functional` でChrome・ローカルサーバーの起動からM4〜M8の機能検証まで自動実行できます。出力先を省略すると生JSONは gitignore した `verification/out/` に書きます。`--functional` を外すとB1〜B7の性能測定も実行します。CIは機能検証を必須とし、性能測定はハードウェア依存のため別に扱います。CIの生JSONは workflow artifact `alto-browser-reports-browser`（機能検証・埋め込み例）と `alto-browser-reports-vector`（ベクター比較）です。`wasm` のレポート出力先は `alto-browser-reports-wasm`（出力がある場合のみ）です。GPU lifecycle の手動実行は `gpu-lifecycle-<OS>` に保存します。`verification/` に残すのは要約の `.md`、テストが読む `build.json`、サンプル文書です。ネイティブRustテストだけではWebGPU・OPFSの実動作を検証できません。
+`ALTO_TARGET_DIR=/任意のビルド先 sh scripts/build.sh` でRustの成果物を外に置けます。ブラウザ検証は画面から実行でき、`ALTO_BROWSER_REPORT_DIR=/任意の出力先 node scripts/verify-browser.mjs --functional` でChrome・ローカルサーバーの起動からM4〜M8の機能検証まで自動実行できます。出力先を省略すると生JSONは gitignore した `verification/out/` に書きます。`--functional` を外すとB1〜B7の性能測定も実行します。CIは機能検証を必須とし、性能測定はハードウェア依存のため別に扱います。CIの生JSONは workflow artifact `alto-browser-reports-browser`（機能検証・埋め込み例）と `alto-browser-reports-vector`（ベクター比較）です。GPU lifecycle の手動実行は `gpu-lifecycle-<OS>` に保存します。`verification/` に残すのは要約の `.md`、テストが読む `build.json`、サンプル文書です。ネイティブRustテストだけではWebGPU・OPFSの実動作を検証できません。
 
 DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2` を指定し、`ALTO_BROWSER_VIEW_MODE=css` で同じ文書範囲を描画します。例: `ALTO_BROWSER_DPR=2 ALTO_BROWSER_WIDTH=1093 ALTO_BROWSER_HEIGHT=827 ALTO_BROWSER_VIEW_MODE=css ALTO_BROWSER_PROFILE=1 ALTO_BROWSER_REPORT_DIR=/tmp/alto-dpr2 node scripts/verify-browser.mjs --benchmark-only`。従来の同じ物理ズームでの比較には `ALTO_BROWSER_VIEW_MODE=physical` を使います。結果JSONにはキャンバスのCSS/物理寸法とB2時点の可視文書範囲を記録します。
 

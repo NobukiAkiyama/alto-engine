@@ -1,6 +1,6 @@
 # M7・M8 検証結果
 
-生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports-browser`（機能検証・埋め込み例）と `alto-browser-reports-vector`（ベクター比較）（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
 
 ## 2026-10-26：整数 4 タップで双一次と回転を確定
 
@@ -20,7 +20,7 @@ plain scene の `composite.wgsl` を、f32 の CPU 参照および lavapipe（Me
 
 `cargo test --workspace --locked` は **123 件**（変更前の記録は 118 件、追加は alto-gpu の 5 件）。Node の SDK テストは 7 件から **11 件**（待ち上限 2 件、CPU 参照のロックステップ 2 件）。ブラウザの parity スイートは 41 件。macos-15 SwiftShader の push 実行では失敗 0（ビット一致 34、丸め xfail は `scale-bilinear` の 1 件、別経路 xfail 5、フレーム待ち 1）。同じコミットの pull_request 実行は、embed の往復キャッシュ試験が Playground のエンジンを再起動している途中に parity が始まり、41 件とも `the engine is restarting` で落ちた。各スイートの前に Playground が `ready` になるまで待つ。機能スイートの他は functional 32、M5 8、M6 10、M7 9、M8 6、embed 24。この Linux の SwiftShader は main の配布 SDK でも表示タイルの読み戻しでデバイスが破棄される。最新のブラウザ計測は [フレームペーシング](FRAME-PACING-RESULTS-2026-10-26.md) と [組み込み API](EMBEDDING-API-RESULTS-2026-10-25.md) を参照。
 
-parity スイートの生JSONはコミットしない。`scripts/verify-browser.mjs` が他のスイートと同じ出力先へ書く。CI は artifact `alto-browser-reports` の `parity.json`、ローカルで `ALTO_BROWSER_REPORT_DIR` を省略したときは gitignore した `verification/out/rebuild-parity.json`。
+parity スイートの生JSONはコミットしない。`scripts/verify-browser.mjs` が他のスイートと同じ出力先へ書く。CI は artifact `alto-browser-reports-browser` の `parity.json`、ローカルで `ALTO_BROWSER_REPORT_DIR` を省略したときは gitignore した `verification/out/rebuild-parity.json`。
 
 ## 2026-10-23：現在の配布版
 
@@ -72,12 +72,12 @@ B6はエンジンが計上する割当量を描画時にサンプリングした
 
 | 検証 | 結果 |
 |---|---|
-| 機能 11項目 | JSON（`rebuild-functional.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| M5 8項目 | JSON（`rebuild-m5.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| M6 10項目 | JSON（`rebuild-m6.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| M7 9項目 | JSON（`rebuild-m7.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| M8 6項目 | JSON（`rebuild-m8.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
-| B1〜B7 | JSON（`rebuild-benchmark.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`） |
+| 機能 11項目 | JSON（`rebuild-functional.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
+| M5 8項目 | JSON（`rebuild-m5.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
+| M6 10項目 | JSON（`rebuild-m6.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
+| M7 9項目 | JSON（`rebuild-m7.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
+| M8 6項目 | JSON（`rebuild-m8.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
+| B1〜B7 | JSON（`rebuild-benchmark.json`、CI artifact `alto-browser-reports-browser`、ローカルは `verification/out/`） |
 | `alto-git` の実行記録 | [テキスト](m8-git-transcript.txt) |
 
 2026-10-19 の内蔵 Chromium 152 の JSON は、その日の別バイナリ（SHA-256 `68b14862c40be81523462ad90fbb86acd876b1bcff5548055a2125c971b0481d`）の記録として残しています。M6までの経緯は [M6](M6-RESULTS.md)・[M5](M5-RESULTS.md)・[M4](M4-RESULTS.md)。

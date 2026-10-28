@@ -175,12 +175,6 @@ jobs:
         with:
           name: wasm-hashes
           path: ${{ runner.temp }}/wasm-hashes
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: alto-browser-reports-wasm
-          path: ${{ runner.temp }}/alto-browser
-          if-no-files-found: ignore
 
   # Independent cached rebuilds let browser/vector tests start without waiting
   # for wasm's clippy, API and Node checks or an artifact transfer.
@@ -216,6 +210,7 @@ jobs:
           cache-targets: "true"
           cache-bin: "false"
           shared-key: wasm-fast
+          save-if: false
           workspaces: ". -> target/wasm-fast"
       - name: Install pinned Chrome for Testing
         shell: bash
@@ -307,6 +302,7 @@ jobs:
           cache-targets: "true"
           cache-bin: "false"
           shared-key: wasm-fast
+          save-if: false
           workspaces: ". -> target/wasm-fast"
       - name: Install pinned Chrome for Testing
         shell: bash
