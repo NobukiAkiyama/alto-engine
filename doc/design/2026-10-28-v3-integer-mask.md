@@ -81,7 +81,7 @@ color-adjust のように f16 の中間（`q14_stored`）と `effects-resolve.wg
 この PR は、マスクのほかに v3 の範囲を二つ広げる。どちらも `effects-q14.wgsl` の整数のモードで描き、`v3_gap`（Rust）と `sceneGap`（JS）が受け入れる。
 
 - **モード 22。選択つきの color-adjust。** v2 のモード 5 にあたる。効果の `selection` を持つ color-adjust を、上の「モード 5」の式で描く。color-adjust 以外の効果の選択は、今までどおり拒否する。
-- **モード 23。normal 以外のブレンドの調整レイヤー。** v2 のモード 7 にあたる。マスクがなくても、ブレンドが normal でない color-adjust の調整レイヤーはこのモードで描く。式は上の「モード 7」である。ただし、マスクなしは v3 では拒否する（float purge PR まで。上流のモード 18・17・19 と resolve に f32 が残るため、`v3_gap` / `sceneGap` は v3-unsupported、ホストは GpuUnsupported とし、float では描かない）。
+- **モード 23。normal 以外のブレンドの調整レイヤー。** v2 のモード 7 にあたる。v3 で描くのは、有効なピクセルマスクを持つ color-adjust の調整レイヤーだけである（ブレンドは任意）。式は上の「モード 7」である。マスクのない（または `mask_enabled` が偽の）normal 以外のブレンドは、v3 では拒否する。`v3_gap` / `sceneGap` は v3-unsupported、ホストは描画前に GpuUnsupported とし、float では描かない（#37、Linus 21:46）。float purge で上流のモードは整数になったが、この拒否を外すのは範囲の変更なので、別のレビューで扱う。
 
 **v3 では、screen 以外のブレンドはすべて multiply で描く。** モード 23 の分岐は screen（2）と multiply の二つだけで、overlay、darken、lighten などのほかのモードも multiply の式を通る。これは v2 のモード 7 の意味をそのまま保ったもので、仕様として凍結する。v3 の調整レイヤーで、ブレンドモードごとの式を後から入れることはしない。入れるなら、新しい描画バージョンの変更として扱う。
 
@@ -95,6 +95,8 @@ color-adjust のように f16 の中間（`q14_stored`）と `effects-resolve.wg
 - その後はすべて整数である。`unorm_byte` の往復は `Gpu::atlas_read` と `measureAtlasRead` が 256 値の全チャネルで必須の検査として押さえる。`.r` はそのチャネルの一つなので、新しいアトラスの検査は足さない。
 
 引く位置は常に整数である。ホストの `mask_sampler`（`crates/alto-gpu/src/renderer.rs`）がマスクの逆変換（`mask_entries` の `transform` の逆）を `integer_inverse` で Q16 にし、`SAMPLE_INTEGER` で引く。軸平行で倍率 1 の逆変換も同じ経路を通る。v3 のマスクに f32 の位置（`sparse`）はない。
+
+アップロードするマスクタイルも同じ整数で選ぶ（#37、`64dbb22`）。ホストの `mask_tile_range` は、出力 ROI の四隅の画素をシェーダと同じ `pixel_q8` と `coord_q8`（パックした Q16 の逆行列）で評価し、テクセル `q >> 8` をさらに `>> 8` してタイルキーにする。Q24 の和は画素の添字について正確にアフィンで、丸めと算術シフトは単調なので、四隅が ROI の全画素を囲む。余白は足さない。f64 の逆行列で選ぶと、量子化誤差（原点から遠いほど大きい）のぶんだけサンプラが読むタイルを落とす。四隅のどれかが整数の範囲（i32 の Q8）を出るときは、描画を GpuUnsupported で拒否する。float purge で、モード 18 のラスタも同じ `lookup_entries` で選ぶ。
 
 - 画素中心は `pixel_q8`、ソース位置は `coord_q8`（Rust `source_q8`、JS `sourceAxis`）。テクセルは Q8 の算術右シフト `>> 8`（`floor_frac_q8` の床）で、負の座標でも床になる。タイルキーはテクセルの `>> 8`、タイル内の位置はテクセルからキー × 256 を引いたものである。重み `fx, fy` は使わない。
 - `pixel_q8` は整数の原点と倍率を要る。`Roi`（`m5.rs`）の `x`、`y`、`scale` は f32 である。三つがちょうど整数で倍率が 1 以上であることを要る。
@@ -266,3 +268,17 @@ measure するのは、算術が整数でも入力が float のまま来るケ�
 8. **整数で引けない位置。** v3 のマスクに f32 の位置はない。負のレベルや整数でない `Roi`、Q16 に入らない逆変換は描画を拒否する（DQ3-4）。これらが実際に現れるかは調べていない。現れるなら、拒否をやめるには整数の位置の定義を広げる必要がある。
 9. **欠けたスロット。** `0xffffffff` のスロットはカバレッジ 255 になる（v2 の `(1, 0, 0.2, 1)` の `.r`）。デバッグ用の印がマスクとしては「全部見せる」になる。v3 で 0 にするかは決めていない。
 10. **古いメモの指し先。** [正確な CPU 参照](2026-10-27-exact-cpu-references.md) の「mask」節は、この文書で置き換えた。あの節からこの文書への指し先は、実装 PR で足す。この変更は文書を一つ足すだけで、既存の文書は触らない。
+
+## float purge（v3 デフォルト化の前提）
+
+#37 のあと、v3 の M5 経路に残っていた float を除いた（Linus 21:35 / 21:46 の項目 9〜12）。v1 / v2 のシェーダ、出力、ハッシュは変えない。
+
+- **項目 9。モード 8、17、19、20。** f32 の `p` から入力座標を作る `load_a` / `load_b` をやめ、モード 21〜23 と同じ整数の `input_map`（`texel_a` / `texel_b`、負の分子は床除算）で読む。設定も f32 の `settings` スロットではなく整数の `grid[0]` に置く。整数で表せない入力領域は GpuUnsupported。`effects-q14.wgsl` から `load_a`、`load_b`、`sparse_bytes` はなくなった。
+- **項目 10。モード 18（ラスタの入口）。** f32 の `p` と f32 の逆行列 `inv0` / `inv1`（f64 から f32 へ丸め、FMA の余地あり）をやめ、マスクと同じ Q16 の逆行列と Q8 の画素中心（`lookup`）で引く。タイルの選別も `mask_tile_range`。逆行列が特異なら何も描かない（v1 / v2 の f64 の選別と同じ）。
+  - **設計判断：最近傍。** 整数の 4 タップではなく最近傍にした。CPU 参照（Rust `q14_program_cpu`、JS `renderM5V3`）は、そのまま置いたラスタを画素ごとにそのまま写す。最近傍は Q8 の位置 `i * 256 + 128` の床で、その画素そのものになり、参照と全バイト一致する（`v3_raster_lookup_is_nearest_and_copies_as_placed`）。整数合成の 4 タップは同じ位置で重み 128 を持ち、隣のテクセルと半分ずつ混ぜるので一致しない。v2 の M5 の `sparse` も最近傍なので、意味も変わらない。
+- **項目 11。resolve のキャンバス判定。** `effects-resolve-q14.wgsl` は f32 の中心で `p < canvas` を比べていた。ホストが i64 で 2 倍した式 `0 <= 2 o + (2 i + 1) s < 2 end` からキャンバス上の画素の矩形 `span` を求め（`resolve_span`）、シェーダは整数の添字を比べるだけにした。タイルの原点もキーから i64 で求め直し、f32 の `Roi` と一致しなければ GpuUnsupported（`integer_origin`）。
+- **項目 12。不透明度の量子化。** `composite_opacity_q14` は f32 で `v * 16384 + 0.5` を切り捨てていた。積は正確だが和は正確でなく、`2^-15` の直前の f32（Q14 で `0.5 - 2^-25`）が 0 ではなく 1 になる。f32 のビットから整数で `v * 16384` を 0 から遠い側へ丸める `q14_round` に替えた。color-adjust の `color_adjust_q14` も同じ欠陥があったので同じ関数にした。JS（`q14Round`、`opacityQ14`、`colorAdjustQ14`）も BigInt で同じ式にした。
+- **uniform。** v3 の `Config` は float のフィールドを宣言しない（f32 のスロットは `unused` で、ホストは 0 のままにする）。
+- **アトラス。** `Rgba8Unorm` のままにし、`textureLoad` と `unorm_byte` でバイトに戻す。整数形式（`r8uint` / `rgba8uint`）は採らない。アトラスは v1 / v2 と共有の一枚で、WebGPU では `Rgba8Unorm` と `Rgba8Uint` はビュー互換でない。v3 だけを整数にするには、二枚目のアトラス（アップロードとメモリの二重化）か、v1 / v2 のシェーダのアトラスの型の変更が要る。後者は v1 / v2 を一文字も変えないという条件に反する。`unorm_byte` の往復は 256 値の全チャネルで `Gpu::atlas_read` が必須の検査として押さえ、v3 で float の値に触れるのはシェーダの `atlas_bytes` 一か所だけである（`v3_stages_call_no_f32_coordinate_helper`）。
+
+検査は、モードごとに GPU と CPU の全バイト比較（原点、負のキー、10^6 付近、2^23 の直前、レベル倍率 4、回転・縮小・結びのラスタ、キャンバスの端、レベル 1 のピラミッド、実際の `Renderer::read_tile` 経由）、Rust と JS の一致（`m5-v3-renderer-reference.mjs`）、`main` から届く関数に float がないことの検査である。

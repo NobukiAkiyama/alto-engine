@@ -518,21 +518,21 @@ fn mode(m: RenderBlend) -> f32 {
 }
 
 /// Q14 quantize of a color-adjust setting. 1.0 is 16384. The value is clamped
-/// to [-1, 4], multiplied by 16384 in f32, and rounded half away from zero.
-/// Render version 3 stores these bits in the mode 17 uniform.
+/// to [-1, 4], and `value * 16384` is rounded half away from zero exactly
+/// (`q14_round`, integer). A value that is not finite is 0.
+/// Render version 3 stores these Q14 integers in the mode 17 uniform.
 pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     if !value.is_finite() {
         return 0;
     }
-    let x = value.clamp(-1.0, 4.0) * 16384.0;
-    let adj = if x.is_sign_negative() { -0.5 } else { 0.5 };
-    (x + adj) as i32
+    crate::q14_round(value.clamp(-1.0, 4.0))
 }
 
-/// Where a v3 mask stage reads its mask: the integer output ROI (`x`, `y`,
-/// level scale), the Q16 inverse and its i64 Q16 translation bits
-/// (`effects-q14.wgsl` `Config.grid` rows 3 to 5). The lookup is always
-/// `SAMPLE_INTEGER` (`sample.rs`).
+/// Where a v3 stage reads the atlas: the mask of modes 21 to 23, or the raster
+/// tiles of mode 18. The integer output ROI (`x`, `y`, level scale), the Q16
+/// inverse and its i64 Q16 translation bits (`effects-q14.wgsl` `Config.grid`
+/// rows 3 to 5). The positions are always `SAMPLE_INTEGER` (`sample.rs`), and the
+/// texel is the nearest one (`effects-q14.wgsl` `lookup`).
 pub(crate) struct MaskSampler {
     pub origin: [i32; 3],
     pub inverse: [i32; 4],
@@ -640,9 +640,33 @@ pub(crate) fn input_map(out: [f32; 3], size: [u32; 2], input: [f32; 3]) -> Optio
     ])
 }
 
-/// The integer uniform of a v3 mask stage, `effects-q14.wgsl` `Config.grid`:
+/// The pixel-index rectangle `[x0, y0, x1, y1)` of a 256² tile whose pixel
+/// centers lie on the canvas, for `effects-resolve-q14.wgsl`. The tile has
+/// integer origin `origin` and level scale `scale`; pixel `i` is on the canvas
+/// when `0 <= origin + (i + 1/2) * scale < end`, the test of the v1/v2 resolve,
+/// here doubled and exact in i64. An empty rectangle is all zero.
+pub(crate) fn resolve_span(origin: [i64; 2], scale: i64, end: [i64; 2]) -> [u32; 4] {
+    let axis = |o: i64, e: i64| {
+        let inside = |i: i64| (0..2 * e).contains(&(2 * o + (2 * i + 1) * scale));
+        let lo = (0..256).find(|&i| inside(i)).unwrap_or(256);
+        let hi = (lo..256)
+            .take_while(|&i| inside(i))
+            .last()
+            .map_or(lo, |i| i + 1);
+        (lo as u32, hi as u32)
+    };
+    let (x0, x1) = axis(origin[0], end[0]);
+    let (y0, y1) = axis(origin[1], end[1]);
+    if x0 == x1 || y0 == y1 {
+        return [0; 4];
+    }
+    [x0, y0, x1, y1]
+}
+
+/// The integer uniform of a v3 M5 stage, `effects-q14.wgsl` `Config.grid`:
 /// row 0 the Q14 settings, rows 1 and 2 the `input_map` of inputs `a` and `b`,
-/// rows 3 to 5 the mask lookup (zero without a mask). The rows go into the
+/// rows 3 to 5 the atlas lookup: the mask of modes 21 to 23 or the raster of
+/// mode 18 (zero without one; `mask_sampler` builds both). The rows go into the
 /// `curve` slots of the M5 uniform, which no v3 stage reads otherwise. That
 /// uniform is shared with versions 1 and 2 and its Rust type is `[f32; 64]`,
 /// so the integers travel as f32 bit patterns (`f32::from_bits`, a copy). The
@@ -698,8 +722,9 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
             RContent::Text(_) => return Some("text"),
-            // Without a pixel mask, a non-normal blend would reach mode 23 through
-            // stages that still take f32 coordinates; refused until they do not.
+            // Without a pixel mask, a non-normal blend stays refused (#37, Linus
+            // 21:46). Its stages are integer since the float purge; drawing it
+            // through mode 23 is a scope change that needs its own review.
             RContent::Adjustment(e)
                 if !color_adjust(e) || (f.mask.is_none() && n.blend != RenderBlend::Normal) =>
             {

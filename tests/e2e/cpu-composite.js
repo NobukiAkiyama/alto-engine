@@ -684,13 +684,39 @@ const Q14_ONE = 16384;
 const Q14_HALF = 8192;
 const Q14_LUMA = [3483, 11718, 1183];
 
-/** Q14 of a color-adjust setting. 1 is 16384. Half away from zero. */
-function colorAdjustQ14(value) {
+const F32_VALUE = new Float32Array(1);
+const F32_BITS = new Uint32Array(F32_VALUE.buffer);
+/**
+ * `v * 16384` rounded half away from zero, exactly, for an f32 `v` with
+ * `|v| <= 4` (Rust `q14_round`). Evaluated on the f32 bits in BigInt: the f32
+ * sum with one half that a float rounding needs is not exact.
+ */
+export function q14Round(v) {
+  F32_VALUE[0] = v;
+  const bits = F32_BITS[0];
+  const exponent = (bits >>> 23) & 0xff;
+  const fraction = BigInt(bits & 0x7fffff);
+  const [m, e] = exponent === 0 ? [fraction, -149] : [fraction | 0x800000n, exponent - 150];
+  const shift = e + 14;
+  let magnitude;
+  if (shift >= 0) magnitude = m << BigInt(shift);
+  else if (shift < -40) magnitude = 0n;
+  else magnitude = (m + (1n << BigInt(-shift - 1))) >> BigInt(-shift);
+  const q = Number(magnitude);
+  return bits >>> 31 && q ? -q : q;
+}
+
+/** Q14 of a color-adjust setting. 1 is 16384. Clamped to [-1, 4], then `q14Round`. */
+export function colorAdjustQ14(value) {
   if (!Number.isFinite(value)) return 0;
-  const clamped = f(Math.min(4, Math.max(-1, value)));
-  const x = f(clamped * 16384);
-  const adj = x < 0 || Object.is(x, -0) ? -0.5 : 0.5;
-  return Math.trunc(f(x + adj));
+  return q14Round(f(Math.min(4, Math.max(-1, f(value)))));
+}
+
+/** Q14 of a layer opacity (Rust `composite_opacity_q14`): clamped to 0..1, then `q14Round`; NaN is 0. */
+export function opacityQ14(value) {
+  const v = f(value);
+  if (Number.isNaN(v)) return 0;
+  return q14Round(Math.min(1, Math.max(0, v)));
 }
 
 function byteQ14(byte) {
@@ -813,36 +839,71 @@ export function maskAdjustQ14(orig, filt, f, blend) {
 }
 
 /**
- * The byte a v3 mask stage reads at pixel (x, y) of a tile whose ROI has origin
- * `origin` and level scale `scale` (default: level 0 at the origin).
- * `byteAt(x, y)` is the stored mask byte, 0 outside its tiles. As the host
- * (`renderer::mask_sampler`), every mask takes the Q16 inverse and Q8 pixel
- * centers, axis-aligned unit inverses included; there is no f32 lookup. A mask
- * without a Q16 inverse, or a ROI whose origin is not an integer or whose scale
- * is not an integer of at least 1, is refused (throws), as the host refuses the
- * render. Nearest; the texel is the floor.
+ * The stored texel a v3 stage reads at pixel (x, y) of a tile whose ROI has
+ * origin `origin` and level scale `scale` (default: level 0 at the origin): the
+ * raster of mode 18, or the mask of modes 21 to 23. `texelAt(x, y)` is the
+ * stored texel, transparent outside its tiles. As the host
+ * (`renderer::mask_sampler`), every lookup takes the Q16 inverse and Q8 pixel
+ * centers, axis-aligned unit inverses included; there is no f32 lookup. A
+ * transform without a Q16 inverse, or a ROI whose origin is not an i32 or whose
+ * scale is not an i32 of at least 1, is refused (throws), as the host refuses
+ * the render. A pixel without an i32 Q8 position is `null` (transparent).
+ * Nearest; the texel is the floor.
  */
-export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
+export function lookupV3(texelAt, transform, x, y, origin = [0, 0], scale = 1) {
   const inv = inverseF64(transform);
   const q = inv && quantizeInverse(inv);
-  if (!q) throw new Error("v3 refuses a mask without a Q16 lookup");
-  if (!origin.every(Number.isInteger) || !Number.isInteger(scale) || scale < 1) {
-    throw new Error("v3 refuses a mask at a ROI without integer origin and scale");
+  if (!q) throw new Error("v3 refuses a lookup without a Q16 inverse");
+  if (!origin.every(fitsI32) || !fitsI32(scale) || scale < 1) {
+    throw new Error("v3 refuses a lookup at a ROI without i32 integer origin and scale");
   }
   const px = pixelQ8(origin[0], x, scale);
   const py = pixelQ8(origin[1], y, scale);
   const pos = px === null || py === null ? null : sourceQ8(q, px, py);
-  if (!pos) return 0;
-  return byteAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+  if (!pos) return null;
+  return texelAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+}
+
+/** The mask byte of `lookupV3`; `byteAt(x, y)` is the stored byte, 0 outside its tiles. */
+export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
+  return lookupV3(byteAt, transform, x, y, origin, scale) ?? 0;
 }
 
 /**
- * Q14 coverage of `mask` (`{ bytes, transform }`, one 256² R8 tile at key 0,0) at
- * pixel (x, y) of a tile with ROI `frame` (`{ origin, scale }`).
+ * A texel source over `tiles` (`[{ key: [tx, ty], bytes }]`, 256² tiles of
+ * `channels` bytes per texel), transparent outside them.
+ */
+function tileTexels(tiles, channels) {
+  const byKey = new Map(tiles.map((t) => [`${t.key[0]},${t.key[1]}`, t.bytes]));
+  return (x, y) => {
+    const kx = Math.floor(x / 256), ky = Math.floor(y / 256);
+    const bytes = byKey.get(`${kx},${ky}`);
+    if (!bytes) return channels === 1 ? 0 : [0, 0, 0, 0];
+    const i = ((y - ky * 256) * 256 + x - kx * 256) * channels;
+    return channels === 1 ? bytes[i] : Array.from(bytes.subarray(i, i + 4));
+  };
+}
+
+/**
+ * Q14 coverage of `mask` at pixel (x, y) of a tile with ROI `frame`
+ * (`{ origin, scale }`). A mask is `{ bytes, transform }` (one 256² R8 tile at
+ * key 0,0) or `{ tiles, transform }` (R8 tiles by key, `tileTexels`); its
+ * transform is the document transform, after linking.
  */
 function maskCoverage(mask, x, y, frame) {
-  const byteAt = (tx, ty) => (tx >= 0 && ty >= 0 && tx < 256 && ty < 256 ? mask.bytes[ty * 256 + tx] : 0);
-  return BigInt(byteQ14(maskByteV3(byteAt, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
+  if (!mask.at) mask.at = tileTexels(mask.tiles ?? [{ key: [0, 0], bytes: mask.bytes }], 1);
+  return BigInt(byteQ14(maskByteV3(mask.at, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
+}
+
+/**
+ * The stored bytes of a raster layer at pixel (x, y): `image` is the tile's own
+ * pixels (mode 18 of a raster drawn as it is); `{ tiles, transform }` are RGBA
+ * tiles by key under the layer's document transform (the Q16 nearest lookup).
+ */
+function rasterBytes(layer, i, x, y, frame) {
+  if (!layer.tiles) return Array.from(layer.image.pixels.subarray(i, i + 4));
+  if (!layer.at) layer.at = tileTexels(layer.tiles, 4);
+  return lookupV3(layer.at, layer.transform ?? IDENT, x, y, frame.origin, frame.scale) ?? [0, 0, 0, 0];
 }
 
 /**
@@ -854,9 +915,9 @@ function maskCoverage(mask, x, y, frame) {
  * A `mask` is mode 21: the mask and the opacity once, then mode 19 at opacity 1.
  * `{ adjust, opacity, mode, mask }` is a color-adjust adjustment layer: mode 17,
  * then mode 23 with a mask or a non-normal blend, else mode 20 below opacity 1.
- * A mask is `{ bytes, transform }` (see `maskCoverage`). The tile's ROI has
- * origin `origin` and level scale `scale`; images are the tile's pixels, and only
- * the mask lookup depends on where the tile is.
+ * A mask is `{ bytes, transform }` or `{ tiles, transform }` (see `maskCoverage`).
+ * A raster's pixels are `image` (the tile's own pixels) or `{ tiles, transform }`
+ * (see `rasterBytes`). The tile's ROI has origin `origin` and level scale `scale`.
  */
 export function renderM5V3(layers, w = 256, h = 256, origin = [0, 0], scale = 1) {
   const out = new Uint8Array(w * h * 4);
@@ -887,7 +948,7 @@ function stackM5V3(layers, i, x, y, frame) {
     let src;
     if (layer.group) src = stackM5V3(layer.group, i, x, y, frame);
     else {
-      let q = big(ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4))));
+      let q = big(ingressQ14(rasterBytes(layer, i, x, y, frame)));
       for (const effect of layer.effects || []) {
         const adjusted = big(colorAdjustStageQ14(q.map(Number), effect));
         q = effect.selection ? maskSelectQ14(q, adjusted, maskCoverage(effect.selection, x, y, frame)) : adjusted;
@@ -1057,7 +1118,7 @@ export function compositeQ14Blend(dst, src, pre, sa, mode) {
   if (out.some((v) => v > oa)) throw new Error("Q14 RGB exceeds alpha");
   return [...out, oa];
 }
-const cqOpacity = (v) => BigInt(Math.trunc(f(f(f(Math.min(1, Math.max(0, f(v)))) * 16384) + 0.5)));
+const cqOpacity = (v) => BigInt(opacityQ14(v));
 function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
   for (const op of ops) if (op.mode >= 17) throw new Error(`unspecified blend mode ${op.mode}`);
   const out = new Uint8Array(256 * 256 * 4);

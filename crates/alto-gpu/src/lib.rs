@@ -85,7 +85,42 @@ pub fn integer_effects_shader() -> String {
     )
 }
 
-/// Quantize the document's f32 opacity on the host, before uploading commands.
+/// `v * 16384` rounded half away from zero, for a finite `v` with `|v| <= 4`.
+/// Exact: it is evaluated on the bits of `v`, not in float. The f32 product is
+/// exact, but the f32 sum with one half is not (`0.5 - 2^-25` plus `0.5` rounds
+/// to 1, so the largest f32 below `2^-15` would quantize to 1, not 0).
+pub(crate) fn q14_round(v: f32) -> i32 {
+    debug_assert!(v.is_finite() && v.abs() <= 4.0);
+    let bits = v.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let fraction = u64::from(bits & 0x7f_ffff);
+    // |v| = m * 2^e, subnormals included.
+    let (m, e) = if exponent == 0 {
+        (fraction, -149)
+    } else {
+        (fraction | 0x80_0000, exponent - 150)
+    };
+    // |v| * 2^14 = m * 2^shift. With m < 2^24, a shift below -40 is under 1/2.
+    let shift = e + 14;
+    let magnitude = if shift >= 0 {
+        m << shift
+    } else if shift < -40 {
+        0
+    } else {
+        (m + (1 << (-shift - 1))) >> -shift
+    } as i32;
+    if bits >> 31 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+/// Quantize the document's f32 opacity on the host, before uploading commands:
+/// clamped to 0..=1, then `q14_round`. NaN is 0.
 pub(crate) fn composite_opacity_q14(v: f32) -> i32 {
-    (v.clamp(0.0, 1.0) * 16384.0 + 0.5).trunc() as i32
+    if v.is_nan() {
+        return 0;
+    }
+    q14_round(v.clamp(0.0, 1.0))
 }

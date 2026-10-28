@@ -189,8 +189,15 @@ test("v3 mask lookup at non-zero and negative ROI origins is the integer shift",
   for (const [i, j] of [[0, 0], [127, 255], [128, 40]]) {
     assert.equal(maskByteV3(pattern, scaled, i, j, [-256, -512], 2), pattern(i + 128, j + 44));
   }
-  // A ROI without an integer origin, or a level scale below 1, is refused.
-  for (const [origin, scale] of [[[0.5, 0], 1], [[0, -0.25], 1], [[0, 0], 0.5]]) {
+  // A ROI without an integer origin, or a level scale below 1, is refused, and so
+  // is one outside i32 (Rust `exact_i32`), unsafe integers included.
+  for (const [origin, scale] of [
+    [[0.5, 0], 1], [[0, -0.25], 1], [[0, 0], 0.5],
+    [[2 ** 31, 0], 1], [[0, -(2 ** 31) - 1], 1], [[0, 0], 2 ** 31], [[2 ** 53, 0], 1],
+  ]) {
     assert.throws(() => maskByteV3(pattern, move, 0, 0, origin, scale), /integer origin and scale/);
   }
+  // The i32 bounds themselves are accepted; a pixel whose Q8 center leaves i32 reads 0.
+  assert.equal(maskByteV3(pattern, move, 0, 0, [-(2 ** 31), 0], 1), 0);
+  assert.equal(maskByteV3(pattern, move, 0, 0, [2 ** 31 - 1, 0], 1), 0);
 });

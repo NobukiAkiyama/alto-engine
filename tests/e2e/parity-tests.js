@@ -572,8 +572,8 @@ export async function runParityTests(engine, log) {
           return formatMeasure(row);
         });
       }
-      // An unmasked non-normal adjustment blend would reach mode 23 through the
-      // f32 stages upstream of it; v3 refuses it, and no tile is drawn (DQ3-4).
+      // An unmasked non-normal adjustment blend stays refused in v3 (#37, Linus
+      // 21:46): GpuUnsupported from `v3_gap`, and no tile is drawn (DQ3-4).
       await test("v3-adjustment-screen-unmasked is refused", async () => {
         const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
         assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
@@ -585,13 +585,18 @@ export async function runParityTests(engine, log) {
         });
         const renderPath = sceneGap(doc.getSnapshot());
         assert(renderPath === "v3-unsupported", `scene gap ${renderPath}`);
-        let refused = false;
+        let refusal = null;
         try {
           await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
-        } catch {
-          refused = true;
+        } catch (error) {
+          refusal = error;
         }
-        assert(refused, "unmasked screen adjustment layer was drawn");
+        assert(refusal, "unmasked screen adjustment layer was drawn");
+        assert(refusal.code === "GPU_UNSUPPORTED", `refused with ${refusal.code}: ${refusal.message}`);
+        assert(
+          String(refusal.message).includes("v3 adjustment has no integer definition yet"),
+          `refused for another reason: ${refusal.message}`,
+        );
         return renderPath;
       });
     }

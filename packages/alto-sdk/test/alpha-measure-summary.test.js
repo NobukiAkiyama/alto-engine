@@ -63,14 +63,19 @@ test("v3 classification is closed: color-adjust is integer M5, unspecified featu
     ["selected", { type: "raster", props: { effects: [{ type: "color_adjust", brightness: 0, contrast: 1, saturation: 1, selection: { tiles: {} } }] } }],
     ["masked-multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply", mask: {} } }],
     ["mask", { type: "raster", props: { mask: {} } }],
+    ["disabled-mask-normal-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { mask: {}, mask_enabled: false } }],
   ]) {
     const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
     assert.equal(sceneGap(scene), "v3-m5-integer", name);
   }
+  // A raster whose mask is disabled has no mask (Rust `features.mask` is None):
+  // it stays on the plain integer tile compositor.
+  const disabled = { meta: { render_version: 3 }, nodes: new Map([["off", { type: "raster", props: { mask: {}, mask_enabled: false } }]]) };
+  assert.equal(sceneGap(disabled), null);
   for (const [name, node] of [
     ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
     ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
-    // Unmasked non-normal adjustment blends stay refused until the v3 float purge.
+    // Unmasked non-normal adjustment blends stay refused (#37); a disabled mask is no mask.
     ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
     ["screen-adjust-disabled-mask", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "screen", mask: {}, mask_enabled: false } }],
     ["vector", { type: "vector", props: {} }],
