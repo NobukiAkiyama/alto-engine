@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -270,7 +270,12 @@ pub struct Renderer {
     visible_job: Option<TileJob>,
     visible_tile_jobs: bool,
     composite: wgpu::ComputePipeline,
+    // Keep v3 shader compilation off v1/v2 queues, including after GPU recovery.
+    composite_q14: OnceLock<wgpu::ComputePipeline>,
     downsample: wgpu::ComputePipeline,
+    downsample_q14: OnceLock<wgpu::ComputePipeline>,
+    integer_cache: bool,
+    present_q14: OnceLock<wgpu::RenderPipeline>,
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
@@ -471,6 +476,37 @@ fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
         module: &shader,
         entry_point: Some("main"),
         compilation_options: Default::default(),
+        cache: None,
+    })
+}
+fn integer_present(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("integer present"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present-q14.wgsl").into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("integer present"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
         cache: None,
     })
 }
@@ -791,6 +827,7 @@ impl Renderer {
             display_layers,
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC,
         )?;
         let scratch = memory::create_texture(
@@ -891,7 +928,11 @@ impl Renderer {
             visible_job: None,
             visible_tile_jobs: true,
             composite,
+            composite_q14: OnceLock::new(),
             downsample,
+            downsample_q14: OnceLock::new(),
+            integer_cache: false,
+            present_q14: OnceLock::new(),
             present,
             brush,
             sampler,
@@ -1084,6 +1125,61 @@ impl Renderer {
             self.visible_tile_jobs = enabled;
             self.invalidate(None);
         }
+    }
+    // Validate before cache access or command construction. M5 keeps its existing formats.
+    fn prepare_scene(&mut self, scene: &RenderScene) -> Result<()> {
+        if scene.render_version == 3 && scene.nodes.iter().any(|n| n.blend as u32 >= 17) {
+            return Err(RenderError::InvalidArgument(
+                "v3 unspecified blend mode".into(),
+            ));
+        }
+        let integer = scene.render_version == 3 && crate::damage::plain_scene(scene);
+        if integer == self.integer_cache {
+            return Ok(());
+        }
+        let format = if integer {
+            wgpu::TextureFormat::Rgba8Uint
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let cache = memory::create_texture(
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some("display tiles"),
+                size: self.cache.size(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: self.cache.usage(),
+                view_formats: &[],
+            },
+            Class::Fixed,
+        )?;
+        let scratch = memory::create_texture(
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some("pyramid input"),
+                size: self.scratch.size(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: self.scratch.usage(),
+                view_formats: &[],
+            },
+            Class::Fixed,
+        )?;
+        self.reset_render_cache();
+        self.cache_view = array_view(&cache);
+        let old_cache = std::mem::replace(&mut self.cache, cache);
+        let old_scratch = std::mem::replace(&mut self.scratch, scratch);
+        self.retired.textures.push((old_cache, MemoryClass::Fixed));
+        self.retired
+            .textures
+            .push((old_scratch, MemoryClass::Fixed));
+        self.integer_cache = integer;
+        Ok(())
     }
     /// Diagnostic reset: keep the document, discard all GPU-derived tiles.
     pub fn reset_render_cache(&mut self) {
@@ -1637,11 +1733,54 @@ impl Renderer {
         scene: &RenderScene,
         key: CacheKey,
         slot: usize,
-        commands: Vec<Command>,
+        mut commands: Vec<Command>,
         entries: Vec<Entry>,
         mut encoder: wgpu::CommandEncoder,
         prefetch: bool,
     ) -> Result<bool> {
+        let integer = scene.render_version == 3;
+        if integer {
+            for c in &mut commands {
+                if c.info[0] == 0
+                    && c.info[3] == 0
+                    && !crate::sample::axis_unit([
+                        c.inv0[0], c.inv0[1], c.inv0[2], c.inv0[3], c.inv1[0], c.inv1[1],
+                    ])
+                {
+                    return Err(RenderError::GpuUnsupported(
+                        "v3 filtered f32 fallback is not specified".into(),
+                    ));
+                }
+                c.inv1[2] = f32::from_bits(crate::composite_opacity_q14(c.inv1[2]) as u32);
+                c.inv1[3] = f32::from_bits(c.inv1[3] as u32);
+            }
+        }
+        let pipeline = if integer {
+            self.composite_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer tile compositor",
+                    &crate::integer_composite_shader(),
+                )
+            })
+        } else {
+            &self.composite
+        };
+        let integer_output = if integer {
+            Some(memory::create_buffer(
+                &self.device,
+                &wgpu::BufferDescriptor {
+                    label: Some("integer composite bytes"),
+                    size: 256 * 256 * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                },
+                Class::Fixed,
+                true,
+            )?)
+        } else {
+            None
+        };
         let cb = buffer(
             &self.device,
             &self.queue,
@@ -1682,7 +1821,7 @@ impl Renderer {
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
-            layout: &self.composite.get_bind_group_layout(0),
+            layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1690,7 +1829,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.cache_view),
+                    resource: match &integer_output {
+                        Some(out) => out.as_entire_binding(),
+                        None => wgpu::BindingResource::TextureView(&self.cache_view),
+                    },
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1711,9 +1853,37 @@ impl Renderer {
                 label: Some("composite"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.composite);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(16, 16, 1);
+        }
+        if let Some(out) = integer_output {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &out,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(1024),
+                        rows_per_image: Some(256),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.cache,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.retired.classified_buffer(&out, MemoryClass::Fixed);
         }
         self.queue.submit(Some(encoder.finish()));
         self.release_retired();
@@ -1822,6 +1992,7 @@ impl Renderer {
         store: &dyn TileStore,
         view: Viewport,
     ) -> Result<JobStep> {
+        self.prepare_scene(scene)?;
         let now = self.clock;
         if self.is_lost() || self.last_pending != 0 || self.last_view != Some(view) {
             return Ok(JobStep::Idle);
@@ -2043,6 +2214,7 @@ impl Renderer {
         view: Viewport,
         budget_ms: f64,
     ) -> Result<FrameReport> {
+        self.prepare_scene(scene)?;
         if self.is_lost() {
             return Err(RenderError::GpuLost(format!(
                 "device lost ({})",
@@ -2345,27 +2517,36 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE,
         )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
+        let present = if self.integer_cache {
+            self.present_q14
+                .get_or_init(|| integer_present(&self.device, self.config.format))
+        } else {
+            &self.present
+        };
+        let mut present_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&self.cache_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: ub.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: tb.as_entire_binding(),
+            },
+        ];
+        if !self.integer_cache {
+            present_entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            });
+        }
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present"),
-            layout: &self.present.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.cache_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: ub.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: tb.as_entire_binding(),
-                },
-            ],
+            layout: &present.get_bind_group_layout(0),
+            entries: &present_entries,
         });
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -2406,7 +2587,7 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.present);
+            pass.set_pipeline(present);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..6, 0..tiles.len() as u32);
         }
@@ -2844,6 +3025,7 @@ impl Renderer {
         store: &dyn TileStore,
         keys: &[CacheKey],
     ) -> Result<Vec<u8>> {
+        self.prepare_scene(scene)?;
         const TILE_BYTES: u64 = TILE_RGBA_BYTES;
         let total = TILE_BYTES
             .checked_mul(keys.len() as u64)
@@ -2992,6 +3174,17 @@ impl Renderer {
                 },
             );
         }
+        let pipeline = if self.integer_cache {
+            self.downsample_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer display pyramid",
+                    include_str!("../shaders/downsample-q14.wgsl"),
+                )
+            })
+        } else {
+            &self.downsample
+        };
         let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
             &self.device,
@@ -3002,7 +3195,7 @@ impl Renderer {
         )?;
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("display pyramid"),
-            layout: &self.downsample.get_bind_group_layout(0),
+            layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -3020,7 +3213,7 @@ impl Renderer {
         });
         {
             let mut p = e.begin_compute_pass(&Default::default());
-            p.set_pipeline(&self.downsample);
+            p.set_pipeline(pipeline);
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups(16, 16, 1);
         }
@@ -3036,11 +3229,21 @@ impl Renderer {
 mod shader_tests {
     #[test]
     fn shaders_validate() {
+        let integer = crate::integer_composite_shader();
         for (name, text) in [
+            ("integer composite", integer.as_str()),
             ("composite", include_str!("../shaders/composite.wgsl")),
             ("present", include_str!("../shaders/present.wgsl")),
             ("brush", include_str!("../shaders/brush.wgsl")),
             ("downsample", include_str!("../shaders/downsample.wgsl")),
+            (
+                "integer downsample",
+                include_str!("../shaders/downsample-q14.wgsl"),
+            ),
+            (
+                "integer present",
+                include_str!("../shaders/present-q14.wgsl"),
+            ),
             ("effects", include_str!("../shaders/effects.wgsl")),
             ("vector", include_str!("../shaders/vector.wgsl")),
             ("vector-paint", include_str!("../shaders/vector-paint.wgsl")),

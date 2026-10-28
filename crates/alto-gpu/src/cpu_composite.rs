@@ -17,6 +17,9 @@
 //! 0, 1, 128 and 254) run through the contrast × saturation × brightness grid.
 //! The other four stay explicit xfails in the browser suite.
 
+#[path = "composite_q14.rs"]
+mod q14;
+
 use crate::blend_ref::{blend, effects_blend};
 use crate::damage::plain_scene;
 use crate::sample::{
@@ -807,6 +810,37 @@ fn fetch_integer(
     out
 }
 
+fn fetch_integer_bytes(
+    tiles: &[Tile],
+    inv: &IntegerInverse,
+    origin_px: [i32; 2],
+    scale: i32,
+    x: i32,
+    y: i32,
+) -> [u8; 4] {
+    let Some(px) = pixel_q8(origin_px[0], x, scale) else {
+        return [0; 4];
+    };
+    let Some(py) = pixel_q8(origin_px[1], y, scale) else {
+        return [0; 4];
+    };
+    let Some(q) = source_q8(inv, px, py) else {
+        return [0; 4];
+    };
+    let (ix, fx) = floor_frac_q8(q[0]);
+    let (iy, fy) = floor_frac_q8(q[1]);
+    let a = sample_u8(tiles, ix, iy);
+    let b = sample_u8(tiles, ix + 1, iy);
+    let d = sample_u8(tiles, ix, iy + 1);
+    let e = sample_u8(tiles, ix + 1, iy + 1);
+    let mut out = [0; 4];
+    for channel in 0..4 {
+        let byte = bilinear_byte(a[channel], b[channel], d[channel], e[channel], fx, fy);
+        out[channel] = byte;
+    }
+    out
+}
+
 /// Tile placement and which sampling path the document's render version selects.
 struct Frame {
     origin: [f32; 2],
@@ -1413,7 +1447,67 @@ fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: 
     color_adjust_image(&solid, brightness, contrast, saturation)
 }
 
+fn composite_integer(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
+    let mut out = vec![0; 256 * 256 * 4];
+    let mut prequant = vec![0.0; 256 * 256 * 4];
+    for y in 0..256 {
+        for x in 0..256 {
+            let p = [
+                frame.origin[0] + (x as f32 + 0.5) * frame.scale,
+                frame.origin[1] + (y as f32 + 0.5) * frame.scale,
+            ];
+            let mut accum = [0i64; 4];
+            let mut stack = Vec::new();
+            if p[0] >= 0.0 && p[1] >= 0.0 && p[0] < width as f32 && p[1] < height as f32 {
+                for op in ops {
+                    match op {
+                        Op::Push => {
+                            stack.push(accum);
+                            accum = [0; 4];
+                        }
+                        Op::Pop { opacity, mode } => {
+                            accum = q14::pop(
+                                stack.pop().unwrap(),
+                                accum,
+                                q14::opacity(*opacity),
+                                *mode,
+                            );
+                        }
+                        Op::Draw {
+                            inv,
+                            opacity,
+                            mode,
+                            tiles,
+                        } => {
+                            let inv32 = inv.map(|v| v as f32);
+                            let bytes = if axis_unit(inv32) {
+                                let q = [
+                                    inv32[0] * p[0] + inv32[2] * p[1] + inv32[4],
+                                    inv32[1] * p[0] + inv32[3] * p[1] + inv32[5],
+                                ];
+                                sample_u8(tiles, q[0].floor() as i32, q[1].floor() as i32)
+                            } else {
+                                let q = integer_inverse(*inv)
+                                    .expect("v3 filtered f32 fallback is unspecified");
+                                fetch_integer_bytes(tiles, &q, frame.origin_px, frame.scale_i, x, y)
+                            };
+                            accum = q14::draw(accum, bytes, q14::opacity(*opacity), *mode);
+                        }
+                    }
+                }
+            }
+            let i = ((y * 256 + x) * 4) as usize;
+            out[i..i + 4].copy_from_slice(&q14::bytes(accum));
+            prequant[i..i + 4].copy_from_slice(&accum.map(|v| v as f32 / 16384.0));
+        }
+    }
+    (out, prequant)
+}
+
 fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
+    if frame.version == 3 {
+        return composite_integer(ops, width, height, frame);
+    }
     let mut out = vec![0u8; 256 * 256 * 4];
     let mut prequant = vec![0f32; 256 * 256 * 4];
     let width = width as f32;
@@ -1485,6 +1579,40 @@ fn render_pair(case: &Case, version: u32) -> (Vec<u8>, Vec<f32>) {
     )
 }
 
+/// Byte reference for the v3 cached pyramid; children are TL, TR, BL, BR.
+fn downsample_q14(children: &[Vec<u8>; 4]) -> Vec<u8> {
+    let mut out = vec![0; 256 * 256 * 4];
+    for y in 0..256 {
+        for x in 0..256 {
+            for c in 0..4 {
+                let child = &children[(y / 128) * 2 + x / 128];
+                let i = ((y % 128 * 2) * 256 + x % 128 * 2) * 4 + c;
+                let sum = u32::from(child[i])
+                    + u32::from(child[i + 4])
+                    + u32::from(child[i + 1024])
+                    + u32::from(child[i + 1028]);
+                out[(y * 256 + x) * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+fn pyramid_children(case: &Case) -> [Case; 4] {
+    std::array::from_fn(|i| {
+        let mut child = case.clone();
+        child.level -= 1;
+        child.tx = case.tx * 2 + (i % 2) as i32;
+        child.ty = case.ty * 2 + (i / 2) as i32;
+        child
+    })
+}
+fn render_pyramid(case: &Case) -> Vec<u8> {
+    if case.level <= 0 {
+        return render_at(case, 3);
+    }
+    downsample_q14(&pyramid_children(case).map(|c| render_pyramid(&c)))
+}
+
 fn render_at(case: &Case, version: u32) -> Vec<u8> {
     render_pair(case, version).0
 }
@@ -1549,6 +1677,7 @@ struct MeasuredPixel {
 }
 
 struct MeasuredCase {
+    render_path: Option<&'static str>,
     name: String,
     count: u32,
     max_abs: [u32; 4],
@@ -1654,6 +1783,7 @@ fn measure_case(
         format!(" lengths cpu {} gpu {}", cpu.len(), gpu.len())
     };
     MeasuredCase {
+        render_path: None, // Case fixtures contain only plain raster/group nodes.
         name: case.name.clone(),
         count,
         max_abs,
@@ -1947,6 +2077,12 @@ fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
 }
 
 fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
+    write_measure(adapter, rows, false, &[]);
+}
+fn write_v3_measure(adapter: &str, rows: &[MeasuredCase], errors: &[String]) {
+    write_measure(adapter, rows, true, errors);
+}
+fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[String]) {
     let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
         return;
     };
@@ -1957,12 +2093,17 @@ fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
         json_escape(adapter)
     );
     for (index, row) in rows.iter().enumerate() {
+        let enforced = integer && row.render_path != Some("v3-m5-float");
+        let render_path = row
+            .render_path
+            .map_or("null".to_string(), |p| format!("\"{p}\""));
         if index > 0 {
             json.push_str(",\n");
         }
         json.push_str(&format!(
-            "    {{\"name\": \"{}\", \"enforced\": false, \"count\": {}, \"maxAbs\": [{},{},{},{}], \"mismatches\": [",
+            "    {{\"name\": \"{}\", \"renderPath\": {render_path}, \"enforced\": {enforced}, \"status\": \"{}\", \"count\": {}, \"maxAbs\": [{},{},{},{}], \"mismatches\": [",
             json_escape(&row.name),
+            if row.count==0 && row.length_note.is_empty() {"exact"} else {"mismatch"},
             row.count,
             row.max_abs[0],
             row.max_abs[1],
@@ -1995,7 +2136,40 @@ fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
         }
         json.push_str("]}");
     }
-    json.push_str("\n  ]\n}\n");
+    json.push_str("\n  ]");
+    if integer {
+        let exact_count = rows
+            .iter()
+            .filter(|r| {
+                r.render_path != Some("v3-m5-float") && r.count == 0 && r.length_note.is_empty()
+            })
+            .count();
+        let float_count = rows
+            .iter()
+            .filter(|r| r.render_path == Some("v3-m5-float"))
+            .count();
+        json.push_str(&format!(
+            ",\n  \"integerExactCount\": {exact_count},\n  \"v3M5FloatCount\": {float_count}"
+        ));
+        let status = if !errors.is_empty() {
+            "error"
+        } else if rows.iter().any(|r| {
+            r.render_path != Some("v3-m5-float") && (r.count != 0 || !r.length_note.is_empty())
+        }) {
+            "mismatch"
+        } else {
+            "exact"
+        };
+        let list = errors
+            .iter()
+            .map(|e| format!("\"{}\"", json_escape(e)))
+            .collect::<Vec<_>>()
+            .join(",");
+        json.push_str(&format!(
+            ",\n  \"status\": \"{status}\",\n  \"errors\": [{list}]"
+        ));
+    }
+    json.push_str("\n}\n");
     let mut markdown = format!(
         "### Semi-transparent parity ({})\n\nThese cases are **measured-not-enforced**. A mismatch does not fail the job.\n\nBackend: `{adapter}`\n\n| case | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | ---: | --- | --- |\n",
         json_escape(adapter)
@@ -2023,8 +2197,13 @@ fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
             shown
         };
         markdown.push_str(&format!(
-            "| {} | {} | {},{},{},{} | {}{} |\n",
+            "| {}{} | {} | {},{},{},{} | {}{} |\n",
             row.name,
+            if row.render_path == Some("v3-m5-float") {
+                " (v3-m5-float; measured-not-enforced)"
+            } else {
+                ""
+            },
             row.count,
             row.max_abs[0],
             row.max_abs[1],
@@ -2034,9 +2213,39 @@ fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
             row.length_note
         ));
     }
-    std::fs::write(dir.join("alpha-measure.json"), json).expect("write alpha measure json");
-    std::fs::write(dir.join("alpha-measure.md"), markdown).expect("write alpha measure markdown");
-    write_prequant(&dir, adapter, rows);
+    if integer && !errors.is_empty() {
+        markdown.push_str("\nGPU errors:\n\n");
+        for error in errors {
+            markdown.push_str(&format!("- {error}\n"));
+        }
+    }
+    if integer {
+        json = json.replacen("measured-not-enforced", "enforced", 1);
+        markdown = markdown
+            .replacen("measured-not-enforced", "enforced", 1)
+            .replace("A mismatch does not fail", "A mismatch fails");
+    }
+    std::fs::write(
+        dir.join(if integer {
+            "composite-v3.json"
+        } else {
+            "alpha-measure.json"
+        }),
+        json,
+    )
+    .expect("write alpha measure json");
+    std::fs::write(
+        dir.join(if integer {
+            "composite-v3.md"
+        } else {
+            "alpha-measure.md"
+        }),
+        markdown,
+    )
+    .expect("write alpha measure markdown");
+    if !integer {
+        write_prequant(&dir, adapter, rows);
+    }
 }
 
 /// Every mismatching channel: pre-quantization f32 on both sides, and the
@@ -2302,6 +2511,15 @@ fn scene(content: RContent, features: RFeatures) -> RenderScene {
 }
 
 fn gap(scene: &RenderScene) -> Option<&'static str> {
+    if scene.render_version == 3
+        && scene.nodes.iter().any(|n| {
+            n.features.mask.is_some()
+                || n.features.vector_mask.is_some()
+                || !n.features.effects.is_empty()
+        })
+    {
+        return Some("v3-m5-float");
+    }
     for n in &scene.nodes {
         if n.features.mask.is_some() {
             return Some("mask");
@@ -2370,6 +2588,15 @@ fn parity_shader() -> String {
         "parity shader did not keep the production textureStore"
     );
     src
+}
+
+fn integer_parity_shader() -> String {
+    let source = crate::integer_composite_shader();
+    let marker = "  output[id.y*256u+id.x]=";
+    assert_eq!(source.matches(marker).count(), 1);
+    source.replace("@compute @workgroup_size(16,16)",
+        "@group(0) @binding(5) var<storage,read_write> pre_quant:array<vec4f>;\n@compute @workgroup_size(16,16)")
+        .replace(marker, &format!("  pre_quant[id.y*256u+id.x]=vec4f(accum)/16384.0;\n{marker}"))
 }
 
 /// `effects.wgsl` uniform. Field order matches the WGSL `Config` in uniform address space.
@@ -2553,9 +2780,171 @@ impl Gpu {
     }
 
     fn render(&self, case: &Case) -> Result<(Vec<u8>, Vec<f32>), String> {
+        self.render_version(case, 2)
+    }
+
+    fn downsample_q14(&self, children: &[Vec<u8>; 4]) -> Result<Vec<u8>, String> {
+        let device = &self.device;
+        let input = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("integer pyramid parity input"),
+            size: wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (i, child) in children.iter().enumerate() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &input,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: (i as u32 % 2) * 256,
+                        y: (i as u32 / 2) * 256,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                child,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("integer pyramid parity output"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Uint,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("integer pyramid parity"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/downsample-q14.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let config = upload_buffer(
+            device,
+            &self.queue,
+            &[[0u32; 4]],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let input_view = input.create_view(&Default::default());
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: config.as_entire_binding(),
+                },
+            ],
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 1024,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(16, 16, 1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        let bytes = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        Ok(bytes)
+    }
+    fn render_pyramid(&self, case: &Case) -> Result<Vec<u8>, String> {
+        if case.level <= 0 {
+            return self.render_version(case, 3).map(|p| p.0);
+        }
+        let children = pyramid_children(case).map(|c| self.render_pyramid(&c));
+        let [a, b, c, d] = children;
+        self.downsample_q14(&[a?, b?, c?, d?])
+    }
+
+    fn render_version(&self, case: &Case, version: u32) -> Result<(Vec<u8>, Vec<f32>), String> {
+        let integer = version == 3;
         let mut ops = Vec::new();
         for node in &case.nodes {
             walk(node, ident(), &mut ops);
+        }
+        if integer
+            && ops.iter().any(|op| match op {
+                Op::Pop { mode, .. } | Op::Draw { mode, .. } => *mode >= 17,
+                _ => false,
+            })
+        {
+            return Err("v3 unspecified blend mode".into());
         }
         let mut commands = Vec::new();
         let mut entries = Vec::new();
@@ -2590,7 +2979,7 @@ impl Gpu {
                             pad: 0,
                         });
                     }
-                    let packed = crate::sample::pack_inverse(*inv, RENDER_VERSION);
+                    let packed = crate::sample::pack_inverse(*inv, version);
                     commands.push(GpuCommand {
                         inv0: packed.inv0,
                         inv1: [
@@ -2603,6 +2992,12 @@ impl Gpu {
                         trans: packed.trans,
                     });
                 }
+            }
+        }
+        if integer {
+            for c in &mut commands {
+                c.inv1[2] = f32::from_bits(crate::composite_opacity_q14(c.inv1[2]) as u32);
+                c.inv1[3] = f32::from_bits(c.inv1[3] as u32);
             }
         }
         let layers = (atlas_tiles.len() as u32).max(1);
@@ -2646,6 +3041,32 @@ impl Gpu {
                 },
             );
         }
+        let integer_output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("integer parity bytes"),
+            size: 256 * 256 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let integer_pipeline = if integer {
+            let src = integer_parity_shader();
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("integer parity"),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            Some(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("integer parity"),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+            )
+        } else {
+            None
+        };
+        let pipeline = integer_pipeline.as_ref().unwrap_or(&self.pipeline);
         let output = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("parity output"),
             size: wgpu::Extent3d {
@@ -2691,7 +3112,7 @@ impl Gpu {
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("parity composite"),
-            layout: &self.pipeline.get_bind_group_layout(0),
+            layout: &pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -2699,7 +3120,11 @@ impl Gpu {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&output_view),
+                    resource: if integer {
+                        integer_output.as_entire_binding()
+                    } else {
+                        wgpu::BindingResource::TextureView(&output_view)
+                    },
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -2727,7 +3152,7 @@ impl Gpu {
                 label: Some("parity composite"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(16, 16, 1);
         }
@@ -2737,27 +3162,31 @@ impl Gpu {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &output,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &read,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(1024),
-                    rows_per_image: Some(256),
+        if integer {
+            encoder.copy_buffer_to_buffer(&integer_output, 0, &read, 0, 256 * 1024);
+        } else {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
-        );
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(1024),
+                        rows_per_image: Some(256),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         let pre_read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("parity prequant readback"),
             size: pre_bytes,
@@ -3525,6 +3954,7 @@ fn unorm_boundary_split_is_exact_f32_equality() {
         &dir,
         "unit",
         &[MeasuredCase {
+            render_path: None,
             name: "boundary".into(),
             count: 1,
             max_abs: [1, 1, 1, 1],
@@ -3875,6 +4305,14 @@ fn plain_scene_gaps_are_explicit() {
     ] {
         assert!(!plain_scene(scene), "{reason} was treated as a plain scene");
         assert_eq!(gap(scene), Some(reason));
+        let mut v3 = scene.clone();
+        v3.render_version = 3;
+        let expected = if matches!(reason, "mask" | "vector mask" | "effects") {
+            "v3-m5-float"
+        } else {
+            reason
+        };
+        assert_eq!(gap(&v3), Some(expected));
     }
     // The plain compositor skips an unsupported node, so the tile stays exact.
     assert!(plain_scene(&unsupported));
@@ -4087,6 +4525,48 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
+    let mut measured_v3 = Vec::new();
+    let mut v3_errors = Vec::new();
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.name = format!("v3-{}", case.name);
+        let (cpu, cpu_pre) = render_pair(&case, 3);
+        match gpu.render_version(&case, 3) {
+            Ok((bytes, pre)) => {
+                let row = measure_case(&case, &cpu, &bytes, &cpu_pre, &pre);
+                println!("v3 composite (enforced): {}", measure_line(&row));
+                if cpu != bytes {
+                    failed.push(format!("{}: {}", case.name, diff_report(&cpu, &bytes)));
+                }
+                measured_v3.push(row);
+            }
+            Err(err) => {
+                v3_errors.push(format!("{}: {err}", case.name));
+                failed.push(format!("{}: {err}", case.name));
+            }
+        }
+    }
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.level = 1;
+        case.tx = 0;
+        case.ty = 0;
+        case.name = format!("v3-{}-level1", case.name);
+        let cpu = render_pyramid(&case);
+        match gpu.render_pyramid(&case) {
+            Ok(bytes) => {
+                let row = measure_case(&case, &cpu, &bytes, &[], &[]);
+                if cpu != bytes {
+                    failed.push(format!("{}: {}", case.name, diff_report(&cpu, &bytes)));
+                }
+                measured_v3.push(row);
+            }
+            Err(err) => {
+                v3_errors.push(format!("{}: {err}", case.name));
+                failed.push(format!("{}: {err}", case.name));
+            }
+        }
+    }
+    write_v3_measure(&gpu.adapter_name, &measured_v3, &v3_errors);
+
     // Enforced: every byte on every channel must round-trip. Stored first, then failed.
     let atlas = gpu.atlas_read();
     match &atlas {
@@ -4142,4 +4622,107 @@ fn gpu_shader_matches_cpu_reference() {
         "GPU and CPU pixels differ:\n{}",
         failed.join("\n")
     );
+}
+
+#[test]
+fn composite_v3_rust_and_js_references_agree_byte_for_byte() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let js = std::process::Command::new("node")
+        .arg(root.join("tests/e2e/composite-v3-reference.mjs"))
+        .output()
+        .expect("node is required to compare the Rust and JavaScript v3 references");
+    assert!(
+        js.status.success(),
+        "JS reference failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let mut data = js.stdout.as_slice();
+    let mut count = 0;
+    for case in cases().into_iter().filter(|c| c.measure) {
+        let end = data.iter().position(|b| *b == b'\n').expect("JS case name");
+        assert_eq!(std::str::from_utf8(&data[..end]).unwrap(), case.name);
+        data = &data[end + 1..];
+        let (bytes, rest) = data.split_at(256 * 256 * 4);
+        let rust = render_at(&case, 3);
+        assert!(
+            rust == bytes,
+            "{}: {}",
+            case.name,
+            diff_report(&rust, bytes)
+        );
+        data = rest;
+        count += 1;
+    }
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.level = 1;
+        case.tx = 0;
+        case.ty = 0;
+        let end = data
+            .iter()
+            .position(|b| *b == b'\n')
+            .expect("JS pyramid case name");
+        assert_eq!(
+            std::str::from_utf8(&data[..end]).unwrap(),
+            format!("{}-level1", case.name)
+        );
+        data = &data[end + 1..];
+        let (bytes, rest) = data.split_at(256 * 256 * 4);
+        let rust = render_pyramid(&case);
+        assert!(
+            rust == bytes,
+            "{} level1: {}",
+            case.name,
+            diff_report(&rust, bytes)
+        );
+        data = rest;
+    }
+    assert!(data.is_empty(), "JS produced extra cases");
+    assert!(count >= 37);
+}
+
+#[test]
+fn integer_composite_shader_has_only_integer_color_output() {
+    let shader = crate::integer_composite_shader();
+    assert!(shader.contains("var<storage, read_write> output: array<u32>"));
+    assert!(shader.contains("opacity_q: u32"));
+    assert!(shader.contains("unorm_byte(s.r)"));
+    for forbidden in [
+        "textureStore",
+        "textureSample",
+        "rgba8unorm",
+        "rgba16float",
+        "round(",
+        "=sqrt(",
+        "= sqrt(",
+    ] {
+        assert!(
+            !shader.contains(forbidden),
+            "unexpected v3 shader operation: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn v3_isolation_uses_document_opacity_before_q14_quantization() {
+    let almost_one = f32::from_bits(1.0f32.to_bits() - 1);
+    assert_eq!(crate::composite_opacity_q14(almost_one), 16384);
+    let mut ops = Vec::new();
+    walk(&group(false, almost_one, Vec::new()), ident(), &mut ops);
+    assert!(matches!(ops.as_slice(), [Op::Push, Op::Pop { .. }]));
+    ops.clear();
+    walk(&group(false, 1.0, Vec::new()), ident(), &mut ops);
+    assert!(ops.is_empty());
+}
+
+#[test]
+fn integer_parity_shader_records_the_q14_accumulator_and_validates() {
+    let shader = integer_parity_shader();
+    assert!(shader.contains("pre_quant[id.y*256u+id.x]=vec4f(accum)/16384.0;"));
+    let module = naga::front::wgsl::parse_str(&shader).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14 } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -126,4 +126,53 @@ test("opaque blue under half-red normal blend is the known pixel", () => {
   assert.deepEqual([tile[0], tile[1], tile[2], tile[3]], [128, 0, 127, 255]);
   const level = renderCase(parityCases().find((item) => item.name === "level1-centers"));
   assert.deepEqual([level[0], level[1], level[2], level[3]], [1, 1, 8, 255]);
+});
+
+test("v3 compositing resolves the former blend-color and half-opacity boundaries", async () => {
+  const { alphaMeasureCases, compositeQ14Blend } = await import("../../../tests/e2e/cpu-composite.js");
+  const cases = new Map(alphaMeasureCases().map((c) => [c.name, c]));
+  for (const name of ["blend-color", "opacity-half", "nested-groups"]) {
+    const tile = renderCase(cases.get(`${name}-alpha-measure`), 3);
+    for (let i = 0; i < tile.length; i += 4) {
+      assert.ok(tile[i] <= tile[i + 3] && tile[i + 1] <= tile[i + 3] && tile[i + 2] <= tile[i + 3], `${name} premultiplied at ${i / 4}`);
+    }
+    if (name === "blend-color") {
+      const i = (82 * 256 + 181) * 4;
+      assert.deepEqual([...tile.slice(i, i + 4)], [105, 107, 156, 255]);
+    }
+  }
+  // Half-away division, including the premultiplied normal path.
+  assert.deepEqual(compositeQ14Blend([0n, 0n, 0n, 0n], [16384n, 0n, 0n], [8192n, 0n, 0n], 8192n, 0), [8192n, 0n, 0n, 8192n]);
+});
+
+test("v3 isolates from document f32 opacity before Q14 quantization", () => {
+  const raster = (rgba, mode = 0) => ({ type: "raster", image: solid(1, 1, rgba), visible: true, opacity: 1, mode, transform: [1, 0, 0, 1, 0, 0] });
+  const scene = (opacity, isolated = false) => ({ w: 1, h: 1, tx: 0, ty: 0, level: 0, nodes: [
+    raster([100, 150, 200, 255]),
+    { type: "group", opacity, isolated, visible: true, mode: 0, transform: [1, 0, 0, 1, 0, 0], children: [raster([200, 100, 50, 255], 1)] },
+  ] });
+  const pixel = (s) => [...renderCase(s, 3).slice(0, 4)];
+  assert.deepEqual(pixel(scene(1 - 2 ** -24)), pixel(scene(1, true)));
+  assert.deepEqual(pixel(scene(1 - 1e-9)), pixel(scene(1)));
+  assert.notDeepEqual(pixel(scene(1)), pixel(scene(1, true)));
+});
+
+test("v3 rejects unspecified modes before drawing, including hidden nodes", () => {
+  const base=parityCases().find(c=>c.name==="blend-normal");
+  for(const mode of [17,18,255]) {
+    const nodes=[...base.nodes,{...base.nodes[0],mode,visible:false}];
+    assert.throws(()=>renderCase({...base,nodes},3),/unspecified blend mode/);
+  }
+});
+
+test("v3 integer pyramid rounds ties upward and preserves premultiplication across levels", () => {
+  const child=new Uint8Array(256*256*4);
+  for(let y=0;y<256;y++) for(let x=0;x<256;x++) {
+    const i=(y*256+x)*4;
+    child.set([x%2,y%2,(x+y)%2,1],i);
+  }
+  const level1=downsampleQ14([child,child,child,child]);
+  const level2=downsampleQ14([level1,level1,level1,level1]);
+  assert(level1.every(v=>v===1));
+  assert.deepEqual(level2,level1);
 });

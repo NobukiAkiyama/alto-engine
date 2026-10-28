@@ -1,5 +1,6 @@
 // Turn a measured-not-enforced alpha parity JSON file into markdown.
 // Rust writes { cases: [...] }. The browser parity report writes { alphaMeasure: [...] }.
+import { isV3IntegerCase } from "../tests/e2e/cpu-composite.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 const [backendLabel, jsonPath, outDir] = process.argv.slice(2);
@@ -49,6 +50,24 @@ for (const row of rows) {
   markdown += "\n";
 }
 
+const v3Rows = report.compositeV3 || (report.label === "enforced" ? report.cases : []) || [];
+const integerRows = v3Rows.filter(isV3IntegerCase);
+const floatRows = [...v3Rows.filter((row) => !isV3IntegerCase(row)), ...(report.v3M5Float || [])];
+if (floatRows.length) {
+  markdown += `### v3-m5-float (${backendLabel})\n\nMeasured-not-enforced; excluded from the v3 integer-exact count.\n\n`;
+  for (const row of floatRows) markdown += `- ${row.name}: ${row.status}, mismatched pixels ${row.count ?? "error"}\n`;
+  markdown += "\n";
+}
+
+if (integerRows.length) {
+  markdown += `### v3 integer composite (${backendLabel})\n\nEnforced: every byte must match the CPU reference, including cached pyramid levels >=1.\n\n`;
+  markdown += "| case | status | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | --- | ---: | --- | --- |\n";
+  for (const row of integerRows) {
+    markdown += `| ${row.name} | ${row.status} | ${row.count ?? "error"} | ${(row.maxAbs || []).join(",")} | ${row.error || cell(row)} |\n`;
+  }
+  markdown += "\n";
+}
+
 const atlas = report.atlasRead;
 if (atlas) {
   markdown += `### Atlas read (\`Rgba8Unorm\` + \`textureLoad\` + \`unorm_byte\`, ${backendLabel})\n\n`;
@@ -63,6 +82,10 @@ if (atlas) {
 }
 
 await mkdir(outDir, { recursive: true });
+if (v3Rows.length) {
+  await writeFile(`${outDir}/composite-v3.json`, JSON.stringify({ label: "enforced", backend, status: integerRows.some((r) => r.status === "error") ? "error" : integerRows.some((r) => r.status !== "exact" || r.count !== 0) ? "mismatch" : "exact", integerExactCount: integerRows.filter((r) => r.status === "exact" && r.count === 0).length, v3M5Float: floatRows, cases: integerRows }, null, 2) + "\n");
+}
+if (floatRows.length) await writeFile(`${outDir}/v3-m5-float.json`, JSON.stringify({ label: "measured-not-enforced", backend, cases: floatRows }, null, 2) + "\n");
 if (report.tie8192?.length) {
   const totals = { tiesReached: 0, gpuEqualsCpu: 0, gpuDiffersCpu: 0, unavailable: 0 };
   for (const row of report.tie8192) for (const key of Object.keys(totals)) totals[key] += row[key];
@@ -86,3 +109,5 @@ if (process.env.GITHUB_STEP_SUMMARY) {
   await appendFile(process.env.GITHUB_STEP_SUMMARY, markdown);
 }
 console.log(`wrote ${rows.length} measured-not-enforced cases for ${backend}`);
+
+if (integerRows.some((r) => r.status !== "exact" || r.count !== 0)) process.exitCode = 1;

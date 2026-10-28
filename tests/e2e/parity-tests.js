@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { measureColorAdjustTies, alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
+import { measureColorAdjustTies, alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -191,9 +191,9 @@ export async function runParityTests(engine, log) {
     const start = performance.now();
     try {
       const detail = await fn();
-      const row = { name, pass: true, ms: performance.now() - start, detail: detail || "" };
+      const row = { name, pass: true, ms: performance.now() - start, detail: detail?.detail ?? detail ?? "", ...(typeof detail === "object" ? detail : {}) };
       results.push(row);
-      log(`PASS ${name} ${row.ms.toFixed(1)} ms${detail ? `; ${detail}` : ""}`);
+      log(`PASS ${name} ${row.ms.toFixed(1)} ms${row.detail ? `; ${row.detail}` : ""}`);
     } catch (error) {
       if (error.xfail) {
         results.push({ name, pass: true, xfail: true, reason: error.reason, ms: performance.now() - start });
@@ -216,6 +216,7 @@ export async function runParityTests(engine, log) {
     }
   };
   const alphaMeasure = [];
+  const compositeV3 = [];
   const tie8192 = [];
   let atlasRead = null;
   try {
@@ -274,6 +275,58 @@ export async function runParityTests(engine, log) {
         });
         log(`FAIL ${testCase.name} ${error}`);
       }
+    }
+    for (const testCase of alphaMeasureCases()) {
+      await test(`v3-${testCase.name}`, async () => {
+        let renderPath = null;
+        try {
+          const suffix = testCase.w === 256 && testCase.h === 256 ? "" : `-${testCase.w}x${testCase.h}`;
+          const fixture = await fetch(`../../tests/fixtures/render-v3-empty${suffix}.alto`);
+          assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not select integer compositing");
+          for (const node of testCase.nodes) await addNode(doc, engine, node);
+          const cpu = renderCase(testCase, 3);
+          const gpu = await gpuTile(engine, testCase);
+          renderPath = sceneGap(doc.getSnapshot());
+          const enforced = isV3IntegerCase({ renderPath });
+          const row = { ...measureRow(testCase, cpu, gpu), renderPath, name: `v3-${testCase.name}`, enforced, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`${renderPath || "v3 composite"} (${enforced ? "enforced" : "measured-not-enforced"}): ${formatMeasure(row)}`);
+          if (enforced) assert(same(cpu, gpu), formatMeasure(row));
+          return { detail: formatMeasure(row), renderPath, enforced };
+        } catch (error) {
+          if (!compositeV3.some((row) => row.name === `v3-${testCase.name}`)) {
+            compositeV3.push({ name: `v3-${testCase.name}`, renderPath, enforced: isV3IntegerCase({ renderPath }), status: "error", error: String(error) });
+          }
+          throw error;
+        }
+      });
+    }
+    for (const source of alphaMeasureCases()) {
+      const testCase = { ...source, level: 1, tx: 0, ty: 0, name: `v3-${source.name}-level1` };
+      await test(testCase.name, async () => {
+        let renderPath = null;
+        try {
+          const suffix = source.w === 256 && source.h === 256 ? "" : `-${source.w}x${source.h}`;
+          const fixture = await fetch(`../../tests/fixtures/render-v3-empty${suffix}.alto`);
+          assert(fixture.ok, `v3 fixture status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          for (const node of source.nodes) await addNode(doc, engine, node);
+          renderPath = sceneGap(doc.getSnapshot());
+          const enforced = isV3IntegerCase({ renderPath });
+          // Reset, populate children and read the parent in the same worker request.
+          const gpu = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+          const cpu = renderPyramidCase(testCase);
+          const row = { ...measureRow(testCase,cpu,gpu), renderPath, name: testCase.name, level: 1, enforced, status: same(cpu,gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          if (enforced) assert(same(cpu,gpu),formatMeasure(row));
+          return { detail: formatMeasure(row), renderPath, enforced };
+        } catch (error) {
+          if (!compositeV3.some((r)=>r.name===testCase.name)) compositeV3.push({name:testCase.name,level:1,renderPath,enforced:isV3IntegerCase({renderPath}),status:"error",error:String(error)});
+          throw error;
+        }
+      });
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
@@ -435,6 +488,10 @@ export async function runParityTests(engine, log) {
       userAgent: navigator.userAgent,
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
+      compositeV3Label: "enforced",
+      compositeV3: compositeV3.filter(isV3IntegerCase),
+      v3M5Float: compositeV3.filter((row) => !isV3IntegerCase(row)),
+      integerExactCount: compositeV3.filter((row) => isV3IntegerCase(row) && row.status === "exact" && row.count === 0).length,
       tie8192,
       atlasRead,
       results,

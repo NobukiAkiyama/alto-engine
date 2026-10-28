@@ -15,3 +15,57 @@ mod cpu_composite;
 pub fn shader_with_blend(body: &str) -> String {
     format!("{}{body}", include_str!("../shaders/blend.wgsl"))
 }
+
+/// Assemble v3 from the frozen coordinate implementation and the existing Q14 helpers.
+/// The v1/v2 shader sources and their pipelines remain unchanged.
+pub fn integer_composite_shader() -> String {
+    let composite = include_str!("../shaders/composite.wgsl");
+    let effects = include_str!("../shaders/effects.wgsl");
+    let prefix = composite.split("fn sample_texel").next().unwrap();
+    let prefix = prefix.replace(
+        "struct Command { inv0: vec4f, inv1: vec4f, info: vec4u, trans: vec4u };",
+        "struct Command { inv0: vec4f, translation: vec2f, opacity_q: u32, mode: u32, info: vec4u, trans: vec4u };",
+    );
+    let prefix = prefix.replace(
+        "var output: texture_storage_2d_array<rgba8unorm, write>;",
+        "var<storage, read_write> output: array<u32>;",
+    );
+    let sample = &composite
+        [composite.find("fn sample_byte").unwrap()..composite.find("fn fetch_legacy").unwrap()];
+    let begin = sample.find("  let s = textureLoad").unwrap();
+    let end = sample.find("fn channel_byte").unwrap();
+    let sample = format!(
+        "{}  let s = textureLoad(atlas, local, i32(t.slot), 0);\n  return vec4u(unorm_byte(s.r),unorm_byte(s.g),unorm_byte(s.b),unorm_byte(s.a));\n}}\n{}",
+        &sample[..begin],
+        &sample[end..]
+    );
+    let fetch = &composite
+        [composite.find("fn fetch_integer").unwrap()..composite.find("fn fetch(c:").unwrap()];
+    let fetch = fetch
+        .replace("-> vec4f", "-> vec4u")
+        .replace("vec4f(0.0)", "vec4u(0u)")
+        .replace(
+            "return vec4f(f32(r), f32(g), f32(bl), f32(al)) / 255.0;",
+            "return vec4u(r,g,bl,al);",
+        );
+    let div =
+        &effects[effects.find("fn div_q(").unwrap()..effects.find("// Same 64-bit pair").unwrap()];
+    let q14 = &effects
+        [effects.find("fn wide_div_q14(").unwrap()..effects.find("fn q14_stored(").unwrap()];
+    format!(
+        "{prefix}\n{div}\n{q14}\n{sample}\n{fetch}\n{}\n{}",
+        r#"
+fn fetch_bytes(c: Command,p:vec2f,ix:vec2i)->vec4u {
+  if c.info.w!=0u {return fetch_integer(c,ix);}
+  let q=vec2f(c.inv0.x*p.x+c.inv0.z*p.y+c.translation.x,c.inv0.y*p.x+c.inv0.w*p.y+c.translation.y);
+  return sample_byte(c,i32(floor(q.x)),i32(floor(q.y)));
+}
+"#,
+        include_str!("../shaders/composite-q14.wgsl")
+    )
+}
+
+/// Quantize the document's f32 opacity on the host, before uploading commands.
+pub(crate) fn composite_opacity_q14(v: f32) -> i32 {
+    (v.clamp(0.0, 1.0) * 16384.0 + 0.5).trunc() as i32
+}

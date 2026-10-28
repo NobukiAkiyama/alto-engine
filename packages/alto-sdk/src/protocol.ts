@@ -137,7 +137,7 @@ export interface Requests {
   waitFrame: Q<None, FrameStats>;
   readTile: Q<{ x: number; y: number }, Uint8Array>;
   /** `fresh` empties the render caches first, in the same Worker step. */
-  readTileLevel: Q<{ level: number; x: number; y: number; fresh?: boolean }, Uint8Array>;
+  readTileLevel: Q<{ level: number; x: number; y: number; fresh?: boolean; pyramid?: boolean }, Uint8Array>;
   vectorStats: Q<None, Record<string, number>>;
   setGlyphAtlas: Q<{ enabled: boolean }, true>;
   setVisibleTileJobs: Q<{ enabled: boolean }, true>;

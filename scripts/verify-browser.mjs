@@ -4,6 +4,9 @@
 // --examples opens the Vite builds of examples/minimal-embed and react-embed instead
 // and drives each through the public API it exposes (build them first).
 // --suite=functional (or comma-separated names) narrows a diagnostic run.
+// --embed-test=substring isolates an embed test for before/after measurements.
+// ALTO_BROWSER_PRESENT_TIMING=1 records per-tick counters and GPU queue latency.
+// ALTO_BROWSER_VERBOSE_GPU=1 enables Chrome verbose GPU/process logging.
 // Every run saves Chrome stderr and CDP GPU/process/console diagnostics. An explicit
 // ALTO_BROWSER_EXPECTED_VERSION refuses a changed browser; watchdogs stay on unless
 // ALTO_BROWSER_DISABLE_GPU_WATCHDOG=1 is set for a controlled comparison.
@@ -25,11 +28,14 @@ const lifecycleOnly = process.argv.includes("--gpu-lifecycle");
 const startupOnly = process.argv.includes("--startup-only");
 // --behind-resize runs tests/diagnostics/behind-resize.html (plain WebGPU, crbug.com/557281760).
 const behindOnly = process.argv.includes("--behind-resize");
+const embedTest = process.argv.find((arg) => arg.startsWith("--embed-test="))?.slice(13);
 const selectedSuites = process.argv.find((arg) => arg.startsWith("--suite="))?.slice(8).split(",");
 const disableGpuWatchdog = process.env.ALTO_BROWSER_DISABLE_GPU_WATCHDOG === "1";
 const expectedVersion = process.env.ALTO_BROWSER_EXPECTED_VERSION;
 const surfaceRecording = process.env.ALTO_BROWSER_SURFACE_RECORDING === "1";
 const resizeBarrier = process.env.ALTO_BROWSER_RESIZE_BARRIER === "1";
+const verboseGpu = process.env.ALTO_BROWSER_VERBOSE_GPU === "1";
+const presentTiming = process.env.ALTO_BROWSER_PRESENT_TIMING === "1";
 const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
 const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
 if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
@@ -110,8 +116,19 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      if ((surfaceRecording || resizeBarrier) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+      if ((surfaceRecording || resizeBarrier || presentTiming) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
         let source = await readFile(path, "utf8");
+        if (presentTiming) {
+          const replace = (before, after) => {
+            if (source.split(before).length !== 2) throw Error("present timing target changed: " + before);
+            source = source.replace(before, after);
+          };
+          replace("const frame = decodeFrame(runtime.tick(budget));", "altoPresentTiming.begin(); const frame = decodeFrame(runtime.tick(budget)); altoPresentTiming.end();");
+          replace("function noteDeferred(frame, where) {", "function noteDeferred(frame, where) { altoPresentTiming.frame(frame, where, deferredWaits, countsDeferredWait(frame, where));");
+          replace("await runtime.recoverGpu();", 'const restoreStart = performance.now(); altoPresentTiming.emit("restore-start"); await runtime.recoverGpu(); runtime.setProfiling(true); altoPresentTiming.emit("restore-done", { ms: performance.now() - restoreStart });');
+          replace("async function execute(m) {", 'async function execute(m) { if (m.t === "presentTimingMark") { runtime.setProfiling(true); return altoPresentTiming.mark(m.label); }');
+          source = (await readFile(join(root, "tests/diagnostics/present-timing.js"), "utf8")) + "\n" + source;
+        }
         if (resizeBarrier) {
           const target = "runtime.resize(pendingResize.width, pendingResize.height);";
           if (source.split(target).length !== 2) throw Error("resize barrier target changed");
@@ -197,11 +214,14 @@ if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
 
 let server, chrome, client, browserClient, profile;
 const summary = [];
-const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, resizeBarrier, browser: null, executable: null, args: [], events: [], system: [] };
+const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, resizeBarrier, verboseGpu, presentTiming, embedTest: embedTest ?? null, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "", traceStream = null, traceStarted = false, unexpectedSurfaceFault = false;
 const recordEvent = ({ method, params }) => {
   if (method === "Tracing.tracingComplete") traceStream = params.stream;
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
+  const timingText = method === "Log.entryAdded" ? params.entry?.text : method === "Runtime.consoleAPICalled" ? params.args?.[0]?.value : null;
+  if (presentTiming && typeof timingText === "string" && timingText.startsWith("PRESENT-TIMING "))
+    appendFileSync(join(reportDir, "present-timing.jsonl"), timingText.slice(15) + "\n");
   diagnostics.events.push({ at: new Date().toISOString(), method, params });
   if (diagnostics.events.length > 500) diagnostics.events.shift();
 };
@@ -217,12 +237,14 @@ async function sampleSystem(label) {
 try {
   await mkdir(reportDir, { recursive: true });
   await writeFile(join(reportDir, "chrome-stderr.log"), "");
+  if (presentTiming) await writeFile(join(reportDir, "present-timing.jsonl"), "");
   diagnostics.artifacts = {};
-  for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm", ...(vectorOnly ? ["examples/vector-comparison/pkg/alto_wasm_bg.wasm"] : [])])
+  for (const file of ["packages/alto-sdk/dist/worker.js", "packages/alto-sdk/dist/pkg/alto_wasm_bg.wasm", ...(vectorOnly ? ["examples/vector-comparison/pkg/alto_wasm_bg.wasm"] : []), ...(presentTiming ? ["tests/diagnostics/present-timing.js"] : [])])
     diagnostics.artifacts[file] = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
   server = await startServer();
   const address = server.address();
   const query = new URLSearchParams();
+  if (embedTest) query.set("embedTest", embedTest);
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
   const pageUrl = `http://127.0.0.1:${address.port}/${behindOnly ? "tests/diagnostics/behind-resize.html" : vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
@@ -235,6 +257,7 @@ try {
     "--headless=new",
     "--enable-unsafe-webgpu",
     "--enable-logging=stderr",
+    ...(verboseGpu ? ["--v=1"] : []),
     ...(graphiteBackend === "swiftshader" ? ["--enable-skia-graphite", "--skia-graphite-dawn-backend=swiftshader",
       ...(platform() === "linux" ? ["--enable-gpu", "--use-angle=swiftshader"] : [])] : []),
     ...(disableGpuWatchdog ? ["--disable-gpu-watchdog"] : []),
@@ -272,6 +295,7 @@ try {
     return message.result?.result?.value;
   };
   await send("Page.enable");
+  if (presentTiming) await send("Page.addScriptToEvaluateOnNewDocument", { source: "globalThis.__altoPresentTiming = true;" });
   if (surfaceRecording) await send("Page.addScriptToEvaluateOnNewDocument", { source: await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8") });
   await send("Runtime.enable");
   await send("Log.enable");

@@ -116,6 +116,9 @@ jobs:
           if [ -f "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" ]; then
             cat "$RUNNER_TEMP/alto-alpha-measure/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f "$RUNNER_TEMP/alto-alpha-measure/composite-v3.md" ]; then
+            cat "$RUNNER_TEMP/alto-alpha-measure/composite-v3.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f "$RUNNER_TEMP/alto-alpha-measure/tie-8192.md" ]; then
             cat "$RUNNER_TEMP/alto-alpha-measure/tie-8192.md" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -184,6 +187,8 @@ jobs:
     timeout-minutes: 60
     env:
       ALTO_WASM_TARGET_DIR: target/wasm-fast
+      ALTO_BROWSER_VERBOSE_GPU: '1'
+      ALTO_BROWSER_PRESENT_TIMING: '1'
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
@@ -462,6 +467,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -f "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" ]; then
             cat "$RUNNER_TEMP/alto-gpu-parity/alpha-measure.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RUNNER_TEMP/alto-gpu-parity/composite-v3.md" ]; then
+            cat "$RUNNER_TEMP/alto-gpu-parity/composite-v3.md" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f "$RUNNER_TEMP/alto-gpu-parity/tie-8192.md" ]; then
             cat "$RUNNER_TEMP/alto-gpu-parity/tie-8192.md" >> "$GITHUB_STEP_SUMMARY"
