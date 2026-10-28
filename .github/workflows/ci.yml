@@ -22,6 +22,14 @@ on:
         description: Record Canvas and WebGPU calls around the first surface fault
         default: false
         type: boolean
+      verbose_gpu:
+        description: Diagnostic opt-in - verbose GPU logging in the wasm-browser job
+        default: false
+        type: boolean
+      present_timing:
+        description: Diagnostic opt-in - record present timing in the wasm-browser job
+        default: false
+        type: boolean
       resize_barrier:
         description: Diagnostic only - wait for GPU submissions before applying SDK resize
         default: false
@@ -187,8 +195,8 @@ jobs:
     timeout-minutes: 60
     env:
       ALTO_WASM_TARGET_DIR: target/wasm-fast
-      ALTO_BROWSER_VERBOSE_GPU: '1'
-      ALTO_BROWSER_PRESENT_TIMING: '1'
+      ALTO_BROWSER_VERBOSE_GPU: ${{ inputs.verbose_gpu && '1' || '0' }}
+      ALTO_BROWSER_PRESENT_TIMING: ${{ inputs.present_timing && '1' || '0' }}
       ALTO_BROWSER_SURFACE_RECORDING: ${{ inputs.surface_recording && '1' || '0' }}
       ALTO_BROWSER_RESIZE_BARRIER: ${{ inputs.resize_barrier && '1' || '0' }}
       ALTO_BROWSER_GPU_TRACE: ${{ inputs.gpu_trace && '1' || '0' }}
