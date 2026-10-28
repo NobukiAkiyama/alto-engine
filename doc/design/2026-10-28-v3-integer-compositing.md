@@ -8,11 +8,11 @@
 
 ## 前提
 
-The GPU unorm store conversion is allowed error by the API spec, so it cannot be a determinism foundation. v3 does all quantization in its own integer formulas and writes only to `rgba8uint` or packed-u32 storage. No path may write to a float or unorm target and let hardware round.
+The GPU unorm store conversion is allowed error by the API spec, so it cannot be a determinism foundation. v3 does all quantization in its own integer formulas and writes its final tile output only to `rgba8uint` or packed u32. Intermediates may use `rgba16uint` holding Q14 integers. No float intermediate exists anywhere in v3. No path may write to a float or unorm target and let hardware round.
 
 GPU の unorm ストア変換は、API 仕様が誤差を許している。WebGPU / Vulkan の float から `rgba8unorm` への書き込みは、`roundTiesToEven` であるとも、`floor(x + 0.5)` であるとも要求されない。実装がどちらに寄せても仕様違反ではない。したがって、この変換は決定性の基礎にできない。
 
-v3 は量子化をすべて自分の整数式で行う。書き込み先は `rgba8uint` か、パックした u32 のストレージだけである。float または unorm のターゲットへ合成結果を書き、ハードウェアに丸めさせる経路は一本もない。
+v3 は量子化をすべて自分の整数式で行う。最終のタイル出力は `rgba8uint` かパック u32。中間値は Q14 の整数で `rgba16uint` を許す。float の中間は v3 のどこにも置かない。float または unorm のターゲットへ合成結果を書き、ハードウェアに丸めさせる経路は一本もない。
 
 計測は [半透明合成の計測](../verification/semi-transparent-composite-parity.md) にある。v2 では、事前量子化の f32 が CPU とビット一致しても、`rgba8unorm` のストアが ±1 になる。P2P ではその ±1 がタイルハッシュの分岐になり、同じ文書がピアによって違う。v2 はその既知の非決定性を持ったまま凍結する。既存文書の対処は `render.upgrade`（`upgrade_render_version` / `upgradeRenderVersion`）で、将来の `render_version` 3 の整数合成へ上げることである。この設計が入るまで、その更新が届く先は main の color-adjust であり、合成そのものは v2 の float `blend` のままである。
 
