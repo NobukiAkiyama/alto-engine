@@ -1239,65 +1239,164 @@ fn color_adjust_image_v3(src: &[u8], brightness: f32, contrast: f32, saturation:
     out
 }
 
-/// Measure-only CPU replay of the integer intermediates before f16 stores.
-/// Never used by rendering or parity assertions.
-fn write_tie_8192(adapter: &str, src: &[u8], grid: &[(f32, f32, f32)]) {
+/// Diagnostic only: replay through the output f16 store and effects-resolve's
+/// textureLoad. All Q14 store inputs here map to integral Q14 after f16 rounding.
+/// Resolve performs no arithmetic between that load and the unorm8 store.
+struct TieMeasurement {
+    json: String,
+    markdown: String,
+    reached: u32,
+    equal: u32,
+    different: u32,
+    unavailable: u32,
+}
+
+fn measure_tie_8192(
+    src: &[u8],
+    settings: (f32, f32, f32),
+    gpu: &[u8],
+    cpu: &[u8],
+) -> TieMeasurement {
+    let (contrast, saturation, brightness) = settings;
+    let name = color_adjust_case_name(contrast, saturation, brightness);
+    let mut old_pixels = 0u32;
+    let mut old_channels = [0u32; 3];
+    let mut pixels = 0u32;
+    let mut channels = [0u32; 4];
+    let mut lossy = [0u32; 3];
+    let mut histogram = std::collections::BTreeMap::<u32, u32>::new();
+    let mut details = Vec::new();
+    let mut equal = 0u32;
+    let mut different = 0u32;
+    let mut unavailable = 0u32;
+    for (index, px) in src.as_chunks::<4>().0.iter().enumerate() {
+        let b = px.map(u32::from);
+        let input = [
+            premul_byte_q14(b[0], b[3]),
+            premul_byte_q14(b[1], b[3]),
+            premul_byte_q14(b[2], b[3]),
+            byte_q14(b[3]),
+        ];
+        let stored = input.map(q14_to_f16_bits);
+        let q = stored.map(f16_bits_to_q14);
+        let rgb = color_adjust_exact_q14(
+            q,
+            crate::renderer::color_adjust_q14(brightness),
+            crate::renderer::color_adjust_q14(contrast),
+            crate::renderer::color_adjust_q14(saturation),
+        );
+        let resolve = [
+            f16_bits_to_q14(q14_to_f16_bits(rgb[0])),
+            f16_bits_to_q14(q14_to_f16_bits(rgb[1])),
+            f16_bits_to_q14(q14_to_f16_bits(rgb[2])),
+            f16_bits_to_q14(stored[3]),
+        ];
+        old_pixels += u32::from(rgb.contains(&8192));
+        for (c, value) in rgb.into_iter().enumerate() {
+            if value == 8192 {
+                old_channels[c] += 1;
+                *histogram.entry(resolve[c]).or_default() += 1;
+            }
+        }
+        let mut pixel_tie = false;
+        for (c, value) in resolve.into_iter().enumerate() {
+            if (255 * value) % 16384 != 8192 {
+                continue;
+            }
+            pixel_tie = true;
+            channels[c] += 1;
+            let offset = index * 4 + c;
+            let gpu_byte = gpu.get(offset).copied();
+            let cpu_byte = cpu.get(offset).copied();
+            match (gpu_byte, cpu_byte) {
+                (Some(g), Some(c)) if g == c => equal += 1,
+                (Some(_), Some(_)) => different += 1,
+                _ => unavailable += 1,
+            }
+            let lower = 255 * value / 16384;
+            let side = match gpu_byte.map(u32::from) {
+                Some(g) if g == lower => "down",
+                Some(g) if g == lower + 1 => "up",
+                Some(_) => "other",
+                None => "unavailable",
+            };
+            let parity = match gpu_byte {
+                Some(g) if g % 2 == 0 => "even",
+                Some(_) => "odd",
+                None => "unavailable",
+            };
+            let gpu_json = gpu_byte.map_or_else(|| "null".into(), |v| v.to_string());
+            let cpu_json = cpu_byte.map_or_else(|| "null".into(), |v| v.to_string());
+            details.push(format!(
+                "{{\"case\":\"{}\",\"x\":{},\"y\":{},\"channel\":\"{}\",\"q\":{value},\"gpuByte\":{gpu_json},\"cpuByte\":{cpu_json},\"gpuSide\":\"{side}\",\"gpuParity\":\"{parity}\"}}",
+                json_escape(&name), index % 256, index / 256, ["r", "g", "b", "a"][c]
+            ));
+        }
+        pixels += u32::from(pixel_tie);
+        for value in input.into_iter().chain(rgb) {
+            if value >= 2048 && f16_bits_to_q14(q14_to_f16_bits(value)) != value {
+                let bucket = if value < 4096 {
+                    0
+                } else if value < 8192 {
+                    1
+                } else {
+                    2
+                };
+                lossy[bucket] += 1;
+            }
+        }
+    }
+    let histogram = histogram
+        .into_iter()
+        .map(|(q, count)| {
+            format!(
+                "{{\"q\":{q},\"count\":{count},\"intact\":{},\"isTie\":{}}}",
+                q == 8192,
+                (255 * q) % 16384 == 8192
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let reached = channels.iter().sum();
+    let json = format!(
+        "{{\"name\":\"{}\",\"adjustOutput8192\":{{\"pixels\":{old_pixels},\"channels\":{old_channels:?}}},\"resolveInput\":{{\"pixels\":{pixels},\"channels\":{channels:?}}},\"old8192ResolveHistogram\":[{histogram}],\"lossyStep2_4_8\":{lossy:?},\"tiesReached\":{reached},\"gpuEqualsCpu\":{equal},\"gpuDiffersCpu\":{different},\"unavailable\":{unavailable},\"ties\":[{}]}}",
+        json_escape(&name),
+        details.join(",")
+    );
+    let markdown = format!(
+        "| {name} | {pixels} | {channels:?} | {reached} | {equal} | {different} | {old_pixels} / {old_channels:?} |\n"
+    );
+    TieMeasurement {
+        json,
+        markdown,
+        reached,
+        equal,
+        different,
+        unavailable,
+    }
+}
+
+fn write_tie_8192(adapter: &str, rows: &[TieMeasurement]) {
     let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
         return;
     };
-    let mut rows = Vec::new();
-    let mut markdown = format!(
-        "### Q14 half ties ({adapter})\n\nMeasured-not-enforced CPU replay, not GPU intermediate readback. RGB immediately before the adjustment output f16 store. Precision-loss buckets count input RGBA and output RGB store calls (alpha passthrough excluded).\n\n| case | pixels | channels r,g,b | lossy step 2/4/8 |\n| --- | ---: | --- | --- |\n"
-    );
-    for &(contrast, saturation, brightness) in grid {
-        let mut pixels = 0u32;
-        let mut channels = [0u32; 3];
-        let mut lossy = [0u32; 3];
-        for px in src.as_chunks::<4>().0 {
-            let b = px.map(u32::from);
-            let input = [
-                premul_byte_q14(b[0], b[3]),
-                premul_byte_q14(b[1], b[3]),
-                premul_byte_q14(b[2], b[3]),
-                byte_q14(b[3]),
-            ];
-            let q = input.map(|v| f16_bits_to_q14(q14_to_f16_bits(v)));
-            let rgb = color_adjust_exact_q14(
-                q,
-                crate::renderer::color_adjust_q14(brightness),
-                crate::renderer::color_adjust_q14(contrast),
-                crate::renderer::color_adjust_q14(saturation),
-            );
-            pixels += u32::from(rgb.contains(&8192));
-            for (count, value) in channels.iter_mut().zip(rgb) {
-                *count += u32::from(value == 8192);
-            }
-            for value in input.into_iter().chain(rgb) {
-                if value >= 2048 && f16_bits_to_q14(q14_to_f16_bits(value)) != value {
-                    let bucket = if value < 4096 {
-                        0
-                    } else if value < 8192 {
-                        1
-                    } else {
-                        2
-                    };
-                    lossy[bucket] += 1;
-                }
-            }
-        }
-        let name = color_adjust_case_name(contrast, saturation, brightness);
-        rows.push(format!("{{\"name\":\"{}\",\"pixels\":{pixels},\"channels\":{channels:?},\"lossyStep2_4_8\":{lossy:?}}}", json_escape(&name)));
-        markdown.push_str(&format!(
-            "| {name} | {pixels} | {channels:?} | {lossy:?} |\n"
-        ));
-    }
+    let reached: u32 = rows.iter().map(|r| r.reached).sum();
+    let equal: u32 = rows.iter().map(|r| r.equal).sum();
+    let different: u32 = rows.iter().map(|r| r.different).sum();
+    let unavailable: u32 = rows.iter().map(|r| r.unavailable).sum();
     let json = format!(
-        "{{\"label\":\"measured-not-enforced\",\"source\":\"cpu-replay-before-f16-store\",\"backend\":\"{}\",\"cases\":[{}]}}\n",
+        "{{\"label\":\"measured-not-enforced\",\"source\":\"resolve-input-q14\",\"qSource\":\"cpu-replay-through-f16-store\",\"byteSource\":\"gpu_tile-readback\",\"cpuByteSource\":\"cpu-reference\",\"channelOrder\":\"rgba (adjustOutput8192: rgb)\",\"lossyScope\":\"input RGBA and adjust output RGB stores; steps 2/4/8\",\"backend\":\"{}\",\"totals\":{{\"tiesReached\":{reached},\"gpuEqualsCpu\":{equal},\"gpuDiffersCpu\":{different},\"unavailable\":{unavailable}}},\"cases\":[{}]}}\n",
         json_escape(adapter),
-        rows.join(",")
+        rows.iter()
+            .map(|r| r.json.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let markdown = format!(
+        "### Resolve unorm8 ties ({adapter})\n\nMeasured-not-enforced. Q14 is CPU-replayed through the adjustment output f16 store and resolve textureLoad; bytes are GPU tile readback and CPU reference. Tie: `255*q mod 16384 == 8192`. Old counts are RGB before the adjustment output f16 store. JSON includes every tie and the old-8192 resolve histogram.\n\nTotals (channels): ties reached **{reached}**, GPU == CPU **{equal}**, GPU != CPU **{different}**, unavailable **{unavailable}**.\n\n| case | resolve tie pixels | channels r,g,b,a | ties reached | GPU == CPU | GPU != CPU | old 8192 pixels / r,g,b |\n| --- | ---: | --- | ---: | ---: | ---: | --- |\n{}",
+        rows.iter().map(|r| r.markdown.as_str()).collect::<String>()
     );
     let dir = std::path::PathBuf::from(dir);
-    // Diagnostics must not turn count values or reporting errors into failures.
     if let Err(error) = std::fs::create_dir_all(&dir)
         .and_then(|()| std::fs::write(dir.join("tie-8192.json"), json))
         .and_then(|()| std::fs::write(dir.join("tie-8192.md"), markdown))
@@ -4005,7 +4104,7 @@ fn gpu_shader_matches_cpu_reference() {
     write_atlas_read(&gpu.adapter_name, &atlas);
     let src = color_adjust_gradient();
     let grid = color_adjust_grid();
-    write_tie_8192(&gpu.adapter_name, &src, &grid);
+    let mut ties = Vec::new();
     match gpu.render_color_adjust(&src, &grid) {
         Ok(tiles) => {
             if tiles.len() != grid.len() {
@@ -4018,6 +4117,13 @@ fn gpu_shader_matches_cpu_reference() {
             for (tile, &(contrast, saturation, brightness)) in tiles.iter().zip(&grid) {
                 let cpu = color_adjust_image_v3(&src, brightness, contrast, saturation);
                 let name = color_adjust_case_name(contrast, saturation, brightness);
+                // Readback already completed. Measurements never feed parity decisions.
+                ties.push(measure_tie_8192(
+                    &src,
+                    (contrast, saturation, brightness),
+                    tile,
+                    &cpu,
+                ));
                 let report = diff_report(&cpu, tile);
                 println!("{name}: {report}");
                 if cpu != *tile {
@@ -4030,6 +4136,7 @@ fn gpu_shader_matches_cpu_reference() {
             failed.push(format!("color-adjust: {err}"));
         }
     }
+    write_tie_8192(&gpu.adapter_name, &ties);
     assert!(
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",

@@ -332,13 +332,13 @@ export async function runParityTests(engine, log) {
           });
         });
         const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+        const cpu = renderColorAdjustV3(image, settings);
         // Reporting failures and counts never affect parity enforcement.
         try {
-          tie8192.push({ name, ...measureColorAdjustTies(image, settings) });
+          tie8192.push(measureColorAdjustTies(image, settings, gpu, cpu, name));
         } catch (error) {
           log(`tie-8192 measurement unavailable: ${error}`);
         }
-        const cpu = renderColorAdjustV3(image, settings);
         const gap = diff(cpu, gpu);
         log(`${name}: ${gap}`);
         const gapName = sceneGap(doc.getSnapshot());

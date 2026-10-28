@@ -840,23 +840,52 @@ export function sceneGap(snapshot) {
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
 }
 
-// Measure-only replay; no rendering or comparison uses these counts.
-export function measureColorAdjustTies(image, settings) {
-  const channels = [0, 0, 0];
+// Measure-only replay through the adjustment output f16 store and resolve load.
+// Resolve copies the loaded value directly to rgba8unorm. No rendering uses this.
+export function measureColorAdjustTies(image, settings, gpu, cpu, name) {
+  const adjustOutput8192 = { pixels: 0, channels: [0, 0, 0] };
+  const resolveInput = { pixels: 0, channels: [0, 0, 0, 0] };
+  const histogram = new Map();
   const lossyStep2_4_8 = [0, 0, 0];
-  let pixels = 0;
+  const ties = [];
+  let gpuEqualsCpu = 0, gpuDiffersCpu = 0, unavailable = 0;
   for (let i = 0; i < image.pixels.length; i += 4) {
     const b = image.pixels.slice(i, i + 4);
     const input = [premulByteQ14(b[0], b[3]), premulByteQ14(b[1], b[3]), premulByteQ14(b[2], b[3]), byteQ14(b[3])];
-    const q = input.map((v) => f16BitsToQ14(q14ToF16Bits(v)));
+    const stored = input.map(q14ToF16Bits);
+    const q = stored.map(f16BitsToQ14);
     const rgb = colorAdjustExactQ14(q, colorAdjustQ14(f(settings.brightness)), colorAdjustQ14(f(settings.contrast)), colorAdjustQ14(f(settings.saturation)));
-    if (rgb.includes(8192)) pixels++;
-    rgb.forEach((v, c) => { if (v === 8192) channels[c]++; });
+    // These f16 values are exact multiples of 1/16384, so conversion is lossless.
+    const resolve = [...rgb.map((v) => f16BitsToQ14(q14ToF16Bits(v))), f16BitsToQ14(stored[3])];
+    if (rgb.includes(8192)) adjustOutput8192.pixels++;
+    rgb.forEach((v, c) => {
+      if (v === 8192) {
+        adjustOutput8192.channels[c]++;
+        histogram.set(resolve[c], (histogram.get(resolve[c]) || 0) + 1);
+      }
+    });
+    let pixelTie = false;
+    resolve.forEach((v, c) => {
+      if ((255 * v) % 16384 !== 8192) return;
+      pixelTie = true;
+      resolveInput.channels[c]++;
+      const gpuByte = gpu?.[i + c] ?? null;
+      const cpuByte = cpu?.[i + c] ?? null;
+      if (gpuByte === null || cpuByte === null) unavailable++;
+      else if (gpuByte === cpuByte) gpuEqualsCpu++;
+      else gpuDiffersCpu++;
+      const lower = Math.floor(255 * v / 16384);
+      ties.push({ case: name, x: (i / 4) % image.w, y: Math.floor(i / 4 / image.w), channel: "rgba"[c], q: v, gpuByte, cpuByte,
+        gpuSide: gpuByte === null ? "unavailable" : gpuByte === lower ? "down" : gpuByte === lower + 1 ? "up" : "other",
+        gpuParity: gpuByte === null ? "unavailable" : gpuByte % 2 === 0 ? "even" : "odd" });
+    });
+    if (pixelTie) resolveInput.pixels++;
     for (const v of [...input, ...rgb]) {
       if (v >= 2048 && f16BitsToQ14(q14ToF16Bits(v)) !== v) {
         lossyStep2_4_8[v < 4096 ? 0 : v < 8192 ? 1 : 2]++;
       }
     }
   }
-  return { pixels, channels, lossyStep2_4_8 };
+  const old8192ResolveHistogram = [...histogram].sort(([a], [b]) => a - b).map(([q, count]) => ({q, count, intact: q === 8192, isTie: (255 * q) % 16384 === 8192}));
+  return { name, adjustOutput8192, resolveInput, old8192ResolveHistogram, lossyStep2_4_8, tiesReached: ties.length, gpuEqualsCpu, gpuDiffersCpu, unavailable, ties };
 }
