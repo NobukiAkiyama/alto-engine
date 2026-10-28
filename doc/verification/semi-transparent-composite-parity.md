@@ -21,7 +21,7 @@ Counts are mismatched pixels. The parenthetical is max absolute difference per c
 | backend | adapter | CPU reference |
 | --- | --- | --- |
 | lavapipe | `llvmpipe (LLVM 20.1.2, 256 bits)` on `ubuntu-24.04`, `mesa-vulkan-drivers 25.2.8-0ubuntu0.24.04.4` | Rust `cpu_composite` render version 2 |
-| Metal | `Apple Paravirtual device` on `macos-15` (native job) | Rust `cpu_composite` render version 2 |
+| Metal | `Apple Paravirtual device` on `macos-15` (native job). This is not real Apple hardware; real hardware is unverified | Rust `cpu_composite` render version 2 |
 | SwiftShader | Chrome SwiftShader (`ALTO_BROWSER_GPU=swiftshader`, wasm job) | JavaScript `renderCase` render version 2 |
 
 | case | lavapipe | Metal | SwiftShader |
@@ -101,4 +101,15 @@ The f32 values differ by 1 to 3 ulps. Every one of those gaps sits on a rounding
 
 On Metal in the same run, 8217 channels differ. 8208 of them are bit-identical before quantization and still store a different byte, so that ±1 is the `rgba8unorm` store versus CPU `round_ties_even` on an exact `n+0.5` boundary. The other 9 differ by one ulp (`|GPU - CPU| * 255` at most `1.51991844e-5`): `blend-hue` and `blend-color` blue at (181,82), and seven channels in `eight-layers`. All 8217 are within `1e-4` of an `n+0.5` boundary. None exceed `1e-3`.
 
+Metal exact-half count, [CI run 40593541861](https://github.com/NobukiAkiyama/alto-engine/actions/runs/40593541861) on `30a4437` (`Apple Paravirtual device`, not real Apple hardware; real hardware is unverified): of 8208 bit-identical pre-store channels, 8208 have `v*255` exactly equal to `n+0.5` and 0 do not; 8201 differ as CPU `round_ties_even` versus `round-half-up`, and 7 are exact halves where those two rules agree but the GPU byte is the other integer (all 8208 GPU bytes match round-ties-to-odd).
+
 `rgba8unorm` store versus CPU `round_ties_even` is the step that turns a tie, or a one-ulp gap on that tie, into a byte. It is not a second formula.
+
+## Atlas read (enforced)
+
+Render version 3 keeps the atlas as one `Rgba8Unorm` texture and reads it with `textureLoad` followed by `unorm_byte` (`u32(clamp(v, 0, 1) * 255 + 0.5)`, the `effects.wgsl` function color-adjust mode 18 already uses). The same jobs check that read, and the check is required: a 256x1 `Rgba8Unorm` texture holds every byte value on every channel (R = i, G = 255 − i, B = i ^ 0x55, A = i + 128), a compute shader reads it back, and each backend asserts that all 1024 channels round-trip exactly.
+
+- Metal (native job) and lavapipe (gpu-parity job): `Gpu::atlas_read` in `crates/alto-gpu/src/cpu_composite.rs`, run at the end of `gpu_shader_matches_cpu_reference`. Output `atlas-read.json` and `atlas-read.md` beside `alpha-measure.json`, plus an `atlas-read (enforced): …` log line. `atlas_read_uses_effects_unorm_byte` checks the shader text matches `effects.wgsl`.
+- SwiftShader (wasm job): `measureAtlasRead` in `tests/e2e/parity-tests.js`, stored as `atlasRead` in `parity.json` and summarized by `scripts/alpha-measure-summary.mjs`. The `atlas-read round-trips all 256 bytes` test fails the parity run on a mismatch or a GPU error.
+
+Any mismatch or error fails the job; `atlas-read.json` is still written first. A mismatch on some backend is the only reason to switch the atlas to `Rgba8Uint`.

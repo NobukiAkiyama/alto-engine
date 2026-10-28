@@ -1538,6 +1538,106 @@ fn dist_to_half(v: f32) -> f32 {
     (shifted - shifted.round()).abs()
 }
 
+/// `clamp(v, 0, 1) * 255` when that product is finite.
+fn scaled_byte(v: f32) -> Option<f32> {
+    if !v.is_finite() {
+        return None;
+    }
+    let scaled = v.clamp(0.0, 1.0) * 255.0;
+    scaled.is_finite().then_some(scaled)
+}
+
+/// Exact f32 equality with `n + 0.5`. Not an epsilon test.
+fn exactly_half_boundary(scaled: f32) -> bool {
+    let n = scaled.floor();
+    scaled == n + 0.5
+}
+
+/// `floor(x + 0.5)` on a non-negative byte-scaled value. At an exact tie this is
+/// `n + 1`. Elsewhere it is the nearest integer.
+fn round_half_up_byte(scaled: f32) -> u8 {
+    (scaled + 0.5).floor().clamp(0.0, 255.0) as u8
+}
+
+fn round_ties_even_byte(scaled: f32) -> u8 {
+    scaled.round_ties_even().clamp(0.0, 255.0) as u8
+}
+
+/// At an exact `n + 0.5`, the odd integer of `{n, n + 1}`.
+fn round_ties_odd_byte(scaled: f32) -> u8 {
+    let n = scaled.floor() as u32;
+    let odd = if n.is_multiple_of(2) { n + 1 } else { n };
+    odd.min(255) as u8
+}
+
+struct ChannelBoundary {
+    /// Pre-store f32 bits match. The byte still differs; the caller checked that.
+    bits_equal: bool,
+    exact_half: bool,
+    /// GPU byte is round-half-up and CPU byte is `round_ties_even`, and those
+    /// two bytes are different.
+    tie_even_vs_half_up: bool,
+    /// Exact tie, and the pair is not tie-even versus round-half-up.
+    exact_half_not_half_up: bool,
+    /// Bit-identical pre-store value whose `v * 255` is not exactly `n + 0.5`.
+    not_exact_half: bool,
+    /// Exact tie and the GPU byte is round-ties-to-odd.
+    gpu_ties_odd: bool,
+    class: &'static str,
+}
+
+fn classify_boundary(gpu_v: f32, cpu_v: f32, gpu_byte: u8, cpu_byte: u8) -> ChannelBoundary {
+    if gpu_v.to_bits() != cpu_v.to_bits() {
+        return ChannelBoundary {
+            bits_equal: false,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: false,
+            gpu_ties_odd: false,
+            class: "floats-differ",
+        };
+    }
+    let Some(scaled) = scaled_byte(gpu_v) else {
+        return ChannelBoundary {
+            bits_equal: true,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: true,
+            gpu_ties_odd: false,
+            class: "not-exact-half",
+        };
+    };
+    let ties_even = round_ties_even_byte(scaled);
+    let half_up = round_half_up_byte(scaled);
+    if !exactly_half_boundary(scaled) {
+        return ChannelBoundary {
+            bits_equal: true,
+            exact_half: false,
+            tie_even_vs_half_up: false,
+            exact_half_not_half_up: false,
+            not_exact_half: true,
+            gpu_ties_odd: false,
+            class: "not-exact-half",
+        };
+    }
+    let tie_even_vs_half_up = half_up != ties_even && gpu_byte == half_up && cpu_byte == ties_even;
+    ChannelBoundary {
+        bits_equal: true,
+        exact_half: true,
+        tie_even_vs_half_up,
+        exact_half_not_half_up: !tie_even_vs_half_up,
+        not_exact_half: false,
+        gpu_ties_odd: gpu_byte == round_ties_odd_byte(scaled),
+        class: if tie_even_vs_half_up {
+            "tie-even-vs-half-up"
+        } else {
+            "exact-half-not-half-up"
+        },
+    }
+}
+
 fn json_f32(v: f32) -> String {
     if v.is_finite() {
         format!("{v:.8e}")
@@ -1583,6 +1683,101 @@ fn measure_line(row: &MeasuredCase) -> String {
 
 fn json_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// The `unorm_byte` that color-adjust mode 18 uses (`effects.wgsl`). The atlas-read
+/// measurement runs this exact text; `atlas_read_uses_effects_unorm_byte` checks it.
+const UNORM_BYTE_WGSL: &str = "fn unorm_byte(v: f32) -> u32 {
+  return u32(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+}";
+
+/// Texel `i` of the 256x1 atlas-read texture. Every channel sweeps all 256 bytes.
+fn atlas_read_texel(i: usize) -> [u8; 4] {
+    let i = i as u8;
+    [i, 255 - i, i ^ 0x55, i.wrapping_add(128)]
+}
+
+fn atlas_read_shader() -> String {
+    format!(
+        "@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> out: array<u32, 1024>;
+{UNORM_BYTE_WGSL}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {{
+  if (id.x >= 256u) {{ return; }}
+  let v = textureLoad(atlas, vec2u(id.x, 0u), 0);
+  out[id.x * 4u] = unorm_byte(v.r);
+  out[id.x * 4u + 1u] = unorm_byte(v.g);
+  out[id.x * 4u + 2u] = unorm_byte(v.b);
+  out[id.x * 4u + 3u] = unorm_byte(v.a);
+}}
+"
+    )
+}
+
+/// Result of reading all 256 bytes from an `Rgba8Unorm` texture with
+/// `textureLoad` + `unorm_byte`. Enforced.
+struct AtlasRead {
+    mismatches: Vec<(usize, usize, u8, u32)>,
+}
+
+impl AtlasRead {
+    fn line(&self) -> String {
+        if self.mismatches.is_empty() {
+            "atlas-read (enforced): 256/256 byte values round-trip exactly on all 4 channels".into()
+        } else {
+            let shown: Vec<String> = self
+                .mismatches
+                .iter()
+                .take(8)
+                .map(|(t, c, want, got)| format!("texel {t} ch {c} byte {want} read {got}"))
+                .collect();
+            format!(
+                "atlas-read (enforced): {} channel mismatches: {}",
+                self.mismatches.len(),
+                shown.join("; ")
+            )
+        }
+    }
+}
+
+fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
+    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create alpha measure directory");
+    let (status, count, error) = match result {
+        Ok(r) if r.mismatches.is_empty() => ("exact", 0, String::new()),
+        Ok(r) => ("mismatch", r.mismatches.len(), String::new()),
+        Err(e) => ("error", 0, e.clone()),
+    };
+    let mut list = String::new();
+    if let Ok(r) = result {
+        for (n, (t, c, want, got)) in r.mismatches.iter().enumerate() {
+            if n > 0 {
+                list.push_str(", ");
+            }
+            list.push_str(&format!(
+                "{{\"texel\": {t}, \"channel\": {c}, \"byte\": {want}, \"read\": {got}}}"
+            ));
+        }
+    }
+    let json = format!(
+        "{{\n  \"label\": \"enforced\",\n  \"backend\": \"{}\",\n  \"format\": \"Rgba8Unorm\",\n  \"read\": \"textureLoad + unorm_byte\",\n  \"values\": 256,\n  \"status\": \"{status}\",\n  \"mismatchedChannels\": {count},\n  \"error\": \"{}\",\n  \"mismatches\": [{list}]\n}}\n",
+        json_escape(adapter),
+        json_escape(&error)
+    );
+    std::fs::write(dir.join("atlas-read.json"), json).expect("write atlas read json");
+    let line = match result {
+        Ok(r) => r.line(),
+        Err(e) => format!("atlas-read (enforced): GPU error: {e}"),
+    };
+    let markdown = format!(
+        "### Atlas read (`Rgba8Unorm` + `textureLoad` + `unorm_byte`)\n\nBackend: `{}`\n\n{line}\n",
+        adapter
+    );
+    std::fs::write(dir.join("atlas-read.md"), markdown).expect("write atlas read markdown");
 }
 
 fn write_alpha_measure(adapter: &str, rows: &[MeasuredCase]) {
@@ -1691,6 +1886,11 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
     let mut floats_within = 0u32;
     let mut floats_apart = 0u32;
     let mut bit_identical = 0u32;
+    let mut exact_half = 0u32;
+    let mut tie_even_vs_half_up = 0u32;
+    let mut exact_half_not_half_up = 0u32;
+    let mut not_exact_half = 0u32;
+    let mut gpu_ties_odd = 0u32;
     let mut max_delta = 0f32;
     let mut lines = Vec::new();
     for row in rows {
@@ -1702,6 +1902,7 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                 differing += 1;
                 let gpu_v = pixel.gpu_pre[index];
                 let cpu_v = pixel.cpu_pre[index];
+                let boundary = classify_boundary(gpu_v, cpu_v, pixel.gpu[index], pixel.cpu[index]);
                 let gpu_dist = dist_to_half(gpu_v);
                 let cpu_dist = dist_to_half(cpu_v);
                 let nearer = gpu_dist.min(cpu_dist);
@@ -1717,12 +1918,31 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                 } else {
                     floats_apart += 1;
                 }
-                if gpu_v.to_bits() == cpu_v.to_bits() {
+                if boundary.bits_equal {
                     bit_identical += 1;
                 }
+                if boundary.exact_half {
+                    exact_half += 1;
+                }
+                if boundary.tie_even_vs_half_up {
+                    tie_even_vs_half_up += 1;
+                }
+                if boundary.exact_half_not_half_up {
+                    exact_half_not_half_up += 1;
+                }
+                if boundary.not_exact_half {
+                    not_exact_half += 1;
+                }
+                if boundary.gpu_ties_odd {
+                    gpu_ties_odd += 1;
+                }
+                let (ties_even_byte, half_up_byte) = scaled_byte(gpu_v)
+                    .filter(|_| boundary.bits_equal)
+                    .map(|scaled| (round_ties_even_byte(scaled), round_half_up_byte(scaled)))
+                    .unwrap_or((0, 0));
                 max_delta = max_delta.max(delta);
                 lines.push(format!(
-                    "    {{\"case\": \"{}\", \"x\": {}, \"y\": {}, \"channel\": \"{name}\", \"gpuByte\": {}, \"cpuByte\": {}, \"gpu\": {}, \"cpu\": {}, \"gpuBits\": {}, \"cpuBits\": {}, \"gpuDistToHalf\": {}, \"cpuDistToHalf\": {}, \"absScaledDelta\": {}, \"ops\": \"{}\"}}",
+                    "    {{\"case\": \"{}\", \"x\": {}, \"y\": {}, \"channel\": \"{name}\", \"gpuByte\": {}, \"cpuByte\": {}, \"gpu\": {}, \"cpu\": {}, \"gpuBits\": {}, \"cpuBits\": {}, \"gpuDistToHalf\": {}, \"cpuDistToHalf\": {}, \"absScaledDelta\": {}, \"exactHalf\": {}, \"tiesEvenByte\": {ties_even_byte}, \"halfUpByte\": {half_up_byte}, \"boundaryClass\": \"{}\", \"ops\": \"{}\"}}",
                     json_escape(&row.name),
                     pixel.x,
                     pixel.y,
@@ -1735,6 +1955,8 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
                     json_f32(gpu_dist),
                     json_f32(cpu_dist),
                     json_f32(delta),
+                    if boundary.exact_half { "true" } else { "false" },
+                    boundary.class,
                     json_escape(&row.ops),
                 ));
             }
@@ -1746,7 +1968,7 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
         lines.join(",\n")
     };
     let json = format!(
-        "{{\n  \"backend\": \"{}\",\n  \"epsilonScaled\": {EPS:.0e},\n  \"tighterEpsilonScaled\": {TIGHTER:.0e},\n  \"differingChannels\": {differing},\n  \"withinEpsilonOfHalf\": {on_boundary},\n  \"withinTighterEpsilonOfHalf\": {on_boundary_tight},\n  \"prequantAbsDeltaWithinEpsilon\": {floats_within},\n  \"prequantAbsDeltaBeyondEpsilon\": {floats_apart},\n  \"bitIdenticalChannels\": {bit_identical},\n  \"maxAbsScaledDelta\": {},\n  \"channels\": [\n{body}\n  ]\n}}\n",
+        "{{\n  \"backend\": \"{}\",\n  \"epsilonScaled\": {EPS:.0e},\n  \"tighterEpsilonScaled\": {TIGHTER:.0e},\n  \"differingChannels\": {differing},\n  \"withinEpsilonOfHalf\": {on_boundary},\n  \"withinTighterEpsilonOfHalf\": {on_boundary_tight},\n  \"prequantAbsDeltaWithinEpsilon\": {floats_within},\n  \"prequantAbsDeltaBeyondEpsilon\": {floats_apart},\n  \"bitIdenticalChannels\": {bit_identical},\n  \"bitIdenticalExactHalf\": {exact_half},\n  \"bitIdenticalTieEvenVsHalfUp\": {tie_even_vs_half_up},\n  \"bitIdenticalExactHalfNotHalfUp\": {exact_half_not_half_up},\n  \"bitIdenticalNotExactHalf\": {not_exact_half},\n  \"bitIdenticalExactHalfGpuTiesToOdd\": {gpu_ties_odd},\n  \"maxAbsScaledDelta\": {},\n  \"channels\": [\n{body}\n  ]\n}}\n",
         json_escape(adapter),
         json_f32(max_delta)
     );
@@ -1763,13 +1985,34 @@ fn write_prequant(dir: &std::path::Path, adapter: &str, rows: &[MeasuredCase]) {
          - `|GPU - CPU| * 255` within {EPS:.0e}: {floats_within}\n\
          - `|GPU - CPU| * 255` beyond {EPS:.0e}: {floats_apart}\n\
          - Bit-identical pre-quant channels: {bit_identical}\n\
-         - Max `|GPU - CPU| * 255`: {}\n\n",
+         - Max `|GPU - CPU| * 255`: {}\n\
+         - Bit-identical and `v * 255` exactly `n + 0.5`: {exact_half}\n\
+         - Of those, GPU byte is round-half-up and CPU byte is round-ties-even: {tie_even_vs_half_up}\n\
+         - Of those, exact `n + 0.5` but not that pair: {exact_half_not_half_up}\n\
+         - Bit-identical and not exactly `n + 0.5`: {not_exact_half}\n\
+         - Of the exact halves, GPU byte equals round-ties-to-odd: {gpu_ties_odd}\n\n",
         json_escape(adapter),
         json_f32(max_delta)
     );
+    markdown.push_str(
+        "Exact means f32 equality of `clamp(v, 0, 1) * 255` with `floor(that) + 0.5`, not an epsilon. \
+         round-half-up is `floor(clamp(v, 0, 1) * 255 + 0.5)`. \
+         CPU bytes use `round_ties_even`. \
+         A bit-identical channel that is not exactly `n + 0.5` means the unorm store differed from the CPU quantizer away from a tie.\n\n",
+    );
+    if not_exact_half > 0 {
+        markdown.push_str(
+            "At least one bit-identical channel is not exactly on `n + 0.5`. The unorm store conversion itself differs from CPU away from a tie.\n\n",
+        );
+    }
+    if exact_half_not_half_up > 0 {
+        markdown.push_str(
+            "Some exact ties are not round-half-up versus round-ties-even: those two rules agree, and the GPU byte is the other integer.\n\n",
+        );
+    }
     if floats_apart == 0 && differing > 0 && bit_identical == differing {
         markdown.push_str(
-            "Every differing channel has bit-identical pre-quantization floats on an n+0.5 boundary. The ±1 is the `rgba8unorm` store versus CPU `round_ties_even`.\n\n",
+            "Every differing channel has bit-identical pre-quantization floats. The ±1 is the `rgba8unorm` store versus CPU `round_ties_even`.\n\n",
         );
     } else if floats_apart == 0 && differing > 0 {
         markdown.push_str(&format!(
@@ -2029,6 +2272,118 @@ impl Gpu {
                 adapter_name: info.name,
             }))
         })
+    }
+
+    /// Upload all 256 byte values to an `Rgba8Unorm` texture and read them back
+    /// with `textureLoad` + `unorm_byte`. Returns every channel that does not
+    /// round-trip. Enforced: the caller records it and fails on any mismatch.
+    fn atlas_read(&self) -> Result<AtlasRead, String> {
+        let device = &self.device;
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atlas read"),
+            source: wgpu::ShaderSource::Wgsl(atlas_read_shader().into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("atlas read"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas read"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let data: Vec<u8> = (0..256).flat_map(atlas_read_texel).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1024),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atlas read out"),
+            size: 4096,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atlas read readback"),
+            size: 4096,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas read"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(4, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&out, 0, &read, 0, 4096);
+        self.queue.submit(Some(encoder.finish()));
+        map_readback(device, &read)?;
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            return Err(format!("validation: {err}"));
+        }
+        let raw = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        read.unmap();
+        let got: &[u32] = bytemuck::cast_slice(&raw);
+        let mut mismatches = Vec::new();
+        for texel in 0..256 {
+            let want = atlas_read_texel(texel);
+            for ch in 0..4 {
+                let value = got[texel * 4 + ch];
+                if value != u32::from(want[ch]) {
+                    mismatches.push((texel, ch, want[ch], value));
+                }
+            }
+        }
+        Ok(AtlasRead { mismatches })
     }
 
     fn render(&self, case: &Case) -> Result<(Vec<u8>, Vec<f32>), String> {
@@ -2956,6 +3311,75 @@ fn integer_filter_recovers_a_texel_and_rounds_half_up() {
     }
 }
 
+/// Exact `n+0.5` is f32 equality, not an epsilon. `0.5` in byte space is a tie
+/// where round-ties-even and round-half-up disagree. `127.5` is a tie where
+/// they agree. `10` is an integer byte.
+#[test]
+fn unorm_boundary_split_is_exact_f32_equality() {
+    let half_up_tie = f32::from_bits(989_888_641);
+    let agreed = classify_boundary(half_up_tie, half_up_tie, 1, 0);
+    assert!(agreed.exact_half && agreed.tie_even_vs_half_up);
+    assert!(!agreed.exact_half_not_half_up && !agreed.not_exact_half);
+    assert!(agreed.gpu_ties_odd);
+    assert_eq!(agreed.class, "tie-even-vs-half-up");
+
+    let rules_agree = f32::from_bits(1_056_964_608);
+    let other = classify_boundary(rules_agree, rules_agree, 127, 128);
+    assert!(other.exact_half && other.exact_half_not_half_up);
+    assert!(!other.tie_even_vs_half_up && !other.not_exact_half);
+    assert!(other.gpu_ties_odd);
+    assert_eq!(other.class, "exact-half-not-half-up");
+
+    let integer = 10.0f32 / 255.0;
+    let off = classify_boundary(integer, integer, 11, 10);
+    assert!(off.not_exact_half && off.bits_equal);
+    assert!(!off.exact_half);
+    assert_eq!(off.class, "not-exact-half");
+
+    let drifted = classify_boundary(half_up_tie, rules_agree, 1, 0);
+    assert!(!drifted.bits_equal && !drifted.not_exact_half);
+    assert_eq!(drifted.class, "floats-differ");
+
+    let dir = std::env::temp_dir().join(format!(
+        "alto-boundary-{}-{}",
+        std::process::id(),
+        half_up_tie.to_bits()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pixel = MeasuredPixel {
+        x: 1,
+        y: 2,
+        sources: Vec::new(),
+        gpu: [1, 127, 11, 9],
+        cpu: [0, 128, 10, 8],
+        gpu_pre: [half_up_tie, rules_agree, integer, half_up_tie],
+        cpu_pre: [half_up_tie, rules_agree, integer, rules_agree],
+    };
+    write_prequant(
+        &dir,
+        "unit",
+        &[MeasuredCase {
+            name: "boundary".into(),
+            count: 1,
+            max_abs: [1, 1, 1, 1],
+            mismatches: vec![pixel],
+            length_note: String::new(),
+            ops: "unit".into(),
+        }],
+    );
+    let json = std::fs::read_to_string(dir.join("prequant.json")).unwrap();
+    assert!(json.contains("\"bitIdenticalExactHalf\": 2"));
+    assert!(json.contains("\"bitIdenticalTieEvenVsHalfUp\": 1"));
+    assert!(json.contains("\"bitIdenticalExactHalfNotHalfUp\": 1"));
+    assert!(json.contains("\"bitIdenticalNotExactHalf\": 1"));
+    assert!(json.contains("\"bitIdenticalExactHalfGpuTiesToOdd\": 2"));
+    assert!(json.contains("\"boundaryClass\": \"tie-even-vs-half-up\""));
+    assert!(json.contains("\"boundaryClass\": \"exact-half-not-half-up\""));
+    assert!(json.contains("\"boundaryClass\": \"not-exact-half\""));
+    assert!(json.contains("\"boundaryClass\": \"floats-differ\""));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A 0.1× layer moved 4000px inverts to a -40000px translation. That Q16 value
 /// does not fit in `i32`. The integer path keeps it, and the sampled ramp texel
 /// is the one at source (5, 5). A translation that is not an exact `f64` integer
@@ -3304,6 +3728,19 @@ fn lavapipe_adapter_names() {
 }
 
 #[test]
+fn atlas_read_uses_effects_unorm_byte() {
+    let effects = include_str!("../shaders/effects.wgsl");
+    assert!(effects.contains(UNORM_BYTE_WGSL));
+    let mut seen = [[false; 256]; 4];
+    for i in 0..256 {
+        for (ch, &b) in atlas_read_texel(i).iter().enumerate() {
+            seen[ch][b as usize] = true;
+        }
+    }
+    assert!(seen.iter().all(|c| c.iter().all(|&v| v)));
+}
+
+#[test]
 fn alpha_measure_cases_are_not_enforced() {
     let all = cases();
     let measured: Vec<_> = all.iter().filter(|case| case.measure).collect();
@@ -3484,6 +3921,21 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
+    // Enforced: every byte on every channel must round-trip. Stored first, then failed.
+    let atlas = gpu.atlas_read();
+    match &atlas {
+        Ok(r) => {
+            println!("{}", r.line());
+            if !r.mismatches.is_empty() {
+                failed.push(r.line());
+            }
+        }
+        Err(e) => {
+            println!("atlas-read (enforced): GPU error: {e}");
+            failed.push(format!("atlas-read: {e}"));
+        }
+    }
+    write_atlas_read(&gpu.adapter_name, &atlas);
     let src = color_adjust_gradient();
     let grid = color_adjust_grid();
     match gpu.render_color_adjust(&src, &grid) {

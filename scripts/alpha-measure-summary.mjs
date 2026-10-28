@@ -49,7 +49,21 @@ for (const row of rows) {
   markdown += "\n";
 }
 
+const atlas = report.atlasRead;
+if (atlas) {
+  markdown += `### Atlas read (\`Rgba8Unorm\` + \`textureLoad\` + \`unorm_byte\`, ${backendLabel})\n\n`;
+  markdown += "Enforced: a mismatch or error fails the parity run. All 256 byte values on all 4 channels.\n\n";
+  markdown += `Status: **${atlas.status}**, mismatched channels: ${atlas.mismatchedChannels}`;
+  if (atlas.error) markdown += `, error: ${atlas.error}`;
+  markdown += "\n\n";
+  for (const m of (atlas.mismatches || []).slice(0, 16)) {
+    markdown += `- texel ${m.texel} channel ${m.channel} byte ${m.byte} read ${m.read}\n`;
+  }
+  markdown += "\n";
+}
+
 await mkdir(outDir, { recursive: true });
+if (atlas) await writeFile(`${outDir}/atlas-read.json`, JSON.stringify({ backend, ...atlas }, null, 2) + "\n");
 await writeFile(`${outDir}/alpha-measure.md`, markdown);
 await writeFile(`${outDir}/alpha-measure.json`, JSON.stringify({
   label: "measured-not-enforced",
