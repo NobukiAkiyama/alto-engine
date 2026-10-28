@@ -349,9 +349,10 @@ export async function runParityTests(engine, log) {
     // The 2^23 boundary in the browser (Linus 04:40 item 5, DQ3-4), each read
     // warm (the tile cached before the change, then damaged), re-read, and cold.
     // A drawn tile equals the CPU on every byte; a refused tile gives the same
-    // GPU_UNSUPPORTED warm and cold. The canvas is at most 65536 px, so the
-    // plain-path tiles past 2^23 px are off the canvas (no pixel, skipped); those
-    // cases run natively (`renderer_cold_warm`, `renderer_cases`).
+    // GPU_UNSUPPORTED warm and cold. The plain-path tiles at 2^23 px use the
+    // empty v3 fixture 8388864 + 256 px wide, opened through `engine.open`
+    // (`openPackage`, no canvas limit; `createDocument` caps new documents at
+    // 65536 px), with one small image imported and moved there.
     {
       const vivid = { brightness: 0, contrast: 1.7, saturation: 1.6 };
       const open = async (name) => {
@@ -374,7 +375,7 @@ export async function runParityTests(engine, log) {
       };
       // Warm (damaged), re-read and cold reads of tile (x, y) after `change`,
       // with the tile read before it. `want` is the CPU tile, or the refusal.
-      const check = async (name, x, y, change, want) => {
+      const check = async (name, x, y, change, want, renderPath = "v3-m5-integer") => {
         await read(x, y);
         await change();
         if (want.message) {
@@ -391,7 +392,7 @@ export async function runParityTests(engine, log) {
         const cold = await readCold(x, y);
         assert(same(again, warm), `${name} (${x}, ${y}) re-read differs: ${diff(warm, again)}`);
         assert(same(cold, warm), `${name} (${x}, ${y}) cold differs from warm: ${diff(warm, cold)}`);
-        const row = { ...measureRow({ name, nodes: [], level: 0, tx: x, ty: y }, want, warm), renderPath: "v3-m5-integer", enforced: true, status: same(want, warm) ? "exact" : "mismatch" };
+        const row = { ...measureRow({ name, nodes: [], level: 0, tx: x, ty: y }, want, warm), renderPath, enforced: true, status: same(want, warm) ? "exact" : "mismatch" };
         compositeV3.push(row);
         assert(same(want, warm), formatMeasure(row));
         return formatMeasure(row);
@@ -460,6 +461,39 @@ export async function runParityTests(engine, log) {
           const doc = await open("render-v3-empty-300x100.alto");
           const change = await maskScene(-(8388608 - W) - 100)(doc, backdrop());
           return check("v3-mask-tile-at-2^23-refused", x, 0, change, { message: "GPU_UNSUPPORTED: v3 mask ROI has no integer tile range" });
+        });
+      }
+      // The plain path at 2^23 px (Linus 08:10, Codex P2-1): a 256x256 raster
+      // (no effect or mask, so the integer tile compositor) moved to tile 32767
+      // draws and equals the CPU; moved to tile 32768, whose pixel centers do not
+      // fit i32, it is refused there; left at tile 32767, tile 32768 gets nothing
+      // from it and is transparent, as the CPU.
+      const WIDE = 8388864 + 256;
+      for (const [name, shift, key, refused] of [
+        ["v3-plain-tile-32767-draws", 8388352, 32767, false],
+        ["v3-plain-tile-32768-refused", 8388608, 32768, true],
+        ["v3-plain-tile-32768-no-contribution", 8388352, 32768, false],
+      ]) {
+        await test(name, async () => {
+          const doc = await open("render-v3-empty-8389120x256.alto");
+          const meta = doc.getSnapshot().meta;
+          assert(meta.width === WIDE && meta.height === 256, `wide fixture is ${meta.width}x${meta.height}`);
+          const image = colorAdjustGradient();
+          const asset = await imported(engine, image);
+          const transform = [1, 0, 0, 1, shift, 0];
+          const change = async () => {
+            await doc.transact("raster", (tx) => {
+              const id = tx.addRasterFromAsset(asset);
+              tx.setTransform(id, transform);
+            });
+            assert(sceneGap(doc.getSnapshot()) === null, `${name} is not on the plain path`);
+          };
+          if (refused) return check(name, key, 0, change, { message: "GPU_UNSUPPORTED: v3 draw ROI has no integer tile range" });
+          const cpu = renderCase({ w: WIDE, h: 256, level: 0, tx: key, ty: 0,
+            nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform }] }, 3);
+          if (key === 32767) assert(cpu.some((v, i) => i % 4 === 3 && v !== 0), `${name}: the CPU tile is transparent`);
+          else assert(cpu.every((v) => v === 0), `${name}: the CPU tile is not transparent`);
+          return check(name, key, 0, change, cpu, null);
         });
       }
       // M5 rasters (a color-adjust effect) placed at tile 32767 (the last tile

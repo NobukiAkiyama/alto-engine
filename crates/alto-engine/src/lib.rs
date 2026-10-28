@@ -1543,6 +1543,64 @@ mod render_v3_fixture {
         assert!(text.contains("\"format_version\": 4"));
     }
 
+    /// The empty v3 fixtures are the engine's own save of an empty document:
+    /// render version 3 (format 4) at each size, through the debug-only opt-in.
+    /// `render-v3-empty-8389120x256.alto` is 8388864 + 256 px wide, past 2^23
+    /// px, for the browser's plain-path 2^23 checks (Linus 08:10); it opens
+    /// through `open_package` (`engine.open`), which has no canvas limit
+    /// (`createDocument`'s 65536 px applies to new documents only).
+    /// `ALTO_WRITE_FIXTURES=1` writes missing or changed fixtures.
+    #[test]
+    fn empty_v3_fixtures_are_the_engine_save() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let _guard = UnstableRenderV3Guard::enable();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        for (w, h) in [
+            (256, 256),
+            (300, 100),
+            (512, 256),
+            (512, 512),
+            (4096, 256),
+            (8_389_120, 256),
+        ] {
+            let mut engine = Engine::new();
+            let created = engine.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
+            engine.upgrade_render_version_unstable(created).unwrap();
+            // The fixtures name the root node with a fixed id, so the bytes do not
+            // depend on the clock; the package (snapshot hash, manifest) is then
+            // the engine's save of that snapshot.
+            let root = engine.document(created).unwrap().root.0.to_string();
+            let snapshot = String::from_utf8(engine.snapshot(created).unwrap())
+                .unwrap()
+                .replace(&root, "00000000-0000-7000-8000-000000000001");
+            let handle = engine.open_snapshot(snapshot.as_bytes()).unwrap();
+            let saved = engine.save_package(handle).unwrap();
+            let name = if (w, h) == (256, 256) {
+                "render-v3-empty.alto".to_string()
+            } else {
+                format!("render-v3-empty-{w}x{h}.alto")
+            };
+            let path = dir.join(&name);
+            if std::env::var_os("ALTO_WRITE_FIXTURES").is_some()
+                && std::fs::read(&path).ok().as_deref() != Some(&saved[..])
+            {
+                std::fs::write(&path, &saved).unwrap();
+            }
+            if let Some(dump) = std::env::var_os("ALTO_DUMP_FIXTURES") {
+                std::fs::write(std::path::Path::new(&dump).join(&name), &saved).unwrap();
+            }
+            let committed = std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(committed == saved, "{name} is not the engine's save");
+            let (opened, warnings) = engine.open_package(&committed).unwrap();
+            assert!(warnings.is_empty(), "{name}: {warnings:?}");
+            let meta = &engine.document(opened).unwrap().meta;
+            assert_eq!((meta.width, meta.height), (w, h), "{name}");
+            assert_eq!(meta.render_version, RENDER_VERSION_EXACT, "{name}");
+        }
+    }
+
     #[test]
     fn unstable_opt_in_can_upgrade_to_render_version_three_and_write_format_four() {
         if !cfg!(debug_assertions) {

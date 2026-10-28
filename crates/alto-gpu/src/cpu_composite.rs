@@ -2663,6 +2663,25 @@ fn renderer_cases() -> Vec<RendererCase> {
             )],
         )
     });
+    // The browser's plain tile 32767 (Linus 08:10): the color-adjust gradient
+    // (the browser imports `colorAdjustGradient`) moved there on the wide
+    // fixture's canvas; also compared with JS (`renderer_rust_and_js_references_agree`).
+    out.push(RendererCase {
+        canvas: [8_389_120, 256],
+        ..case(
+            "plain [32767, 0] wide fixture, moved gradient".into(),
+            [32767, 0],
+            vec![RendererLayer::Raster {
+                tiles: vec![([0, 0], TileSpec::Raster(0))],
+                transform: [1.0, 0.0, 0.0, 1.0, 8_388_352.0, 0.0],
+                adjust: None,
+                selection: None,
+                mask: None,
+                opacity: 1.0,
+                blend: RenderBlend::Normal,
+            }],
+        )
+    });
     // Plain refusals: the first tile at 2^23 px, and an inverse with no Q16
     // value (a 10^-6 scale inverts to 10^6, past an i32 coefficient).
     out.push(RendererCase {
@@ -3046,7 +3065,55 @@ fn cold_warm_cases() -> Vec<ColdWarmCase> {
     let edge = [3908 * 256, 256];
     let boundary = [32769 * 256, 256];
     let masked = renderer_mask_cases().swap_remove(1);
+    // The browser's 2^23 document (Linus 08:10): the empty v3 fixture 8388864 +
+    // 256 px wide, opened through `open_package` (the `engine.open` path), with
+    // one 256x256 raster moved by a translation, as the browser test imports it.
+    let wide = {
+        let bytes = include_bytes!("../../../tests/fixtures/render-v3-empty-8389120x256.alto");
+        let mut engine = alto_engine::Engine::new();
+        let (doc, warnings) = engine.open_package(bytes).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let scene = engine.render_scene(doc).unwrap();
+        assert_eq!(scene.render_version, alto_core::RENDER_VERSION_EXACT);
+        [scene.canvas.x1, scene.canvas.y1]
+    };
+    assert_eq!(wide, [8_389_120, 256]);
+    let moved = |x: f64| {
+        with(
+            wide,
+            vec![RendererLayer::Raster {
+                tiles: vec![([0, 0], TileSpec::Raster(8))],
+                transform: [1.0, 0.0, 0.0, 1.0, x, 0.0],
+                adjust: None,
+                selection: None,
+                mask: None,
+                opacity: 1.0,
+                blend: RenderBlend::Normal,
+            }],
+        )
+    };
     vec![
+        ColdWarmCase {
+            name: "wide fixture: plain tile 32767 draws",
+            before: blank(wide),
+            after: moved(8_388_352.0),
+            keys: vec![((0, 32_767, 0), None)],
+        },
+        ColdWarmCase {
+            name: "wide fixture: plain tile 32768 with a contribution is refused",
+            before: blank(wide),
+            after: moved(8_388_608.0),
+            keys: vec![(
+                (0, 32_768, 0),
+                Some("v3 draw ROI has no integer tile range"),
+            )],
+        },
+        ColdWarmCase {
+            name: "wide fixture: plain tile 32768 without a contribution is transparent",
+            before: blank(wide),
+            after: moved(8_388_352.0),
+            keys: vec![((0, 32_768, 0), None)],
+        },
         ColdWarmCase {
             name: "large-translation-out-of-range",
             before: blank([256, 256]),
