@@ -57,6 +57,16 @@ struct Config {
     origin_scale: [f32; 4],
     info: [u32; 4],
 }
+/// The version 3 tile compositor uniform (`integer_composite_shader`): the
+/// integer origin and level scale, the command count and cache slot, and the
+/// on-canvas pixel rectangle (`resolve_span`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct IntegerConfig {
+    pub origin_scale: [i32; 4],
+    pub info: [u32; 4],
+    pub span: [u32; 4],
+}
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ViewUniform {
@@ -166,6 +176,8 @@ enum PlanTask {
         min: [f64; 2],
         max: [f64; 2],
         start: u32,
+        /// Render version 3: the integer draw; its keys select the tiles.
+        v3: Option<PlainDraw>,
     },
 }
 struct TileJob {
@@ -663,6 +675,96 @@ pub(crate) fn resolve_span(origin: [i64; 2], scale: i64, end: [i64; 2]) -> [u32;
     [x0, y0, x1, y1]
 }
 
+/// How a version 3 plain draw (`integer_composite_shader`) reads its tiles in
+/// the level-0 display tile `key`: the Q16 inverse, the filter
+/// (`SAMPLE_NEAREST` for an axis-aligned unit inverse, `axis_unit_q16`, else
+/// the integer 4-tap `SAMPLE_INTEGER`), and the inclusive tile keys
+/// `[min tx, min ty, max tx, max ty]` its on-canvas pixels read (`None`: no
+/// pixel of the tile is on the canvas). There is no f32 fetch.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlainDraw {
+    pub inverse: crate::sample::IntegerInverse,
+    pub sample: u32,
+    pub keys: Option<[i32; 4]>,
+}
+
+impl PlainDraw {
+    /// Whether the draw reads source tile `k`.
+    fn reads(&self, k: TileKey) -> bool {
+        self.keys
+            .is_some_and(|[x0, y0, x1, y1]| (x0..=x1).contains(&k.tx) && (y0..=y1).contains(&k.ty))
+    }
+    /// The draw command. `submit_composite` turns the opacity and the mode into
+    /// their integers.
+    fn command(&self, opacity: f32, blend: RenderBlend, start: u32, count: u32) -> Command {
+        Command {
+            inv0: self.inverse.m.map(|v| f32::from_bits(v.cast_unsigned())),
+            inv1: [0.0, 0.0, opacity, mode(blend)],
+            info: [0, start, count, self.sample],
+            trans: crate::sample::pack_wide(self.inverse.tx, self.inverse.ty),
+        }
+    }
+}
+
+/// The [`PlainDraw`] of a draw with f64 inverse `inv` in the level-0 display
+/// tile `key` of a canvas ending at `end`. The pixels are those of
+/// `resolve_span`, and the tile range is their four corners through the
+/// shader's own `pixel_q8` and `source_q8`: the Q24 sum is exact and affine in
+/// the pixel index, and the rounding and shifts are monotone, so the corners
+/// bound every pixel. The 4-tap also reads the next texel on each axis.
+/// Refused (`GpuUnsupported`, DQ3-4) when the inverse has no Q16 value or a
+/// corner has no i32 Q8 position; never sampled in f32.
+pub(crate) fn plain_draw_v3(inv: [f64; 6], key: CacheKey, end: [i32; 2]) -> Result<PlainDraw> {
+    let unsupported = |what: &str| RenderError::GpuUnsupported(format!("v3 draw {what}"));
+    if key.0 != 0 {
+        return Err(RenderError::Internal(
+            "v3 plain tile above level 0 (the pyramid builds those)".into(),
+        ));
+    }
+    let origin = |k: i32| i32::try_from(i64::from(k) * 256).ok();
+    let (Some(ox), Some(oy)) = (origin(key.1), origin(key.2)) else {
+        return Err(unsupported("tile has no integer origin"));
+    };
+    let inverse = crate::sample::integer_inverse(inv)
+        .ok_or_else(|| unsupported("transform has no Q16 inverse"))?;
+    let nearest = crate::sample::axis_unit_q16(inverse.m);
+    let span = resolve_span(
+        [i64::from(ox), i64::from(oy)],
+        1,
+        [i64::from(end[0]), i64::from(end[1])],
+    );
+    let keys = if span == [0; 4] {
+        None
+    } else {
+        let reach = i32::from(!nearest);
+        let [x0, y0, x1, y1] = span.map(|v| v as i32);
+        let mut range = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for (x, y) in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)] {
+            let q = crate::sample::pixel_q8(ox, x, 1)
+                .zip(crate::sample::pixel_q8(oy, y, 1))
+                .and_then(|(px, py)| crate::sample::source_q8(&inverse, px, py))
+                .ok_or_else(|| unsupported("ROI has no integer tile range"))?;
+            let (tx, ty) = (q[0] >> 8, q[1] >> 8);
+            range = [
+                range[0].min(tx >> 8),
+                range[1].min(ty >> 8),
+                range[2].max((tx + reach) >> 8),
+                range[3].max((ty + reach) >> 8),
+            ];
+        }
+        Some(range)
+    };
+    Ok(PlainDraw {
+        inverse,
+        sample: if nearest {
+            crate::sample::SAMPLE_NEAREST
+        } else {
+            crate::sample::SAMPLE_INTEGER
+        },
+        keys,
+    })
+}
+
 /// The integer uniform of a v3 M5 stage, `effects-q14.wgsl` `Config.grid`:
 /// row 0 the Q14 settings, rows 1 and 2 the `input_map` of inputs `a` and `b`,
 /// rows 3 to 5 the atlas lookup: the mask of modes 21 to 23 or the raster of
@@ -744,6 +846,10 @@ pub(crate) fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
 }
 pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
     alto_core::Affine2(m).apply(p)
+}
+/// The canvas end `[x1, y1]` of the version 3 resolve tests (they start at 0).
+fn canvas_end(scene: &RenderScene) -> [i32; 2] {
+    [scene.canvas.x1, scene.canvas.y1]
 }
 /// Bounding box of `[x0, y0, x1, y1]` mapped through `m`, as (min, max).
 fn bounds_through(m: [f64; 6], r: [f64; 4]) -> ([f64; 2], [f64; 2]) {
@@ -848,11 +954,22 @@ impl TileJob {
                                 let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                     continue;
                                 };
-                                let (min, max) = bounds_through(inv, self.region);
-                                let x0 = (min[0] / 256.0).floor() as i32;
-                                let y0 = (min[1] / 256.0).floor() as i32;
-                                let x1 = (max[0] / 256.0).ceil() as i32;
-                                let y1 = (max[1] / 256.0).ceil() as i32;
+                                // Version 3 hides lower layers only behind the tiles the
+                                // integer sampler actually reads.
+                                let (x0, y0, x1, y1) = if scene.render_version == 3 {
+                                    match plain_draw_v3(inv, self.key, canvas_end(scene))?.keys {
+                                        Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
+                                        None => continue,
+                                    }
+                                } else {
+                                    let (min, max) = bounds_through(inv, self.region);
+                                    (
+                                        (min[0] / 256.0).floor() as i32,
+                                        (min[1] / 256.0).floor() as i32,
+                                        (max[0] / 256.0).ceil() as i32,
+                                        (max[1] / 256.0).ceil() as i32,
+                                    )
+                                };
                                 let mut opaque = x1 > x0
                                     && y1 > y0
                                     && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
@@ -884,8 +1001,18 @@ impl TileJob {
                             return Ok(());
                         };
                         let (min, max) = bounds_through(inv, self.region);
-                        let x0 = (min[0] / 256.0).floor() as i32;
-                        let x1 = (max[0] / 256.0).ceil() as i32;
+                        let v3 = if scene.render_version == 3 {
+                            Some(plain_draw_v3(inv, self.key, canvas_end(scene))?)
+                        } else {
+                            None
+                        };
+                        let (x0, x1) = match v3 {
+                            Some(d) => d.keys.map_or((0, 0), |k| (k[0], k[2] + 1)),
+                            None => (
+                                (min[0] / 256.0).floor() as i32,
+                                (max[0] / 256.0).ceil() as i32,
+                            ),
+                        };
                         let next = tiles.partition_point(|t| t.key.tx < x0);
                         let end = tiles.partition_point(|t| t.key.tx < x1);
                         self.stack.push(PlanTask::Tiles {
@@ -896,6 +1023,7 @@ impl TileJob {
                             min,
                             max,
                             start: self.sources.len() as u32,
+                            v3,
                         });
                     }
                     _ => {}
@@ -909,12 +1037,19 @@ impl TileJob {
                 min,
                 max,
                 start,
+                v3,
             } => {
                 let n = &scene.nodes[idx];
                 let RContent::Tiles(tiles) = &n.content else {
                     return Err(RenderError::Internal("tile plan changed".into()));
                 };
                 if next == end {
+                    if let Some(d) = v3 {
+                        let count = self.sources.len() as u32 - start;
+                        self.commands
+                            .push(d.command(n.opacity, n.blend, start, count));
+                        return Ok(());
+                    }
                     let packed = crate::sample::pack_inverse(inv, scene.render_version);
                     self.commands.push(Command {
                         inv0: packed.inv0,
@@ -935,11 +1070,16 @@ impl TileJob {
                 } else {
                     let t = &tiles[next];
                     let k = t.key;
-                    if (k.tx as f64 * 256.0) < max[0]
-                        && ((k.tx + 1) as f64 * 256.0) > min[0]
-                        && (k.ty as f64 * 256.0) < max[1]
-                        && ((k.ty + 1) as f64 * 256.0) > min[1]
-                    {
+                    let keep = match v3 {
+                        Some(d) => d.reads(k),
+                        None => {
+                            (k.tx as f64 * 256.0) < max[0]
+                                && ((k.tx + 1) as f64 * 256.0) > min[0]
+                                && (k.ty as f64 * 256.0) < max[1]
+                                && ((k.ty + 1) as f64 * 256.0) > min[1]
+                        }
+                    };
+                    if keep {
                         self.sources.push(PlannedSource {
                             xy: [k.tx, k.ty],
                             hash: t.hash,
@@ -953,6 +1093,7 @@ impl TileJob {
                         min,
                         max,
                         start,
+                        v3,
                     });
                 }
             }
@@ -1679,6 +1820,7 @@ impl Renderer {
         ];
         struct Build<'a> {
             scene: &'a RenderScene,
+            key: CacheKey,
             region: [f64; 4],
             overrides: &'a BTreeMap<(NodeId, TileKey), ContentHash>,
         }
@@ -1731,31 +1873,22 @@ impl Renderer {
                             let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                 continue;
                             };
-                            let corners = [
-                                [b.region[0], b.region[1]],
-                                [b.region[2], b.region[1]],
-                                [b.region[0], b.region[3]],
-                                [b.region[2], b.region[3]],
-                            ]
-                            .map(|p| point(inv, p));
-                            let x0 = (corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min)
-                                / 256.0)
-                                .floor() as i32;
-                            let y0 = (corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)
-                                / 256.0)
-                                .floor() as i32;
-                            let x1 = (corners
-                                .iter()
-                                .map(|p| p[0])
-                                .fold(f64::NEG_INFINITY, f64::max)
-                                / 256.0)
-                                .ceil() as i32;
-                            let y1 = (corners
-                                .iter()
-                                .map(|p| p[1])
-                                .fold(f64::NEG_INFINITY, f64::max)
-                                / 256.0)
-                                .ceil() as i32;
+                            // Version 3 hides lower layers only behind the tiles the
+                            // integer sampler actually reads.
+                            let (x0, y0, x1, y1) = if b.scene.render_version == 3 {
+                                match plain_draw_v3(inv, b.key, canvas_end(b.scene))?.keys {
+                                    Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
+                                    None => continue,
+                                }
+                            } else {
+                                let (min, max) = bounds_through(inv, b.region);
+                                (
+                                    (min[0] / 256.0).floor() as i32,
+                                    (min[1] / 256.0).floor() as i32,
+                                    (max[0] / 256.0).ceil() as i32,
+                                    (max[1] / 256.0).ceil() as i32,
+                                )
+                            };
                             let mut opaque =
                                 x1 > x0 && y1 > y0 && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
                             for x in x0..x1 {
@@ -1826,13 +1959,23 @@ impl Renderer {
                             map.insert(*k, *hash);
                         }
                     }
+                    let v3 = if b.scene.render_version == 3 {
+                        Some(plain_draw_v3(inv, b.key, canvas_end(b.scene))?)
+                    } else {
+                        None
+                    };
                     let start = entries.len() as u32;
                     for (k, hash) in map {
-                        if k.tx as f64 * 256.0 >= maxx
-                            || (k.tx + 1) as f64 * 256.0 <= minx
-                            || k.ty as f64 * 256.0 >= maxy
-                            || (k.ty + 1) as f64 * 256.0 <= miny
-                        {
+                        let skip = match v3 {
+                            Some(d) => !d.reads(k),
+                            None => {
+                                k.tx as f64 * 256.0 >= maxx
+                                    || (k.tx + 1) as f64 * 256.0 <= minx
+                                    || k.ty as f64 * 256.0 >= maxy
+                                    || (k.ty + 1) as f64 * 256.0 <= miny
+                            }
+                        };
+                        if skip {
                             continue;
                         }
                         let slot = r.upload(hash, store, pinned, encoder, previews)?;
@@ -1841,6 +1984,11 @@ impl Renderer {
                             slot,
                             pad: 0,
                         });
+                    }
+                    if let Some(d) = v3 {
+                        let count = entries.len() as u32 - start;
+                        commands.push(d.command(n.opacity, n.blend, start, count));
+                        return Ok(());
                     }
                     let packed = crate::sample::pack_inverse(inv, b.scene.render_version);
                     commands.push(Command {
@@ -1863,6 +2011,7 @@ impl Renderer {
             self,
             &Build {
                 scene,
+                key,
                 region,
                 overrides: &overrides,
             },
@@ -2056,14 +2205,13 @@ impl Renderer {
         let integer = scene.render_version == 3;
         if integer {
             for c in &mut commands {
+                // Every v3 draw is integer (`plain_draw_v3`); there is no f32 fetch.
                 if c.info[0] == 0
-                    && c.info[3] == 0
-                    && !crate::sample::axis_unit([
-                        c.inv0[0], c.inv0[1], c.inv0[2], c.inv0[3], c.inv1[0], c.inv1[1],
-                    ])
+                    && ![crate::sample::SAMPLE_INTEGER, crate::sample::SAMPLE_NEAREST]
+                        .contains(&c.info[3])
                 {
-                    return Err(RenderError::GpuUnsupported(
-                        "v3 filtered f32 fallback is not specified".into(),
+                    return Err(RenderError::Internal(
+                        "v3 draw without an integer sampler".into(),
                     ));
                 }
                 c.inv1[2] = f32::from_bits(crate::composite_opacity_q14(c.inv1[2]) as u32);
@@ -2113,26 +2261,51 @@ impl Renderer {
         )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
         let scale = 2f32.powi(key.0);
-        let ub = buffer(
-            &self.device,
-            &self.queue,
-            "tile config",
-            &[Config {
-                origin_scale: [
-                    key.1 as f32 * 256.0 * scale,
-                    key.2 as f32 * 256.0 * scale,
-                    scale,
-                    scene.canvas.x1 as f32,
-                ],
-                info: [
-                    commands.len() as u32,
-                    slot as u32,
-                    scene.canvas.y1 as u32,
-                    0,
-                ],
-            }],
-            wgpu::BufferUsages::UNIFORM,
-        )?;
+        let ub = if integer {
+            // Level 0 only (`plain_draw_v3`): the origin is the key times 256.
+            let origin = [key.1, key.2].map(|k| i64::from(k) * 256);
+            let [Ok(ox), Ok(oy)] = origin.map(i32::try_from) else {
+                return Err(RenderError::GpuUnsupported(
+                    "v3 tile has no integer origin".into(),
+                ));
+            };
+            buffer(
+                &self.device,
+                &self.queue,
+                "integer tile config",
+                &[IntegerConfig {
+                    origin_scale: [ox, oy, 1, 0],
+                    info: [commands.len() as u32, slot as u32, 0, 0],
+                    span: resolve_span(
+                        origin,
+                        1,
+                        [i64::from(scene.canvas.x1), i64::from(scene.canvas.y1)],
+                    ),
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?
+        } else {
+            buffer(
+                &self.device,
+                &self.queue,
+                "tile config",
+                &[Config {
+                    origin_scale: [
+                        key.1 as f32 * 256.0 * scale,
+                        key.2 as f32 * 256.0 * scale,
+                        scale,
+                        scene.canvas.x1 as f32,
+                    ],
+                    info: [
+                        commands.len() as u32,
+                        slot as u32,
+                        scene.canvas.y1 as u32,
+                        0,
+                    ],
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?
+        };
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),

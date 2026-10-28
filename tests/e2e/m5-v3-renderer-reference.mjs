@@ -2,11 +2,11 @@
 // `cpu_composite::renderer_rust_and_js_references_agree`. stdin is JSON from
 // the Rust test: `cases` (`renderer_cases` that draw, tiles as seeds, masks
 // with their document transform after linking) and `values` (f32 bit patterns).
-// Output: for each case its RGBA8 tile (`renderM5V3` at the tile's ROI, pixels
-// whose center is off the canvas transparent, level 1 as the integer pyramid of
-// its four level-0 tiles), then for each value `opacityQ14` and
-// `colorAdjustQ14` as little-endian i32.
-import { colorAdjustGradient, colorAdjustQ14, downsampleQ14, opacityQ14, renderM5V3 } from "./cpu-composite.js";
+// Output: for each case its RGBA8 tile (`renderM5V3` at the tile's ROI, or
+// `renderPlainV3` for a plain case; pixels whose center is off the canvas
+// transparent; level 1 as the integer pyramid of its four level-0 tiles), then
+// for each value `opacityQ14` and `colorAdjustQ14` as little-endian i32.
+import { colorAdjustGradient, colorAdjustQ14, downsampleQ14, opacityQ14, renderM5V3, renderPlainV3 } from "./cpu-composite.js";
 
 const gradient = colorAdjustGradient().pixels;
 const wrap = (v) => ((v % 256) + 256) % 256;
@@ -45,7 +45,20 @@ function layers(spec) {
   });
 }
 
+// A case of rasters with no effect or mask is drawn by the plain integer tile
+// compositor, not M5 (Rust `RendererCase::plain`).
+const plain = (spec) => spec.every((l) => !l.adjustment && !l.adjust && !l.selection && !l.mask);
+function plainLayers(spec) {
+  return spec.map((l) => ({
+    tiles: l.tiles.map(([key, t]) => ({ tx: key[0], ty: key[1], pixels: tile(t) })),
+    transform: l.transform,
+    opacity: l.opacity,
+    mode: l.blend,
+  }));
+}
+
 function levelZero(stack, key, canvas) {
+  if (stack.plain) return renderPlainV3(stack.plain, canvas[0], canvas[1], [key[0] * 256, key[1] * 256]);
   const out = renderM5V3(stack, 256, 256, [key[0] * 256, key[1] * 256], 1);
   const on = (o, i, end) => 2 * (o + i) + 1 >= 0 && 2 * (o + i) + 1 < 2 * end;
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
@@ -61,7 +74,7 @@ const input = JSON.parse(await new Promise((resolve) => {
 }));
 const chunks = [];
 for (const c of input.cases) {
-  const stack = layers(c.layers);
+  const stack = plain(c.layers) ? { plain: plainLayers(c.layers) } : layers(c.layers);
   if (c.level === 0) chunks.push(Buffer.from(levelZero(stack, c.key, c.canvas)));
   else {
     const children = [0, 1, 2, 3].map((i) => levelZero(stack, [c.key[0] * 2 + (i % 2), c.key[1] * 2 + Math.floor(i / 2)], c.canvas));

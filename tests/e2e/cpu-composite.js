@@ -542,7 +542,7 @@ function walk(node, parent, ops, version = RENDER_VERSION) {
   }
 }
 function composite(ops, width, height, origin, scale, originPx, scaleI, version) {
-  if (version === 3) return compositeInteger(ops, width, height, origin, scale, originPx, scaleI);
+  if (version === 3) return compositeInteger(ops, width, height, originPx, scaleI);
   const out = new Uint8Array(256 * 256 * 4);
   const w = f(width);
   const h = f(height);
@@ -1119,29 +1119,47 @@ export function compositeQ14Blend(dst, src, pre, sa, mode) {
   return [...out, oa];
 }
 const cqOpacity = (v) => BigInt(opacityQ14(v));
-function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
+/**
+ * Render version 3 integer 4-tap or nearest: Rust `sample::axis_unit_q16` on the
+ * Q16 coefficients (`m00, m10, m01, m11`), within 6 of 0 off the axes and of
+ * ±65536 on them.
+ */
+export function axisUnitQ16(m) {
+  const near = (v, to) => Math.abs(Math.abs(v) - to) <= 6;
+  return near(m[1], 0) && near(m[2], 0) && near(m[0], 65536) && near(m[3], 65536);
+}
+/** v3 nearest (`SAMPLE_NEAREST`): the texel under the Q8 position. */
+function fetchNearest(tiles, q, originPx, scale, x, y) {
+  const px = pixelQ8(originPx[0], x, scale);
+  const py = pixelQ8(originPx[1], y, scale);
+  const pos = px === null || py === null ? null : sourceQ8(q, px, py);
+  if (!pos) return [0, 0, 0, 0];
+  return sampleU8(tiles, floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+}
+/**
+ * Render version 3 integer tile compositor (Rust `composite_integer`). A pixel
+ * is on the canvas when its doubled center `2 origin + (2 i + 1) scale` is in
+ * `[0, 2 end)`; every draw is the Q16 lookup (nearest or the integer 4-tap).
+ * There is no f32 fetch and no f32 canvas test.
+ */
+function compositeInteger(ops, width, height, originPx, scaleI) {
   for (const op of ops) if (op.mode >= 17) throw new Error(`unspecified blend mode ${op.mode}`);
   const out = new Uint8Array(256 * 256 * 4);
   // Quantize once on the host, including the inverse, before evaluating pixels.
   const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.inv ? quantizeInverse(op.inv) : null }));
+  const on = (o, i, end) => { const c = 2 * o + (2 * i + 1) * scaleI; return c >= 0 && c < 2 * end; };
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
-    const p = [add(origin[0], mul(add(f(x), f(0.5)), scale)), add(origin[1], mul(add(f(y), f(0.5)), scale))];
     const stack = []; let accum = [0n, 0n, 0n, 0n];
-    if (p[0] >= 0 && p[1] >= 0 && p[0] < width && p[1] < height) for (const op of prepared) {
+    if (on(originPx[0], x, width) && on(originPx[1], y, height)) for (const op of prepared) {
       if (op.t === "push") { stack.push(accum); accum = [0n, 0n, 0n, 0n]; }
       else if (op.t === "pop") {
         const s = cqStraight(accum), sa = cqMul(accum[3], op.opacityQ);
         accum = compositeQ14Blend(stack.pop(), s, s.map((v) => cqMul(v, sa)), sa, op.mode);
       } else {
-        const inv = op.inv.map(f);
-        let bytes;
-        if (axisUnit(inv)) {
-          const q = [add(add(mul(inv[0], p[0]), mul(inv[2], p[1])), inv[4]), add(add(mul(inv[1], p[0]), mul(inv[3], p[1])), inv[5])];
-          bytes = sampleU8(op.tiles, Math.floor(q[0]), Math.floor(q[1]));
-        } else {
-          if (!op.q) throw new Error("v3 filtered f32 fallback is unspecified");
-          bytes = fetchInteger(op.tiles, op.q, originPx, scaleI, x, y, true);
-        }
+        if (!op.q) throw new Error("v3 refuses a draw without a Q16 inverse");
+        const bytes = axisUnitQ16(op.q.m)
+          ? fetchNearest(op.tiles, op.q, originPx, scaleI, x, y)
+          : fetchInteger(op.tiles, op.q, originPx, scaleI, x, y, true);
         const s = bytes.slice(0, 3).map((v) => BigInt(byteQ14(v)));
         const pre = bytes.slice(0, 3).map((v) => cqMul(BigInt(premulByteQ14(v, bytes[3])), op.opacityQ));
         const sa = cqMul(BigInt(byteQ14(bytes[3])), op.opacityQ);
@@ -1152,6 +1170,23 @@ function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
     for (let c = 0; c < 4; c++) out[i + c] = Math.min(255, Math.max(0, Number(cqDiv(accum[c] * 255n))));
   }
   return out;
+}
+
+/**
+ * Render version 3 plain tile (the integer tile compositor) for the real-renderer
+ * cases: `layers` are `{ tiles: [{ tx, ty, pixels }], transform, opacity, mode }`,
+ * bottom first, under a root group that does not isolate; the tile has origin
+ * `originPx` at level 0 and the canvas is `[0, width) x [0, height)`.
+ */
+export function renderPlainV3(layers, width, height, originPx) {
+  const ops = [];
+  for (const l of layers) {
+    const inv = inverseF64(l.transform);
+    if (!inv) continue;
+    const tiles = [...l.tiles].sort((a, b) => a.tx - b.tx || a.ty - b.ty);
+    ops.push({ t: "draw", inv, opacity: f(l.opacity), mode: l.mode, tiles });
+  }
+  return compositeInteger(ops, width, height, originPx, 1);
 }
 
 /** Every v3 scene the host draws is integer-exact and enforced; refused scenes are not. */

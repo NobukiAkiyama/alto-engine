@@ -1858,6 +1858,89 @@ mod pool_tests {
         );
         assert!(resolve.contains("all(id.xy>=c.span.xy)&&all(id.xy<c.span.zw)"));
     }
+    /// Every function `main` reaches in `src`, `main` included.
+    fn reached_from_main(functions: &HashMap<String, String>) -> Vec<String> {
+        let mut reached = vec!["main".to_string()];
+        let mut i = 0;
+        while i < reached.len() {
+            let body = &functions[&reached[i]];
+            for name in functions.keys() {
+                if !reached.contains(name)
+                    && body.match_indices(&format!("{name}(")).any(|(at, _)| {
+                        at == 0 || {
+                            let c = body.as_bytes()[at - 1];
+                            !(c.is_ascii_alphanumeric() || c == b'_')
+                        }
+                    })
+                {
+                    reached.push(name.clone());
+                }
+            }
+            i += 1;
+        }
+        reached
+    }
+    /// The plain-path float purge: the v3 integer tile compositor
+    /// (`integer_composite_shader`) has no f32 fetch, f32 canvas test or float
+    /// uniform. Everything `main` reaches is integer except the atlas texel in
+    /// `sample_byte`, which goes straight through `unorm_byte`.
+    #[test]
+    fn v3_plain_compositor_reads_no_float() {
+        let shader = strip_comments(&crate::integer_composite_shader());
+        let functions = wgsl_functions(&shader);
+        for gone in ["fetch_legacy", "sample_texel", "fetch"] {
+            assert!(!functions.contains_key(gone), "{gone} is still defined");
+        }
+        let reached = reached_from_main(&functions);
+        for needed in [
+            "fetch_bytes",
+            "fetch_integer",
+            "sample_byte",
+            "channel_byte",
+            "pixel_q8",
+            "coord_q8",
+            "unorm_byte",
+            "blend_q",
+        ] {
+            assert!(
+                reached.iter().any(|r| r == needed),
+                "main does not reach {needed}"
+            );
+        }
+        // `origin_scale` and `inv0` are integer fields here (the struct
+        // declarations are checked below).
+        let tokens = |body: &str| -> Vec<String> {
+            float_tokens(body)
+                .into_iter()
+                .filter(|t| t != "origin_scale" && t != "inv0")
+                .collect()
+        };
+        for name in reached
+            .iter()
+            .filter(|n| !["unorm_byte", "sample_byte"].contains(&n.as_str()))
+        {
+            let found = tokens(&functions[name]);
+            assert!(
+                found.is_empty(),
+                "{name} (reached from main) uses {found:?}"
+            );
+        }
+        let sample = &functions["sample_byte"];
+        assert_eq!(shader.matches("textureLoad(atlas").count(), 1);
+        assert!(sample.contains("textureLoad(atlas"));
+        for ch in ["s.r", "s.g", "s.b", "s.a"] {
+            assert!(sample.contains(&format!("unorm_byte({ch})")), "{ch}");
+        }
+        assert!(tokens(&sample.replace("textureLoad(atlas", "")).is_empty());
+        for decl in ["struct Command", "struct Config"] {
+            let at = &shader[shader.find(decl).unwrap()..];
+            let body = &at[..at.find('}').unwrap()];
+            assert!(tokens(body).is_empty(), "{body}");
+        }
+        assert!(shader.contains("all(id.xy>=config.span.xy) && all(id.xy<config.span.zw)"));
+        assert!(shader.contains("let fx = select(qx.v - (x << 8), 0, c.info.w == 2u);"));
+        assert!(shader.contains("let fy = select(qy.v - (y << 8), 0, c.info.w == 2u);"));
+    }
     /// The v3 resolve span is exactly the pixels whose center is on the canvas,
     /// at origins where an f32 center is not exact (past 2^24 px) and on both
     /// sides of 0.

@@ -51,6 +51,19 @@ pub const SAMPLE_F32: u32 = 0;
 /// `Command.info[3]`: the inverse is Q16 bitcast into the f32 slots, and the
 /// shader runs the integer 4-tap.
 pub const SAMPLE_INTEGER: u32 = 1;
+/// `Command.info[3]`, render version 3 only: the inverse is Q16 as for
+/// `SAMPLE_INTEGER`, and the texel is the nearest one, the floor of the Q8
+/// position (`axis_unit_q16` draws). Version 3 has no f32 fetch.
+pub const SAMPLE_NEAREST: u32 = 2;
+
+/// Render version 3: the integer counterpart of `axis_unit` on the Q16
+/// coefficients `m` (`m00, m10, m01, m11`). The f32 test `|v| < 0.0001` is
+/// `|v| * 65536 < 6.5536`, so a rounded Q16 coefficient within 6 of 0 (off the
+/// axes) or of ±65536 (on them) is axis-aligned and unit: the draw is nearest.
+pub fn axis_unit_q16(m: [i32; 4]) -> bool {
+    let near = |v: i32, to: i32| (i64::from(v).abs() - i64::from(to)).abs() <= 6;
+    near(m[1], 0) && near(m[2], 0) && near(m[0], 65536) && near(m[3], 65536)
+}
 
 /// Same thresholds as `fetch_legacy` in `composite.wgsl`.
 pub fn axis_unit(inv: [f32; 6]) -> bool {
@@ -99,6 +112,7 @@ pub fn quantize_translation(v: f64) -> Option<i64> {
 }
 
 /// Coefficients in `m` (`m00, m10, m01, m11`) and translation, all Q16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntegerInverse {
     pub m: [i32; 4],
     pub tx: i64,

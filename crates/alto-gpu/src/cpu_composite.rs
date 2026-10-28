@@ -2534,6 +2534,165 @@ fn renderer_cases() -> Vec<RendererCase> {
             )
         });
     }
+    // The plain integer tile compositor (no effect or mask, so not M5): an
+    // opaque base shifted off the tile grid, a 1.00004x scale (Q16 within 6 of
+    // unit: the nearest draw that was an f32 fetch) multiplied at opacity 0.7,
+    // and a rotated 4-tap layer screened at 0.5, at the same sources as above.
+    for (key, src, off) in [
+        ([0, 0], [0, 0], [0.25, 0.0]),
+        ([1, 1], [-3, -2], [37.5, -21.25]),
+        ([3906, 5], [-3907, 5], [-11.75, 5.5]),
+        ([32767, 32767], [32767, 32767], [0.0, 0.0]),
+    ] {
+        let shift = [
+            f64::from(key[0] - src[0]) * 256.0 + off[0],
+            f64::from(key[1] - src[1]) * 256.0 + off[1],
+        ];
+        let place =
+            |t: [f64; 6]| crate::renderer::multiply([1.0, 0.0, 0.0, 1.0, shift[0], shift[1]], t);
+        let (pivot, k_raster) = if key[0] > 30_000 {
+            ([src[0] - 2, src[1] - 2], 2.0)
+        } else {
+            (src, 1.25)
+        };
+        let around = |k: [i32; 2]| (k[0] - 1..=k[0] + 1, k[1] - 1..=k[1] + 1);
+        let (xs, ys) = around(src);
+        let opaques: Vec<_> = ys
+            .clone()
+            .flat_map(|ty| {
+                xs.clone()
+                    .map(move |tx| ([tx, ty], TileSpec::Opaque(tx - ty)))
+            })
+            .collect();
+        // A 1.00004x scale about the pivot tile's center.
+        let (cx, cy) = (
+            f64::from(pivot[0]) * 256.0 + 128.0,
+            f64::from(pivot[1]) * 256.0 + 128.0,
+        );
+        let near_unit = [
+            1.00004,
+            0.0,
+            0.0,
+            1.00004,
+            cx - 1.00004 * cx,
+            cy - 1.00004 * cy,
+        ];
+        out.push(case(
+            format!("plain {key:?} from {src:?} nearest, near-unit multiply, rotated screen"),
+            key,
+            vec![
+                raster(opaques, place(ident()), None, 1.0, RenderBlend::Normal),
+                raster(
+                    rasters(xs.clone(), ys.clone()),
+                    place(near_unit),
+                    None,
+                    0.7,
+                    RenderBlend::Multiply,
+                ),
+                raster(
+                    rasters(xs, ys),
+                    place(rotation(pivot, k_raster)),
+                    None,
+                    0.5,
+                    RenderBlend::Screen,
+                ),
+            ],
+        ));
+    }
+    // The opaque-occluder shortcut: an opaque layer over all the tiles its
+    // integer draw reads hides the layer below; one with a missing tile in
+    // that range (here, half a pixel past the only tile) does not.
+    for (name, tiles) in [
+        (
+            "covering",
+            vec![([4, 4], TileSpec::Opaque(1)), ([5, 4], TileSpec::Opaque(2))],
+        ),
+        ("half a pixel short", vec![([4, 4], TileSpec::Opaque(1))]),
+    ] {
+        out.push(case(
+            format!("plain [4, 4] occluder {name}"),
+            [4, 4],
+            vec![
+                raster(
+                    vec![([4, 4], TileSpec::Raster(3))],
+                    ident(),
+                    None,
+                    1.0,
+                    RenderBlend::Normal,
+                ),
+                raster(
+                    tiles,
+                    [1.0, 0.0, 0.0, 1.0, -0.5, 0.0],
+                    None,
+                    1.0,
+                    RenderBlend::Normal,
+                ),
+            ],
+        ));
+    }
+    // The plain resolve at a canvas edge near 10^6 px, and the plain pyramid.
+    out.push(RendererCase {
+        canvas: [3906 * 256 + 100, 7 * 256 + 211],
+        ..case(
+            "plain [3906, 7] canvas edge".into(),
+            [3906, 7],
+            vec![raster(
+                vec![([3906, 7], TileSpec::Raster(9))],
+                [1.0, 0.0, 0.0, 1.0, 0.5, -0.5],
+                None,
+                0.6,
+                RenderBlend::Normal,
+            )],
+        )
+    });
+    out.push(RendererCase {
+        level: 1,
+        canvas: [512 * 2, 512 * 2],
+        ..case(
+            "plain [1, 1] from [-4, -3] level 1".into(),
+            [1, 1],
+            vec![raster(
+                rasters(-5..=-2, -4..=-1),
+                crate::renderer::multiply(
+                    [1.0, 0.0, 0.0, 1.0, 6.0 * 256.0 + 0.5, 5.0 * 256.0],
+                    rotation([-4, -3], 0.9),
+                ),
+                None,
+                0.8,
+                RenderBlend::Normal,
+            )],
+        )
+    });
+    // Plain refusals: the first tile at 2^23 px, and an inverse with no Q16
+    // value (a 10^-6 scale inverts to 10^6, past an i32 coefficient).
+    out.push(RendererCase {
+        refused: Some("v3 draw ROI has no integer tile range"),
+        ..case(
+            "plain [32768, 0] refused".into(),
+            [32768, 0],
+            vec![raster(
+                vec![([32768, 0], TileSpec::Raster(1))],
+                ident(),
+                None,
+                1.0,
+                RenderBlend::Normal,
+            )],
+        )
+    });
+    out.push(RendererCase {
+        refused: Some("v3 draw transform has no Q16 inverse"),
+        ..case(
+            "plain [0, 0] tiny scale refused".into(),
+            [0, 0],
+            vec![raster(
+                vec![([0, 0], TileSpec::Raster(1))],
+                [1e-6, 0.0, 0.0, 1e-6, 0.0, 0.0],
+                None,
+                1.0,
+                RenderBlend::Normal,
+            )],
+        )
+    });
     // Refused: the first tile at 2^23 px has no Q8 pixel center in i32, for the
     // raster (mode 18) and, with the raster near the origin, for a mask whose
     // corner lands past 2^23 px.
@@ -2584,6 +2743,9 @@ type PreparedMask = (Vec<([i32; 2], Vec<u8>)>, [f64; 6]);
 /// center is off the canvas are transparent (the exact doubled test, not
 /// `resolve_span`).
 fn renderer_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
+    if case.plain() {
+        return plain_tile_cpu(case, key);
+    }
     let region = [key[0] * 256, key[1] * 256, 1];
     let q = q14::Q;
     let clamp = |v: [i64; 4]| v.map(|c| c.clamp(0, q));
@@ -2750,6 +2912,69 @@ fn renderer_case_cpu(case: &RendererCase) -> Vec<u8> {
     out
 }
 
+impl RendererCase {
+    /// Whether every layer is a raster with no effect or mask: the renderer
+    /// draws such a scene with the integer tile compositor, not M5.
+    fn plain(&self) -> bool {
+        self.layers.iter().all(|l| {
+            matches!(
+                l,
+                RendererLayer::Raster {
+                    adjust: None,
+                    selection: None,
+                    mask: None,
+                    ..
+                }
+            )
+        })
+    }
+}
+
+/// CPU reference for a level-0 tile `key` of a plain [`RendererCase`]: the
+/// draws of [`composite_integer`], every tile of every layer listed (the
+/// renderer's tile selection and opaque-occluder shortcut must not change it).
+fn plain_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
+    let ops: Vec<Op> = case
+        .layers
+        .iter()
+        .filter_map(|layer| {
+            let RendererLayer::Raster {
+                tiles,
+                transform,
+                opacity,
+                blend,
+                ..
+            } = layer
+            else {
+                unreachable!("a plain case has rasters only");
+            };
+            let mut tiles: Vec<Tile> = tiles
+                .iter()
+                .map(|(k, spec)| Tile {
+                    tx: k[0],
+                    ty: k[1],
+                    pixels: spec.bytes(),
+                })
+                .collect();
+            tiles.sort_by_key(|t| (t.tx, t.ty));
+            Some(Op::Draw {
+                inv: crate::renderer::inverse(*transform)?,
+                opacity: *opacity,
+                mode: *blend as u32,
+                tiles,
+            })
+        })
+        .collect();
+    let frame = Frame {
+        origin: [0.0; 2],
+        scale: 1.0,
+        origin_px: [key[0] * 256, key[1] * 256],
+        scale_i: 1,
+        version: 3,
+    };
+    composite_integer(&ops, case.canvas[0] as u32, case.canvas[1] as u32, &frame).0
+}
+
 /// One render result per [`RendererCase`].
 type RendererResults = Vec<Result<Vec<u8>, crate::RenderError>>;
 
@@ -2912,18 +3137,43 @@ fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: 
     color_adjust_image(&solid, brightness, contrast, saturation)
 }
 
+/// Render version 3 nearest (`SAMPLE_NEAREST`): the texel under the Q8 position.
+fn fetch_nearest_bytes(
+    tiles: &[Tile],
+    inv: &IntegerInverse,
+    origin_px: [i32; 2],
+    scale: i32,
+    x: i32,
+    y: i32,
+) -> [u8; 4] {
+    let (Some(px), Some(py)) = (
+        pixel_q8(origin_px[0], x, scale),
+        pixel_q8(origin_px[1], y, scale),
+    ) else {
+        return [0; 4];
+    };
+    match source_q8(inv, px, py) {
+        Some(q) => sample_u8(tiles, q[0] >> 8, q[1] >> 8),
+        None => [0; 4],
+    }
+}
+
+/// Render version 3 CPU reference of the integer tile compositor. A pixel is
+/// on the canvas when its doubled center `2 origin + (2 i + 1) scale` is in
+/// `[0, 2 end)`, exactly. Every draw is the Q16 lookup: nearest when the Q16
+/// inverse is axis-aligned and unit (`axis_unit_q16`), else the integer 4-tap.
 fn composite_integer(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Vec<f32>) {
     let mut out = vec![0; 256 * 256 * 4];
     let mut prequant = vec![0.0; 256 * 256 * 4];
+    let on = |o: i32, i: i32, end: u32| {
+        (0..2 * i64::from(end))
+            .contains(&(2 * i64::from(o) + (2 * i64::from(i) + 1) * i64::from(frame.scale_i)))
+    };
     for y in 0..256 {
         for x in 0..256 {
-            let p = [
-                frame.origin[0] + (x as f32 + 0.5) * frame.scale,
-                frame.origin[1] + (y as f32 + 0.5) * frame.scale,
-            ];
             let mut accum = [0i64; 4];
             let mut stack = Vec::new();
-            if p[0] >= 0.0 && p[1] >= 0.0 && p[0] < width as f32 && p[1] < height as f32 {
+            if on(frame.origin_px[0], x, width) && on(frame.origin_px[1], y, height) {
                 for op in ops {
                     match op {
                         Op::Push => {
@@ -2944,16 +3194,11 @@ fn composite_integer(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec
                             mode,
                             tiles,
                         } => {
-                            let inv32 = inv.map(|v| v as f32);
-                            let bytes = if axis_unit(inv32) {
-                                let q = [
-                                    inv32[0] * p[0] + inv32[2] * p[1] + inv32[4],
-                                    inv32[1] * p[0] + inv32[3] * p[1] + inv32[5],
-                                ];
-                                sample_u8(tiles, q[0].floor() as i32, q[1].floor() as i32)
+                            let q = integer_inverse(*inv)
+                                .expect("v3 refuses a draw without a Q16 inverse");
+                            let bytes = if crate::sample::axis_unit_q16(q.m) {
+                                fetch_nearest_bytes(tiles, &q, frame.origin_px, frame.scale_i, x, y)
                             } else {
-                                let q = integer_inverse(*inv)
-                                    .expect("v3 filtered f32 fallback is unspecified");
                                 fetch_integer_bytes(tiles, &q, frame.origin_px, frame.scale_i, x, y)
                             };
                             accum = q14::draw(accum, bytes, q14::opacity(*opacity), *mode);
@@ -4448,6 +4693,22 @@ impl Gpu {
                             pad: 0,
                         });
                     }
+                    // Version 3 takes its draw from the host (`plain_draw_v3`).
+                    if integer {
+                        let d = crate::renderer::plain_draw_v3(
+                            *inv,
+                            (case.level, case.tx, case.ty),
+                            [case.w as i32, case.h as i32],
+                        )
+                        .map_err(|e| format!("{}: {e}", case.name))?;
+                        commands.push(GpuCommand {
+                            inv0: d.inverse.m.map(|v| f32::from_bits(v.cast_unsigned())),
+                            inv1: [0.0, 0.0, *opacity, *mode as f32],
+                            info: [0, start, entries.len() as u32 - start, d.sample],
+                            trans: crate::sample::pack_wide(d.inverse.tx, d.inverse.ty),
+                        });
+                        continue;
+                    }
                     let packed = crate::sample::pack_inverse(*inv, version);
                     commands.push(GpuCommand {
                         inv0: packed.inv0,
@@ -4563,7 +4824,26 @@ impl Gpu {
         let commands_buf =
             upload_buffer(device, &self.queue, &commands, wgpu::BufferUsages::STORAGE);
         let tiles_buf = upload_buffer(device, &self.queue, &entries, wgpu::BufferUsages::STORAGE);
-        let config_buf = upload_buffer(device, &self.queue, &config, wgpu::BufferUsages::UNIFORM);
+        let config_buf = if integer {
+            // The host's integer uniform: origin, command count, on-canvas span.
+            let origin = [case.tx, case.ty].map(|k| i64::from(k) * 256);
+            upload_buffer(
+                device,
+                &self.queue,
+                &[crate::renderer::IntegerConfig {
+                    origin_scale: [origin[0] as i32, origin[1] as i32, 1, 0],
+                    info: [commands.len() as u32, 0, 0, 0],
+                    span: crate::renderer::resolve_span(
+                        origin,
+                        1,
+                        [i64::from(case.w), i64::from(case.h)],
+                    ),
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )
+        } else {
+            upload_buffer(device, &self.queue, &config, wgpu::BufferUsages::UNIFORM)
+        };
         let pre_bytes = 256 * 256 * 16;
         let pre_quant = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("parity prequant"),
@@ -6851,10 +7131,41 @@ fn gpu_shader_matches_cpu_reference() {
     write_alpha_measure(&gpu.adapter_name, &measured);
     let mut measured_v3 = Vec::new();
     let mut v3_errors = Vec::new();
+    // Version 3 composes only level 0 directly (higher levels are the integer
+    // pyramid, checked below), and refuses a draw whose on-canvas corners have
+    // no i32 Q8 position instead of drawing it transparent.
+    let v3_refused = |name: &str| {
+        name.contains("large-translation-out-of-range")
+            .then_some("GPU_UNSUPPORTED: v3 draw ROI has no integer tile range")
+    };
     for mut case in cases().into_iter().filter(|c| c.measure) {
         case.name = format!("v3-{}", case.name);
+        if case.level > 0 {
+            let cpu = render_pyramid(&case);
+            match gpu.render_pyramid(&case) {
+                Ok(bytes) => {
+                    let row = measure_case(&case, &cpu, &bytes, &[], &[]);
+                    println!("v3 composite (enforced): {}", measure_line(&row));
+                    if cpu != bytes {
+                        failed.push(format!("{}: {}", case.name, diff_report(&cpu, &bytes)));
+                    }
+                    measured_v3.push(row);
+                }
+                Err(err) => {
+                    v3_errors.push(format!("{}: {err}", case.name));
+                    failed.push(format!("{}: {err}", case.name));
+                }
+            }
+            continue;
+        }
         let (cpu, cpu_pre) = render_pair(&case, 3);
         match gpu.render_version(&case, 3) {
+            Err(err) if v3_refused(&case.name).is_some_and(|want| err.ends_with(want)) => {
+                println!("v3 composite (enforced): {} refused: {err}", case.name);
+            }
+            Ok(_) if v3_refused(&case.name).is_some() => {
+                failed.push(format!("{}: drawn, expected a refusal", case.name));
+            }
             Ok((bytes, pre)) => {
                 let row = measure_case(&case, &cpu, &bytes, &cpu_pre, &pre);
                 println!("v3 composite (enforced): {}", measure_line(&row));
@@ -6876,6 +7187,12 @@ fn gpu_shader_matches_cpu_reference() {
         case.name = format!("v3-{}-level1", case.name);
         let cpu = render_pyramid(&case);
         match gpu.render_pyramid(&case) {
+            Err(err) if v3_refused(&case.name).is_some_and(|want| err.ends_with(want)) => {
+                println!("v3 composite (enforced): {} refused: {err}", case.name);
+            }
+            Ok(_) if v3_refused(&case.name).is_some() => {
+                failed.push(format!("{}: drawn, expected a refusal", case.name));
+            }
             Ok(bytes) => {
                 let row = measure_case(&case, &cpu, &bytes, &[], &[]);
                 if cpu != bytes {

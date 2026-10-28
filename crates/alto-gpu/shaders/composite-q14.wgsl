@@ -1,10 +1,10 @@
-// Integer tile compositor main. Appended after blend-q14.wgsl.
+// Integer tile compositor main. Appended after blend-q14.wgsl. Every pixel
+// works on its integer index; `config.span` is the on-canvas rectangle.
 @compute @workgroup_size(16,16)
 fn main(@builtin(global_invocation_id) id:vec3u) {
   if any(id.xy>=vec2u(256u)){return;}
-  let p=config.origin_scale.xy+(vec2f(id.xy)+0.5)*config.origin_scale.z;
   var stack:array<vec4i,32>;var depth=0u;var accum=vec4i(0);
-  if p.x>=0.0 && p.y>=0.0 && p.x<config.origin_scale.w && p.y<f32(config.info.z) {
+  if all(id.xy>=config.span.xy) && all(id.xy<config.span.zw) {
     for(var i=0u;i<config.info.x;i++) {
       let c=commands[i];let op=i32(c.opacity_q);let mode=c.mode;
       if c.info.x==1u {stack[depth]=accum;depth++;accum=vec4i(0);}
@@ -13,7 +13,7 @@ fn main(@builtin(global_invocation_id) id:vec3u) {
         let pre=vec3i(mul_q(s.r,sa),mul_q(s.g,sa),mul_q(s.b,sa));
         depth--;accum=blend_q(stack[depth],s,pre,sa,mode);
       } else {
-        let bytes=fetch_bytes(c,p,vec2i(id.xy));
+        let bytes=fetch_bytes(c,vec2i(id.xy));
         let s=vec3i(i32(byte_q14(bytes.r)),i32(byte_q14(bytes.g)),i32(byte_q14(bytes.b)));
         let sa=mul_q(i32(byte_q14(bytes.a)),op);
         let pre=vec3i(mul_q(i32(premul_byte_q14(bytes.r,bytes.a)),op),mul_q(i32(premul_byte_q14(bytes.g,bytes.a)),op),mul_q(i32(premul_byte_q14(bytes.b,bytes.a)),op));

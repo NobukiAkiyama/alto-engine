@@ -17,14 +17,22 @@ pub fn shader_with_blend(body: &str) -> String {
 }
 
 /// Assemble v3 from the frozen coordinate implementation and the shared Q14 helpers.
-/// The v1/v2 shader sources and their pipelines remain unchanged.
+/// The v1/v2 shader sources and their pipelines remain unchanged. Version 3 reads
+/// no float but the atlas texel (`unorm_byte`): the command inverse and the
+/// tile origin are integers, every draw is the Q16 nearest (`SAMPLE_NEAREST`)
+/// or the integer 4-tap (`renderer::plain_draw_v3`), and the canvas test is the
+/// host's exact pixel rectangle (`renderer::resolve_span`).
 pub fn integer_composite_shader() -> String {
     let composite = include_str!("../shaders/composite.wgsl");
     let q14 = include_str!("../shaders/q14.wgsl");
     let prefix = composite.split("fn sample_texel").next().unwrap();
     let prefix = prefix.replace(
         "struct Command { inv0: vec4f, inv1: vec4f, info: vec4u, trans: vec4u };",
-        "struct Command { inv0: vec4f, translation: vec2f, opacity_q: u32, mode: u32, info: vec4u, trans: vec4u };",
+        "struct Command { inv0: vec4i, unused: vec2u, opacity_q: u32, mode: u32, info: vec4u, trans: vec4u };",
+    );
+    let prefix = prefix.replace(
+        "struct Config { origin_scale: vec4f, info: vec4u };",
+        "struct Config { origin_scale: vec4i, info: vec4u, span: vec4u };",
     );
     let prefix = prefix.replace(
         "var output: texture_storage_2d_array<rgba8unorm, write>;",
@@ -42,6 +50,20 @@ pub fn integer_composite_shader() -> String {
     let fetch = &composite
         [composite.find("fn fetch_integer").unwrap()..composite.find("fn fetch(c:").unwrap()];
     let fetch = fetch
+        .replace("i32(config.origin_scale.z)", "config.origin_scale.z")
+        .replace("i32(config.origin_scale.x)", "config.origin_scale.x")
+        .replace("i32(config.origin_scale.y)", "config.origin_scale.y")
+        .replace("bitcast<vec4<i32>>(c.inv0)", "c.inv0")
+        // SAMPLE_NEAREST (2) is the 4-tap with both weights 0: `channel_byte` is
+        // then `(a * 65536 + 32768) >> 16 = a`, the texel under the Q8 position.
+        .replace(
+            "let fx = qx.v - (x << 8);",
+            "let fx = select(qx.v - (x << 8), 0, c.info.w == 2u);",
+        )
+        .replace(
+            "let fy = qy.v - (y << 8);",
+            "let fy = select(qy.v - (y << 8), 0, c.info.w == 2u);",
+        )
         .replace("-> vec4f", "-> vec4u")
         .replace("vec4f(0.0)", "vec4u(0u)")
         .replace(
@@ -54,10 +76,15 @@ pub fn integer_composite_shader() -> String {
     format!(
         "{prefix}\n{div}\n{q14}\n{sample}\n{fetch}\n{}\n{}\n{}",
         r#"
-fn fetch_bytes(c: Command,p:vec2f,ix:vec2i)->vec4u {
+// The integer 4-tap, or SAMPLE_NEAREST (2) as the 4-tap with zero weights.
+// Out of range is transparent (the host refuses a draw whose on-canvas
+// corners leave i32). A draw without an integer sampler (SAMPLE_F32, which the
+// host refuses in version 3) reads nothing rather than a float fetch. Keep this
+// branch: without it SwiftShader (Subzero) takes about 10x longer to compile
+// the pipeline, and a second copy of the Q8 position code about 70x.
+fn fetch_bytes(c: Command,ix:vec2i)->vec4u {
   if c.info.w!=0u {return fetch_integer(c,ix);}
-  let q=vec2f(c.inv0.x*p.x+c.inv0.z*p.y+c.translation.x,c.inv0.y*p.x+c.inv0.w*p.y+c.translation.y);
-  return sample_byte(c,i32(floor(q.x)),i32(floor(q.y)));
+  return vec4u(0u);
 }
 "#,
         include_str!("../shaders/blend-q14.wgsl"),
