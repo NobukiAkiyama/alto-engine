@@ -839,3 +839,24 @@ export function sceneGap(snapshot) {
   }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
 }
+
+// Measure-only replay; no rendering or comparison uses these counts.
+export function measureColorAdjustTies(image, settings) {
+  const channels = [0, 0, 0];
+  const lossyStep2_4_8 = [0, 0, 0];
+  let pixels = 0;
+  for (let i = 0; i < image.pixels.length; i += 4) {
+    const b = image.pixels.slice(i, i + 4);
+    const input = [premulByteQ14(b[0], b[3]), premulByteQ14(b[1], b[3]), premulByteQ14(b[2], b[3]), byteQ14(b[3])];
+    const q = input.map((v) => f16BitsToQ14(q14ToF16Bits(v)));
+    const rgb = colorAdjustExactQ14(q, colorAdjustQ14(f(settings.brightness)), colorAdjustQ14(f(settings.contrast)), colorAdjustQ14(f(settings.saturation)));
+    if (rgb.includes(8192)) pixels++;
+    rgb.forEach((v, c) => { if (v === 8192) channels[c]++; });
+    for (const v of [...input, ...rgb]) {
+      if (v >= 2048 && f16BitsToQ14(q14ToF16Bits(v)) !== v) {
+        lossyStep2_4_8[v < 4096 ? 0 : v < 8192 ? 1 : 2]++;
+      }
+    }
+  }
+  return { pixels, channels, lossyStep2_4_8 };
+}

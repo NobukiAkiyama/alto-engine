@@ -63,6 +63,13 @@ if (atlas) {
 }
 
 await mkdir(outDir, { recursive: true });
+if (report.tie8192?.length) {
+  const tie = { label: "measured-not-enforced", source: "cpu-replay-before-f16-store", backend, cases: report.tie8192 };
+  await writeFile(`${outDir}/tie-8192.json`, JSON.stringify(tie, null, 2) + "\n");
+  markdown += `### Q14 half ties (${backendLabel})\n\nMeasured-not-enforced CPU replay, not GPU intermediate readback. RGB immediately before the adjustment output f16 store. Precision-loss buckets count input RGBA and output RGB store calls (alpha passthrough excluded).\n\n| case | pixels | channels r,g,b | lossy step 2/4/8 |\n| --- | ---: | --- | --- |\n`;
+  for (const row of tie.cases) markdown += `| ${row.name} | ${row.pixels} | ${row.channels.join(",")} | ${row.lossyStep2_4_8.join(",")} |\n`;
+}
+
 if (atlas) await writeFile(`${outDir}/atlas-read.json`, JSON.stringify({ backend, ...atlas }, null, 2) + "\n");
 await writeFile(`${outDir}/alpha-measure.md`, markdown);
 await writeFile(`${outDir}/alpha-measure.json`, JSON.stringify({

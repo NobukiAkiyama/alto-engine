@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
+import { measureColorAdjustTies, alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -216,6 +216,7 @@ export async function runParityTests(engine, log) {
     }
   };
   const alphaMeasure = [];
+  const tie8192 = [];
   let atlasRead = null;
   try {
     for (const testCase of parityCases()) {
@@ -331,6 +332,12 @@ export async function runParityTests(engine, log) {
           });
         });
         const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+        // Reporting failures and counts never affect parity enforcement.
+        try {
+          tie8192.push({ name, ...measureColorAdjustTies(image, settings) });
+        } catch (error) {
+          log(`tie-8192 measurement unavailable: ${error}`);
+        }
         const cpu = renderColorAdjustV3(image, settings);
         const gap = diff(cpu, gpu);
         log(`${name}: ${gap}`);
@@ -428,6 +435,7 @@ export async function runParityTests(engine, log) {
       userAgent: navigator.userAgent,
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
+      tie8192,
       atlasRead,
       results,
     });

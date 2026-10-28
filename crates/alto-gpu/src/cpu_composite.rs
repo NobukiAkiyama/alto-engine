@@ -1239,6 +1239,73 @@ fn color_adjust_image_v3(src: &[u8], brightness: f32, contrast: f32, saturation:
     out
 }
 
+/// Measure-only CPU replay of the integer intermediates before f16 stores.
+/// Never used by rendering or parity assertions.
+fn write_tie_8192(adapter: &str, src: &[u8], grid: &[(f32, f32, f32)]) {
+    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
+        return;
+    };
+    let mut rows = Vec::new();
+    let mut markdown = format!(
+        "### Q14 half ties ({adapter})\n\nMeasured-not-enforced CPU replay, not GPU intermediate readback. RGB immediately before the adjustment output f16 store. Precision-loss buckets count input RGBA and output RGB store calls (alpha passthrough excluded).\n\n| case | pixels | channels r,g,b | lossy step 2/4/8 |\n| --- | ---: | --- | --- |\n"
+    );
+    for &(contrast, saturation, brightness) in grid {
+        let mut pixels = 0u32;
+        let mut channels = [0u32; 3];
+        let mut lossy = [0u32; 3];
+        for px in src.as_chunks::<4>().0 {
+            let b = px.map(u32::from);
+            let input = [
+                premul_byte_q14(b[0], b[3]),
+                premul_byte_q14(b[1], b[3]),
+                premul_byte_q14(b[2], b[3]),
+                byte_q14(b[3]),
+            ];
+            let q = input.map(|v| f16_bits_to_q14(q14_to_f16_bits(v)));
+            let rgb = color_adjust_exact_q14(
+                q,
+                crate::renderer::color_adjust_q14(brightness),
+                crate::renderer::color_adjust_q14(contrast),
+                crate::renderer::color_adjust_q14(saturation),
+            );
+            pixels += u32::from(rgb.contains(&8192));
+            for (count, value) in channels.iter_mut().zip(rgb) {
+                *count += u32::from(value == 8192);
+            }
+            for value in input.into_iter().chain(rgb) {
+                if value >= 2048 && f16_bits_to_q14(q14_to_f16_bits(value)) != value {
+                    let bucket = if value < 4096 {
+                        0
+                    } else if value < 8192 {
+                        1
+                    } else {
+                        2
+                    };
+                    lossy[bucket] += 1;
+                }
+            }
+        }
+        let name = color_adjust_case_name(contrast, saturation, brightness);
+        rows.push(format!("{{\"name\":\"{}\",\"pixels\":{pixels},\"channels\":{channels:?},\"lossyStep2_4_8\":{lossy:?}}", json_escape(&name)));
+        markdown.push_str(&format!(
+            "| {name} | {pixels} | {channels:?} | {lossy:?} |\n"
+        ));
+    }
+    let json = format!(
+        "{{\"label\":\"measured-not-enforced\",\"source\":\"cpu-replay-before-f16-store\",\"backend\":\"{}\",\"cases\":[{}]}}\n",
+        json_escape(adapter),
+        rows.join(",")
+    );
+    let dir = std::path::PathBuf::from(dir);
+    // Diagnostics must not turn count values or reporting errors into failures.
+    if let Err(error) = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(dir.join("tie-8192.json"), json))
+        .and_then(|()| std::fs::write(dir.join("tie-8192.md"), markdown))
+    {
+        eprintln!("tie-8192 report: {error}");
+    }
+}
+
 fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
     let mut solid = vec![0u8; 256 * 256 * 4];
     for chunk in solid.as_chunks_mut::<4>().0 {
@@ -3938,6 +4005,7 @@ fn gpu_shader_matches_cpu_reference() {
     write_atlas_read(&gpu.adapter_name, &atlas);
     let src = color_adjust_gradient();
     let grid = color_adjust_grid();
+    write_tie_8192(&gpu.adapter_name, &src, &grid);
     match gpu.render_color_adjust(&src, &grid) {
         Ok(tiles) => {
             if tiles.len() != grid.len() {
