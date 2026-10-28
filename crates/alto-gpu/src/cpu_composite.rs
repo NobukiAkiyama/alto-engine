@@ -1436,7 +1436,14 @@ fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
                 21..=23 => {
                     let (x, y) = ((i % 256) as i32, (i / 256) as i32);
                     let image = &images[stage.slot as usize];
-                    let m = || i64::from(byte_q14(u32::from(mask_byte_cpu(image, stage.transform, x, y))));
+                    let m = || {
+                        i64::from(byte_q14(u32::from(mask_byte_cpu(
+                            image,
+                            stage.transform,
+                            x,
+                            y,
+                        ))))
+                    };
                     let f = |has: i32| if has == 0 { q14::Q } else { m() } * w;
                     match stage.mode {
                         21 => mask_layer_q14(a, f(stage.settings[1])),
@@ -1577,7 +1584,14 @@ const FEATHER: f64 = 64.0;
 /// The mask rotated by 0.3 rad about the tile center, as an unlinked mask transform.
 fn rotated_mask_transform() -> [f64; 6] {
     let (s, c) = 0.3f64.sin_cos();
-    [c, s, -s, c, 128.0 - (c - s) * 128.0, 128.0 - (s + c) * 128.0]
+    [
+        c,
+        s,
+        -s,
+        c,
+        128.0 - (c - s) * 128.0,
+        128.0 - (s + c) * 128.0,
+    ]
 }
 
 /// Atlas layers for [`mask_programs`].
@@ -1663,7 +1677,12 @@ fn mask_programs() -> Vec<Q14Program> {
     });
     // A masked color-adjust adjustment layer over an opaque backdrop (mode 23),
     // and a non-normal one without a mask.
-    for (blend, name) in [(0, "normal"), (1, "multiply"), (2, "screen"), (3, "overlay")] {
+    for (blend, name) in [
+        (0, "normal"),
+        (1, "multiply"),
+        (2, "screen"),
+        (3, "overlay"),
+    ] {
         for opacity in [1.0, 0.5] {
             out.push(Q14Program {
                 name: format!("m5-adjustment-mask-{name} o={opacity}"),
@@ -3985,7 +4004,11 @@ fn mask_q14_does_not_overflow() {
     // Premultiplied pixels with rgb <= a: 55 of them.
     let pixels: Vec<[i64; 4]> = E
         .iter()
-        .flat_map(|&a| E.iter().filter(move |&&v| v <= a).map(move |&v| [v, v, v, a]))
+        .flat_map(|&a| {
+            E.iter()
+                .filter(move |&&v| v <= a)
+                .map(move |&v| [v, v, v, a])
+        })
         .collect();
     assert_eq!(pixels.len(), 55);
     let ordered = |p: [i64; 4]| p[..3].iter().all(|v| *v <= p[3]);
@@ -4093,7 +4116,11 @@ fn mask_v3_rust_and_js_references_agree() {
     const E: [i64; 10] = [0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384];
     let pixels: Vec<[i64; 4]> = E
         .iter()
-        .flat_map(|&a| E.iter().filter(move |&&v| v <= a).map(move |&v| [v, v, v, a]))
+        .flat_map(|&a| {
+            E.iter()
+                .filter(move |&&v| v <= a)
+                .map(move |&v| [v, v, v, a])
+        })
         .collect();
     let q = |b: u32| i64::from(byte_q14(b));
     let all: Vec<i64> = (0..=255).map(q).collect();
@@ -4193,7 +4220,11 @@ fn mask_programs_known_values() {
     // The browser `mask` case: opaque red where x < 128, transparent elsewhere.
     let tile = run("v3-mask");
     for (i, px) in tile.as_chunks::<4>().0.iter().enumerate() {
-        let want = if i % 256 < 128 { [255, 0, 0, 255] } else { [0; 4] };
+        let want = if i % 256 < 128 {
+            [255, 0, 0, 255]
+        } else {
+            [0; 4]
+        };
         assert_eq!(*px, want, "pixel {i}");
     }
     // Opacity 0.5 on an opaque pixel through a full mask is F = 2^27; the Q14
@@ -4240,7 +4271,10 @@ fn mask_programs_known_values() {
     assert!(run("m5-mask-coverage o=0").iter().all(|v| *v == 0));
     let full = run("m5-mask-coverage o=1");
     assert_eq!(pixel(&full, 0, 200), [0; 4]);
-    assert_eq!(pixel(&full, 255, 200), pixel(&run("m5-mask-white o=1"), 255, 200));
+    assert_eq!(
+        pixel(&full, 255, 200),
+        pixel(&run("m5-mask-white o=1"), 255, 200)
+    );
     // The rotated mask takes the Q16 lookup; unit translations stay on f32.
     assert_eq!(
         crate::renderer::mask_sampler(rotated_mask_transform(), [0.0, 0.0], 1.0).mode,
@@ -4904,7 +4938,11 @@ fn plain_scene_gaps_are_explicit() {
         n.clip_path = f.clip_path.clone();
         n.clip = f.clip;
         n.effects = f.effects.clone();
-        assert_eq!(crate::renderer::v3_gap(&v3), Some(reason), "mask + {reason}");
+        assert_eq!(
+            crate::renderer::v3_gap(&v3),
+            Some(reason),
+            "mask + {reason}"
+        );
     }
 }
 

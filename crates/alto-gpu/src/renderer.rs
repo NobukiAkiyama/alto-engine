@@ -584,7 +584,8 @@ pub(crate) fn mask_sampler(transform: [f64; 6], origin: [f32; 2], scale: f32) ->
 /// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
 /// mirrors this.
 pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
-    let color_adjust = |e: &crate::REffect| matches!(e.kind, crate::REffectKind::ColorAdjust { .. });
+    let color_adjust =
+        |e: &crate::REffect| matches!(e.kind, crate::REffectKind::ColorAdjust { .. });
     for n in &scene.nodes {
         let f = &n.features;
         if f.vector_mask.is_some() {
