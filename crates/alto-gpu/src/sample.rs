@@ -137,16 +137,22 @@ pub struct IntegerInverse {
 /// The Q16 inverse of render version 3, every value rounded exactly half away
 /// from zero.
 pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
-    integer_inverse_with(inv, round_half_away)
+    Some(IntegerInverse {
+        m: [
+            quantize_coeff(inv[0])?,
+            quantize_coeff(inv[1])?,
+            quantize_coeff(inv[2])?,
+            quantize_coeff(inv[3])?,
+        ],
+        tx: quantize_translation(inv[4])?,
+        ty: quantize_translation(inv[5])?,
+    })
 }
 
 /// The Q16 inverse of render version 2 (`pack_inverse`), with its frozen
 /// rounding (`round_half_away_v2`).
 pub fn integer_inverse_v2(inv: [f64; 6]) -> Option<IntegerInverse> {
-    integer_inverse_with(inv, round_half_away_v2)
-}
-
-fn integer_inverse_with(inv: [f64; 6], round: fn(f64) -> f64) -> Option<IntegerInverse> {
+    let round = round_half_away_v2;
     let t = |v| Some(quantize_q16(v, round)? as i64);
     Some(IntegerInverse {
         m: [
