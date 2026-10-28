@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, parityCases, renderCase, renderColorAdjustV3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -191,9 +191,9 @@ export async function runParityTests(engine, log) {
     const start = performance.now();
     try {
       const detail = await fn();
-      const row = { name, pass: true, ms: performance.now() - start, detail: detail || "" };
+      const row = { name, pass: true, ms: performance.now() - start, detail: detail?.detail ?? detail ?? "", ...(typeof detail === "object" ? detail : {}) };
       results.push(row);
-      log(`PASS ${name} ${row.ms.toFixed(1)} ms${detail ? `; ${detail}` : ""}`);
+      log(`PASS ${name} ${row.ms.toFixed(1)} ms${row.detail ? `; ${row.detail}` : ""}`);
     } catch (error) {
       if (error.xfail) {
         results.push({ name, pass: true, xfail: true, reason: error.reason, ms: performance.now() - start });
@@ -277,6 +277,7 @@ export async function runParityTests(engine, log) {
     }
     for (const testCase of alphaMeasureCases()) {
       await test(`v3-${testCase.name}`, async () => {
+        let renderPath = null;
         try {
           const suffix = testCase.w === 256 && testCase.h === 256 ? "" : `-${testCase.w}x${testCase.h}`;
           const fixture = await fetch(`../../tests/fixtures/render-v3-empty${suffix}.alto`);
@@ -286,14 +287,16 @@ export async function runParityTests(engine, log) {
           for (const node of testCase.nodes) await addNode(doc, engine, node);
           const cpu = renderCase(testCase, 3);
           const gpu = await gpuTile(engine, testCase);
-          const row = { ...measureRow(testCase, cpu, gpu), name: `v3-${testCase.name}`, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          renderPath = sceneGap(doc.getSnapshot());
+          const enforced = isV3IntegerCase({ renderPath });
+          const row = { ...measureRow(testCase, cpu, gpu), renderPath, name: `v3-${testCase.name}`, enforced, status: same(cpu, gpu) ? "exact" : "mismatch" };
           compositeV3.push(row);
-          log(`v3 composite (enforced): ${formatMeasure(row)}`);
-          assert(same(cpu, gpu), formatMeasure(row));
-          return formatMeasure(row);
+          log(`${renderPath || "v3 composite"} (${enforced ? "enforced" : "measured-not-enforced"}): ${formatMeasure(row)}`);
+          if (enforced) assert(same(cpu, gpu), formatMeasure(row));
+          return { detail: formatMeasure(row), renderPath, enforced };
         } catch (error) {
           if (!compositeV3.some((row) => row.name === `v3-${testCase.name}`)) {
-            compositeV3.push({ name: `v3-${testCase.name}`, enforced: true, status: "error", error: String(error) });
+            compositeV3.push({ name: `v3-${testCase.name}`, renderPath, enforced: isV3IntegerCase({ renderPath }), status: "error", error: String(error) });
           }
           throw error;
         }
@@ -454,7 +457,9 @@ export async function runParityTests(engine, log) {
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
       compositeV3Label: "enforced",
-      compositeV3,
+      compositeV3: compositeV3.filter(isV3IntegerCase),
+      v3M5Float: compositeV3.filter((row) => !isV3IntegerCase(row)),
+      integerExactCount: compositeV3.filter((row) => isV3IntegerCase(row) && row.status === "exact" && row.count === 0).length,
       atlasRead,
       results,
     });

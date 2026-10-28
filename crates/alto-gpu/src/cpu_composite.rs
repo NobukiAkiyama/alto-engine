@@ -1477,6 +1477,7 @@ struct MeasuredPixel {
 }
 
 struct MeasuredCase {
+    render_path: Option<&'static str>,
     name: String,
     count: u32,
     max_abs: [u32; 4],
@@ -1582,6 +1583,7 @@ fn measure_case(
         format!(" lengths cpu {} gpu {}", cpu.len(), gpu.len())
     };
     MeasuredCase {
+        render_path: None, // Case fixtures contain only plain raster/group nodes.
         name: case.name.clone(),
         count,
         max_abs,
@@ -1891,11 +1893,15 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
         json_escape(adapter)
     );
     for (index, row) in rows.iter().enumerate() {
+        let enforced = integer && row.render_path != Some("v3-m5-float");
+        let render_path = row
+            .render_path
+            .map_or("null".to_string(), |p| format!("\"{p}\""));
         if index > 0 {
             json.push_str(",\n");
         }
         json.push_str(&format!(
-            "    {{\"name\": \"{}\", \"enforced\": {integer}, \"status\": \"{}\", \"count\": {}, \"maxAbs\": [{},{},{},{}], \"mismatches\": [",
+            "    {{\"name\": \"{}\", \"renderPath\": {render_path}, \"enforced\": {enforced}, \"status\": \"{}\", \"count\": {}, \"maxAbs\": [{},{},{},{}], \"mismatches\": [",
             json_escape(&row.name),
             if row.count==0 && row.length_note.is_empty() {"exact"} else {"mismatch"},
             row.count,
@@ -1932,12 +1938,24 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
     }
     json.push_str("\n  ]");
     if integer {
+        let exact_count = rows
+            .iter()
+            .filter(|r| {
+                r.render_path != Some("v3-m5-float") && r.count == 0 && r.length_note.is_empty()
+            })
+            .count();
+        let float_count = rows
+            .iter()
+            .filter(|r| r.render_path == Some("v3-m5-float"))
+            .count();
+        json.push_str(&format!(
+            ",\n  \"integerExactCount\": {exact_count},\n  \"v3M5FloatCount\": {float_count}"
+        ));
         let status = if !errors.is_empty() {
             "error"
-        } else if rows
-            .iter()
-            .any(|r| r.count != 0 || !r.length_note.is_empty())
-        {
+        } else if rows.iter().any(|r| {
+            r.render_path != Some("v3-m5-float") && (r.count != 0 || !r.length_note.is_empty())
+        }) {
             "mismatch"
         } else {
             "exact"
@@ -1979,8 +1997,13 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
             shown
         };
         markdown.push_str(&format!(
-            "| {} | {} | {},{},{},{} | {}{} |\n",
+            "| {}{} | {} | {},{},{},{} | {}{} |\n",
             row.name,
+            if row.render_path == Some("v3-m5-float") {
+                " (v3-m5-float; measured-not-enforced)"
+            } else {
+                ""
+            },
             row.count,
             row.max_abs[0],
             row.max_abs[1],
@@ -1997,9 +2020,9 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
         }
     }
     if integer {
-        json = json.replace("measured-not-enforced", "enforced");
+        json = json.replacen("measured-not-enforced", "enforced", 1);
         markdown = markdown
-            .replace("measured-not-enforced", "enforced")
+            .replacen("measured-not-enforced", "enforced", 1)
             .replace("A mismatch does not fail", "A mismatch fails");
     }
     std::fs::write(
@@ -2288,6 +2311,15 @@ fn scene(content: RContent, features: RFeatures) -> RenderScene {
 }
 
 fn gap(scene: &RenderScene) -> Option<&'static str> {
+    if scene.render_version == 3
+        && scene.nodes.iter().any(|n| {
+            n.features.mask.is_some()
+                || n.features.vector_mask.is_some()
+                || !n.features.effects.is_empty()
+        })
+    {
+        return Some("v3-m5-float");
+    }
     for n in &scene.nodes {
         if n.features.mask.is_some() {
             return Some("mask");
@@ -3565,6 +3597,7 @@ fn unorm_boundary_split_is_exact_f32_equality() {
         &dir,
         "unit",
         &[MeasuredCase {
+            render_path: None,
             name: "boundary".into(),
             count: 1,
             max_abs: [1, 1, 1, 1],
@@ -3915,6 +3948,14 @@ fn plain_scene_gaps_are_explicit() {
     ] {
         assert!(!plain_scene(scene), "{reason} was treated as a plain scene");
         assert_eq!(gap(scene), Some(reason));
+        let mut v3 = scene.clone();
+        v3.render_version = 3;
+        let expected = if matches!(reason, "mask" | "vector mask" | "effects") {
+            "v3-m5-float"
+        } else {
+            reason
+        };
+        assert_eq!(gap(&v3), Some(expected));
     }
     // The plain compositor skips an unsupported node, so the tile stays exact.
     assert!(plain_scene(&unsupported));

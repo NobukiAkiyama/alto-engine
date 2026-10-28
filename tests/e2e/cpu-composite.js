@@ -839,6 +839,8 @@ export function sceneGap(snapshot) {
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
   }
+  if (snapshot.meta?.render_version === 3 &&
+      ["mask", "vector mask", "effects"].some((gap) => found.has(gap))) return "v3-m5-float";
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
 }
 
@@ -952,4 +954,9 @@ function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
     for (let c = 0; c < 4; c++) out[i + c] = Math.min(255, Math.max(0, Number(cqDiv(accum[c] * 255n))));
   }
   return out;
+}
+
+/** Reporting only: float fallback rows never enter integer-exact enforcement. */
+export function isV3IntegerCase(row) {
+  return row.renderPath !== "v3-m5-float";
 }

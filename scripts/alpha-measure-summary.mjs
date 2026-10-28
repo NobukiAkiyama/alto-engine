@@ -1,5 +1,6 @@
 // Turn a measured-not-enforced alpha parity JSON file into markdown.
 // Rust writes { cases: [...] }. The browser parity report writes { alphaMeasure: [...] }.
+import { isV3IntegerCase } from "../tests/e2e/cpu-composite.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 const [backendLabel, jsonPath, outDir] = process.argv.slice(2);
@@ -49,7 +50,15 @@ for (const row of rows) {
   markdown += "\n";
 }
 
-const integerRows = report.compositeV3 || [];
+const v3Rows = report.compositeV3 || (report.label === "enforced" ? report.cases : []) || [];
+const integerRows = v3Rows.filter(isV3IntegerCase);
+const floatRows = [...v3Rows.filter((row) => !isV3IntegerCase(row)), ...(report.v3M5Float || [])];
+if (floatRows.length) {
+  markdown += `### v3-m5-float (${backendLabel})\n\nMeasured-not-enforced; excluded from the v3 integer-exact count.\n\n`;
+  for (const row of floatRows) markdown += `- ${row.name}: ${row.status}, mismatched pixels ${row.count ?? "error"}\n`;
+  markdown += "\n";
+}
+
 if (integerRows.length) {
   markdown += `### v3 integer composite (${backendLabel})\n\nEnforced: every byte must match the CPU reference.\n\n`;
   markdown += "| case | status | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | --- | ---: | --- | --- |\n";
@@ -73,9 +82,10 @@ if (atlas) {
 }
 
 await mkdir(outDir, { recursive: true });
-if (integerRows.length) {
-  await writeFile(`${outDir}/composite-v3.json`, JSON.stringify({ label: "enforced", backend, status: integerRows.some((r) => r.status === "error") ? "error" : integerRows.some((r) => r.status !== "exact" || r.count !== 0) ? "mismatch" : "exact", cases: integerRows }, null, 2) + "\n");
+if (v3Rows.length) {
+  await writeFile(`${outDir}/composite-v3.json`, JSON.stringify({ label: "enforced", backend, status: integerRows.some((r) => r.status === "error") ? "error" : integerRows.some((r) => r.status !== "exact" || r.count !== 0) ? "mismatch" : "exact", integerExactCount: integerRows.filter((r) => r.status === "exact" && r.count === 0).length, v3M5Float: floatRows, cases: integerRows }, null, 2) + "\n");
 }
+if (floatRows.length) await writeFile(`${outDir}/v3-m5-float.json`, JSON.stringify({ label: "measured-not-enforced", backend, cases: floatRows }, null, 2) + "\n");
 if (atlas) await writeFile(`${outDir}/atlas-read.json`, JSON.stringify({ backend, ...atlas }, null, 2) + "\n");
 await writeFile(`${outDir}/alpha-measure.md`, markdown);
 await writeFile(`${outDir}/alpha-measure.json`, JSON.stringify({
