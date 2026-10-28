@@ -701,48 +701,6 @@ function premulByteQ14(color, alpha) {
   return Math.trunc((color * alpha * 16384 + 32512) / 65025);
 }
 
-function floorLog2(value) {
-  let n = value >>> 0;
-  let p = 0;
-  if (n >= 256) { p += 8; n >>>= 8; }
-  if (n >= 16) { p += 4; n >>>= 4; }
-  if (n >= 4) { p += 2; n >>>= 2; }
-  if (n >= 2) p += 1;
-  return p;
-}
-
-function q14ToF16Bits(qIn) {
-  if (qIn === 0) return 0;
-  const q = Math.min(qIn >>> 0, Q14_ONE);
-  if (q === Q14_ONE) return 0x3c00;
-  const p = floorLog2(q);
-  let sig = q;
-  let expP = p;
-  if (p >= 10) {
-    const cut = p - 10;
-    if (cut > 0) {
-      const half = 1 << (cut - 1);
-      const rem = sig & ((1 << cut) - 1);
-      sig >>>= cut;
-      if (rem > half || (rem === half && (sig & 1) === 1)) sig += 1;
-    }
-    if (sig >= 2048) { sig = 1024; expP = p + 1; }
-  } else sig = q << (10 - p);
-  return (((expP + 1) << 10) | (sig & 1023)) & 0xffff;
-}
-
-function f16BitsToQ14(half) {
-  const h = half & 0xffff;
-  if ((h & 0x8000) !== 0) return 0;
-  const exp = (h >> 10) & 0x1f;
-  const mant = h & 0x3ff;
-  if (exp === 31) return mant === 0 ? Q14_ONE : 0;
-  if (exp === 0) return 0;
-  const sig = 1024 + mant;
-  const q = exp >= 11 ? (sig << (exp - 11)) >>> 0 : sig >>> (11 - exp);
-  return Math.min(q, Q14_ONE);
-}
-
 /** `(n + d/2) / d` in BigInt. Division truncates toward zero, matching `divQ`. */
 function divQBig(n, d) {
   const half = d / 2n;
@@ -782,33 +740,36 @@ function colorAdjustExactQ14(q, brightness, contrast, saturation) {
   });
 }
 
-function colorAdjustTexelV3(rgba, brightness, contrast, saturation) {
+/** Q14 premultiplied ingress of one stored byte texel (`effects-q14.wgsl` mode 18). */
+function ingressQ14(rgba) {
   const alpha = rgba[3];
-  const stored = [
-    q14ToF16Bits(premulByteQ14(rgba[0], alpha)),
-    q14ToF16Bits(premulByteQ14(rgba[1], alpha)),
-    q14ToF16Bits(premulByteQ14(rgba[2], alpha)),
-    q14ToF16Bits(byteQ14(alpha)),
-  ];
-  const rgb = colorAdjustExactQ14(
-    stored.map(f16BitsToQ14),
-    colorAdjustQ14(brightness),
-    colorAdjustQ14(contrast),
-    colorAdjustQ14(saturation),
-  );
-  return [
-    quantize(f16BitsToF32(q14ToF16Bits(rgb[0]))),
-    quantize(f16BitsToF32(q14ToF16Bits(rgb[1]))),
-    quantize(f16BitsToF32(q14ToF16Bits(rgb[2]))),
-    quantize(f16BitsToF32(stored[3])),
-  ];
+  return [premulByteQ14(rgba[0], alpha), premulByteQ14(rgba[1], alpha), premulByteQ14(rgba[2], alpha), byteQ14(alpha)];
 }
 
-/** Render version 3: integer premultiply, Q14 color-adjust, unorm resolve. */
+/** Mode 17 on premultiplied Q14; alpha passes through. */
+function colorAdjustStageQ14(q, settings) {
+  const rgb = colorAdjustExactQ14(
+    q,
+    colorAdjustQ14(f(settings.brightness ?? 0)),
+    colorAdjustQ14(f(settings.contrast ?? 1)),
+    colorAdjustQ14(f(settings.saturation ?? 1)),
+  );
+  return [...rgb, q[3]];
+}
+
+/** Resolve: `div_q(q * 255, 16384)` bytes, as the integer tile compositor. */
+const resolveQ14 = (q) => q.map((v) => Math.min(255, Math.max(0, Number(divQBig(BigInt(v) * 255n, 16384n)))));
+
+function colorAdjustTexelV3(rgba, brightness, contrast, saturation) {
+  // Mode 18, then mode 19 at opacity 1 onto the empty backdrop (a Q14 copy), then 17.
+  return resolveQ14(colorAdjustStageQ14(ingressQ14(rgba), { brightness, contrast, saturation }));
+}
+
+/** Render version 3, integer M5 stages: Q14 premultiply, Q14 color-adjust, byte resolve. */
 export function renderColorAdjustV3(image, settings = {}) {
-  const brightness = f(settings.brightness ?? 0);
-  const contrast = f(settings.contrast ?? 1);
-  const saturation = f(settings.saturation ?? 1);
+  const brightness = settings.brightness ?? 0;
+  const contrast = settings.contrast ?? 1;
+  const saturation = settings.saturation ?? 1;
   const out = new Uint8Array(image.w * image.h * 4);
   for (let i = 0; i < out.length; i += 4) {
     out.set(colorAdjustTexelV3(
@@ -817,6 +778,42 @@ export function renderColorAdjustV3(image, settings = {}) {
       contrast,
       saturation,
     ), i);
+  }
+  return out;
+}
+
+/**
+ * Render version 3 M5 reference for a flat stack at the identity transform, as
+ * `renderer/m5.rs` dispatches it. `layers` is bottom first. A raster is
+ * `{ image, opacity, mode, effects }` (color-adjust settings only) and composites
+ * with mode 19; `{ adjust, opacity }` is a color-adjust adjustment layer (mode 17,
+ * then mode 20 when its opacity is below 1).
+ */
+export function renderM5V3(layers, w = 256, h = 256) {
+  const out = new Uint8Array(w * h * 4);
+  const Q = 16384n;
+  const big = (q) => q.map(BigInt);
+  for (let i = 0; i < out.length; i += 4) {
+    let accum = [0n, 0n, 0n, 0n];
+    for (const layer of layers) {
+      const opacity = cqOpacity(layer.opacity ?? 1);
+      if (layer.adjust) {
+        const adjusted = big(colorAdjustStageQ14(accum.map(Number), layer.adjust));
+        accum = opacity === Q ? adjusted : accum.map((v, c) => cqDiv(v * (Q - opacity) + adjusted[c] * opacity));
+        continue;
+      }
+      let q = ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4)));
+      for (const effect of layer.effects || []) q = colorAdjustStageQ14(q, effect);
+      const src = big(q);
+      const mode = layer.mode ?? 0;
+      const straight = cqStraight(src);
+      if (opacity === Q) accum = compositeQ14Blend(accum, straight, src.slice(0, 3), src[3], mode);
+      else {
+        const sa = cqMul(src[3], opacity);
+        accum = compositeQ14Blend(accum, straight, straight.map((v) => cqMul(v, sa)), sa, mode);
+      }
+    }
+    out.set(resolveQ14(accum), i);
   }
   return out;
 }
@@ -831,9 +828,18 @@ export function fnv64(bytes) {
 
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
-/** Why a document is outside the plain composite.wgsl path, or null when it is on it. */
+const isColorAdjust = (effect) => effect?.type === "color_adjust" && !effect.selection;
+
+/**
+ * Why a document is outside the plain composite.wgsl path, or null when it is on it.
+ * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
+ * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
+ * effects and color-adjust adjustment layers) and "v3-unsupported" (the host
+ * refuses the scene; no tile is drawn).
+ */
 export function sceneGap(snapshot) {
   const found = new Set();
+  let unsupported = false;
   for (const node of snapshot.nodes.values()) {
     const props = node.props || {};
     if (props.mask) found.add("mask");
@@ -845,9 +851,18 @@ export function sceneGap(snapshot) {
     if (node.type === "text") found.add("text");
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
+    if (props.mask || props.vector_mask || props.clip_path || props.clip_to_below ||
+        node.type === "vector" || node.type === "text" ||
+        (props.effects || []).some((effect) => !isColorAdjust(effect)) ||
+        (node.type === "adjustment" && (!isColorAdjust(node.adjustment) || (props.blend ?? "normal") !== "normal"))) {
+      unsupported = true;
+    }
   }
-  if (snapshot.meta?.render_version === 3 &&
-      ["mask", "vector mask", "effects"].some((gap) => found.has(gap))) return "v3-m5-float";
+  if (snapshot.meta?.render_version === 3) {
+    if (unsupported) return "v3-unsupported";
+    if (found.has("effects") || found.has("adjustment")) return "v3-m5-integer";
+    return null;
+  }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
 }
 
@@ -964,9 +979,9 @@ function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
   return out;
 }
 
-/** Reporting only: float fallback rows never enter integer-exact enforcement. */
+/** Every v3 scene the host draws is integer-exact and enforced; refused scenes are not. */
 export function isV3IntegerCase(row) {
-  return row.renderPath !== "v3-m5-float";
+  return row.renderPath !== "v3-unsupported";
 }
 
 /** Integer cached-pyramid reference. Children are TL, TR, BL, BR. */
@@ -982,54 +997,4 @@ export function downsampleQ14(children) {
 export function renderPyramidCase(testCase) {
   if (testCase.level <= 0) return renderCase(testCase,3);
   return downsampleQ14(Array.from({length:4},(_,i)=>renderPyramidCase({...testCase,level:testCase.level-1,tx:testCase.tx*2+i%2,ty:testCase.ty*2+Math.floor(i/2)})));
-}
-
-// Measure-only replay through the adjustment output f16 store and resolve load.
-// Resolve copies the loaded value directly to rgba8unorm. No rendering uses this.
-export function measureColorAdjustTies(image, settings, gpu, cpu, name) {
-  const adjustOutput8192 = { pixels: 0, channels: [0, 0, 0] };
-  const resolveInput = { pixels: 0, channels: [0, 0, 0, 0] };
-  const histogram = new Map();
-  const lossyStep2_4_8 = [0, 0, 0];
-  const ties = [];
-  let gpuEqualsCpu = 0, gpuDiffersCpu = 0, unavailable = 0;
-  for (let i = 0; i < image.pixels.length; i += 4) {
-    const b = image.pixels.slice(i, i + 4);
-    const input = [premulByteQ14(b[0], b[3]), premulByteQ14(b[1], b[3]), premulByteQ14(b[2], b[3]), byteQ14(b[3])];
-    const stored = input.map(q14ToF16Bits);
-    const q = stored.map(f16BitsToQ14);
-    const rgb = colorAdjustExactQ14(q, colorAdjustQ14(f(settings.brightness)), colorAdjustQ14(f(settings.contrast)), colorAdjustQ14(f(settings.saturation)));
-    // These f16 values are exact multiples of 1/16384, so conversion is lossless.
-    const resolve = [...rgb.map((v) => f16BitsToQ14(q14ToF16Bits(v))), f16BitsToQ14(stored[3])];
-    if (rgb.includes(8192)) adjustOutput8192.pixels++;
-    rgb.forEach((v, c) => {
-      if (v === 8192) {
-        adjustOutput8192.channels[c]++;
-        histogram.set(resolve[c], (histogram.get(resolve[c]) || 0) + 1);
-      }
-    });
-    let pixelTie = false;
-    resolve.forEach((v, c) => {
-      if ((255 * v) % 16384 !== 8192) return;
-      pixelTie = true;
-      resolveInput.channels[c]++;
-      const gpuByte = gpu?.[i + c] ?? null;
-      const cpuByte = cpu?.[i + c] ?? null;
-      if (gpuByte === null || cpuByte === null) unavailable++;
-      else if (gpuByte === cpuByte) gpuEqualsCpu++;
-      else gpuDiffersCpu++;
-      const lower = Math.floor(255 * v / 16384);
-      ties.push({ case: name, x: (i / 4) % image.w, y: Math.floor(i / 4 / image.w), channel: "rgba"[c], q: v, gpuByte, cpuByte,
-        gpuSide: gpuByte === null ? "unavailable" : gpuByte === lower ? "down" : gpuByte === lower + 1 ? "up" : "other",
-        gpuParity: gpuByte === null ? "unavailable" : gpuByte % 2 === 0 ? "even" : "odd" });
-    });
-    if (pixelTie) resolveInput.pixels++;
-    for (const v of [...input, ...rgb]) {
-      if (v >= 2048 && f16BitsToQ14(q14ToF16Bits(v)) !== v) {
-        lossyStep2_4_8[v < 4096 ? 0 : v < 8192 ? 1 : 2]++;
-      }
-    }
-  }
-  const old8192ResolveHistogram = [...histogram].sort(([a], [b]) => a - b).map(([q, count]) => ({q, count, intact: q === 8192, isTie: (255 * q) % 16384 === 8192}));
-  return { name, adjustOutput8192, resolveInput, old8192ResolveHistogram, lossyStep2_4_8, tiesReached: ties.length, gpuEqualsCpu, gpuDiffersCpu, unavailable, ties };
 }

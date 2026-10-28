@@ -10,9 +10,11 @@
 //!
 //! Masks, clips, blur, vectors and text are not on the composite path. `composite.wgsl`
 //! never sees them (`plain_scene` is false, and the effect pass uses rgba16float).
-//! Color adjust is the exception: the reference repeats `effects.wgsl` mode 0, the
-//! normal blend onto clear, mode 3, and `effects-resolve.wgsl`, with an f16 round trip
-//! after every store. The shader is unchanged, so render version 2 pixels stay put.
+//! Color adjust is the exception: for versions 1 and 2 the reference repeats
+//! `effects.wgsl` mode 0, the normal blend onto clear, mode 3, and
+//! `effects-resolve.wgsl`, with an f16 round trip after every store. Render version 3
+//! runs the integer M5 stages of `effects-q14.wgsl` (Q14 in `rgba16uint`, resolved to
+//! `rgba8uint`), and its reference is integer throughout.
 //! The parity image is a 256² gradient (every R, G, B and alpha, including alpha
 //! 0, 1, 128 and 254) run through the contrast × saturation × brightness grid.
 //! The other four stay explicit xfails in the browser suite.
@@ -1013,84 +1015,6 @@ const Q14_HALF: i32 = 8192;
 /// Luma weights in Q14. They sum to [`Q14_ONE`].
 const Q14_LUMA: [i32; 3] = [3483, 11718, 1183];
 
-/// f16 bits to Q14, truncated toward zero and clamped to 0..1. Negatives become
-/// 0, inf becomes 1, NaN becomes 0, and subnormals become 0.
-fn f16_bits_to_q14(half: u16) -> u32 {
-    let sign = half & 0x8000;
-    let exp = ((half >> 10) & 0x1f) as u32;
-    let mant = (half & 0x3ff) as u32;
-    if sign != 0 {
-        return 0;
-    }
-    if exp == 31 {
-        return if mant == 0 { Q14_ONE as u32 } else { 0 };
-    }
-    if exp == 0 {
-        return 0;
-    }
-    let sig = 1024 + mant;
-    let q = if exp >= 11 {
-        sig << (exp - 11)
-    } else {
-        sig >> (11 - exp)
-    };
-    q.min(Q14_ONE as u32)
-}
-
-fn floor_log2(mut value: u32) -> u32 {
-    let mut p = 0u32;
-    if value >= 256 {
-        p += 8;
-        value >>= 8;
-    }
-    if value >= 16 {
-        p += 4;
-        value >>= 4;
-    }
-    if value >= 4 {
-        p += 2;
-        value >>= 2;
-    }
-    if value >= 2 {
-        p += 1;
-    }
-    p
-}
-
-/// Q14 in 0..1 to f16 bits, round ties to even.
-fn q14_to_f16_bits(q: u32) -> u16 {
-    if q == 0 {
-        return 0;
-    }
-    let q = q.min(Q14_ONE as u32);
-    if q == Q14_ONE as u32 {
-        return 0x3c00;
-    }
-    let p = floor_log2(q);
-    let (sig, exp_p) = if p >= 10 {
-        let cut = p - 10;
-        let mut sig = q;
-        if cut > 0 {
-            let half = 1u32 << (cut - 1);
-            let rem = sig & ((1u32 << cut) - 1);
-            sig >>= cut;
-            if rem > half || (rem == half && (sig & 1) == 1) {
-                sig += 1;
-            }
-        }
-        if sig >= 2048 {
-            (1024u32, p + 1)
-        } else {
-            (sig, p)
-        }
-    } else {
-        (q << (10 - p), p)
-    };
-    let mant = (sig & 1023) as u16;
-    let exp = (exp_p + 1) as u16;
-    (exp << 10) | mant
-}
-
 /// `(n + d/2) / d` for `d > 0`, with the sign taken so a tie moves away from zero.
 fn div_q_i64(n: i64, d: i64) -> Option<i64> {
     let half = d / 2;
@@ -1113,7 +1037,7 @@ fn saturation_mix_sum(luma: i64, channel: i64, saturation: i64) -> Option<i64> {
 
 /// Mode 17. `q` is premultiplied Q14 plus alpha. Settings are already Q14.
 /// The returned channels are premultiplied Q14; alpha is not part of the result
-/// because the stored alpha keeps the input f16 bits.
+/// because the stage passes the input alpha through unchanged.
 ///
 /// Straight channels are 0..=16384. `color_adjust_q14` quantizes a setting into
 /// −16384..=65536 (the f32 is clamped to [−1, 4] first). Brightness in the
@@ -1215,9 +1139,10 @@ fn premul_byte_q14(color: u32, alpha: u32) -> u32 {
     (color * alpha * 16384 + 32_512) / 65_025
 }
 
-/// Render version 3. Recovered bytes are premultiplied in Q14, stored as f16,
-/// copied through the clear normal blend, then adjusted. The alpha f16 bits
-/// survive the adjustment. The unorm resolve is round-ties-to-even.
+/// Render version 3, the integer M5 chain: mode 18 premultiplies the recovered
+/// bytes into Q14, mode 19 copies them onto the empty backdrop, mode 17 adjusts
+/// with alpha unchanged, and the resolve writes `div_q(q * 255, 16384)` bytes.
+/// Every stage stores exact Q14 in `rgba16uint`, so nothing rounds in between.
 fn color_adjust_texel_v3(
     rgba: [u8; 4],
     brightness: f32,
@@ -1226,25 +1151,230 @@ fn color_adjust_texel_v3(
 ) -> [u8; 4] {
     let bytes = rgba.map(u32::from);
     let alpha = bytes[3];
-    let stored = [
-        q14_to_f16_bits(premul_byte_q14(bytes[0], alpha)),
-        q14_to_f16_bits(premul_byte_q14(bytes[1], alpha)),
-        q14_to_f16_bits(premul_byte_q14(bytes[2], alpha)),
-        q14_to_f16_bits(byte_q14(alpha)),
+    let q = [
+        premul_byte_q14(bytes[0], alpha),
+        premul_byte_q14(bytes[1], alpha),
+        premul_byte_q14(bytes[2], alpha),
+        byte_q14(alpha),
     ];
-    let q = stored.map(f16_bits_to_q14);
     let rgb = color_adjust_exact_q14(
         q,
         crate::renderer::color_adjust_q14(brightness),
         crate::renderer::color_adjust_q14(contrast),
         crate::renderer::color_adjust_q14(saturation),
     );
-    quantize([
-        f16_to_f32(q14_to_f16_bits(rgb[0])),
-        f16_to_f32(q14_to_f16_bits(rgb[1])),
-        f16_to_f32(q14_to_f16_bits(rgb[2])),
-        f16_to_f32(stored[3]),
-    ])
+    q14::bytes([rgb[0], rgb[1], rgb[2], q[3]].map(i64::from))
+}
+
+/// One `effects-q14.wgsl` dispatch over 256² targets with the identity ROI.
+/// `a`/`b` are input targets, `slot` the atlas layer mode 18 reads, and
+/// `settings` the Q14 integers the host bit-casts into the uniform.
+#[derive(Clone, Copy)]
+struct Q14Stage {
+    mode: u32,
+    settings: [i32; 4],
+    a: usize,
+    b: usize,
+    out: usize,
+    slot: u32,
+}
+
+/// An M5 graph as `renderer/m5.rs` dispatches it for render version 3. Target 0
+/// is never written, so it is the empty backdrop.
+struct Q14Program {
+    name: String,
+    targets: usize,
+    stages: Vec<Q14Stage>,
+    result: usize,
+}
+
+impl Q14Stage {
+    fn ingress(slot: u32, out: usize) -> Self {
+        Self {
+            mode: 18,
+            settings: [0; 4],
+            a: 0,
+            b: 0,
+            out,
+            slot,
+        }
+    }
+    fn layer(dst: usize, src: usize, opacity: f32, mode: u32, out: usize) -> Self {
+        Self {
+            mode: 19,
+            settings: [crate::composite_opacity_q14(opacity), mode as i32, 0, 0],
+            a: dst,
+            b: src,
+            out,
+            slot: 0,
+        }
+    }
+    fn color_adjust(
+        input: usize,
+        (contrast, saturation, brightness): (f32, f32, f32),
+        out: usize,
+    ) -> Self {
+        Self {
+            mode: 17,
+            settings: [
+                crate::renderer::color_adjust_q14(brightness),
+                crate::renderer::color_adjust_q14(contrast),
+                crate::renderer::color_adjust_q14(saturation),
+                0,
+            ],
+            a: input,
+            b: input,
+            out,
+            slot: 0,
+        }
+    }
+    fn adjustment_mix(backdrop: usize, adjusted: usize, opacity: f32, out: usize) -> Self {
+        Self {
+            mode: 20,
+            settings: [crate::composite_opacity_q14(opacity), 0, 0, 0],
+            a: backdrop,
+            b: adjusted,
+            out,
+            slot: 0,
+        }
+    }
+}
+
+/// CPU reference for a [`Q14Program`], one pixel at a time, with the checked
+/// Q14 functions of the integer tile compositor.
+fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
+    let mut out = vec![0u8; 256 * 256 * 4];
+    for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let mut t = vec![[0i64; 4]; program.targets];
+        for stage in &program.stages {
+            let a = t[stage.a];
+            let b = t[stage.b];
+            let w = i64::from(stage.settings[0]);
+            t[stage.out] = match stage.mode {
+                18 => {
+                    let rgba = &images[stage.slot as usize][i * 4..i * 4 + 4];
+                    let alpha = u32::from(rgba[3]);
+                    let mut q = [0i64; 4];
+                    for c in 0..3 {
+                        q[c] = i64::from(premul_byte_q14(u32::from(rgba[c]), alpha));
+                    }
+                    q[3] = i64::from(byte_q14(alpha));
+                    q
+                }
+                19 => {
+                    let mode = stage.settings[1] as u32;
+                    if w == q14::Q {
+                        q14::blend(a, q14::straight(b), [b[0], b[1], b[2]], b[3], mode)
+                    } else {
+                        q14::pop(a, b, w, mode)
+                    }
+                }
+                17 => {
+                    let q = a.map(|v| v as u32);
+                    let rgb = color_adjust_exact_q14(
+                        q,
+                        stage.settings[0],
+                        stage.settings[1],
+                        stage.settings[2],
+                    );
+                    [rgb[0], rgb[1], rgb[2], q[3]].map(i64::from)
+                }
+                20 => std::array::from_fn(|c| {
+                    div_q_i64(a[c] * (q14::Q - w) + b[c] * w, q14::Q).unwrap()
+                }),
+                mode => panic!("no CPU reference for Q14 mode {mode}"),
+            }
+            .map(|v| v.clamp(0, q14::Q));
+        }
+        *px = q14::bytes(t[program.result]);
+    }
+    out
+}
+
+/// The browser `color-adjust` test as an M5 graph: an adjustment layer over one
+/// raster. Raster ingress, the copy onto the empty backdrop, then the Q14 adjust.
+fn color_adjust_program(settings: (f32, f32, f32)) -> Q14Program {
+    Q14Program {
+        name: color_adjust_case_name(settings.0, settings.1, settings.2),
+        targets: 4,
+        stages: vec![
+            Q14Stage::ingress(0, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::color_adjust(2, settings, 3),
+        ],
+        result: 3,
+    }
+}
+
+/// Atlas layers for [`opacity_programs`]: the color-adjust gradient, opaque
+/// blue, opaque red and half-alpha red.
+fn opacity_images() -> Vec<Vec<u8>> {
+    vec![
+        color_adjust_gradient(),
+        [0, 0, 255, 255].repeat(256 * 256),
+        [255, 0, 0, 255].repeat(256 * 256),
+        [255, 0, 0, 128].repeat(256 * 256),
+    ]
+}
+
+/// Opacity 0.5 through the integer M5 stages, enforced on every backend: a layer
+/// at half opacity (normal and four other modes), a color-adjusted layer at half
+/// opacity, and a color-adjust adjustment layer at half opacity.
+fn opacity_programs() -> Vec<Q14Program> {
+    let vivid = (1.7, 1.6, 0.0);
+    let mut out = vec![Q14Program {
+        name: "m5-opacity-half".into(),
+        targets: 5,
+        stages: vec![
+            Q14Stage::ingress(1, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::ingress(2, 3),
+            Q14Stage::layer(2, 3, 0.5, 0, 4),
+        ],
+        result: 4,
+    }];
+    for (mode, name) in [
+        (1, "multiply"),
+        (2, "screen"),
+        (9, "soft-light"),
+        (14, "color"),
+    ] {
+        out.push(Q14Program {
+            name: format!("m5-opacity-half-{name}"),
+            targets: 5,
+            stages: vec![
+                Q14Stage::ingress(0, 1),
+                Q14Stage::layer(0, 1, 1.0, 0, 2),
+                Q14Stage::ingress(3, 3),
+                Q14Stage::layer(2, 3, 0.5, mode, 4),
+            ],
+            result: 4,
+        });
+    }
+    out.push(Q14Program {
+        name: "m5-color-adjust-layer-opacity-half".into(),
+        targets: 6,
+        stages: vec![
+            Q14Stage::ingress(1, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::ingress(0, 3),
+            Q14Stage::color_adjust(3, vivid, 4),
+            Q14Stage::layer(2, 4, 0.5, 0, 5),
+        ],
+        result: 5,
+    });
+    out.push(Q14Program {
+        name: "m5-adjustment-opacity-half".into(),
+        targets: 5,
+        stages: vec![
+            Q14Stage::ingress(0, 1),
+            Q14Stage::layer(0, 1, 1.0, 0, 2),
+            Q14Stage::color_adjust(2, vivid, 3),
+            Q14Stage::adjustment_mix(2, 3, 0.5, 4),
+        ],
+        result: 4,
+    });
+    out
 }
 
 fn color_adjust_image(src: &[u8], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
@@ -1271,172 +1401,6 @@ fn color_adjust_image_v3(src: &[u8], brightness: f32, contrast: f32, saturation:
         *dst = color_adjust_texel_v3(*px, brightness, contrast, saturation);
     }
     out
-}
-
-/// Diagnostic only: replay through the output f16 store and effects-resolve's
-/// textureLoad. All Q14 store inputs here map to integral Q14 after f16 rounding.
-/// Resolve performs no arithmetic between that load and the unorm8 store.
-struct TieMeasurement {
-    json: String,
-    markdown: String,
-    reached: u32,
-    equal: u32,
-    different: u32,
-    unavailable: u32,
-}
-
-fn measure_tie_8192(
-    src: &[u8],
-    settings: (f32, f32, f32),
-    gpu: &[u8],
-    cpu: &[u8],
-) -> TieMeasurement {
-    let (contrast, saturation, brightness) = settings;
-    let name = color_adjust_case_name(contrast, saturation, brightness);
-    let mut old_pixels = 0u32;
-    let mut old_channels = [0u32; 3];
-    let mut pixels = 0u32;
-    let mut channels = [0u32; 4];
-    let mut lossy = [0u32; 3];
-    let mut histogram = std::collections::BTreeMap::<u32, u32>::new();
-    let mut details = Vec::new();
-    let mut equal = 0u32;
-    let mut different = 0u32;
-    let mut unavailable = 0u32;
-    for (index, px) in src.as_chunks::<4>().0.iter().enumerate() {
-        let b = px.map(u32::from);
-        let input = [
-            premul_byte_q14(b[0], b[3]),
-            premul_byte_q14(b[1], b[3]),
-            premul_byte_q14(b[2], b[3]),
-            byte_q14(b[3]),
-        ];
-        let stored = input.map(q14_to_f16_bits);
-        let q = stored.map(f16_bits_to_q14);
-        let rgb = color_adjust_exact_q14(
-            q,
-            crate::renderer::color_adjust_q14(brightness),
-            crate::renderer::color_adjust_q14(contrast),
-            crate::renderer::color_adjust_q14(saturation),
-        );
-        let resolve = [
-            f16_bits_to_q14(q14_to_f16_bits(rgb[0])),
-            f16_bits_to_q14(q14_to_f16_bits(rgb[1])),
-            f16_bits_to_q14(q14_to_f16_bits(rgb[2])),
-            f16_bits_to_q14(stored[3]),
-        ];
-        old_pixels += u32::from(rgb.contains(&8192));
-        for (c, value) in rgb.into_iter().enumerate() {
-            if value == 8192 {
-                old_channels[c] += 1;
-                *histogram.entry(resolve[c]).or_default() += 1;
-            }
-        }
-        let mut pixel_tie = false;
-        for (c, value) in resolve.into_iter().enumerate() {
-            if (255 * value) % 16384 != 8192 {
-                continue;
-            }
-            pixel_tie = true;
-            channels[c] += 1;
-            let offset = index * 4 + c;
-            let gpu_byte = gpu.get(offset).copied();
-            let cpu_byte = cpu.get(offset).copied();
-            match (gpu_byte, cpu_byte) {
-                (Some(g), Some(c)) if g == c => equal += 1,
-                (Some(_), Some(_)) => different += 1,
-                _ => unavailable += 1,
-            }
-            let lower = 255 * value / 16384;
-            let side = match gpu_byte.map(u32::from) {
-                Some(g) if g == lower => "down",
-                Some(g) if g == lower + 1 => "up",
-                Some(_) => "other",
-                None => "unavailable",
-            };
-            let parity = match gpu_byte {
-                Some(g) if g % 2 == 0 => "even",
-                Some(_) => "odd",
-                None => "unavailable",
-            };
-            let gpu_json = gpu_byte.map_or_else(|| "null".into(), |v| v.to_string());
-            let cpu_json = cpu_byte.map_or_else(|| "null".into(), |v| v.to_string());
-            details.push(format!(
-                "{{\"case\":\"{}\",\"x\":{},\"y\":{},\"channel\":\"{}\",\"q\":{value},\"gpuByte\":{gpu_json},\"cpuByte\":{cpu_json},\"gpuSide\":\"{side}\",\"gpuParity\":\"{parity}\"}}",
-                json_escape(&name), index % 256, index / 256, ["r", "g", "b", "a"][c]
-            ));
-        }
-        pixels += u32::from(pixel_tie);
-        for value in input.into_iter().chain(rgb) {
-            if value >= 2048 && f16_bits_to_q14(q14_to_f16_bits(value)) != value {
-                let bucket = if value < 4096 {
-                    0
-                } else if value < 8192 {
-                    1
-                } else {
-                    2
-                };
-                lossy[bucket] += 1;
-            }
-        }
-    }
-    let histogram = histogram
-        .into_iter()
-        .map(|(q, count)| {
-            format!(
-                "{{\"q\":{q},\"count\":{count},\"intact\":{},\"isTie\":{}}}",
-                q == 8192,
-                (255 * q) % 16384 == 8192
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let reached = channels.iter().sum();
-    let json = format!(
-        "{{\"name\":\"{}\",\"adjustOutput8192\":{{\"pixels\":{old_pixels},\"channels\":{old_channels:?}}},\"resolveInput\":{{\"pixels\":{pixels},\"channels\":{channels:?}}},\"old8192ResolveHistogram\":[{histogram}],\"lossyStep2_4_8\":{lossy:?},\"tiesReached\":{reached},\"gpuEqualsCpu\":{equal},\"gpuDiffersCpu\":{different},\"unavailable\":{unavailable},\"ties\":[{}]}}",
-        json_escape(&name),
-        details.join(",")
-    );
-    let markdown = format!(
-        "| {name} | {pixels} | {channels:?} | {reached} | {equal} | {different} | {old_pixels} / {old_channels:?} |\n"
-    );
-    TieMeasurement {
-        json,
-        markdown,
-        reached,
-        equal,
-        different,
-        unavailable,
-    }
-}
-
-fn write_tie_8192(adapter: &str, rows: &[TieMeasurement]) {
-    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
-        return;
-    };
-    let reached: u32 = rows.iter().map(|r| r.reached).sum();
-    let equal: u32 = rows.iter().map(|r| r.equal).sum();
-    let different: u32 = rows.iter().map(|r| r.different).sum();
-    let unavailable: u32 = rows.iter().map(|r| r.unavailable).sum();
-    let json = format!(
-        "{{\"label\":\"measured-not-enforced\",\"source\":\"resolve-input-q14\",\"qSource\":\"cpu-replay-through-f16-store\",\"byteSource\":\"gpu_tile-readback\",\"cpuByteSource\":\"cpu-reference\",\"channelOrder\":\"rgba (adjustOutput8192: rgb)\",\"lossyScope\":\"input RGBA and adjust output RGB stores; steps 2/4/8\",\"backend\":\"{}\",\"totals\":{{\"tiesReached\":{reached},\"gpuEqualsCpu\":{equal},\"gpuDiffersCpu\":{different},\"unavailable\":{unavailable}}},\"cases\":[{}]}}\n",
-        json_escape(adapter),
-        rows.iter()
-            .map(|r| r.json.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let markdown = format!(
-        "### Resolve unorm8 ties ({adapter})\n\nMeasured-not-enforced. Q14 is CPU-replayed through the adjustment output f16 store and resolve textureLoad; bytes are GPU tile readback and CPU reference. Tie: `255*q mod 16384 == 8192`. Old counts are RGB before the adjustment output f16 store. JSON includes every tie and the old-8192 resolve histogram.\n\nTotals (channels): ties reached **{reached}**, GPU == CPU **{equal}**, GPU != CPU **{different}**, unavailable **{unavailable}**.\n\n| case | resolve tie pixels | channels r,g,b,a | ties reached | GPU == CPU | GPU != CPU | old 8192 pixels / r,g,b |\n| --- | ---: | --- | ---: | ---: | ---: | --- |\n{}",
-        rows.iter().map(|r| r.markdown.as_str()).collect::<String>()
-    );
-    let dir = std::path::PathBuf::from(dir);
-    if let Err(error) = std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(dir.join("tie-8192.json"), json))
-        .and_then(|()| std::fs::write(dir.join("tie-8192.md"), markdown))
-    {
-        eprintln!("tie-8192 report: {error}");
-    }
 }
 
 fn color_adjust_tile(rgba: [u8; 4], brightness: f32, contrast: f32, saturation: f32) -> Vec<u8> {
@@ -1981,7 +1945,7 @@ fn json_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The `unorm_byte` that color-adjust mode 18 uses (`effects.wgsl`). The atlas-read
+/// The `unorm_byte` that every v3 atlas read uses (`q14.wgsl`). The atlas-read
 /// measurement runs this exact text; `atlas_read_uses_effects_unorm_byte` checks it.
 const UNORM_BYTE_WGSL: &str = "fn unorm_byte(v: f32) -> u32 {
   return u32(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
@@ -2093,7 +2057,7 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
         json_escape(adapter)
     );
     for (index, row) in rows.iter().enumerate() {
-        let enforced = integer && row.render_path != Some("v3-m5-float");
+        let enforced = integer && row.render_path != Some("v3-unsupported");
         let render_path = row
             .render_path
             .map_or("null".to_string(), |p| format!("\"{p}\""));
@@ -2141,20 +2105,20 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
         let exact_count = rows
             .iter()
             .filter(|r| {
-                r.render_path != Some("v3-m5-float") && r.count == 0 && r.length_note.is_empty()
+                r.render_path != Some("v3-unsupported") && r.count == 0 && r.length_note.is_empty()
             })
             .count();
-        let float_count = rows
+        let unsupported_count = rows
             .iter()
-            .filter(|r| r.render_path == Some("v3-m5-float"))
+            .filter(|r| r.render_path == Some("v3-unsupported"))
             .count();
         json.push_str(&format!(
-            ",\n  \"integerExactCount\": {exact_count},\n  \"v3M5FloatCount\": {float_count}"
+            ",\n  \"integerExactCount\": {exact_count},\n  \"v3UnsupportedCount\": {unsupported_count}"
         ));
         let status = if !errors.is_empty() {
             "error"
         } else if rows.iter().any(|r| {
-            r.render_path != Some("v3-m5-float") && (r.count != 0 || !r.length_note.is_empty())
+            r.render_path != Some("v3-unsupported") && (r.count != 0 || !r.length_note.is_empty())
         }) {
             "mismatch"
         } else {
@@ -2199,8 +2163,8 @@ fn write_measure(adapter: &str, rows: &[MeasuredCase], integer: bool, errors: &[
         markdown.push_str(&format!(
             "| {}{} | {} | {},{},{},{} | {}{} |\n",
             row.name,
-            if row.render_path == Some("v3-m5-float") {
-                " (v3-m5-float; measured-not-enforced)"
+            if row.render_path == Some("v3-unsupported") {
+                " (v3-unsupported; refused by the host)"
             } else {
                 ""
             },
@@ -2510,15 +2474,24 @@ fn scene(content: RContent, features: RFeatures) -> RenderScene {
     }
 }
 
+/// The numeric parity host refuses v3 modes 17 and up before any command is
+/// built, as the renderer does in `prepare_scene` (DQ3-3: no new variant).
+fn has_unspecified_v3_mode(ops: &[Op]) -> bool {
+    ops.iter().any(|op| match op {
+        Op::Pop { mode, .. } | Op::Draw { mode, .. } => *mode >= 17,
+        _ => false,
+    })
+}
+
+/// Version 3 has exactly three classes (`renderer::v3_gap`): `None` (integer tile
+/// compositor), `v3-m5-integer` (integer M5 stages) and `v3-unsupported` (refused
+/// by the host). Versions 1 and 2 keep their first-gap names.
 fn gap(scene: &RenderScene) -> Option<&'static str> {
-    if scene.render_version == 3
-        && scene.nodes.iter().any(|n| {
-            n.features.mask.is_some()
-                || n.features.vector_mask.is_some()
-                || !n.features.effects.is_empty()
-        })
-    {
-        return Some("v3-m5-float");
+    if scene.render_version == 3 {
+        if crate::renderer::v3_gap(scene).is_some() {
+            return Some("v3-unsupported");
+        }
+        return (!plain_scene(scene)).then_some("v3-m5-integer");
     }
     for n in &scene.nodes {
         if n.features.mask.is_some() {
@@ -2938,12 +2911,7 @@ impl Gpu {
         for node in &case.nodes {
             walk(node, ident(), &mut ops);
         }
-        if integer
-            && ops.iter().any(|op| match op {
-                Op::Pop { mode, .. } | Op::Draw { mode, .. } => *mode >= 17,
-                _ => false,
-            })
-        {
+        if integer && has_unspecified_v3_mode(&ops) {
             return Err("v3 unspecified blend mode".into());
         }
         let mut commands = Vec::new();
@@ -3217,85 +3185,42 @@ impl Gpu {
         Ok((bytes, prequant))
     }
 
-    /// The production color-adjust chain for each `(contrast, saturation, brightness)`:
-    /// mode 0, normal blend onto clear, mode 3, resolve. Sampling does not depend on
-    /// the settings, so those passes run once.
-    fn render_color_adjust(
+    /// Runs Q14 stage programs through the production `effects-q14.wgsl` and
+    /// `effects-resolve-q14.wgsl`. Targets are `rgba16uint` and start at zero, so
+    /// an unwritten target is the empty backdrop. Each program's result target is
+    /// resolved to `rgba8uint` and read back.
+    fn render_q14(
         &self,
-        pixels: &[u8],
-        grid: &[(f32, f32, f32)],
+        images: &[Vec<u8>],
+        programs: &[Q14Program],
     ) -> Result<Vec<Vec<u8>>, String> {
-        if pixels.len() != 256 * 256 * 4 {
-            return Err(format!("color-adjust image is {} bytes", pixels.len()));
-        }
         let device = &self.device;
-        let effects = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("color-adjust effects"),
-            layout: None,
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("color-adjust effects"),
-                source: wgpu::ShaderSource::Wgsl(
-                    shader_with_blend(include_str!("../shaders/effects.wgsl")).into(),
-                ),
-            }),
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("color-adjust resolve"),
-            layout: None,
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("color-adjust resolve"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../shaders/effects-resolve.wgsl").into(),
-                ),
-            }),
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let float_tex = |label: &str| {
-            device.create_texture(&wgpu::TextureDescriptor {
+        let compile = |label: &str, source: String| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d {
-                    width: 256,
-                    height: 256,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-                view_formats: &[],
+                layout: None,
+                module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                }),
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
             })
         };
-        let backdrop = float_tex("color-adjust clear");
-        let sampled = float_tex("color-adjust sample");
-        let blended = float_tex("color-adjust blend");
-        let adjusted = float_tex("color-adjust filter");
-        let dummy = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color-adjust dummy"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let effects = compile("q14 stages", crate::integer_effects_shader());
+        let resolve = compile(
+            "q14 resolve",
+            include_str!("../shaders/effects-resolve-q14.wgsl").to_string(),
+        );
+        let size = |layers: usize| wgpu::Extent3d {
+            width: 256,
+            height: 256,
+            depth_or_array_layers: layers as u32,
+        };
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color-adjust atlas"),
-            size: wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
+            label: Some("q14 atlas"),
+            size: size(images.len()),
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -3303,71 +3228,48 @@ impl Gpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &atlas,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(1024),
-                rows_per_image: Some(256),
-            },
-            wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
-        );
+        for (layer, pixels) in images.iter().enumerate() {
+            if pixels.len() != 256 * 256 * 4 {
+                return Err(format!("q14 image {layer} is {} bytes", pixels.len()));
+            }
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(256),
+                },
+                size(1),
+            );
+        }
+        let atlas_v = atlas.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let output = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color-adjust resolve"),
-            size: wgpu::Extent3d {
-                width: 256,
-                height: 256,
-                depth_or_array_layers: 1,
-            },
+            label: Some("q14 resolve"),
+            size: size(1),
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba8Uint,
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let region = [0.0, 0.0, 1.0, 0.0];
-        let config =
-            |mode: u32, settings: [f32; 4], entries: u32, size: [u32; 4], clip: u32| EffectConfig {
-                out_region: region,
-                region_a: region,
-                region_b: region,
-                inv0: [1.0, 0.0, 0.0, 1.0],
-                inv1: [0.0; 4],
-                settings,
-                info: [mode, 0, entries, 0],
-                extra: [0.0; 4],
-                curve: [0.0; 64],
-                sizes: size,
-                output_clip: [256, 256, clip, clip],
-            };
-        let tile = [GpuTile {
-            xy: [0, 0],
-            slot: 0,
-            pad: 0,
-        }];
-        let full = [256, 256, 256, 256];
-        let configs = [
-            config(6, [0.0; 4], 0, [1, 1, 1, 1], 1),
-            config(18, [0.0; 4], 1, full, 1),
-            config(19, [1.0, 0.0, 0.0, 0.0], 0, full, 1),
-            config(17, [0.0; 4], 0, full, 1),
-        ];
-        let uniforms: Vec<_> = configs
-            .iter()
-            .map(|item| upload_buffer(device, &self.queue, &[*item], wgpu::BufferUsages::UNIFORM))
-            .collect();
-        let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
+        let output_v = output.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let resolve_config = upload_buffer(
             device,
             &self.queue,
@@ -3377,144 +3279,122 @@ impl Gpu {
             }],
             wgpu::BufferUsages::UNIFORM,
         );
-        let view = |texture: &wgpu::Texture| texture.create_view(&Default::default());
-        let backdrop_v = view(&backdrop);
-        let sampled_v = view(&sampled);
-        let blended_v = view(&blended);
-        let adjusted_v = view(&adjusted);
-        let dummy_v = view(&dummy);
-        let atlas_v = atlas.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let output_v = output.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let layout = effects.get_bind_group_layout(0);
-        let bind = |a: &wgpu::TextureView,
-                    b: &wgpu::TextureView,
-                    clip: &wgpu::TextureView,
-                    out: &wgpu::TextureView,
-                    uniform: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("color-adjust stage"),
-                layout: &layout,
+        let region = [0.0, 0.0, 1.0, 0.0];
+        let mut tiles_out = Vec::with_capacity(programs.len());
+        for program in programs {
+            let targets: Vec<_> = (0..program.targets)
+                .map(|_| {
+                    device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("q14 target"),
+                        size: size(1),
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Uint,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    })
+                })
+                .collect();
+            let views: Vec<_> = targets
+                .iter()
+                .map(|t| t.create_view(&Default::default()))
+                .collect();
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let mut keep = Vec::new();
+            for stage in &program.stages {
+                if stage.out == stage.a || stage.out == stage.b {
+                    return Err(format!("{}: stage reads its own output", program.name));
+                }
+                let tile = [GpuTile {
+                    xy: [0, 0],
+                    slot: stage.slot,
+                    pad: 0,
+                }];
+                let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
+                let uniform = upload_buffer(
+                    device,
+                    &self.queue,
+                    &[EffectConfig {
+                        out_region: region,
+                        region_a: region,
+                        region_b: region,
+                        inv0: [1.0, 0.0, 0.0, 1.0],
+                        inv1: [0.0; 4],
+                        settings: stage.settings.map(|v| f32::from_bits(v as u32)),
+                        info: [stage.mode, 0, u32::from(stage.mode == 18), 0],
+                        extra: [0.0; 4],
+                        curve: [0.0; 64],
+                        sizes: [256; 4],
+                        output_clip: [256; 4],
+                    }],
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("q14 stage"),
+                    layout: &effects.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&views[stage.a]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&views[stage.b]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&atlas_v),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&views[stage.out]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: tiles.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: uniform.as_entire_binding(),
+                        },
+                    ],
+                });
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&effects);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.dispatch_workgroups(16, 16, 1);
+                }
+                keep.push((tiles, uniform));
+            }
+            let resolve_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("q14 resolve"),
+                layout: &resolve.get_bind_group_layout(0),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(a),
+                        resource: wgpu::BindingResource::TextureView(&views[program.result]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(b),
+                        resource: wgpu::BindingResource::TextureView(&output_v),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(clip),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&atlas_v),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(out),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: tiles.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: uniform.as_entire_binding(),
+                        resource: resolve_config.as_entire_binding(),
                     },
                 ],
-            })
-        };
-        let stage = [
-            bind(&dummy_v, &dummy_v, &dummy_v, &backdrop_v, &uniforms[0]),
-            bind(&backdrop_v, &backdrop_v, &dummy_v, &sampled_v, &uniforms[1]),
-            bind(&backdrop_v, &sampled_v, &dummy_v, &blended_v, &uniforms[2]),
-            bind(&blended_v, &blended_v, &dummy_v, &adjusted_v, &uniforms[3]),
-        ];
-        let resolve_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("color-adjust resolve"),
-            layout: &resolve.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&adjusted_v),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&output_v),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: resolve_config.as_entire_binding(),
-                },
-            ],
-        });
-        let mut prep = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("color-adjust sample"),
-        });
-        for group in &stage[..3] {
-            let mut pass = prep.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("color-adjust sample"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&effects);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(16, 16, 1);
-        }
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        self.queue.submit(Some(prep.finish()));
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| format!("poll: {e}"))?;
-        if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(format!("validation: {err}"));
-        }
-        let mut tiles_out = Vec::with_capacity(grid.len());
-        for &(contrast, saturation, brightness) in grid {
-            let filter = config(
-                17,
-                [
-                    f32::from_bits(crate::renderer::color_adjust_q14(brightness) as u32),
-                    f32::from_bits(crate::renderer::color_adjust_q14(contrast) as u32),
-                    f32::from_bits(crate::renderer::color_adjust_q14(saturation) as u32),
-                    0.0,
-                ],
-                0,
-                full,
-                1,
-            );
-            self.queue
-                .write_buffer(&uniforms[3], 0, bytemuck::bytes_of(&filter));
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("color-adjust"),
             });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("color-adjust"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&effects);
-                pass.set_bind_group(0, &stage[3], &[]);
-                pass.dispatch_workgroups(16, 16, 1);
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("color-adjust resolve"),
-                    timestamp_writes: None,
-                });
+                let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&resolve);
                 pass.set_bind_group(0, &resolve_bind, &[]);
                 pass.dispatch_workgroups(16, 16, 1);
             }
             let read = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("color-adjust readback"),
+                label: Some("q14 readback"),
                 size: 256 * 1024,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
@@ -3534,17 +3414,13 @@ impl Gpu {
                         rows_per_image: Some(256),
                     },
                 },
-                wgpu::Extent3d {
-                    width: 256,
-                    height: 256,
-                    depth_or_array_layers: 1,
-                },
+                size(1),
             );
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             self.queue.submit(Some(encoder.finish()));
             map_readback(device, &read)?;
             if let Some(err) = pollster::block_on(scope.pop()) {
-                return Err(format!("validation: {err}"));
+                return Err(format!("{}: validation: {err}", program.name));
             }
             let bytes = read
                 .slice(..)
@@ -3552,6 +3428,7 @@ impl Gpu {
                 .map_err(|e| e.to_string())?
                 .to_vec();
             read.unmap();
+            drop(keep);
             tiles_out.push(bytes);
         }
         Ok(tiles_out)
@@ -3623,13 +3500,6 @@ fn color_adjust_q14_known_values() {
     assert_eq!(color_adjust_q14(0.5), Q14_HALF);
     assert_eq!(color_adjust_q14(-1.0), -Q14_ONE);
     assert_eq!(color_adjust_q14(4.0), Q14_ONE * 4);
-    assert_eq!(f16_bits_to_q14(0x3c00), Q14_ONE as u32);
-    assert_eq!(f16_bits_to_q14(0x3800), Q14_HALF as u32);
-    assert_eq!(f16_bits_to_q14(0), 0);
-    assert_eq!(q14_to_f16_bits(0), 0);
-    assert_eq!(q14_to_f16_bits(Q14_ONE as u32), 0x3c00);
-    assert_eq!(q14_to_f16_bits(Q14_HALF as u32), 0x3800);
-    assert_eq!(q14_to_f16_bits(1), 0x0400);
     assert_eq!(Q14_LUMA[0] + Q14_LUMA[1] + Q14_LUMA[2], Q14_ONE);
     let anchor = [251, 2, 251, 128];
     let v2 = color_adjust_texel(anchor, -0.35f64 as f32, 0.5f64 as f32, 0.0);
@@ -3830,29 +3700,29 @@ fn color_adjust_gradient_covers_every_channel_and_the_alpha_anchors() {
             "c={contrast} s={saturation} b={brightness}"
         );
     }
-    // Render version 3. Same bytes as renderColorAdjustV3 in tests/e2e/cpu-composite.js.
+    // Render version 3, integer M5 stages. Same bytes as renderColorAdjustV3 in tests/e2e/cpu-composite.js.
     let exact = [
-        "85427e72aa6975f4",
-        "d34d9def32069e30",
-        "6fabe3fd4a1d755d",
-        "03bdc46a2a94022a",
-        "e2631093ebe7c14b",
-        "6614a1c612c0eb35",
-        "35828221f6e46782",
-        "f2d63e24deb38bb5",
-        "e21500eb040c8e1d",
-        "54f48aae0e383c44",
-        "8e735cc19d43f13b",
-        "2edfc3149add3c41",
+        "7653b3dacf9f4a5d",
+        "74bbfcc000f4b9bb",
+        "628362e24b9f31df",
+        "cd2fba24007d3e58",
+        "cc0d355c44d9b665",
+        "3f1281ebe63782d5",
+        "1181326aa3c6b1fd",
+        "2193ceed938b774e",
+        "784796ff684f97ba",
+        "f8dd1fdfc273cc83",
+        "e1a6f921d39e706d",
+        "22c67fdcd3f3045e",
         // Contrast 0 makes every channel the same, so saturation does not move a pixel.
         "204b8da3774c1b25",
         "455fe98699531725",
         "204b8da3774c1b25",
         "455fe98699531725",
-        "3696fac022da0187",
-        "a719b6b1ac5d2588",
-        "e3e29d265599c372",
-        "db4228c4143ca9ff",
+        "1de207d9c6ef6ab5",
+        "33c42326a62c7eb0",
+        "e401eecb14e94b56",
+        "63a34d861b27424e",
     ];
     for (expected, (contrast, saturation, brightness)) in exact.into_iter().zip(color_adjust_grid())
     {
@@ -4307,16 +4177,55 @@ fn plain_scene_gaps_are_explicit() {
         assert_eq!(gap(scene), Some(reason));
         let mut v3 = scene.clone();
         v3.render_version = 3;
-        let expected = if matches!(reason, "mask" | "vector mask" | "effects") {
-            "v3-m5-float"
+        // A color-adjust adjustment layer is the only one of these with integer stages.
+        let expected = if reason == "adjustment" {
+            "v3-m5-integer"
         } else {
-            reason
+            "v3-unsupported"
         };
-        assert_eq!(gap(&v3), Some(expected));
+        assert_eq!(gap(&v3), Some(expected), "v3 {reason}");
+        assert_eq!(
+            crate::renderer::v3_gap(&v3),
+            (reason != "adjustment").then_some(reason)
+        );
     }
     // The plain compositor skips an unsupported node, so the tile stays exact.
     assert!(plain_scene(&unsupported));
     assert_eq!(gap(&unsupported), Some("unsupported"));
+    let mut v3 = unsupported.clone();
+    v3.render_version = 3;
+    assert_eq!(gap(&v3), None);
+
+    // Color-adjust layer effects are integer M5; a selection-limited one, or any
+    // other effect, has no integer stage yet. So does a non-normal adjustment layer.
+    let color_adjust = REffect {
+        kind: REffectKind::ColorAdjust {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        },
+        selection: None,
+    };
+    let mut layer = scene(
+        RContent::Tiles(Vec::new()),
+        RFeatures {
+            effects: vec![color_adjust.clone()],
+            ..RFeatures::default()
+        },
+    );
+    layer.render_version = 3;
+    layer.nodes[0].opacity = 0.5;
+    assert_eq!(gap(&layer), Some("v3-m5-integer"));
+    layer.nodes[0].features.effects[0].selection = Some(RMask {
+        tiles: Vec::new(),
+        linked: true,
+        transform: ident(),
+    });
+    assert_eq!(crate::renderer::v3_gap(&layer), Some("effects"));
+    let mut multiply = adjustment.clone();
+    multiply.render_version = 3;
+    multiply.nodes[0].blend = RenderBlend::Multiply;
+    assert_eq!(crate::renderer::v3_gap(&multiply), Some("adjustment"));
 }
 
 fn is_lavapipe_adapter(name: &str) -> bool {
@@ -4333,8 +4242,8 @@ fn lavapipe_adapter_names() {
 
 #[test]
 fn atlas_read_uses_effects_unorm_byte() {
-    let effects = include_str!("../shaders/effects.wgsl");
-    assert!(effects.contains(UNORM_BYTE_WGSL));
+    let q14 = include_str!("../shaders/q14.wgsl");
+    assert!(q14.contains(UNORM_BYTE_WGSL));
     let mut seen = [[false; 256]; 4];
     for i in 0..256 {
         for (ch, &b) in atlas_read_texel(i).iter().enumerate() {
@@ -4582,46 +4491,163 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_atlas_read(&gpu.adapter_name, &atlas);
+    // Enforced: the v3 M5 color-adjust chain and opacity 0.5, integer-exact.
     let src = color_adjust_gradient();
-    let grid = color_adjust_grid();
-    let mut ties = Vec::new();
-    match gpu.render_color_adjust(&src, &grid) {
-        Ok(tiles) => {
-            if tiles.len() != grid.len() {
-                failed.push(format!(
-                    "color-adjust: {} GPU tiles for {} settings",
-                    tiles.len(),
-                    grid.len()
-                ));
-            }
-            for (tile, &(contrast, saturation, brightness)) in tiles.iter().zip(&grid) {
-                let cpu = color_adjust_image_v3(&src, brightness, contrast, saturation);
-                let name = color_adjust_case_name(contrast, saturation, brightness);
-                // Readback already completed. Measurements never feed parity decisions.
-                ties.push(measure_tie_8192(
-                    &src,
-                    (contrast, saturation, brightness),
-                    tile,
-                    &cpu,
-                ));
-                let report = diff_report(&cpu, tile);
-                println!("{name}: {report}");
-                if cpu != *tile {
-                    failed.push(format!("{name}: {report}"));
+    let adjust: Vec<_> = color_adjust_grid()
+        .into_iter()
+        .map(color_adjust_program)
+        .collect();
+    let images = opacity_images();
+    let opacity = opacity_programs();
+    for (images, programs) in [
+        (std::slice::from_ref(&src), &adjust),
+        (&images[..], &opacity),
+    ] {
+        match gpu.render_q14(images, programs) {
+            Ok(tiles) => {
+                if tiles.len() != programs.len() {
+                    failed.push(format!(
+                        "q14 stages: {} GPU tiles for {} programs",
+                        tiles.len(),
+                        programs.len()
+                    ));
+                }
+                for (tile, program) in tiles.iter().zip(programs.iter()) {
+                    let cpu = q14_program_cpu(images, program);
+                    let report = diff_report(&cpu, tile);
+                    println!("{} (v3 M5 integer, enforced): {report}", program.name);
+                    if cpu != *tile {
+                        failed.push(format!("{}: {report}", program.name));
+                    }
                 }
             }
-        }
-        Err(err) => {
-            println!("color-adjust: GPU render failed: {err}");
-            failed.push(format!("color-adjust: {err}"));
+            Err(err) => {
+                println!("q14 stages: GPU render failed: {err}");
+                failed.push(format!("q14 stages: {err}"));
+            }
         }
     }
-    write_tie_8192(&gpu.adapter_name, &ties);
     assert!(
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",
         failed.join("\n")
     );
+}
+
+#[test]
+fn v3_hosts_refuse_blend_modes_17_and_up() {
+    // RenderBlend has variants 0..=16 only, so a v3 RenderScene cannot carry 17.
+    assert_eq!(RenderBlend::Add as u32, 16);
+    for mode in [0u32, 16] {
+        let mut ops = Vec::new();
+        walk(
+            &raster(solid(1, 1, [0; 4]), mode, 1.0, true, ident()),
+            ident(),
+            &mut ops,
+        );
+        assert!(!has_unspecified_v3_mode(&ops), "mode {mode}");
+    }
+    for mode in [17u32, 18, 255] {
+        let mut ops = Vec::new();
+        walk(
+            &raster(solid(1, 1, [0; 4]), mode, 1.0, true, ident()),
+            ident(),
+            &mut ops,
+        );
+        assert!(has_unspecified_v3_mode(&ops), "draw mode {mode}");
+        ops.clear();
+        let mut g = group(true, 0.5, Vec::new());
+        if let Node::Group { mode: m, .. } = &mut g {
+            *m = mode;
+        }
+        walk(&g, ident(), &mut ops);
+        assert!(has_unspecified_v3_mode(&ops), "pop mode {mode}");
+    }
+}
+
+#[test]
+fn m5_opacity_half_over_blue_is_the_known_pixel() {
+    let images = opacity_images();
+    let programs = opacity_programs();
+    let half = programs
+        .iter()
+        .find(|p| p.name == "m5-opacity-half")
+        .unwrap();
+    let tile = q14_program_cpu(&images, half);
+    // sa = 8192, pre = 8192 red; blue keeps 16384 * (1 - 0.5). 8192 * 255 / 16384
+    // is the tie 127.5, which goes up.
+    assert_eq!(pixel(&tile, 7, 9), [128, 0, 128, 255]);
+    assert!(tile.chunks(4).all(|p| p == &tile[..4]));
+    // The Q14 program reproduces the color-adjust reference used by the browser.
+    let src = color_adjust_gradient();
+    for settings in color_adjust_grid() {
+        let program = color_adjust_program(settings);
+        assert_eq!(
+            q14_program_cpu(std::slice::from_ref(&src), &program),
+            color_adjust_image_v3(&src, settings.2, settings.0, settings.1),
+            "{}",
+            program.name
+        );
+    }
+    // Every half-opacity program differs from the same graph at opacity 1.
+    for program in &programs {
+        let mut opaque = Q14Program {
+            name: program.name.clone(),
+            targets: program.targets,
+            stages: program.stages.clone(),
+            result: program.result,
+        };
+        for stage in &mut opaque.stages {
+            if matches!(stage.mode, 19 | 20) {
+                stage.settings[0] = q14::Q as i32;
+            }
+        }
+        assert_ne!(
+            q14_program_cpu(&images, program),
+            q14_program_cpu(&images, &opaque),
+            "{}",
+            program.name
+        );
+    }
+}
+
+#[test]
+fn integer_effects_shader_has_no_float_targets_and_validates() {
+    let shader = crate::integer_effects_shader();
+    assert!(shader.contains("var output: texture_storage_2d<rgba16uint,write>"));
+    assert!(shader.contains("var a: texture_2d<u32>"));
+    let resolve = include_str!("../shaders/effects-resolve-q14.wgsl");
+    assert!(resolve.contains("texture_storage_2d_array<rgba8uint,write>"));
+    for text in [shader.as_str(), resolve] {
+        for forbidden in [
+            "rgba16float",
+            "rgba8unorm",
+            "textureSample",
+            "f16",
+            "round(",
+            "=sqrt(",
+            "= sqrt(",
+        ] {
+            assert!(!text.contains(forbidden), "v3 M5 shader uses {forbidden}");
+        }
+    }
+    let v2 = include_str!("../shaders/effects.wgsl");
+    for gone in ["f16", "Q14", "info.x==17u", "info.x==18u", "info.x==19u"] {
+        assert!(!v2.contains(gone), "v1/v2 effects.wgsl still has {gone}");
+    }
+    // The host binds 0, 1 and 3..=6 only; an unused declared binding would leave
+    // the derived layout without it and fail the bind group.
+    assert!(!shader.contains("@binding(2)"));
+    for text in [shader, resolve.to_string()] {
+        let module = naga::front::wgsl::parse_str(&text)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
 }
 
 #[test]

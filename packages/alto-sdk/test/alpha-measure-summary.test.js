@@ -41,7 +41,7 @@ test("alpha summary enforces v3 exactly and preserves mismatch and error reports
 });
 
 
-test("v3 overlapping semi-transparent layers with color-adjust are reported outside integer-exact enforcement", () => {
+test("v3 classification is closed: color-adjust is integer M5, unspecified features are refused", () => {
   const snapshot = {
     meta: { render_version: 3 },
     nodes: new Map([
@@ -51,28 +51,44 @@ test("v3 overlapping semi-transparent layers with color-adjust are reported outs
     ]),
   };
   const renderPath = sceneGap(snapshot);
-  assert.equal(renderPath, "v3-m5-float");
-  const dir = mkdtempSync(join(tmpdir(), "alto-v3-fallback-"));
+  assert.equal(renderPath, "v3-m5-integer");
+  assert.equal(isV3IntegerCase({ renderPath }), true);
+  const plain = { meta: { render_version: 3 }, nodes: new Map([["only", { type: "raster", props: {} }]]) };
+  assert.equal(sceneGap(plain), null);
+  const adjust = { meta: { render_version: 3 }, nodes: new Map([
+    ["adj", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "normal", opacity: 0.5 } }],
+  ]) };
+  assert.equal(sceneGap(adjust), "v3-m5-integer");
+  for (const [name, node] of [
+    ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
+    ["selected", { type: "raster", props: { effects: [{ type: "color_adjust", brightness: 0, contrast: 1, saturation: 1, selection: { tiles: {} } }] } }],
+    ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
+    ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
+    ["vector", { type: "vector", props: {} }],
+    ["text", { type: "text", props: {} }],
+    ["clip", { type: "raster", props: { clip_to_below: true } }],
+  ]) {
+    const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
+    assert.equal(sceneGap(scene), "v3-unsupported", name);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "alto-v3-unsupported-"));
   try {
-    // Even a byte-exact fallback is excluded; a mismatch is informational too.
-    for (const count of [0, 1]) {
-      const row = { name: "v3-overlapping-color-adjust", renderPath, status: count ? "mismatch" : "exact", count };
-      assert.equal(isV3IntegerCase(row), false);
-      const input = join(dir, "parity.json");
-      writeFileSync(input, JSON.stringify({ alphaMeasure: [{ name: "v2", count: 0 }], compositeV3: [row] }));
-      const run = spawnSync(process.execPath, [script, "test-backend", input, dir], {
-        encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: "" },
-      });
-      assert.equal(run.status, 0, run.stderr);
-      const report = JSON.parse(readFileSync(join(dir, "composite-v3.json"), "utf8"));
-      assert.equal(report.integerExactCount, 0);
-      assert.deepEqual(report.cases, []);
-      assert.deepEqual(report.v3M5Float, [row]);
-      assert.ok(readFileSync(join(dir, "alpha-measure.md"), "utf8").includes("v3-m5-float"));
-    }
+    const row = { name: "v3-masked", renderPath: "v3-unsupported", status: "error", error: "refused" };
+    assert.equal(isV3IntegerCase(row), false);
+    const input = join(dir, "parity.json");
+    writeFileSync(input, JSON.stringify({ alphaMeasure: [{ name: "v2", count: 0 }], compositeV3: [row] }));
+    const run = spawnSync(process.execPath, [script, "test-backend", input, dir], {
+      encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: "" },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(readFileSync(join(dir, "composite-v3.json"), "utf8"));
+    assert.equal(report.integerExactCount, 0);
+    assert.deepEqual(report.cases, []);
+    assert.deepEqual(report.v3Unsupported, [row]);
+    assert.ok(readFileSync(join(dir, "alpha-measure.md"), "utf8").includes("v3-unsupported"));
     // Classification must scan the entire scene and preserve pre-v3 gap names.
     snapshot.nodes.set("first-mask", { type: "raster", props: { mask: {} } });
-    assert.equal(sceneGap(snapshot), "v3-m5-float");
+    assert.equal(sceneGap(snapshot), "v3-unsupported");
     snapshot.meta.render_version = 2;
     assert.equal(sceneGap(snapshot), "mask");
   } finally {

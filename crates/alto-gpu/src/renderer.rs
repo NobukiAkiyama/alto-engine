@@ -253,6 +253,8 @@ pub struct Renderer {
     visible_keys: HashSet<CacheKey>,
     overview_keys: HashSet<CacheKey>,
     overview_pins: HashSet<CacheKey>,
+    /// Children of a v3 parent being built synchronously. Never evicted meanwhile.
+    pyramid_pins: Vec<CacheKey>,
     cache_pressure: bool,
     eviction_view: Viewport,
     ideal_level: i32,
@@ -524,6 +526,45 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     let x = value.clamp(-1.0, 4.0) * 16384.0;
     let adj = if x.is_sign_negative() { -0.5 } else { 0.5 };
     (x + adj) as i32
+}
+
+/// The feature that render version 3 has no integer definition for, or `None`.
+/// Version 3 draws plain scenes with the integer tile compositor and color-adjust
+/// (layer effects and adjustment layers, normal blend, any opacity) with the
+/// integer M5 stages. Everything else is refused before any command is built,
+/// so no v3 tile is ever written through a float or unorm target. Every node is
+/// checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap` mirrors this.
+pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
+    let color_adjust = |e: &crate::REffect| {
+        matches!(e.kind, crate::REffectKind::ColorAdjust { .. }) && e.selection.is_none()
+    };
+    for n in &scene.nodes {
+        let f = &n.features;
+        if f.mask.is_some() {
+            return Some("mask");
+        }
+        if f.vector_mask.is_some() {
+            return Some("vector mask");
+        }
+        if f.clip_path.is_some() {
+            return Some("clip path");
+        }
+        if f.clip {
+            return Some("clip");
+        }
+        if !f.effects.iter().all(color_adjust) {
+            return Some("effects");
+        }
+        match &n.content {
+            RContent::Mesh(_) => return Some("vector"),
+            RContent::Text(_) => return Some("text"),
+            RContent::Adjustment(e) if !color_adjust(e) || n.blend != RenderBlend::Normal => {
+                return Some("adjustment");
+            }
+            _ => {}
+        }
+    }
+    None
 }
 // The renderer keeps raw matrices in its hot loops; the math is `Affine2`'s.
 pub(crate) fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
@@ -915,6 +956,7 @@ impl Renderer {
             visible_keys: HashSet::new(),
             overview_keys: HashSet::new(),
             overview_pins: HashSet::new(),
+            pyramid_pins: Vec::new(),
             cache_pressure: false,
             eviction_view: Viewport::default(),
             ideal_level: 0,
@@ -1126,14 +1168,22 @@ impl Renderer {
             self.invalidate(None);
         }
     }
-    // Validate before cache access or command construction. M5 keeps its existing formats.
+    // Validate before cache access or command construction. Every v3 scene that
+    // passes writes integer bytes, plain or M5, so v3 always uses the uint cache.
     fn prepare_scene(&mut self, scene: &RenderScene) -> Result<()> {
         if scene.render_version == 3 && scene.nodes.iter().any(|n| n.blend as u32 >= 17) {
             return Err(RenderError::InvalidArgument(
                 "v3 unspecified blend mode".into(),
             ));
         }
-        let integer = scene.render_version == 3 && crate::damage::plain_scene(scene);
+        if scene.render_version == 3
+            && let Some(gap) = v3_gap(scene)
+        {
+            return Err(RenderError::GpuUnsupported(format!(
+                "v3 {gap} has no integer definition yet"
+            )));
+        }
+        let integer = scene.render_version == 3;
         if integer == self.integer_cache {
             return Ok(());
         }
@@ -1634,6 +1684,7 @@ impl Renderer {
                         && !self.visible_keys.contains(cached)
                         && !self.overview_keys.contains(cached)
                         && !self.overview_pins.contains(cached)
+                        && !self.pyramid_pins.contains(cached)
                         && !(prefetch
                             && key.0 > 0
                             && cached.0 == key.0 - 1
@@ -1676,6 +1727,9 @@ impl Renderer {
         store: &dyn TileStore,
         prefetch: bool,
     ) -> Result<bool> {
+        if self.integer_cache && key.0 > 0 {
+            return self.compose_from_children(scene, key, store, prefetch);
+        }
         let Some(slot) = self.cache_slot(key, prefetch)? else {
             return Ok(false);
         };
@@ -1726,6 +1780,58 @@ impl Renderer {
             self.profile.commands_ms += (self.clock)() - commands_start;
         }
         self.submit_composite(scene, key, slot, commands, entries, encoder, prefetch)
+    }
+    /// Render version 3 defines a level >= 1 tile only as the integer downsample of
+    /// its children, so a cold request builds the missing children first and its
+    /// bytes equal the warm (cached-children) result. Determinism over speed.
+    fn compose_from_children(
+        &mut self,
+        scene: &RenderScene,
+        key: CacheKey,
+        store: &dyn TileStore,
+        prefetch: bool,
+    ) -> Result<bool> {
+        let pins = self.pyramid_pins.len();
+        let result = self.compose_children_then_parent(scene, key, store, prefetch);
+        self.pyramid_pins.truncate(pins);
+        result
+    }
+    fn compose_children_then_parent(
+        &mut self,
+        scene: &RenderScene,
+        key: CacheKey,
+        store: &dyn TileStore,
+        prefetch: bool,
+    ) -> Result<bool> {
+        let mut warm = true;
+        for child in pyramid_children(scene, key) {
+            if !self.cache_map.contains_key(&child) {
+                warm = false;
+                if !self.compose(scene, child, store, prefetch)? {
+                    return Ok(false);
+                }
+            }
+            self.pyramid_pins.push(child);
+        }
+        if warm && self.profiling {
+            self.profile.pyramid_hits += 1;
+        }
+        let Some(slot) = self.cache_slot(key, prefetch)? else {
+            return Ok(false);
+        };
+        if !self.downsample_cached(scene, key, slot as u32)? {
+            return Err(RenderError::Internal("v3 pyramid children missing".into()));
+        }
+        self.cache_slots[slot] = Some(key);
+        self.cache_map.insert(
+            key,
+            Cached {
+                slot: slot as u32,
+                used: self.frame,
+                prefetched: prefetch,
+            },
+        );
+        Ok(true)
     }
     #[allow(clippy::too_many_arguments)] // Submission shares the visible and prefetch paths without copying GPU setup.
     fn submit_composite(
@@ -2009,6 +2115,16 @@ impl Renderer {
         }
         self.overview_pins.clear();
         let keys = self.prefetch_keys(scene, view);
+        if self.integer_cache {
+            // Version 3 parents come only from their children: descend like the overview.
+            let Some(key) = keys
+                .into_iter()
+                .find(|key| !self.cache_map.contains_key(key))
+            else {
+                return Ok(JobStep::Idle);
+            };
+            return self.hierarchy_step(scene, store, key);
+        }
         if self
             .prefetch_job
             .as_ref()
@@ -2366,7 +2482,12 @@ impl Renderer {
                 }
                 break;
             }
-            if self.visible_tile_jobs && self.resumable_scene(scene) {
+            // A v3 level >= 1 tile is never composited from sources: `compose`
+            // builds its children first, so cold and warm bytes agree.
+            if self.visible_tile_jobs
+                && self.resumable_scene(scene)
+                && !(self.integer_cache && key.0 > 0)
+            {
                 // Reuse already-composited children before touching source tiles.
                 if self.visible_job.is_none() {
                     let slot = self
@@ -3106,6 +3227,26 @@ impl Renderer {
     }
 }
 
+/// The children of `key` that lie inside the canvas, in TL, TR, BL, BR order.
+fn pyramid_children(scene: &RenderScene, key: CacheKey) -> Vec<CacheKey> {
+    let mut out = Vec::new();
+    if key.0 <= 0 {
+        return out;
+    }
+    for y in 0..2 {
+        for x in 0..2 {
+            let child = (key.0 - 1, key.1 * 2 + x, key.2 * 2 + y);
+            let span = 256i64 << child.0;
+            if (child.1 as i64) * span < scene.canvas.x1 as i64
+                && (child.2 as i64) * span < scene.canvas.y1 as i64
+            {
+                out.push(child);
+            }
+        }
+    }
+    out
+}
+
 impl Renderer {
     fn downsample_cached(&self, scene: &RenderScene, key: CacheKey, slot: u32) -> Result<bool> {
         if key.0 <= 0 {
@@ -3243,6 +3384,11 @@ mod shader_tests {
             (
                 "integer present",
                 include_str!("../shaders/present-q14.wgsl"),
+            ),
+            ("integer effects", &crate::integer_effects_shader()),
+            (
+                "integer effects resolve",
+                include_str!("../shaders/effects-resolve-q14.wgsl"),
             ),
             ("effects", include_str!("../shaders/effects.wgsl")),
             ("vector", include_str!("../shaders/vector.wgsl")),

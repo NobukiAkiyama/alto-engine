@@ -94,27 +94,27 @@ test("color-adjust gradient covers every channel and the alpha anchors", () => {
     assert.equal(fnv64(renderColorAdjust(imageFull, settings)), expected[index], `${settings.contrastLabel} ${settings.saturationLabel} ${settings.brightnessLabel}`);
   });
   const exact = [
-    "85427e72aa6975f4",
-    "d34d9def32069e30",
-    "6fabe3fd4a1d755d",
-    "03bdc46a2a94022a",
-    "e2631093ebe7c14b",
-    "6614a1c612c0eb35",
-    "35828221f6e46782",
-    "f2d63e24deb38bb5",
-    "e21500eb040c8e1d",
-    "54f48aae0e383c44",
-    "8e735cc19d43f13b",
-    "2edfc3149add3c41",
+    "7653b3dacf9f4a5d",
+    "74bbfcc000f4b9bb",
+    "628362e24b9f31df",
+    "cd2fba24007d3e58",
+    "cc0d355c44d9b665",
+    "3f1281ebe63782d5",
+    "1181326aa3c6b1fd",
+    "2193ceed938b774e",
+    "784796ff684f97ba",
+    "f8dd1fdfc273cc83",
+    "e1a6f921d39e706d",
+    "22c67fdcd3f3045e",
     // Contrast 0 flattens every channel, so saturation does not move a pixel.
     "204b8da3774c1b25",
     "455fe98699531725",
     "204b8da3774c1b25",
     "455fe98699531725",
-    "3696fac022da0187",
-    "a719b6b1ac5d2588",
-    "e3e29d265599c372",
-    "db4228c4143ca9ff",
+    "1de207d9c6ef6ab5",
+    "33c42326a62c7eb0",
+    "e401eecb14e94b56",
+    "63a34d861b27424e",
   ];
   colorAdjustGrid().forEach((settings, index) => {
     assert.equal(fnv64(renderColorAdjustV3(imageFull, settings)), exact[index], `v3 ${settings.contrastLabel} ${settings.saturationLabel} ${settings.brightnessLabel}`);
