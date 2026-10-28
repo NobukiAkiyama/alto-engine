@@ -281,4 +281,4 @@
   - 計測のコードが新しい API に移るので、変更前のビルドでは、移す前の計測のコードを使う。
   - 計測の中身が同じであることは、差分を見て確かめる。
 - [ ] 結果を `doc/verification/EMBEDDING-API-RESULTS-2026-10-25.md` に書く。
-- [ ] `SHA256SUMS` と `build.json` を更新し、段階ごとにコミットする。
+- [ ] タグ前に最新 main の `wasm-hashes-main` artifact から `SHA256SUMS` と `build.json` を更新する PR をマージし、そのコミットにタグを付ける（[リリース手順](../../RELEASING.md)）。main は2回のクリーンビルドの再現性を検査し、tag push だけがコミット済み値と照合する。

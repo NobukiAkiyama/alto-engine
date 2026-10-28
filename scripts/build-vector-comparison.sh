@@ -5,7 +5,7 @@
 # was built without that remapping.
 set -eu
 cd "$(dirname "$0")/.."
-# Same uncached directory as the release rebuild. See build-wasm-pkg.sh.
+# Same target policy as the release package. See build-wasm-pkg.sh.
 export CARGO_TARGET_DIR="${ALTO_WASM_TARGET_DIR:-${ALTO_TARGET_DIR:-target}}"
 out=${1:-examples/vector-comparison/pkg}
 # shellcheck disable=SC1091

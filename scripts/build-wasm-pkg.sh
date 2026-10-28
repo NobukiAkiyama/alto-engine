@@ -1,10 +1,9 @@
 #!/bin/sh
 # Release-build alto-wasm and alto-decode and run the pinned wasm-bindgen CLI into OUT_DIR.
-# check.sh rebuilds into a temp directory and requires wasm/SHA256SUMS to match.
+# check.sh wasm-release requires wasm/SHA256SUMS to match; wasm-fast reports drift.
 set -eu
 cd "$(dirname "$0")/.."
-# Prefer the uncached CI directory. A restored native target must not supply
-# these release artifacts: wasm/SHA256SUMS is a from-scratch byte check.
+# Release verification supplies a clean target; fast CI can cache this directory.
 export CARGO_TARGET_DIR="${ALTO_WASM_TARGET_DIR:-${ALTO_TARGET_DIR:-target}}"
 out=${1:?usage: build-wasm-pkg.sh OUT_DIR}
 # shellcheck disable=SC1091
