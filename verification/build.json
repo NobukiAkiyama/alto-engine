@@ -6,7 +6,7 @@
   "buildHost": "aarch64-apple-darwin",
   "wasmBytes": 4807471,
   "gzipBytes": 1214310,
-  "wasmSha256": "7cdf1643d1ceeda43752f3771d66a2fdcd61602f321de34303020ee6e2fc1631",
+  "wasmSha256": "eab2f1c1874cd7edfaefa9de535da382dec70d3b79cf3957c64b5b4b8c37ba88",
   "comparisonWasm": {
     "bytes": 6540467,
     "gzipBytes": 1619437,
