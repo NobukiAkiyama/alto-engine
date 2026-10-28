@@ -815,20 +815,15 @@ export function maskAdjustQ14(orig, filt, f, blend) {
 /**
  * The byte a v3 mask stage reads at pixel (x, y) of a level-0 tile at the origin.
  * `byteAt(x, y)` is the stored mask byte, 0 outside its tiles. As the host
- * (`renderer::mask_sampler`): an axis-aligned unit inverse uses the f32 lookup,
- * any other the Q16 inverse and Q8 pixel centers. Nearest; the texel is the floor.
+ * (`renderer::mask_sampler`), every mask takes the Q16 inverse and Q8 pixel
+ * centers, axis-aligned unit inverses included; there is no f32 lookup. A mask
+ * without a Q16 inverse is refused (throws), as the host refuses the render.
+ * Nearest; the texel is the floor.
  */
 export function maskByteV3(byteAt, transform, x, y) {
   const inv = inverseF64(transform);
-  if (!inv) return 0;
-  const inv32 = inv.map(f);
-  const q = quantizeInverse(inv);
-  if (axisUnit(inv32) || !q) {
-    const p = [f(x + 0.5), f(y + 0.5)];
-    const qx = add(add(mul(inv32[0], p[0]), mul(inv32[2], p[1])), inv32[4]);
-    const qy = add(add(mul(inv32[1], p[0]), mul(inv32[3], p[1])), inv32[5]);
-    return byteAt(Math.floor(qx), Math.floor(qy));
-  }
+  const q = inv && quantizeInverse(inv);
+  if (!q) throw new Error("v3 refuses a mask without a Q16 lookup");
   const px = pixelQ8(0, x, 1);
   const py = pixelQ8(0, y, 1);
   const pos = px === null || py === null ? null : sourceQ8(q, px, py);

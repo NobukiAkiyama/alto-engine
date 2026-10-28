@@ -30,8 +30,8 @@ fn sparse_bytes(p:vec2f)->vec4u {
  return vec4u(unorm_byte(s.r),unorm_byte(s.g),unorm_byte(s.b),unorm_byte(s.a));
 }
 // The mask byte at output pixel `ix`, nearest only (doc/design/2026-10-28-v3-integer-mask.md).
-// `info.w` is sample.rs SAMPLE_F32 (0): the f32 `sparse` lookup, which the host
-// picks for axis-aligned unit inverses. SAMPLE_INTEGER (1): the Q16 inverse is
+// Always the Q16 lookup (sample.rs SAMPLE_INTEGER); there is no f32 route, and
+// the host refuses a mask it cannot express this way. The Q16 inverse is
 // bitcast in `inv0`, the i64 Q16 translation in `extra` (lo, hi, lo, hi), and the
 // output ROI origin and scale are exact integers. The texel is the arithmetic
 // `>> 8` of the Q8 position; there are no weights. Out of range is byte 0.
@@ -42,8 +42,7 @@ fn mask_texel(x: i32, y: i32) -> u32 {
  if t.slot==0xffffffffu{return 255u;}
  return unorm_byte(textureLoad(atlas,vec2i(x,y)-key*256,i32(t.slot),0).r);
 }
-fn mask_byte(p: vec2f, ix: vec2i) -> u32 {
- if c.info.w==0u{return sparse_bytes(p).r;}
+fn mask_byte(ix: vec2i) -> u32 {
  let scale=i32(c.out_region.z);
  let px=pixel_q8(i32(c.out_region.x),ix.x,scale);let py=pixel_q8(i32(c.out_region.y),ix.y,scale);
  if px.ok==0u||py.ok==0u{return 0u;}
@@ -53,9 +52,9 @@ fn mask_byte(p: vec2f, ix: vec2i) -> u32 {
  return mask_texel(qx.v>>8,qy.v>>8);
 }
 // Mask coverage in Q14; 16384 when the stage has no mask (`settings.y == 0`).
-fn mask_q(p: vec2f, ix: vec2i, has: i32) -> i32 {
+fn mask_q(ix: vec2i, has: i32) -> i32 {
  if has==0{return Q14_ONE;}
- return i32(byte_q14(mask_byte(p,ix)));
+ return i32(byte_q14(mask_byte(ix)));
 }
 // `(n + 2^27) >> 28` for n >= 0: the one rounding of the Q28 mask factor.
 // Every mask term is non-negative and below 2^43, so no sign branch is needed.
@@ -126,19 +125,19 @@ fn layer_q14(dst: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
  else if c.info.x==21u{
   // Layer mask and opacity (v2 mode 4): F = m * o in Q28, rounded once.
   // settings: x opacity Q14, y has mask.
-  let v=load_a(p);let f=u32(mask_q(p,vec2i(id.xy),settings.y)*settings.x);
+  let v=load_a(p);let f=u32(mask_q(vec2i(id.xy),settings.y)*settings.x);
   for(var i=0u;i<4u;i++){out[i]=div28(wide_mul_u32(u32(v[i]),f));}
  }
  else if c.info.x==22u{
   // Effect selection (v2 mode 5): a is before the effect, b after it.
-  let s=mask_q(p,vec2i(id.xy),1);let a0=load_a(p);let f=load_b(p);
+  let s=mask_q(vec2i(id.xy),1);let a0=load_a(p);let f=load_b(p);
   for(var i=0u;i<4u;i++){out[i]=div_q(a0[i]*(Q14_ONE-s)+f[i]*s,Q14_ONE);}
  }
  else if c.info.x==23u{
   // Adjustment-layer mask, opacity and blend (v2 mode 7). As v2, screen (2) is
   // screen and every other non-normal blend is multiply, on straight Q14.
   // settings: x opacity Q14, y has mask, z blend.
-  let o=load_a(p);let f=load_b(p);let w=u32(mask_q(p,vec2i(id.xy),settings.y)*settings.x);
+  let o=load_a(p);let f=load_b(p);let w=u32(mask_q(vec2i(id.xy),settings.y)*settings.x);
   var g=f;
   if settings.z!=0{
    let d=straight_q(o);let t=straight_q(f);var col=vec3i(0);

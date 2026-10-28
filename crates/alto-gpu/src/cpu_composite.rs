@@ -1230,37 +1230,25 @@ fn mask_adjust_q14(orig: [i64; 4], filt: [i64; 4], f: i64, blend: u32) -> Option
 }
 
 /// The byte a v3 mask stage reads at pixel (x, y) of a level-0 target at the
-/// origin, from one mask tile at key (0, 0) whose R channel is the byte. The
-/// sampler is the host's (`renderer::mask_sampler`); the Q16 path is evaluated
-/// here from `integer_inverse` and `source_q8`, not from the packed bits.
-fn mask_byte_cpu(image: &[u8], transform: [f64; 6], x: i32, y: i32) -> u8 {
-    let texel = |tx: i32, ty: i32| {
-        if (tx >> 8, ty >> 8) != (0, 0) {
-            0
-        } else {
-            image[((ty * 256 + tx) * 4) as usize]
-        }
-    };
-    let sampler = crate::renderer::mask_sampler(transform, [0.0, 0.0], 1.0);
-    if sampler.mode == crate::sample::SAMPLE_F32 {
-        // `sparse`: f32 products and sums, then floor. Enforced only for unit
-        // axis-aligned inverses with integer translation, where every step is exact.
-        let (i0, i1) = (sampler.inv0, sampler.inv1);
-        let p = [x as f32 + 0.5, y as f32 + 0.5];
-        let q = [
-            i0[0] * p[0] + i0[2] * p[1] + i1[0],
-            i0[1] * p[0] + i0[3] * p[1] + i1[1],
-        ];
-        return texel(q[0].floor() as i32, q[1].floor() as i32);
-    }
-    let inv = integer_inverse(crate::renderer::inverse(transform).unwrap()).unwrap();
+/// origin, from one mask tile at key (0, 0) whose R channel is the byte. As the
+/// host (`renderer::mask_sampler`), every mask takes the Q16 lookup; it is
+/// evaluated here from `integer_inverse` and `source_q8`, not from the packed
+/// bits. `None` when the host refuses the mask (no Q16 lookup).
+fn mask_byte_cpu(image: &[u8], transform: [f64; 6], x: i32, y: i32) -> Option<u8> {
+    crate::renderer::mask_sampler(transform, [0.0, 0.0], 1.0)?;
+    let inv = integer_inverse(crate::renderer::inverse(transform)?)?;
     let (Some(px), Some(py)) = (pixel_q8(0, x, 1), pixel_q8(0, y, 1)) else {
-        return 0;
+        return Some(0);
     };
     let Some(q) = source_q8(&inv, px, py) else {
-        return 0;
+        return Some(0);
     };
-    texel(floor_frac_q8(q[0]).0, floor_frac_q8(q[1]).0)
+    let (tx, ty) = (floor_frac_q8(q[0]).0, floor_frac_q8(q[1]).0);
+    Some(if (tx >> 8, ty >> 8) != (0, 0) {
+        0
+    } else {
+        image[((ty * 256 + tx) * 4) as usize]
+    })
 }
 
 /// One `effects-q14.wgsl` dispatch over 256² targets with the identity ROI.
@@ -1437,12 +1425,10 @@ fn q14_program_cpu(images: &[Vec<u8>], program: &Q14Program) -> Vec<u8> {
                     let (x, y) = ((i % 256) as i32, (i / 256) as i32);
                     let image = &images[stage.slot as usize];
                     let m = || {
-                        i64::from(byte_q14(u32::from(mask_byte_cpu(
-                            image,
-                            stage.transform,
-                            x,
-                            y,
-                        ))))
+                        i64::from(byte_q14(u32::from(
+                            mask_byte_cpu(image, stage.transform, x, y)
+                                .expect("v3 refuses a mask without a Q16 lookup"),
+                        )))
                     };
                     let f = |has: i32| if has == 0 { q14::Q } else { m() } * w;
                     match stage.mode {
@@ -1594,6 +1580,16 @@ fn rotated_mask_transform() -> [f64; 6] {
     ]
 }
 
+/// A unit mask moved by (2.501953125, -0.498046875) px. Both inverse
+/// translations are Q16 exact (-163968 and 32640), and with Q8 pixel centers
+/// `x * 256 + 128` the Q8 sums land exactly on `.5`: `x * 256 - 512.5` and
+/// `y * 256 + 255.5`, the ties of `wide_round_shr16`. At x = 2 the negative tie
+/// crosses into the tile at key -1. An f32 floor would pick the other texel at
+/// every tie.
+fn tie_mask_transform() -> [f64; 6] {
+    [1.0, 0.0, 0.0, 1.0, 2.501953125, -0.498046875]
+}
+
 /// Atlas layers for [`mask_programs`].
 fn mask_images() -> Vec<Vec<u8>> {
     let mut opaque = color_adjust_gradient();
@@ -1662,6 +1658,15 @@ fn mask_programs() -> Vec<Q14Program> {
         5,
         1.0,
         rotated_mask_transform(),
+    ));
+    // The Q8 rounding tie, positive and negative, with the negative tie crossing
+    // a tile boundary (`tie_mask_transform`).
+    out.push(masked(
+        "m5-mask-tie".into(),
+        0,
+        5,
+        1.0,
+        tie_mask_transform(),
     ));
     // A selection-limited color-adjust layer effect: mode 17, then mode 22.
     out.push(Q14Program {
@@ -3667,7 +3672,8 @@ impl Gpu {
                 let tiles = upload_buffer(device, &self.queue, &tile, wgpu::BufferUsages::STORAGE);
                 // The mask stages take their lookup from the host's `mask_sampler`.
                 let mask = (21..=23).contains(&stage.mode);
-                let sampler = crate::renderer::mask_sampler(stage.transform, [0.0, 0.0], 1.0);
+                let sampler = crate::renderer::mask_sampler(stage.transform, [0.0, 0.0], 1.0)
+                    .ok_or_else(|| format!("{}: v3 refuses the mask", program.name))?;
                 let uniform = upload_buffer(
                     device,
                     &self.queue,
@@ -3686,7 +3692,11 @@ impl Gpu {
                             stage.mode,
                             0,
                             u32::from(stage.mode == 18 || mask),
-                            if mask { sampler.mode } else { 0 },
+                            if mask {
+                                crate::sample::SAMPLE_INTEGER
+                            } else {
+                                0
+                            },
                         ],
                         extra: if mask { sampler.extra } else { [0.0; 4] },
                         curve: [0.0; 64],
@@ -4127,11 +4137,12 @@ fn mask_v3_rust_and_js_references_agree() {
     let some: Vec<i64> = [0, 1, 2, 127, 128, 129, 253, 254, 255].map(q).to_vec();
     let few: Vec<i64> = [0, 1, 127, 128, 254, 255].map(q).to_vec();
     let opacities = [0, 1, 8192, 16383, 16384];
-    // Rotated (Q16), a unit move (f32), and a 2x scale with a move (Q16).
+    // Rotated, a unit move, a 2x scale with a move, and the rounding tie: all Q16.
     let transforms = [
         rotated_mask_transform(),
         [1.0, 0.0, 0.0, 1.0, 3.0, -7.0],
         [2.0, 0.0, 0.0, 2.0, -5.0, 9.0],
+        tie_mask_transform(),
     ];
     let mut rust = Vec::new();
     let mut push = |v: [i64; 4]| {
@@ -4168,7 +4179,7 @@ fn mask_v3_rust_and_js_references_agree() {
     for transform in transforms {
         for y in 0..256 {
             for x in 0..256 {
-                rust.push(mask_byte_cpu(&pattern, transform, x, y));
+                rust.push(mask_byte_cpu(&pattern, transform, x, y).unwrap());
             }
         }
     }
@@ -4198,16 +4209,13 @@ fn mask_v3_rust_and_js_references_agree() {
     if let Some(i) = rust.iter().zip(&js.stdout).position(|(a, b)| a != b) {
         panic!("Rust and JS v3 mask references differ first at byte {i}");
     }
-    // The three lookups are the ones intended.
-    let modes = transforms.map(|t| crate::renderer::mask_sampler(t, [0.0, 0.0], 1.0).mode);
-    assert_eq!(
-        modes,
-        [
-            crate::sample::SAMPLE_INTEGER,
-            crate::sample::SAMPLE_F32,
-            crate::sample::SAMPLE_INTEGER
-        ]
-    );
+    // Every lookup is Q16, the axis-aligned unit move included.
+    for t in transforms {
+        assert!(
+            crate::renderer::mask_sampler(t, [0.0, 0.0], 1.0).is_some(),
+            "{t:?}"
+        );
+    }
 }
 
 /// The CPU programs reproduce the memo's stated pixels and identities.
@@ -4275,22 +4283,51 @@ fn mask_programs_known_values() {
         pixel(&full, 255, 200),
         pixel(&run("m5-mask-white o=1"), 255, 200)
     );
-    // The rotated mask takes the Q16 lookup; unit translations stay on f32.
-    assert_eq!(
-        crate::renderer::mask_sampler(rotated_mask_transform(), [0.0, 0.0], 1.0).mode,
-        crate::sample::SAMPLE_INTEGER
-    );
-    for (origin, scale) in [([0.0, 0.0], 0.5), ([0.5, 0.0], 1.0)] {
-        assert_eq!(
-            crate::renderer::mask_sampler(rotated_mask_transform(), origin, scale).mode,
-            crate::sample::SAMPLE_F32,
-            "non-integer ROI {origin:?} {scale}"
+    // Every v3 mask takes the Q16 lookup, axis-aligned unit moves included. A
+    // non-integer ROI, a level scale below 1, a singular transform or an inverse
+    // outside the Q16 format has no lookup, and the host refuses it (DQ3-4).
+    let sampler = crate::renderer::mask_sampler;
+    for (t, origin, scale) in [
+        (rotated_mask_transform(), [0.0, 0.0], 1.0),
+        ([1.0, 0.0, 0.0, 1.0, 3.0, -7.0], [256.0, 0.0], 2.0),
+        (ident(), [-512.0, 256.0], 4.0),
+    ] {
+        assert!(
+            sampler(t, origin, scale).is_some(),
+            "{t:?} at {origin:?} {scale}"
         );
     }
-    assert_eq!(
-        crate::renderer::mask_sampler([1.0, 0.0, 0.0, 1.0, 3.0, -7.0], [256.0, 0.0], 2.0).mode,
-        crate::sample::SAMPLE_F32
-    );
+    for (t, origin, scale) in [
+        (rotated_mask_transform(), [0.0, 0.0], 0.5),
+        (rotated_mask_transform(), [0.5, 0.0], 1.0),
+        (ident(), [0.0, 0.0], 0.5),
+        ([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0], 1.0),
+        ([1.0, 0.0, 0.0, 1.0, 1e12, 0.0], [0.0, 0.0], 1.0),
+        ([1e-6, 0.0, 0.0, 1e-6, 0.0, 0.0], [0.0, 0.0], 1.0),
+    ] {
+        assert!(
+            sampler(t, origin, scale).is_none(),
+            "{t:?} at {origin:?} {scale} has no Q16 lookup"
+        );
+        assert_eq!(
+            mask_byte_cpu(&images[5], t, 0, 0).is_none(),
+            origin == [0.0, 0.0] && scale == 1.0
+        );
+    }
+    // The tie: the Q8 sum is exactly half a step below a texel edge. Half away
+    // from zero sends x = 3 (+) up to texel 1, and x = 2 (-) down to texel -1,
+    // which is the tile at key -1 (not in the map, byte 0). Rows move up by one
+    // texel; the last row lands on key 1.
+    let pattern = |x: i32, y: i32| ((x * 7 + y * 13) & 255) as u8;
+    let tie = tie_mask_transform();
+    let byte = |x, y| mask_byte_cpu(&images[5], tie, x, y).unwrap();
+    for y in [0, 1, 254] {
+        assert_eq!(byte(2, y), 0, "x = 2, y = {y}");
+        assert_eq!(byte(3, y), pattern(1, y + 1), "x = 3, y = {y}");
+        assert_eq!(byte(255, y), pattern(253, y + 1), "x = 255, y = {y}");
+    }
+    assert_eq!(byte(3, 255), 0);
+    assert_ne!(run("m5-mask-tie"), run("m5-mask-coverage o=1"));
     assert_ne!(run("m5-mask-rotated"), run("m5-mask-coverage o=1"));
     // The selection keeps the input where the selection is 0 and is the adjusted
     // copy where it is 255.

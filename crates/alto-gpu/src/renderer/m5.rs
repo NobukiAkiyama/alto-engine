@@ -529,19 +529,30 @@ impl Context<'_> {
             ..Params::zeroed()
         }
     }
-    /// A version 3 mask stage (modes 21 to 23). The mask is read at `roi`, the
-    /// output region of the stage, through `mask_sampler`. `settings` are Q14
-    /// integers.
-    fn mask_params(mode: u32, transform: [f64; 6], roi: Roi, settings: [i32; 4]) -> Params {
-        let s = super::mask_sampler(transform, [roi.x, roi.y], roi.scale);
-        Params {
-            inv0: s.inv0,
-            inv1: s.inv1,
-            extra: s.extra,
+    /// A version 3 mask stage (modes 21 to 23). The mask, if any, is read at
+    /// `roi`, the output region of the stage, through `mask_sampler`: the Q16
+    /// lookup only. A mask that has no Q16 lookup is refused (DQ3-4), never
+    /// sampled in f32. `settings` are Q14 integers.
+    fn mask_params(
+        mode: u32,
+        transform: Option<[f64; 6]>,
+        roi: Roi,
+        settings: [i32; 4],
+    ) -> Result<Params> {
+        let mut p = Params {
             settings: q14_settings(settings),
-            info: [mode, 0, 0, s.mode],
+            info: [mode, 0, 0, crate::sample::SAMPLE_INTEGER],
             ..Params::zeroed()
+        };
+        if let Some(transform) = transform {
+            let s = super::mask_sampler(transform, [roi.x, roi.y], roi.scale).ok_or_else(|| {
+                RenderError::GpuUnsupported(
+                    "v3 mask transform or level has no integer lookup".into(),
+                )
+            })?;
+            (p.inv0, p.inv1, p.extra) = (s.inv0, s.inv1, s.extra);
         }
+        Ok(p)
     }
     fn mask_entries(
         &mut self,
@@ -710,10 +721,10 @@ impl Context<'_> {
             )?;
             let p = Self::mask_params(
                 21,
-                transform,
+                Some(transform),
                 source.roi,
                 [crate::composite_opacity_q14(node.opacity), 1, 0, 0],
-            );
+            )?;
             self.dispatch(&out, &source, &source, &source, p, &entries)?;
             return Ok(out);
         }
@@ -891,7 +902,7 @@ impl Context<'_> {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
             let p = if self.resources.exact {
-                Self::mask_params(22, transform, roi, [0; 4])
+                Self::mask_params(22, Some(transform), roi, [0; 4])?
             } else {
                 Self::params(5, transform)
             };
@@ -1052,7 +1063,7 @@ impl Context<'_> {
                     // Q14 (mode 20).
                     if node.features.mask.is_some() || node.blend != RenderBlend::Normal {
                         let out = self.alloc(desired)?;
-                        let (entries, t, has_mask) = match &node.features.mask {
+                        let (entries, mask_transform, has_mask) = match &node.features.mask {
                             Some(mask) => {
                                 let (e, t) = self.mask_entries(
                                     mask,
@@ -1064,13 +1075,13 @@ impl Context<'_> {
                                         None
                                     },
                                 )?;
-                                (e, t, 1)
+                                (e, Some(t), 1)
                             }
-                            None => (vec![], transform, 0),
+                            None => (vec![], None, 0),
                         };
                         let p = Self::mask_params(
                             23,
-                            t,
+                            mask_transform,
                             desired,
                             [
                                 crate::composite_opacity_q14(node.opacity),
@@ -1078,7 +1089,7 @@ impl Context<'_> {
                                 node.blend as i32,
                                 0,
                             ],
-                        );
+                        )?;
                         self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
                         mixed = out;
                     } else if node.opacity != 1.0 {

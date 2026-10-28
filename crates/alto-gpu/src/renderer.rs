@@ -529,12 +529,11 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
 }
 
 /// Where a v3 mask stage reads its mask: the uniform `inv0`, `inv1` and `extra`
-/// slots and the `info.w` sampler (`sample.rs`).
+/// slots. The lookup is always `SAMPLE_INTEGER` (`sample.rs`).
 pub(crate) struct MaskSampler {
     pub inv0: [f32; 4],
     pub inv1: [f32; 4],
     pub extra: [f32; 4],
-    pub mode: u32,
 }
 
 /// An f32 that is exactly an `i32`.
@@ -543,35 +542,26 @@ fn exact_i32(v: f32) -> Option<i32> {
 }
 
 /// The sampler for a v3 mask with document-to-pixel `transform`, read at an
-/// output ROI with origin `origin` and level scale `scale`. The rule is the
-/// compositor's: `pack_inverse` keeps axis-aligned unit inverses on the f32
-/// nearest lookup and packs the rest as Q16. The Q16 path also needs the Q8 pixel
-/// center, so it is taken only when the origin and the scale are exact integers
-/// and the scale is at least 1. Otherwise the f32 lookup is used.
-pub(crate) fn mask_sampler(transform: [f64; 6], origin: [f32; 2], scale: f32) -> MaskSampler {
-    let inv = inverse(transform).unwrap_or([0.0; 6]);
-    let float = MaskSampler {
-        inv0: [inv[0] as f32, inv[1] as f32, inv[2] as f32, inv[3] as f32],
-        inv1: [inv[4] as f32, inv[5] as f32, 0.0, 0.0],
-        extra: [0.0; 4],
-        mode: crate::sample::SAMPLE_F32,
-    };
-    let integer_roi = exact_i32(origin[0]).is_some()
-        && exact_i32(origin[1]).is_some()
-        && exact_i32(scale).is_some_and(|s| s >= 1);
-    if !integer_roi || inverse(transform).is_none() {
-        return float;
-    }
-    let packed = crate::sample::pack_inverse(inv, alto_core::RENDER_VERSION_EXACT);
-    if packed.sample_mode != crate::sample::SAMPLE_INTEGER {
-        return float;
-    }
-    MaskSampler {
-        inv0: packed.inv0,
+/// output ROI with origin `origin` and level scale `scale`. Every v3 mask takes
+/// the Q16 lookup (`SAMPLE_INTEGER`), axis-aligned unit inverses included; there
+/// is no f32 lookup. The Q16 inverse is `integer_inverse`, and the Q8 pixel
+/// center needs an origin and a scale that are exact integers, with the scale at
+/// least 1. `None` when any of that fails or `transform` is singular: the host
+/// refuses the render (DQ3-4).
+pub(crate) fn mask_sampler(
+    transform: [f64; 6],
+    origin: [f32; 2],
+    scale: f32,
+) -> Option<MaskSampler> {
+    exact_i32(origin[0])?;
+    exact_i32(origin[1])?;
+    exact_i32(scale).filter(|s| *s >= 1)?;
+    let q = crate::sample::integer_inverse(inverse(transform)?)?;
+    Some(MaskSampler {
+        inv0: q.m.map(|v| f32::from_bits(v.cast_unsigned())),
         inv1: [0.0; 4],
-        extra: packed.trans.map(f32::from_bits),
-        mode: crate::sample::SAMPLE_INTEGER,
-    }
+        extra: crate::sample::pack_wide(q.tx, q.ty).map(f32::from_bits),
+    })
 }
 
 /// The feature that render version 3 has no integer definition for, or `None`.
