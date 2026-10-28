@@ -131,8 +131,8 @@ function square() {
 }
 
 
-// Measured-not-enforced: all 256 bytes in an Rgba8Unorm texture, read with
-// textureLoad + unorm_byte (the effects.wgsl text). Records, never fails.
+// Enforced: all 256 bytes in an Rgba8Unorm texture, read with
+// textureLoad + unorm_byte (the effects.wgsl text). Recorded, then asserted.
 async function measureAtlasRead() {
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -179,9 +179,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         if (got[i * 4 + ch] !== want[ch]) mismatches.push({ texel: i, channel: ch, byte: want[ch], read: got[i * 4 + ch] });
       }
     }
-    return { label: "measured-not-enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
+    return { label: "enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
   } catch (error) {
-    return { label: "measured-not-enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
+    return { label: "enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
   }
 }
 
@@ -230,8 +230,13 @@ export async function runParityTests(engine, log) {
         return gap;
       });
     }
-    atlasRead = await measureAtlasRead();
-    log(`atlas-read (measured-not-enforced): ${atlasRead.status} ${atlasRead.mismatchedChannels} channel mismatches${atlasRead.error ? ` ${atlasRead.error}` : ""}`);
+    await test("atlas-read round-trips all 256 bytes", async () => {
+      atlasRead = await measureAtlasRead();
+      const gap = `${atlasRead.status} ${atlasRead.mismatchedChannels} channel mismatches${atlasRead.error ? ` ${atlasRead.error}` : ""}`;
+      log(`atlas-read (enforced): ${gap}`);
+      assert(atlasRead.status === "exact", `atlas-read ${gap}`);
+      return gap;
+    });
     await test("alpha-measure layers are distinct", async () => {
       assertDistinctAlphaLayers();
     });

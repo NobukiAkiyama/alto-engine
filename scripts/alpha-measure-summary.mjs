@@ -52,7 +52,7 @@ for (const row of rows) {
 const atlas = report.atlasRead;
 if (atlas) {
   markdown += `### Atlas read (\`Rgba8Unorm\` + \`textureLoad\` + \`unorm_byte\`, ${backendLabel})\n\n`;
-  markdown += "Measured-not-enforced. All 256 byte values on all 4 channels.\n\n";
+  markdown += "Enforced: a mismatch or error fails the parity run. All 256 byte values on all 4 channels.\n\n";
   markdown += `Status: **${atlas.status}**, mismatched channels: ${atlas.mismatchedChannels}`;
   if (atlas.error) markdown += `, error: ${atlas.error}`;
   markdown += "\n\n";

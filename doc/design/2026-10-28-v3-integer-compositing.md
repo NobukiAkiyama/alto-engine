@@ -72,7 +72,7 @@ v3 が変えるのは、そのバイトの読み方である。WGSL の `sample_
 - v3 は `textureLoad` で読み、その場で `unorm_byte`（`u32(clamp(v, 0, 1) * 255 + 0.5)`、`effects.wgsl`）でバイトに戻す。`round(s * 255)` は使わない。`unorm_byte` は #22 の color-adjust モード 18 がすでに使い、3 バックエンドで差 0 だった関数である。
 - その後はすべて整数である。`textureSample` もハードウェアのフィルタも使わない。4 タップの補間は上の `channel_byte` が整数で行う。
 - 二枚目のアトラス（たとえば `Rgba8Uint`）を並べない理由は三つ。VRAM が倍になる。アップロードが倍になる。内容ハッシュをキーにするタイルキャッシュが二つになる。
-- `Rgba8Uint` へ切り替えるのは、どれかのバックエンドで `unorm_byte` の不一致が計測されたときだけである。その計測が下の「検証」のアトラス読み取り項目である。
+- `Rgba8Uint` へ切り替えるのは、どれかのバックエンドで `unorm_byte` の不一致が計測されたときだけである。下の「検証」のアトラス読み取り項目は必須の検査であり、不一致が出たらテストが落ちる。
 
 ## ストレートとプレマルチプライ
 
@@ -218,7 +218,7 @@ color-adjust の彩度 mix の範囲 −5_502_926_848..=5_771_362_304 は `color
 - lavapipe。gpu-parity ジョブ。
 - SwiftShader。wasm ジョブ。`ALTO_BROWSER_GPU=swiftshader` で、アダプタの architecture に `swiftshader` が含まれること。
 
-アトラス読み取りも同じ三つで計測する。256 通りのバイト値を全チャネルに入れた `Rgba8Unorm` テクスチャを `textureLoad` + `unorm_byte` で読み、全値が正確に戻るかをバックエンドごとに記録する（Rust `Gpu::atlas_read`、出力 `atlas-read.json` / `atlas-read.md`。ブラウザは `tests/e2e/parity-tests.js` の `measureAtlasRead`、`parity.json` の `atlasRead`）。measured-not-enforced であり、不一致でテストは落ちない。不一致が出たら、そのときに `Rgba8Uint` を検討する。
+アトラス読み取りも同じ三つで検査する（必須）。256 通りのバイト値を全チャネルに入れた `Rgba8Unorm` テクスチャを `textureLoad` + `unorm_byte` で読み、全値が正確に戻ることをバックエンドごとに記録し、確かめる（Rust `Gpu::atlas_read`、出力 `atlas-read.json` / `atlas-read.md`。ブラウザは `tests/e2e/parity-tests.js` の `measureAtlasRead`、`parity.json` の `atlasRead`）。これは enforced（必須）である。どれかのバックエンドで一つでも戻らない値やエラーがあれば、`gpu_shader_matches_cpu_reference`（Metal、lavapipe）とブラウザのパリティ実行（SwiftShader）が失敗する。結果の JSON は失敗時も残す。不一致が出たら、そのときに `Rgba8Uint` を検討する。
 
 対象は、半透明の `-alpha-measure` ケース全部である。v3 の文書として実行し、一致したら v3 のハッシュとして固定する。v2 の `-alpha-measure` は measured-not-enforced のままである。`tests/parity/render-v1.txt` と `tests/parity/cpu-reference.txt` の既存行は一文字も変えない。`existing_v1_and_v2_hashes_are_unchanged` がそれを見る。
 

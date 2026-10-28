@@ -1716,7 +1716,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {{
 }
 
 /// Result of reading all 256 bytes from an `Rgba8Unorm` texture with
-/// `textureLoad` + `unorm_byte`. Measured-not-enforced.
+/// `textureLoad` + `unorm_byte`. Enforced.
 struct AtlasRead {
     mismatches: Vec<(usize, usize, u8, u32)>,
 }
@@ -1724,7 +1724,7 @@ struct AtlasRead {
 impl AtlasRead {
     fn line(&self) -> String {
         if self.mismatches.is_empty() {
-            "atlas-read (measured-not-enforced): 256/256 byte values round-trip exactly on all 4 channels".into()
+            "atlas-read (enforced): 256/256 byte values round-trip exactly on all 4 channels".into()
         } else {
             let shown: Vec<String> = self
                 .mismatches
@@ -1733,7 +1733,7 @@ impl AtlasRead {
                 .map(|(t, c, want, got)| format!("texel {t} ch {c} byte {want} read {got}"))
                 .collect();
             format!(
-                "atlas-read (measured-not-enforced): {} channel mismatches: {}",
+                "atlas-read (enforced): {} channel mismatches: {}",
                 self.mismatches.len(),
                 shown.join("; ")
             )
@@ -1764,14 +1764,14 @@ fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
         }
     }
     let json = format!(
-        "{{\n  \"label\": \"measured-not-enforced\",\n  \"backend\": \"{}\",\n  \"format\": \"Rgba8Unorm\",\n  \"read\": \"textureLoad + unorm_byte\",\n  \"values\": 256,\n  \"status\": \"{status}\",\n  \"mismatchedChannels\": {count},\n  \"error\": \"{}\",\n  \"mismatches\": [{list}]\n}}\n",
+        "{{\n  \"label\": \"enforced\",\n  \"backend\": \"{}\",\n  \"format\": \"Rgba8Unorm\",\n  \"read\": \"textureLoad + unorm_byte\",\n  \"values\": 256,\n  \"status\": \"{status}\",\n  \"mismatchedChannels\": {count},\n  \"error\": \"{}\",\n  \"mismatches\": [{list}]\n}}\n",
         json_escape(adapter),
         json_escape(&error)
     );
     std::fs::write(dir.join("atlas-read.json"), json).expect("write atlas read json");
     let line = match result {
         Ok(r) => r.line(),
-        Err(e) => format!("atlas-read (measured-not-enforced): GPU error: {e}"),
+        Err(e) => format!("atlas-read (enforced): GPU error: {e}"),
     };
     let markdown = format!(
         "### Atlas read (`Rgba8Unorm` + `textureLoad` + `unorm_byte`)\n\nBackend: `{}`\n\n{line}\n",
@@ -2276,7 +2276,7 @@ impl Gpu {
 
     /// Upload all 256 byte values to an `Rgba8Unorm` texture and read them back
     /// with `textureLoad` + `unorm_byte`. Returns every channel that does not
-    /// round-trip. Measured-not-enforced: the caller records, it does not fail.
+    /// round-trip. Enforced: the caller records it and fails on any mismatch.
     fn atlas_read(&self) -> Result<AtlasRead, String> {
         let device = &self.device;
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -3921,11 +3921,19 @@ fn gpu_shader_matches_cpu_reference() {
         }
     }
     write_alpha_measure(&gpu.adapter_name, &measured);
-    // Measured-not-enforced: printed and stored, never pushed to `failed`.
+    // Enforced: every byte on every channel must round-trip. Stored first, then failed.
     let atlas = gpu.atlas_read();
     match &atlas {
-        Ok(r) => println!("{}", r.line()),
-        Err(e) => println!("atlas-read (measured-not-enforced): GPU error: {e}"),
+        Ok(r) => {
+            println!("{}", r.line());
+            if !r.mismatches.is_empty() {
+                failed.push(r.line());
+            }
+        }
+        Err(e) => {
+            println!("atlas-read (enforced): GPU error: {e}");
+            failed.push(format!("atlas-read: {e}"));
+        }
     }
     write_atlas_read(&gpu.adapter_name, &atlas);
     let src = color_adjust_gradient();
