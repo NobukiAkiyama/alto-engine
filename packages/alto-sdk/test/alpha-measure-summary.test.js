@@ -60,10 +60,16 @@ test("v3 classification is closed: color-adjust is integer M5, unspecified featu
   ]) };
   assert.equal(sceneGap(adjust), "v3-m5-integer");
   for (const [name, node] of [
-    ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
     ["selected", { type: "raster", props: { effects: [{ type: "color_adjust", brightness: 0, contrast: 1, saturation: 1, selection: { tiles: {} } }] } }],
-    ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
     ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
+    ["mask", { type: "raster", props: { mask: {} } }],
+  ]) {
+    const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
+    assert.equal(sceneGap(scene), "v3-m5-integer", name);
+  }
+  for (const [name, node] of [
+    ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
+    ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
     ["vector", { type: "vector", props: {} }],
     ["text", { type: "text", props: {} }],
     ["clip", { type: "raster", props: { clip_to_below: true } }],
@@ -87,7 +93,8 @@ test("v3 classification is closed: color-adjust is integer M5, unspecified featu
     assert.deepEqual(report.v3Unsupported, [row]);
     assert.ok(readFileSync(join(dir, "alpha-measure.md"), "utf8").includes("v3-unsupported"));
     // Classification must scan the entire scene and preserve pre-v3 gap names.
-    snapshot.nodes.set("first-mask", { type: "raster", props: { mask: {} } });
+    // A mask alone is integer M5; combined with blur it is still refused, never float-drawn.
+    snapshot.nodes.set("first-mask", { type: "raster", props: { mask: {}, effects: [{ type: "gaussian_blur", radius: 4 }] } });
     assert.equal(sceneGap(snapshot), "v3-unsupported");
     snapshot.meta.render_version = 2;
     assert.equal(sceneGap(snapshot), "mask");
