@@ -1,15 +1,16 @@
 #!/bin/sh
-# Usage: check.sh [all|native|wasm|wasm-fast|wasm-release]
+# Usage: check.sh [all|native|wasm|wasm-fast|wasm-release|wasm-report]
 # wasm-fast uses cached builds and reports release-binary drift without gating PRs.
 # wasm-release gates release hashes only; CI supplies a clean RUNNER_TEMP target.
+# wasm-report builds release packages and reports metadata without checking committed hashes.
 # all/wasm retain strict local checks. Render hash checks are independent.
 set -eu
 cd "$(dirname "$0")/.."
 phase=${1:-all}
 case "$phase" in
-  all|native|wasm|wasm-fast|wasm-release) ;;
+  all|native|wasm|wasm-fast|wasm-release|wasm-report) ;;
   *)
-    echo "usage: check.sh [all|native|wasm|wasm-fast|wasm-release]" >&2
+    echo "usage: check.sh [all|native|wasm|wasm-fast|wasm-release|wasm-report]" >&2
     exit 1
     ;;
 esac
@@ -24,7 +25,7 @@ fi
 if [ "$phase" = native ]; then
   exit 0
 fi
-if [ "$phase" != wasm-release ]; then
+if [ "$phase" != wasm-release ] && [ "$phase" != wasm-report ]; then
   CARGO_TARGET_DIR="$wasm_target" cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings
 fi
 # Collect all package and metadata mismatches before returning a failure.
@@ -32,9 +33,11 @@ hash_status=0
 check_sums() {
   sh scripts/verify-wasm-sums.sh "$@" || hash_status=1
 }
-check_sums release examples/browser-playground/pkg committed
-check_sums release packages/alto-sdk/dist/pkg committed
-check_sums vector-comparison examples/vector-comparison/pkg committed
+if [ "$phase" != wasm-report ]; then
+  check_sums release examples/browser-playground/pkg committed
+  check_sums release packages/alto-sdk/dist/pkg committed
+  check_sums vector-comparison examples/vector-comparison/pkg committed
+fi
 bindgen_version=$(sed -n 's/^wasm-bindgen *= *"=\([0-9][0-9.]*\)".*/\1/p' crates/alto-wasm/Cargo.toml)
 if [ -z "$bindgen_version" ]; then
   echo "pin wasm-bindgen with an exact '=' version in crates/alto-wasm/Cargo.toml" >&2
@@ -46,8 +49,12 @@ fi
 pkg_out=$(mktemp -d)
 trap 'rm -rf "$pkg_out"' EXIT
 sh scripts/build-wasm-pkg.sh "$pkg_out"
-if [ "$phase" = wasm-release ]; then
+if [ "$phase" = wasm-release ] || [ "$phase" = wasm-report ]; then
   sh scripts/build-vector-comparison.sh "$pkg_out/vector"
+  if [ "$phase" = wasm-report ]; then
+    node scripts/report-wasm-hashes.mjs "${ALTO_WASM_HASH_REPORT_DIR:?}" "$pkg_out"
+    exit 0
+  fi
   check_sums release "$pkg_out"
   check_sums vector-comparison "$pkg_out/vector"
   ALTO_METADATA_RELEASE_DIR="$pkg_out" node scripts/check-build-metadata.mjs || hash_status=1

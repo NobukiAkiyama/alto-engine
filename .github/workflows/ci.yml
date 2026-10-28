@@ -232,7 +232,7 @@ jobs:
   wasm-release-hashes:
     if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -248,12 +248,35 @@ jobs:
           cache-bin: "false"
           shared-key: wasm-registry
       - name: Check clean arm64 macOS release hashes before slow tests
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           test "$(uname -m)" = arm64
           rustc -vV | grep -q '^host: aarch64-apple-darwin$'
           ALTO_WASM_TARGET_DIR=$(mktemp -d "$RUNNER_TEMP/alto-wasm-release.XXXXXX")
           export ALTO_WASM_TARGET_DIR
           sh scripts/check.sh wasm-release
+      - name: Check clean main builds are reproducible
+        if: github.ref == 'refs/heads/main'
+        run: |
+          test "$(uname -m)" = arm64
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+          for trial in 1 2; do
+            ALTO_WASM_TARGET_DIR=$(mktemp -d "$RUNNER_TEMP/alto-wasm-main.XXXXXX")
+            ALTO_WASM_HASH_REPORT_DIR="$RUNNER_TEMP/wasm-hashes-main-$trial"
+            export ALTO_WASM_TARGET_DIR ALTO_WASM_HASH_REPORT_DIR
+            sh scripts/check.sh wasm-report
+          done
+          status=0
+          for file in SHA256SUMS build-fields.json sizes.json; do
+            diff -u "$RUNNER_TEMP/wasm-hashes-main-1/$file" "$RUNNER_TEMP/wasm-hashes-main-2/$file" || status=1
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        with:
+          name: wasm-hashes-main
+          path: ${{ runner.temp }}/wasm-hashes-main-1
+          if-no-files-found: error
 
   gpu-parity:
     if: ${{ !inputs.gpu_lifecycle }}

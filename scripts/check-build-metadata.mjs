@@ -7,7 +7,12 @@ import { gzipSync } from "node:zlib";
 let failures = 0;
 const check = (actual, expected, message) => {
   try { assert.deepEqual(actual, expected, message); }
-  catch (error) { console.error(error.message); failures++; }
+  catch (error) {
+    console.error(error.message);
+    console.error("  actual:", actual);
+    console.error("  expected:", expected);
+    failures++;
+  }
 };
 const fast = process.argv.includes("--fast");
 const releaseDir = process.env.ALTO_METADATA_RELEASE_DIR;
