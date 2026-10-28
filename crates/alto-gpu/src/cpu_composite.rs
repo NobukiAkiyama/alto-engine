@@ -1286,7 +1286,7 @@ fn write_tie_8192(adapter: &str, src: &[u8], grid: &[(f32, f32, f32)]) {
             }
         }
         let name = color_adjust_case_name(contrast, saturation, brightness);
-        rows.push(format!("{{\"name\":\"{}\",\"pixels\":{pixels},\"channels\":{channels:?},\"lossyStep2_4_8\":{lossy:?}}", json_escape(&name)));
+        rows.push(format!("{{\"name\":\"{}\",\"pixels\":{pixels},\"channels\":{channels:?},\"lossyStep2_4_8\":{lossy:?}}}", json_escape(&name)));
         markdown.push_str(&format!(
             "| {name} | {pixels} | {channels:?} | {lossy:?} |\n"
         ));
