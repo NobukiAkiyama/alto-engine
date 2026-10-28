@@ -275,23 +275,6 @@ export async function runParityTests(engine, log) {
         log(`FAIL ${testCase.name} ${error}`);
       }
     }
-    // A case flagged `v3Refused` must fail with exactly that error (the host
-    // refuses it, DQ3-4); any other refusal of a v3 case is a failure.
-    const expectRefusal = async (name, want, read) => {
-      let refusal = null;
-      try {
-        await read();
-      } catch (error) {
-        refusal = error;
-      }
-      assert(refusal, `${name} was drawn; expected ${want.message}`);
-      assert(refusal.code === want.code, `${name} refused with ${refusal.code}: ${refusal.message}`);
-      assert(String(refusal.message) === want.message, `${name} refused for another reason: ${refusal.message}`);
-      // Reported with the host's other refusals, outside the integer-exact count.
-      compositeV3.push({ name, renderPath: "v3-unsupported", enforced: false, status: "refused", error: refusal.message });
-      log(`${name} (enforced): refused as expected: ${refusal.message}`);
-      return { detail: `refused: ${refusal.message}`, renderPath: "v3-unsupported", enforced: true };
-    };
     for (const testCase of alphaMeasureCases()) {
       await test(`v3-${testCase.name}`, async () => {
         let renderPath = null;
@@ -302,11 +285,15 @@ export async function runParityTests(engine, log) {
           const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
           assert(doc.getSnapshot().meta.render_version === 3, "v3 fixture did not select integer compositing");
           for (const node of testCase.nodes) await addNode(doc, engine, node);
-          if (testCase.v3Refused) return await expectRefusal(`v3-${testCase.name}`, testCase.v3Refused, () => gpuTile(engine, testCase));
           // DQ3-1: a v3 tile at level >= 1 is the integer downsample of its children,
           // even when read cold, never a direct composite at that scale.
           const cpu = testCase.level ? renderPyramidCase(testCase) : renderCase(testCase, 3);
           const gpu = await gpuTile(engine, testCase);
+          // Linus 04:40: the warm read (tiles cached before the layers were added,
+          // then damaged) and a cold read (caches emptied) agree on every byte.
+          const cold = testCase.level ? gpu
+            : new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: testCase.tx, y: testCase.ty, fresh: true }));
+          assert(same(cold, gpu), `v3-${testCase.name} cold differs from warm: ${diff(gpu, cold)}`);
           renderPath = sceneGap(doc.getSnapshot());
           const enforced = isV3IntegerCase({ renderPath });
           const row = { ...measureRow(testCase, cpu, gpu), renderPath, name: `v3-${testCase.name}`, enforced, status: same(cpu, gpu) ? "exact" : "mismatch" };
@@ -332,10 +319,6 @@ export async function runParityTests(engine, log) {
           assert(fixture.ok, `v3 fixture status ${fixture.status}`);
           const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
           for (const node of source.nodes) await addNode(doc, engine, node);
-          if (source.v3Refused) {
-            return await expectRefusal(testCase.name, source.v3Refused, () =>
-              testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
-          }
           renderPath = sceneGap(doc.getSnapshot());
           const enforced = isV3IntegerCase({ renderPath });
           // Reset, populate children and read the parent in the same worker request.

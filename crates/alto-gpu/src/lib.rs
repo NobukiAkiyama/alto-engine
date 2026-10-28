@@ -77,8 +77,8 @@ pub fn integer_composite_shader() -> String {
         "{prefix}\n{div}\n{q14}\n{sample}\n{fetch}\n{}\n{}\n{}",
         r#"
 // The integer 4-tap, or SAMPLE_NEAREST (2) as the 4-tap with zero weights.
-// Out of range is transparent (the host refuses a draw whose on-canvas
-// corners leave i32). A draw without an integer sampler (SAMPLE_F32, which the
+// A pixel whose Q8 position leaves i32 is transparent; the host makes sure
+// such a pixel reaches no tile, or refuses the tile (renderer::v3_reach). A draw without an integer sampler (SAMPLE_F32, which the
 // host refuses in version 3) reads nothing rather than a float fetch. Keep this
 // branch: without it SwiftShader (Subzero) takes about 10x longer to compile
 // the pipeline, and a second copy of the Q8 position code about 70x.

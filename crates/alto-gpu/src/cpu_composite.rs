@@ -2711,26 +2711,40 @@ fn renderer_cases() -> Vec<RendererCase> {
             )],
         )
     });
-    out.push(RendererCase {
-        refused: Some("v3 mask ROI has no integer tile range"),
-        ..case(
-            "renderer [0, 0] mask past 2^23 refused".into(),
-            [0, 0],
-            vec![RendererLayer::Raster {
-                tiles: vec![([0, 0], TileSpec::Raster(2))],
-                transform: ident(),
-                adjust: None,
-                selection: None,
-                mask: Some(RendererCaseMask {
-                    linked: false,
-                    transform: [1.0, 0.0, 0.0, 1.0, -8_388_600.0, 0.0],
-                    tiles: masks(32767..=32767, 0..=0),
-                }),
-                opacity: 1.0,
-                blend: RenderBlend::Normal,
-            }],
-        )
-    });
+    // A mask whose source passes 2^23 texels on tile (0, 0) from pixel 208 on
+    // (DQ3-4, Linus 04:40): the shader drops the pixels whose mask Q8 leaves i32. With the mask
+    // tiles ending at texel 2^23 - 1 those pixels read nothing either way, so it
+    // draws (byte 0 there, as the CPU). With a mask tile at 2^23 they could read
+    // it, so that tile is refused.
+    for (name, tiles, refused) in [
+        ("mask up to 2^23 draws", masks(32767..=32767, 0..=0), None),
+        (
+            "mask tile at 2^23 refused",
+            masks(32767..=32768, 0..=0),
+            Some("v3 mask ROI has no integer tile range"),
+        ),
+    ] {
+        out.push(RendererCase {
+            refused,
+            ..case(
+                format!("renderer [0, 0] {name}"),
+                [0, 0],
+                vec![RendererLayer::Raster {
+                    tiles: vec![([0, 0], TileSpec::Opaque(2))],
+                    transform: ident(),
+                    adjust: None,
+                    selection: None,
+                    mask: Some(RendererCaseMask {
+                        linked: false,
+                        transform: [1.0, 0.0, 0.0, 1.0, -8_388_400.0, 0.0],
+                        tiles,
+                    }),
+                    opacity: 1.0,
+                    blend: RenderBlend::Normal,
+                }],
+            )
+        });
+    }
     out
 }
 
@@ -2913,6 +2927,17 @@ fn renderer_case_cpu(case: &RendererCase) -> Vec<u8> {
 }
 
 impl RendererCase {
+    /// A copy with the same canvas and layers.
+    fn clone_layers(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            level: self.level,
+            key: self.key,
+            canvas: self.canvas,
+            layers: self.layers.clone(),
+            refused: self.refused,
+        }
+    }
     /// Whether every layer is a raster with no effect or mask: the renderer
     /// draws such a scene with the integer tile compositor, not M5.
     fn plain(&self) -> bool {
@@ -2975,14 +3000,319 @@ fn plain_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
     composite_integer(&ops, case.canvas[0] as u32, case.canvas[1] as u32, &frame).0
 }
 
+/// A display tile `(level, tx, ty)` and the refusal it must give, if any.
+type ColdWarmKey = ((i32, i32, i32), Option<&'static str>);
+
+/// A scene change for [`renderer_cold_warm`]: `before` and `after` share the
+/// canvas and node identities; `keys` are the display tiles read after it,
+/// each with the refusal it must give (`None`: drawn, equal to the CPU).
+struct ColdWarmCase {
+    name: &'static str,
+    before: RendererCase,
+    after: RendererCase,
+    keys: Vec<ColdWarmKey>,
+}
+
+/// The scene changes of [`renderer_cold_warm`] (Linus 04:40 item 5): the
+/// large-translation-out-of-range layer, the 2^23 boundary (drawn, refused, and
+/// a far layer at the refused origin), a moved layer read at levels 0 and 1,
+/// a source tile added where the f64 and integer selections part (the
+/// 999936 case), and a masked M5 scene.
+fn cold_warm_cases() -> Vec<ColdWarmCase> {
+    let blank = |canvas: [i32; 2]| RendererCase {
+        name: String::new(),
+        level: 0,
+        key: [0, 0],
+        canvas,
+        layers: vec![],
+        refused: None,
+    };
+    let with = |canvas: [i32; 2], layers: Vec<RendererLayer>| RendererCase {
+        layers,
+        ..blank(canvas)
+    };
+    let raster = |tiles: Vec<([i32; 2], TileSpec)>, transform: [f64; 6]| RendererLayer::Raster {
+        tiles,
+        transform,
+        adjust: None,
+        selection: None,
+        mask: None,
+        opacity: 0.8,
+        blend: RenderBlend::Normal,
+    };
+    let (s, c) = 0.3f64.sin_cos();
+    let rotated = [c, s, -s, c, 300.25, 17.5];
+    let far = [0.9999900000999989, 0.0, 0.0, 1.0, 11.00180998190018, 0.0];
+    let edge = [3908 * 256, 256];
+    let boundary = [32769 * 256, 256];
+    let masked = renderer_mask_cases().swap_remove(1);
+    vec![
+        ColdWarmCase {
+            name: "large-translation-out-of-range",
+            before: blank([256, 256]),
+            after: with(
+                [256, 256],
+                vec![raster(
+                    vec![([0, 0], TileSpec::Raster(1))],
+                    [0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0],
+                )],
+            ),
+            keys: vec![((0, 0, 0), None)],
+        },
+        ColdWarmCase {
+            name: "2^23 boundary",
+            before: blank(boundary),
+            after: with(
+                boundary,
+                vec![
+                    raster(vec![([32_767, 0], TileSpec::Raster(2))], ident()),
+                    raster(vec![([32_768, 0], TileSpec::Raster(3))], ident()),
+                ],
+            ),
+            keys: vec![
+                ((0, 32_767, 0), None),
+                (
+                    (0, 32_768, 0),
+                    Some("v3 draw ROI has no integer tile range"),
+                ),
+            ],
+        },
+        ColdWarmCase {
+            name: "far layer at the 2^23 origin",
+            before: blank(boundary),
+            after: with(
+                boundary,
+                vec![raster(vec![([0, 0], TileSpec::Raster(4))], ident())],
+            ),
+            keys: vec![((0, 32_768, 0), None), ((0, 0, 0), None)],
+        },
+        ColdWarmCase {
+            name: "moved layer",
+            before: with(
+                [1024, 512],
+                vec![raster(
+                    (0..=2).map(|x| ([x, 0], TileSpec::Raster(x))).collect(),
+                    [1.0, 0.0, 0.0, 1.0, 0.5, 0.25],
+                )],
+            ),
+            after: with(
+                [1024, 512],
+                vec![raster(
+                    (0..=2).map(|x| ([x, 0], TileSpec::Raster(x))).collect(),
+                    rotated,
+                )],
+            ),
+            keys: vec![
+                ((0, 0, 0), None),
+                ((0, 1, 0), None),
+                ((0, 2, 0), None),
+                ((0, 1, 1), None),
+                ((1, 0, 0), None),
+            ],
+        },
+        ColdWarmCase {
+            name: "source tile added at the 999936 edge",
+            before: with(
+                edge,
+                vec![raster(
+                    vec![
+                        ([3905, 0], TileSpec::Raster(5)),
+                        ([3906, 0], TileSpec::Raster(6)),
+                    ],
+                    far,
+                )],
+            ),
+            after: with(
+                edge,
+                vec![raster(
+                    vec![
+                        ([3905, 0], TileSpec::Raster(5)),
+                        ([3906, 0], TileSpec::Raster(6)),
+                        ([3907, 0], TileSpec::Opaque(7)),
+                    ],
+                    far,
+                )],
+            ),
+            keys: vec![((0, 3906, 0), None)],
+        },
+        ColdWarmCase {
+            name: "masked M5",
+            before: blank(RendererCase::from(&masked).canvas),
+            after: RendererCase::from(&masked),
+            keys: vec![((0, masked.key[0], masked.key[1]), None)],
+        },
+    ]
+}
+
+/// Linus 04:40 item 5: each [`cold_warm_cases`] scene read warm (the tiles of
+/// `before` cached, then `scene_damage` applied) and cold (caches reset). Every
+/// pair, per key: the warm and cold results.
+type ColdWarm = Vec<(
+    Result<Vec<u8>, crate::RenderError>,
+    Result<Vec<u8>, crate::RenderError>,
+)>;
+
+fn renderer_cold_warm(cases: &[ColdWarmCase]) -> Result<Vec<ColdWarm>, String> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+    let instance = wgpu::Instance::new(descriptor);
+    let mut renderer = pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
+        .map_err(|e| format!("headless renderer: {e}"))?;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let (device, done) = (renderer.device.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = device.poll(wgpu::PollType::Poll);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    let out = cases
+        .iter()
+        .map(|case| {
+            let ids: Vec<NodeId> = (0..=case.before.layers.len().max(case.after.layers.len()))
+                .map(|_| NodeId::new())
+                .collect();
+            let mut store = alto_raster::ObjectStore::default();
+            let before = renderer_scene(&case.before, &mut store, &ids);
+            let after = renderer_scene(&case.after, &mut store, &ids);
+            let read = |r: &mut crate::renderer::Renderer, scene: &RenderScene, key| {
+                pollster::block_on(r.read_tile(scene, &store, key))
+            };
+            renderer.reset_render_cache();
+            for (key, _) in &case.keys {
+                let _ = read(&mut renderer, &before, *key);
+            }
+            renderer.invalidate_damage(&crate::damage::scene_damage(&before, &after));
+            let warm: Vec<_> = case
+                .keys
+                .iter()
+                .map(|(k, _)| read(&mut renderer, &after, *k))
+                .collect();
+            let cold: Vec<_> = case
+                .keys
+                .iter()
+                .map(|(k, _)| {
+                    renderer.reset_render_cache();
+                    read(&mut renderer, &after, *k)
+                })
+                .collect();
+            warm.into_iter().zip(cold).collect()
+        })
+        .collect();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    poller
+        .join()
+        .map_err(|_| "device poller panicked".to_string())?;
+    Ok(out)
+}
+
 /// One render result per [`RendererCase`].
 type RendererResults = Vec<Result<Vec<u8>, crate::RenderError>>;
 
 /// [`RendererCase`]s composed by one headless `Renderer` (caches reset between
 /// cases) and read back, each with its render result.
-fn renderer_gpu(cases: &[RendererCase]) -> Result<RendererResults, String> {
+/// The render scene of a [`RendererCase`], its tiles inserted into `store`.
+/// `ids` (root first, then one per layer) keep node identities across two
+/// scenes, so their `scene_damage` sees moves and edits rather than new nodes.
+fn renderer_scene(
+    case: &RendererCase,
+    store: &mut alto_raster::ObjectStore,
+    ids: &[NodeId],
+) -> RenderScene {
     use alto_core::{PixelFormat, TileKey};
     use alto_raster::{ObjectStore, TileData};
+    let tiles = |store: &mut ObjectStore, format, list: &[([i32; 2], TileSpec)]| {
+        list.iter()
+            .map(|(key, spec)| crate::RenderTile {
+                key: TileKey {
+                    tx: key[0],
+                    ty: key[1],
+                },
+                hash: store.insert_tile(&TileData::new(format, spec.bytes()).expect("tile size")),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mask = |store: &mut ObjectStore, m: &Option<RendererCaseMask>| {
+        m.as_ref().map(|m| RMask {
+            tiles: tiles(store, PixelFormat::R8, &m.tiles),
+            linked: m.linked,
+            transform: m.transform,
+        })
+    };
+    let children: Vec<usize> = (1..=case.layers.len()).collect();
+    let mut scene = scene(
+        RContent::Group {
+            children,
+            isolated: false,
+        },
+        RFeatures::default(),
+    );
+    scene.render_version = alto_core::RENDER_VERSION_EXACT;
+    if let Some(root) = ids.first() {
+        scene.nodes[0].key = *root;
+    }
+    scene.canvas = IRect {
+        x0: 0,
+        y0: 0,
+        x1: case.canvas[0],
+        y1: case.canvas[1],
+    };
+    let color_adjust =
+        |(contrast, saturation, brightness): (f32, f32, f32)| REffectKind::ColorAdjust {
+            brightness,
+            contrast,
+            saturation,
+        };
+    for (i, layer) in case.layers.iter().enumerate() {
+        let mut node = scene.nodes[0].clone();
+        node.key = ids.get(i + 1).copied().unwrap_or_else(NodeId::new);
+        node.features = RFeatures::default();
+        match layer {
+            RendererLayer::Raster {
+                tiles: raster,
+                transform,
+                adjust,
+                selection,
+                mask: m,
+                opacity,
+                blend,
+            } => {
+                node.transform = *transform;
+                node.opacity = *opacity;
+                node.blend = *blend;
+                node.content = RContent::Tiles(tiles(store, PixelFormat::Rgba8, raster));
+                node.features.mask = mask(store, m);
+                if let Some(settings) = adjust {
+                    node.features.effects = vec![REffect {
+                        kind: color_adjust(*settings),
+                        selection: mask(store, selection),
+                    }];
+                }
+            }
+            RendererLayer::Adjust {
+                settings,
+                mask: m,
+                opacity,
+                blend,
+            } => {
+                node.opacity = *opacity;
+                node.blend = *blend;
+                node.content = RContent::Adjustment(REffect {
+                    kind: color_adjust(*settings),
+                    selection: None,
+                });
+                node.features.mask = mask(store, m);
+            }
+        }
+        node.effects = node.features.effects.len();
+        scene.nodes.push(node);
+    }
+    scene
+}
+
+fn renderer_gpu(cases: &[RendererCase]) -> Result<RendererResults, String> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
     let instance = wgpu::Instance::new(descriptor);
@@ -3002,92 +3332,8 @@ fn renderer_gpu(cases: &[RendererCase]) -> Result<RendererResults, String> {
     let result = cases
         .iter()
         .map(|case| {
-            let mut store = ObjectStore::default();
-            let tiles = |store: &mut ObjectStore, format, list: &[([i32; 2], TileSpec)]| {
-                list.iter()
-                    .map(|(key, spec)| crate::RenderTile {
-                        key: TileKey {
-                            tx: key[0],
-                            ty: key[1],
-                        },
-                        hash: store
-                            .insert_tile(&TileData::new(format, spec.bytes()).expect("tile size")),
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let mask = |store: &mut ObjectStore, m: &Option<RendererCaseMask>| {
-                m.as_ref().map(|m| RMask {
-                    tiles: tiles(store, PixelFormat::R8, &m.tiles),
-                    linked: m.linked,
-                    transform: m.transform,
-                })
-            };
-            let children: Vec<usize> = (1..=case.layers.len()).collect();
-            let mut scene = scene(
-                RContent::Group {
-                    children,
-                    isolated: false,
-                },
-                RFeatures::default(),
-            );
-            scene.render_version = alto_core::RENDER_VERSION_EXACT;
-            scene.canvas = IRect {
-                x0: 0,
-                y0: 0,
-                x1: case.canvas[0],
-                y1: case.canvas[1],
-            };
-            let color_adjust =
-                |(contrast, saturation, brightness): (f32, f32, f32)| REffectKind::ColorAdjust {
-                    brightness,
-                    contrast,
-                    saturation,
-                };
-            for layer in &case.layers {
-                let mut node = scene.nodes[0].clone();
-                node.key = NodeId::new();
-                node.features = RFeatures::default();
-                match layer {
-                    RendererLayer::Raster {
-                        tiles: raster,
-                        transform,
-                        adjust,
-                        selection,
-                        mask: m,
-                        opacity,
-                        blend,
-                    } => {
-                        node.transform = *transform;
-                        node.opacity = *opacity;
-                        node.blend = *blend;
-                        node.content =
-                            RContent::Tiles(tiles(&mut store, PixelFormat::Rgba8, raster));
-                        node.features.mask = mask(&mut store, m);
-                        if let Some(settings) = adjust {
-                            node.features.effects = vec![REffect {
-                                kind: color_adjust(*settings),
-                                selection: mask(&mut store, selection),
-                            }];
-                        }
-                    }
-                    RendererLayer::Adjust {
-                        settings,
-                        mask: m,
-                        opacity,
-                        blend,
-                    } => {
-                        node.opacity = *opacity;
-                        node.blend = *blend;
-                        node.content = RContent::Adjustment(REffect {
-                            kind: color_adjust(*settings),
-                            selection: None,
-                        });
-                        node.features.mask = mask(&mut store, m);
-                    }
-                }
-                node.effects = node.features.effects.len();
-                scene.nodes.push(node);
-            }
+            let mut store = alto_raster::ObjectStore::default();
+            let scene = renderer_scene(case, &mut store, &[]);
             renderer.reset_render_cache();
             pollster::block_on(renderer.read_tile(
                 &scene,
@@ -4699,8 +4945,15 @@ impl Gpu {
                             *inv,
                             (case.level, case.tx, case.ty),
                             [case.w as i32, case.h as i32],
+                            tiles
+                                .iter()
+                                .map(|t| alto_core::TileKey { tx: t.tx, ty: t.ty }),
                         )
                         .map_err(|e| format!("{}: {e}", case.name))?;
+                        // A draw that reaches none of its tiles is skipped, as the planners do.
+                        if d.keys.is_none() {
+                            continue;
+                        }
                         commands.push(GpuCommand {
                             inv0: d.inverse.m.map(|v| f32::from_bits(v.cast_unsigned())),
                             inv1: [0.0, 0.0, *opacity, *mode as f32],
@@ -5923,10 +6176,10 @@ fn mask_origin_programs_place_inputs_and_masks_by_integers() {
     }
 }
 
-/// The v3 mask tiles `Context::mask_entries` uploads (`mask_tile_range`) are
-/// the tiles the Q16 lookup reads: the four corners bound every pixel. At
-/// origin 999936 that includes tile (3907, 0), which the f64 inverse misses.
-/// A corner outside the integer range has no range (the render is refused).
+/// The v3 tile selection (`renderer::exact_reach`, used by `v3_reach` for the
+/// masks, mode 18 and the plain draws) is the tiles the Q16 lookup reads: the
+/// four corners, evaluated exactly, bound every pixel. At origin 999936 that
+/// includes tile (3907, 0), which the f64 inverse misses.
 #[test]
 fn v3_mask_tile_range_is_the_q16_lookup() {
     let renderer_cases = renderer_mask_cases();
@@ -5938,9 +6191,11 @@ fn v3_mask_tile_range_is_the_q16_lookup() {
     cases.push(([0, 0, 1], tie_mask_transform()));
     cases.push(([512, -768, 2], rotated_mask_transform()));
     let range_of = |region: [i32; 3], t: [f64; 6]| {
-        let at = [region[0] as f32, region[1] as f32];
-        let sampler = crate::renderer::mask_sampler(t, at, region[2] as f32).unwrap();
-        crate::renderer::mask_tile_range(&sampler, [256, 256])
+        let inv = integer_inverse(crate::renderer::inverse(t).unwrap()).unwrap();
+        let [x, y, scale] = region.map(i64::from);
+        crate::renderer::exact_reach(&inv, [x, y], scale, [0, 0, 256, 256], 0)
+            .keys
+            .map(|k| k as i32)
     };
     for (region, t) in cases {
         let inv = integer_inverse(crate::renderer::inverse(t).unwrap()).unwrap();
@@ -5959,11 +6214,11 @@ fn v3_mask_tile_range_is_the_q16_lookup() {
                 ];
             }
         }
-        assert_eq!(range_of(region, t), Some(every), "{region:?} {t:?}");
+        assert_eq!(range_of(region, t), every, "{region:?} {t:?}");
     }
     let far = &renderer_cases[0];
     let t = far.document_transform();
-    assert_eq!(range_of(far.region(), t), Some([3906, 0, 3907, 0]));
+    assert_eq!(range_of(far.region(), t), [3906, 0, 3907, 0]);
     let right = crate::renderer::point(crate::renderer::inverse(t).unwrap(), [1_000_192.0, 0.0]);
     // The f64 inverse ends the ROI before tile 3907, which the Q16 lookup reads.
     assert!(
@@ -5980,16 +6235,106 @@ fn v3_mask_tile_range_is_the_q16_lookup() {
     let rotated = &renderer_cases[1];
     assert_eq!(
         range_of(rotated.region(), rotated.document_transform()),
-        Some([4, 2, 6, 4])
+        [4, 2, 6, 4]
     );
-    // 0.01x inverts to 100x: the Q8 source of a corner leaves i32.
+}
+
+/// DQ3-4 as read by Linus 04:40 (`renderer::v3_reach`): a source that no pixel
+/// reaches is skipped, never refused; a refusal needs a reached tile and pixels
+/// the shader cannot compute exactly (a Q8 pixel center outside i32, or a pixel
+/// dropped for a source Q8 outside i32 that could read a listed tile).
+#[test]
+fn v3_reach_refuses_only_what_reaches_a_tile() {
+    let reach = |inv: [f64; 6], origin: [i64; 2], reach: i32, keys: &[[i32; 2]]| {
+        let q = integer_inverse(inv).unwrap();
+        crate::renderer::v3_reach(
+            &q,
+            origin,
+            1,
+            [0, 0, 256, 256],
+            reach,
+            keys.iter()
+                .map(|k| alto_core::TileKey { tx: k[0], ty: k[1] }),
+        )
+    };
+    // large-translation-out-of-range: 0.01x moved 84000 px inverts to 100x
+    // moved -8.4M px. On tile (0, 0) every source Q8 is past -2^31, and the
+    // layer's tile (0, 0) is far from that: skipped, not refused, in any cache
+    // state. The planted probe tile (32723, 0) is not reached either.
+    let far = crate::renderer::inverse([0.01, 0.0, 0.0, 0.01, 84_000.0, 0.0]).unwrap();
+    assert_eq!(reach(far, [0, 0], 1, &[[0, 0], [32_723, 0]]), Ok(None));
+    let r = crate::renderer::exact_reach(
+        &integer_inverse(far).unwrap(),
+        [0, 0],
+        1,
+        [0, 0, 256, 256],
+        1,
+    );
+    assert!(r.dropped[0] && r.centers_fit);
+    // At the tile the layer covers it is drawn.
+    assert!(matches!(reach(far, [84_000, 0], 1, &[[0, 0]]), Ok(Some(_))));
+    // A tile origin at 2^23 px has no i32 Q8 pixel center: refused only when a
+    // listed tile is reached ("plain [32768, 0] refused").
+    let id = ident();
+    assert_eq!(reach(id, [8_388_608, 0], 0, &[[32_768, 0]]), Err(()));
+    assert_eq!(reach(id, [8_388_608, 0], 0, &[[0, 0]]), Ok(None));
     assert_eq!(
-        range_of([8_000_000, 0, 1], [0.01, 0.0, 0.0, 0.01, 0.0, 0.0]),
-        None
+        reach(id, [8_388_352, 0], 0, &[[32_767, 0]]),
+        Ok(Some([32_767, 0, 32_767, 0]))
     );
-    // The Q8 pixel center of the right corners leaves i32 (pixel 0 fits).
-    assert!(pixel_q8(8_388_480, 0, 1).is_some() && pixel_q8(8_388_480, 255, 1).is_none());
-    assert_eq!(range_of([8_388_480, 0, 1], ident()), None);
+    // Pixels dropped past 2^23 texels read nothing when the reached tiles end
+    // at texel 2^23 - 1 (the mask of "mask up to 2^23 draws"); a tile at 2^23
+    // could be read by them, so that tile is refused ("mask tile at 2^23 refused").
+    let shifted = crate::renderer::inverse([1.0, 0.0, 0.0, 1.0, -8_388_600.0, 0.0]).unwrap();
+    assert!(
+        crate::renderer::exact_reach(
+            &integer_inverse(shifted).unwrap(),
+            [0, 0],
+            1,
+            [0, 0, 256, 256],
+            0
+        )
+        .dropped[0]
+    );
+    assert_eq!(
+        reach(shifted, [0, 0], 0, &[[32_767, 0]]),
+        Ok(Some([32_767, 0, 32_768, 0]))
+    );
+    assert_eq!(
+        reach(shifted, [0, 0], 0, &[[32_767, 0], [32_768, 0]]),
+        Err(())
+    );
+    // The negative side: a dropped pixel's texel is at most -2^23 - 1, so the
+    // nearest lookup cannot read texel -2^23 but the 4-tap's second texel can.
+    let left = crate::renderer::inverse([1.0, 0.0, 0.0, 1.0, 8_388_610.0, 0.0]).unwrap();
+    assert!(
+        crate::renderer::exact_reach(
+            &integer_inverse(left).unwrap(),
+            [0, 0],
+            1,
+            [0, 0, 256, 256],
+            1
+        )
+        .dropped[0]
+    );
+    assert!(matches!(
+        reach(left, [0, 0], 0, &[[-32_768, 0]]),
+        Ok(Some(_))
+    ));
+    assert_eq!(reach(left, [0, 0], 1, &[[-32_768, 0]]), Err(()));
+    // An empty span reads nothing.
+    let q = integer_inverse(id).unwrap();
+    assert_eq!(
+        crate::renderer::v3_reach(
+            &q,
+            [0, 0],
+            1,
+            [5, 0, 5, 256],
+            0,
+            std::iter::once(alto_core::TileKey { tx: 0, ty: 0 })
+        ),
+        Ok(None)
+    );
 }
 
 /// Rust = JS away from the origin: `tests/e2e/mask-v3-origin-reference.mjs`
@@ -6230,9 +6575,10 @@ fn renderer_cases_are_not_trivial() {
     else {
         panic!("not a raster");
     };
-    let sampler =
-        crate::renderer::mask_sampler(*transform, [3906.0 * 256.0, 5.0 * 256.0], 1.0).unwrap();
-    let range = crate::renderer::mask_tile_range(&sampler, [256, 256]).unwrap();
+    let q = integer_inverse(crate::renderer::inverse(*transform).unwrap()).unwrap();
+    let range = crate::renderer::exact_reach(&q, [3906 * 256, 5 * 256], 1, [0, 0, 256, 256], 0)
+        .keys
+        .map(|k| k as i32);
     assert_eq!(range, [-3907, 4, -3906, 5]);
     assert_eq!(tiles.len(), 9);
 }
@@ -7246,12 +7592,8 @@ fn gpu_shader_matches_cpu_reference() {
     let mut measured_v3 = Vec::new();
     let mut v3_errors = Vec::new();
     // Version 3 composes only level 0 directly (higher levels are the integer
-    // pyramid, checked below), and refuses a draw whose on-canvas corners have
-    // no i32 Q8 position instead of drawing it transparent.
-    let v3_refused = |name: &str| {
-        name.contains("large-translation-out-of-range")
-            .then_some("GPU_UNSUPPORTED: v3 draw ROI has no integer tile range")
-    };
+    // pyramid, checked below). A draw that reaches none of its tiles is skipped,
+    // so large-translation-out-of-range is transparent and equals the CPU.
     for mut case in cases().into_iter().filter(|c| c.measure) {
         case.name = format!("v3-{}", case.name);
         if case.level > 0 {
@@ -7274,12 +7616,6 @@ fn gpu_shader_matches_cpu_reference() {
         }
         let (cpu, cpu_pre) = render_pair(&case, 3);
         match gpu.render_version(&case, 3) {
-            Err(err) if v3_refused(&case.name).is_some_and(|want| err.ends_with(want)) => {
-                println!("v3 composite (enforced): {} refused: {err}", case.name);
-            }
-            Ok(_) if v3_refused(&case.name).is_some() => {
-                failed.push(format!("{}: drawn, expected a refusal", case.name));
-            }
             Ok((bytes, pre)) => {
                 let row = measure_case(&case, &cpu, &bytes, &cpu_pre, &pre);
                 println!("v3 composite (enforced): {}", measure_line(&row));
@@ -7301,12 +7637,6 @@ fn gpu_shader_matches_cpu_reference() {
         case.name = format!("v3-{}-level1", case.name);
         let cpu = render_pyramid(&case);
         match gpu.render_pyramid(&case) {
-            Err(err) if v3_refused(&case.name).is_some_and(|want| err.ends_with(want)) => {
-                println!("v3 composite (enforced): {} refused: {err}", case.name);
-            }
-            Ok(_) if v3_refused(&case.name).is_some() => {
-                failed.push(format!("{}: drawn, expected a refusal", case.name));
-            }
             Ok(bytes) => {
                 let row = measure_case(&case, &cpu, &bytes, &[], &[]);
                 if cpu != bytes {
@@ -7416,6 +7746,58 @@ fn gpu_shader_matches_cpu_reference() {
             println!("renderer cases: GPU render failed: {err}");
             failed.push(format!("renderer cases: {err}"));
         }
+    }
+    // Enforced (Linus 04:40): the same scene read warm after `scene_damage` and
+    // cold gives the same bytes or the same refusal, and drawn tiles equal the CPU.
+    let cold_warm = cold_warm_cases();
+    match renderer_cold_warm(&cold_warm) {
+        Ok(results) => {
+            for (case, per_key) in cold_warm.iter().zip(results) {
+                for (((level, x, y), want), (warm, cold)) in case.keys.iter().zip(per_key) {
+                    let name = format!("cold/warm {} ({level}, {x}, {y})", case.name);
+                    let refusal = |r: &Result<Vec<u8>, crate::RenderError>| match r {
+                        Err(crate::RenderError::GpuUnsupported(m)) => Some(m.clone()),
+                        _ => None,
+                    };
+                    match (&warm, &cold) {
+                        (Ok(w), Ok(c)) if want.is_none() => {
+                            let cpu = renderer_case_cpu(&RendererCase {
+                                level: *level,
+                                key: [*x, *y],
+                                ..RendererCase {
+                                    name: name.clone(),
+                                    ..case.after.clone_layers()
+                                }
+                            });
+                            if w != c || *c != cpu {
+                                failed.push(format!(
+                                    "{name}: warm vs cold {}; cold vs CPU {}",
+                                    diff_report(c, w),
+                                    diff_report(&cpu, c)
+                                ));
+                            } else {
+                                println!("{name} (enforced): warm = cold = CPU");
+                            }
+                        }
+                        _ if want.is_some()
+                            && refusal(&warm).as_deref() == *want
+                            && refusal(&cold).as_deref() == *want =>
+                        {
+                            println!(
+                                "{name} (enforced): refused warm and cold: {}",
+                                want.unwrap()
+                            );
+                        }
+                        _ => failed.push(format!(
+                            "{name}: expected {want:?}, warm {:?}, cold {:?}",
+                            warm.as_ref().map(|_| "tile").map_err(|e| e.to_string()),
+                            cold.as_ref().map(|_| "tile").map_err(|e| e.to_string())
+                        )),
+                    }
+                }
+            }
+        }
+        Err(err) => failed.push(format!("cold/warm: {err}")),
     }
     assert!(
         failed.is_empty(),

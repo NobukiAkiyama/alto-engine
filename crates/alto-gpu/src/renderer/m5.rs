@@ -619,10 +619,11 @@ impl Context<'_> {
     }
     /// Version 3: the sampler of `tiles` drawn with document-to-pixel `transform`
     /// at `roi`, and the tiles it can read, uploaded. The tiles are selected with
-    /// the sampler's own Q16 inverse and Q8 pixel centers (`mask_tile_range`), not
-    /// with the f64 inverse: the two differ by the quantization error, which
-    /// grows with the distance from the origin. Refused (`GpuUnsupported`, naming
-    /// `what`) when the lookup or a corner of the range has no integer value.
+    /// the sampler's own Q16 inverse and Q8 pixel centers (`v3_reach`), not with
+    /// the f64 inverse: the two differ by the quantization error, which grows
+    /// with the distance from the origin. A source that no pixel reaches uploads
+    /// nothing. Refused (`GpuUnsupported`, naming `what`) when the lookup has no
+    /// Q16 value or pixels that reach a tile have no exact shader value (DQ3-4).
     fn lookup_entries(
         &mut self,
         tiles: &[crate::RenderTile],
@@ -635,7 +636,28 @@ impl Context<'_> {
             || RenderError::GpuUnsupported(format!("v3 {what} ROI has no integer tile range"));
         let sampler =
             super::mask_sampler(transform, [roi.x, roi.y], roi.scale).ok_or_else(unsupported)?;
-        let range = super::mask_tile_range(&sampler, [roi.w, roi.h]).ok_or_else(unsupported)?;
+        // The source's tiles, the stroke overrides of `layer` included.
+        let keys = tiles.iter().map(|t| t.key).chain(
+            self.overrides
+                .keys()
+                .filter(|(l, _)| Some(*l) == layer)
+                .map(|(_, k)| *k),
+        );
+        let [x, y, scale] = sampler.origin.map(i64::from);
+        let span = [0, 0, i64::from(roi.w), i64::from(roi.h)];
+        let reach = super::v3_reach(
+            &super::sampler_inverse(&sampler),
+            [x, y],
+            scale,
+            span,
+            0,
+            keys,
+        )
+        .map_err(|()| unsupported())?;
+        // Nothing reached: no tile is read (every pixel is transparent or byte 0).
+        let Some(range) = reach else {
+            return Ok((vec![], sampler));
+        };
         let entries = self.upload_entries(tiles, layer, |key| {
             (range[0]..=range[2]).contains(&key.tx) && (range[1]..=range[3]).contains(&key.ty)
         })?;

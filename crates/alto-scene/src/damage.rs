@@ -12,7 +12,35 @@ pub enum Damage {
     None,
     /// Document coordinates.
     Rects(Vec<Rect>),
+    /// Render version 3: the rectangles, and every changed draw as its world
+    /// transform and the box of its changed source tile keys. The renderer
+    /// also discards each display tile that the draw's integer lookup reaches
+    /// (`renderer::v3_reach`), so a cached tile never outlives a change the
+    /// integer tile selection sees and the f64 rectangle misses at an edge.
+    Sources {
+        rects: Vec<Rect>,
+        sources: Vec<SourceDamage>,
+    },
     All,
+}
+
+/// One changed version 3 draw: its world transform and the inclusive box
+/// `[min tx, min ty, max tx, max ty]` of its changed source tiles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceDamage {
+    pub world: [f64; 6],
+    pub keys: [i32; 4],
+}
+
+/// The inclusive key box of `tiles`, or `None` for no tile.
+fn key_box<'a>(tiles: impl Iterator<Item = &'a RenderTile>) -> Option<[i32; 4]> {
+    tiles.fold(None, |b, t| {
+        let k = t.key;
+        Some(match b {
+            None => [k.tx, k.ty, k.tx, k.ty],
+            Some([x0, y0, x1, y1]) => [x0.min(k.tx), y0.min(k.ty), x1.max(k.tx), y1.max(k.ty)],
+        })
+    })
 }
 
 /// More rectangles than this are merged into their bounding box.
@@ -119,7 +147,12 @@ fn tile_rect(world: [f64; 6], tile: &RenderTile) -> Rect {
     )
 }
 
-fn add_node(placed: &HashMap<NodeId, Placed<'_>>, id: NodeId, out: &mut Vec<Rect>) {
+fn add_node(
+    placed: &HashMap<NodeId, Placed<'_>>,
+    id: NodeId,
+    out: &mut Vec<Rect>,
+    sources: &mut Vec<SourceDamage>,
+) {
     let mut stack = vec![id];
     while let Some(id) = stack.pop() {
         let Some(p) = placed.get(&id) else { continue };
@@ -130,6 +163,12 @@ fn add_node(placed: &HashMap<NodeId, Placed<'_>>, id: NodeId, out: &mut Vec<Rect
             && Affine2(p.world).inverse().is_some()
         {
             out.extend(tiles.iter().map(|t| tile_rect(p.world, t)));
+            if let Some(keys) = key_box(tiles.iter()) {
+                sources.push(SourceDamage {
+                    world: p.world,
+                    keys,
+                });
+            }
         }
         stack.extend(p.children.iter().copied());
     }
@@ -195,32 +234,36 @@ pub fn scene_damage(old: &RenderScene, new: &RenderScene) -> Damage {
         return Damage::All;
     };
     let mut rects = Vec::new();
+    let mut sources = Vec::new();
     for (id, a) in &before {
         if !after.contains_key(id) && a.shown {
-            add_node(&before, *id, &mut rects);
+            add_node(&before, *id, &mut rects, &mut sources);
         }
     }
     for (id, b) in &after {
         let Some(a) = before.get(id) else {
-            add_node(&after, *id, &mut rects);
+            add_node(&after, *id, &mut rects, &mut sources);
             continue;
         };
         if !a.shown && !b.shown {
             continue;
         }
         if a.shown != b.shown || !same_composite(a, b) {
-            add_node(&before, *id, &mut rects);
-            add_node(&after, *id, &mut rects);
+            add_node(&before, *id, &mut rects, &mut sources);
+            add_node(&after, *id, &mut rects, &mut sources);
             continue;
         }
         if let (RContent::Tiles(x), RContent::Tiles(y)) = (&a.node.content, &b.node.content)
             && Affine2(b.world).inverse().is_some()
         {
-            rects.extend(
-                changed_tiles(x, y)
-                    .into_iter()
-                    .map(|t| tile_rect(b.world, t)),
-            );
+            let changed = changed_tiles(x, y);
+            rects.extend(changed.iter().map(|t| tile_rect(b.world, t)));
+            if let Some(keys) = key_box(changed.into_iter()) {
+                sources.push(SourceDamage {
+                    world: b.world,
+                    keys,
+                });
+            }
         }
     }
     if rects.is_empty() {
@@ -228,6 +271,9 @@ pub fn scene_damage(old: &RenderScene, new: &RenderScene) -> Damage {
     }
     if rects.len() > MAX_RECTS {
         rects = vec![rects.iter().copied().fold(rects[0], union)];
+    }
+    if new.render_version >= alto_core::RENDER_VERSION_EXACT {
+        return Damage::Sources { rects, sources };
     }
     Damage::Rects(rects)
 }
@@ -295,10 +341,50 @@ mod tests {
         match d {
             Damage::All => true,
             Damage::None => false,
-            Damage::Rects(rs) => rs
+            Damage::Rects(rs) | Damage::Sources { rects: rs, .. } => rs
                 .iter()
                 .any(|r| r.x0 <= x && x < r.x1 && r.y0 <= y && y < r.y1),
         }
+    }
+
+    /// Render version 3 also names each changed draw by its world and the key
+    /// box of its changed source tiles, for the renderer's integer invalidation.
+    #[test]
+    fn v3_damage_names_the_changed_source_tiles() {
+        let f = fixture();
+        let mut old = f.scene.clone();
+        old.render_version = alto_core::RENDER_VERSION_EXACT;
+        let mut next = old.clone();
+        next.nodes[1].content = RContent::Tiles(vec![tile(0, 0, b"a0"), tile(1, 0, b"painted")]);
+        let Damage::Sources { rects, sources } = scene_damage(&old, &next) else {
+            panic!("v3 damage is Sources");
+        };
+        assert_eq!(rects.len(), 1);
+        assert_eq!(
+            sources,
+            vec![SourceDamage {
+                world: ID,
+                keys: [1, 0, 1, 0]
+            }]
+        );
+        // A moved node names its tiles before and after.
+        let mut moved = old.clone();
+        moved.nodes[1].transform = [1.0, 0.0, 0.0, 1.0, 300.5, 0.0];
+        let Damage::Sources { sources, .. } = scene_damage(&old, &moved) else {
+            panic!("v3 damage is Sources");
+        };
+        assert!(sources.contains(&SourceDamage {
+            world: ID,
+            keys: [0, 0, 1, 0]
+        }));
+        assert!(sources.contains(&SourceDamage {
+            world: [1.0, 0.0, 0.0, 1.0, 300.5, 0.0],
+            keys: [0, 0, 1, 0]
+        }));
+        // Versions 1 and 2 keep plain rectangles.
+        let mut v2 = f.scene.clone();
+        v2.nodes[1].content = RContent::Tiles(vec![tile(0, 0, b"a0"), tile(1, 0, b"painted")]);
+        assert!(matches!(scene_damage(&f.scene, &v2), Damage::Rects(_)));
     }
 
     #[test]
