@@ -81,6 +81,8 @@ async function quadrants(engine, doc) {
 export async function runEmbedTests(_playground, log) {
   const results = [];
   const test = async (label, fn) => {
+    const only = new URLSearchParams(location.search).get("embedTest");
+    if (only && !label.includes(only)) return;
     const s = performance.now();
     try {
       await fn();
@@ -176,6 +178,10 @@ export async function runEmbedTests(_playground, log) {
     });
     await test("presentation readiness, viewport holding and stroke coordinate transform stay consistent", async () => {
       const engine=await engineIn(container());const doc=await engine.createDocument({width:512,height:256});let layer;
+      if (globalThis.__altoPresentTiming) {
+        const realm = await testing(engine).request("presentTimingMark", { label: "presentation readiness" });
+        log("PRESENT-TEST " + JSON.stringify({ realm, renderVersion: doc.getSnapshot().meta.render_version }));
+      }
       await doc.transact("layer",tx=>{layer=tx.addRaster();});
       await unstable(engine).resetRenderCache(true); // optional prefetch disabled
       await unstable(engine).settle();
@@ -204,7 +210,9 @@ export async function runEmbedTests(_playground, log) {
         const timer=setTimeout(()=>{off();reject(Error("GPU recovery timed out"));},15000);
         const off=unstable(engine).onGpu(e=>{if(e==="restored"){clearTimeout(timer);off();resolve();}});
       });
+      const restoreStart = performance.now();
       await testing(engine).destroyGpu();await restored;await unstable(engine).settle();
+      log("PRESENT-RESTORE " + JSON.stringify({ ms: performance.now() - restoreStart }));
       assert(engine.presentation.interactionReady && engine.presentation.presentedViewVersion===engine.presentation.requestedViewVersion,"GPU restore stranded deferred viewport");
       await engine.createDocument({width:256,height:256});assert(engine.presentation.phase==="preparing" && engine.presentation.presentedViewport===null,"cross-document fallback");
       await unstable(engine).settle();assert(engine.presentation.documentSession!==old.documentSession,"document session did not change");

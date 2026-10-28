@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -270,11 +270,12 @@ pub struct Renderer {
     visible_job: Option<TileJob>,
     visible_tile_jobs: bool,
     composite: wgpu::ComputePipeline,
-    composite_q14: wgpu::ComputePipeline,
+    // Keep v3 shader compilation off v1/v2 queues, including after GPU recovery.
+    composite_q14: OnceLock<wgpu::ComputePipeline>,
     downsample: wgpu::ComputePipeline,
-    downsample_q14: wgpu::ComputePipeline,
+    downsample_q14: OnceLock<wgpu::ComputePipeline>,
     integer_cache: bool,
-    present_q14: wgpu::RenderPipeline,
+    present_q14: OnceLock<wgpu::RenderPipeline>,
     present: wgpu::RenderPipeline,
     brush: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
@@ -475,6 +476,37 @@ fn compute(d: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
         module: &shader,
         entry_point: Some("main"),
         compilation_options: Default::default(),
+        cache: None,
+    })
+}
+fn integer_present(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("integer present"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present-q14.wgsl").into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("integer present"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
         cache: None,
     })
 }
@@ -825,18 +857,8 @@ impl Renderer {
             "display pyramid",
             include_str!("../shaders/downsample.wgsl"),
         );
-        let downsample_q14 = compute(
-            &device,
-            "integer display pyramid",
-            include_str!("../shaders/downsample-q14.wgsl"),
-        );
         let composite_src = crate::shader_with_blend(include_str!("../shaders/composite.wgsl"));
         let composite = compute(&device, "tile compositor", &composite_src);
-        let composite_q14 = compute(
-            &device,
-            "integer tile compositor",
-            &crate::integer_composite_shader(),
-        );
         let brush = compute(
             &device,
             "brush coverage",
@@ -847,35 +869,6 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present.wgsl").into()),
         });
         let present = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("present"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("present"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present-q14.wgsl").into()),
-        });
-        let present_q14 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("present"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -935,11 +928,11 @@ impl Renderer {
             visible_job: None,
             visible_tile_jobs: true,
             composite,
-            composite_q14,
+            composite_q14: OnceLock::new(),
             downsample,
-            downsample_q14,
+            downsample_q14: OnceLock::new(),
             integer_cache: false,
-            present_q14,
+            present_q14: OnceLock::new(),
             present,
             brush,
             sampler,
@@ -1763,7 +1756,13 @@ impl Renderer {
             }
         }
         let pipeline = if integer {
-            &self.composite_q14
+            self.composite_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer tile compositor",
+                    &crate::integer_composite_shader(),
+                )
+            })
         } else {
             &self.composite
         };
@@ -2519,7 +2518,8 @@ impl Renderer {
         )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
         let present = if self.integer_cache {
-            &self.present_q14
+            self.present_q14
+                .get_or_init(|| integer_present(&self.device, self.config.format))
         } else {
             &self.present
         };
@@ -3175,7 +3175,13 @@ impl Renderer {
             );
         }
         let pipeline = if self.integer_cache {
-            &self.downsample_q14
+            self.downsample_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer display pyramid",
+                    include_str!("../shaders/downsample-q14.wgsl"),
+                )
+            })
         } else {
             &self.downsample
         };
