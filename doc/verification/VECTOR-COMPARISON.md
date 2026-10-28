@@ -1,7 +1,7 @@
 # M6：lyon / vello 比較
 
 
-生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
+生の検証JSONはこのディレクトリに置かない。新しい実行は CI の artifact `alto-browser-reports-vector`（GPU lifecycle の手動実行は `gpu-lifecycle-<OS>`）、ローカルは gitignore した `verification/out/`。以下のかつてのファイル名は、この変更より前の git 履歴にある。
 
 ## 方法
 
@@ -46,4 +46,4 @@ sh scripts/run.sh
 
 比較用WASMの再ビルドは `sh scripts/build-vector-comparison.sh`。本体WASMは2,532,853 bytes / gzip 599,840 bytes、比較用WASMは4,223,713 bytes / gzip 984,224 bytesです。比較版には本体のRuntimeもリンクされているため、この差はvelloライブラリ単体のサイズではありません。
 
-生JSON（`m6-vector-comparison.json`、CI artifact `alto-browser-reports`、ローカルは `verification/out/`）。比較版 Clippy のログ（`m6-comparison-clippy.log`）はリポジトリに残していない。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。
+過去の生JSONは `m6-vector-comparison.json`（ローカルは `verification/out/`）。現在のバッチ描画と legacy RGBA16F の CI 比較は artifact `alto-browser-reports-vector` の `vector/vector-optimization.json` に保存する。比較版 Clippy のログ（`m6-comparison-clippy.log`）はリポジトリに残していない。上流：[lyonの塗り/線テッセレーション](https://docs.rs/lyon_tessellation/1.0.22/lyon_tessellation/)、[kurboのパス変換](https://docs.rs/kurbo/0.13.1/kurbo/struct.BezPath.html)、[velloのGPU描画](https://docs.rs/vello/0.11.0/vello/)。
