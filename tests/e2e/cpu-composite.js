@@ -234,7 +234,11 @@ export function parityCases() {
   base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
   // Inverse translation is -8400000px. The origin tile's left pixels have a
   // source Q8 past -2^23 px, so the whole 256px canvas is transparent.
-  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])]);
+  // Version 3 refuses this draw: the source Q8 of the tile's corners is past
+  // 2^23 px (Rust `plain_draw_v3`). Versions 1 and 2 draw it transparent.
+  base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])], {
+    v3Refused: { code: "GPU_UNSUPPORTED", message: "GPU_UNSUPPORTED: v3 draw ROI has no integer tile range" },
+  });
   return cases;
 }
 
