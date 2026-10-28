@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14 } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, maskByteV3, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14 } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
@@ -175,4 +175,22 @@ test("v3 integer pyramid rounds ties upward and preserves premultiplication acro
   const level2=downsampleQ14([level1,level1,level1,level1]);
   assert(level1.every(v=>v===1));
   assert.deepEqual(level2,level1);
+});
+
+test("v3 mask lookup at non-zero and negative ROI origins is the integer shift", () => {
+  const pattern = (x, y) => (x >= 0 && y >= 0 && x < 256 && y < 256 ? (x * 7 + y * 13) & 255 : 0);
+  // Document x = -300 + i + 1/2 maps to mask texel x + 400 = i + 100; y = 37 + j.
+  const move = [1, 0, 0, 1, -400, 0];
+  for (const [i, j] of [[0, 0], [155, 218], [156, 219], [255, 255]]) {
+    assert.equal(maskByteV3(pattern, move, i, j, [-300, 37], 1), pattern(i + 100, j + 37));
+  }
+  // Level scale 2 at (-256, -512) under a 2x mask: texel ((-256 + 2i + 1) + 512) / 2 floors to i + 128.
+  const scaled = [2, 0, 0, 2, -512, -600];
+  for (const [i, j] of [[0, 0], [127, 255], [128, 40]]) {
+    assert.equal(maskByteV3(pattern, scaled, i, j, [-256, -512], 2), pattern(i + 128, j + 44));
+  }
+  // A ROI without an integer origin, or a level scale below 1, is refused.
+  for (const [origin, scale] of [[[0.5, 0], 1], [[0, -0.25], 1], [[0, 0], 0.5]]) {
+    assert.throws(() => maskByteV3(pattern, move, 0, 0, origin, scale), /integer origin and scale/);
+  }
 });

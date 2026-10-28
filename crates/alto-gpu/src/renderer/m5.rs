@@ -50,6 +50,9 @@ impl Roi {
     fn uniform(self) -> [f32; 4] {
         [self.x, self.y, self.scale, 0.0]
     }
+    fn region(self) -> [f32; 3] {
+        [self.x, self.y, self.scale]
+    }
     fn bounds(self) -> [f64; 4] {
         [
             self.x as f64,
@@ -529,30 +532,41 @@ impl Context<'_> {
             ..Params::zeroed()
         }
     }
-    /// A version 3 mask stage (modes 21 to 23). The mask, if any, is read at
-    /// `roi`, the output region of the stage, through `mask_sampler`: the Q16
-    /// lookup only. A mask that has no Q16 lookup is refused (DQ3-4), never
-    /// sampled in f32. `settings` are Q14 integers.
+    /// A version 3 mask stage (modes 21 to 23) writing `out` from inputs `a` and
+    /// `b`. Every input texel is placed from the integer pixel index
+    /// (`input_map`), and the mask, if any, is read at `out` through
+    /// `mask_sampler`: the Q16 lookup only. An input region or a mask without an
+    /// integer definition is refused (DQ3-4), never sampled in f32. `settings`
+    /// are Q14 integers. All of it is in `Config.grid` (`mask_grid`).
     fn mask_params(
         mode: u32,
         transform: Option<[f64; 6]>,
-        roi: Roi,
+        out: Roi,
+        a: Roi,
+        b: Roi,
         settings: [i32; 4],
     ) -> Result<Params> {
-        let mut p = Params {
-            settings: q14_settings(settings),
+        let sampler = transform
+            .map(|t| {
+                super::mask_sampler(t, [out.x, out.y], out.scale).ok_or_else(|| {
+                    RenderError::GpuUnsupported(
+                        "v3 mask transform or level has no integer lookup".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let map = |input: Roi| {
+            super::input_map(out.region(), [out.w, out.h], input.region()).ok_or_else(|| {
+                RenderError::GpuUnsupported(
+                    "v3 mask stage input region has no integer texel map".into(),
+                )
+            })
+        };
+        Ok(Params {
+            curve: super::mask_grid(settings, map(a)?, map(b)?, sampler.as_ref()),
             info: [mode, 0, 0, crate::sample::SAMPLE_INTEGER],
             ..Params::zeroed()
-        };
-        if let Some(transform) = transform {
-            let s = super::mask_sampler(transform, [roi.x, roi.y], roi.scale).ok_or_else(|| {
-                RenderError::GpuUnsupported(
-                    "v3 mask transform or level has no integer lookup".into(),
-                )
-            })?;
-            (p.inv0, p.inv1, p.extra) = (s.inv0, s.inv1, s.extra);
-        }
-        Ok(p)
+        })
     }
     fn mask_entries(
         &mut self,
@@ -722,6 +736,8 @@ impl Context<'_> {
             let p = Self::mask_params(
                 21,
                 Some(transform),
+                source.roi,
+                source.roi,
                 source.roi,
                 [crate::composite_opacity_q14(node.opacity), 1, 0, 0],
             )?;
@@ -902,7 +918,7 @@ impl Context<'_> {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
             let p = if self.resources.exact {
-                Self::mask_params(22, Some(transform), roi, [0; 4])?
+                Self::mask_params(22, Some(transform), roi, input.roi, filtered.roi, [0; 4])?
             } else {
                 Self::params(5, transform)
             };
@@ -1083,6 +1099,8 @@ impl Context<'_> {
                             23,
                             mask_transform,
                             desired,
+                            input.roi,
+                            filtered.roi,
                             [
                                 crate::composite_opacity_q14(node.opacity),
                                 has_mask,
@@ -1433,5 +1451,223 @@ mod pool_tests {
         assert!(s.contains("id.xy>=c.output_clip.xy"));
         assert!(s.contains("vec2i(c.output_clip.zw)"));
         assert!(!s.contains("textureDimensions("));
+    }
+    fn roi(x: f32, y: f32, scale: f32) -> Roi {
+        Roi {
+            x,
+            y,
+            scale,
+            w: 256,
+            h: 256,
+        }
+    }
+    /// Every input region and mask a v3 mask stage cannot place in integers is
+    /// refused with `GpuUnsupported` (DQ3-4); equal regions need no integers.
+    #[test]
+    fn v3_mask_stages_refuse_regions_without_an_integer_map() {
+        let map = super::super::input_map;
+        // Equal regions are the pixel index itself, fractional or not.
+        assert_eq!(
+            map([0.5, 3.25, 0.5], [256, 256], [0.5, 3.25, 0.5]),
+            Some([0; 4])
+        );
+        // 2 (out - in) + out_scale, 2 out_scale, 2 in_scale.
+        assert_eq!(
+            map([-300.0, 37.0, 1.0], [256, 256], [-295.0, 34.0, 1.0]),
+            Some([-9, 7, 2, 2])
+        );
+        assert_eq!(
+            map([-256.0, -512.0, 2.0], [256, 256], [-260.0, -520.0, 4.0]),
+            Some([10, 18, 4, 8])
+        );
+        for (out, input) in [
+            ([0.5, 0.0, 1.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [0.0, -0.25, 1.0]),
+            ([0.0, 0.0, 0.5], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.5]),
+            // A numerator past i32.
+            ([1_073_741_824.0, 0.0, 1.0], [-1_073_741_824.0, 0.0, 1.0]),
+            // The step times the last pixel past i32.
+            ([0.0, 0.0, 16_777_216.0], [0.0, 0.0, 1.0]),
+        ] {
+            assert_eq!(map(out, [256, 256], input), None, "{out:?} from {input:?}");
+        }
+        let unsupported = |r: Result<Params>| matches!(r, Err(RenderError::GpuUnsupported(_)));
+        let out = roi(-300.0, 37.0, 1.0);
+        for mode in [21, 22, 23] {
+            // Either input off the integer grid.
+            assert!(unsupported(Context::mask_params(
+                mode,
+                None,
+                out,
+                roi(-299.5, 37.0, 1.0),
+                out,
+                [16384, 0, 0, 0]
+            )));
+            assert!(unsupported(Context::mask_params(
+                mode,
+                None,
+                out,
+                out,
+                roi(-300.0, 37.0, 0.5),
+                [16384, 0, 0, 0]
+            )));
+            // A mask at a level below 1 or a fractional origin.
+            for at in [roi(0.0, 0.0, 0.5), roi(0.5, 0.0, 1.0)] {
+                assert!(unsupported(Context::mask_params(
+                    mode,
+                    Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                    at,
+                    at,
+                    at,
+                    [16384, 1, 0, 0]
+                )));
+            }
+        }
+        // An unmasked mode 23 at a fractional level with equal regions draws.
+        let zoomed = roi(64.0, 32.0, 0.5);
+        let p = Context::mask_params(23, None, zoomed, zoomed, zoomed, [8192, 0, 2, 0]).unwrap();
+        assert_eq!(
+            p.curve[0..12]
+                .iter()
+                .map(|v| v.to_bits() as i32)
+                .collect::<Vec<_>>(),
+            [8192, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(p.out_region == [0.0; 4] && p.inv0 == [0.0; 4] && p.extra == [0.0; 4]);
+    }
+    /// Removes `//` comments.
+    fn strip_comments(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    /// Every `fn` of a WGSL source and its body, braces included.
+    fn wgsl_functions(src: &str) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let mut rest = src;
+        while let Some(at) = rest.find("fn ") {
+            let boundary = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+            let after = &rest[at + 3..];
+            let name: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let Some(open) = after.find('{') else {
+                break;
+            };
+            if !boundary || name.is_empty() {
+                rest = after;
+                continue;
+            }
+            let mut depth = 0;
+            let mut end = open;
+            for (i, ch) in after[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.insert(name, after[open..end].to_string());
+            rest = &after[end..];
+        }
+        out
+    }
+    /// The v3 mask stages (modes 21 to 23) reach none of the f32 coordinate
+    /// helpers (`load_a`, `load_b`, `sparse_bytes`) and read no float region,
+    /// position or uniform: everything they call is integer, except
+    /// `unorm_byte`, which turns the `Rgba8Unorm` atlas `.r` back into its byte.
+    #[test]
+    fn v3_mask_stages_call_no_f32_coordinate_helper() {
+        let shader = strip_comments(&crate::integer_effects_shader());
+        let functions = wgsl_functions(&shader);
+        for helper in ["load_a", "load_b", "sparse_bytes", "mask_stage", "main"] {
+            assert!(functions.contains_key(helper), "{helper} not found");
+        }
+        let mut reached = vec!["mask_stage".to_string()];
+        let mut i = 0;
+        while i < reached.len() {
+            let body = &functions[&reached[i]];
+            for name in functions.keys() {
+                if !reached.contains(name)
+                    && body.match_indices(&format!("{name}(")).any(|(at, _)| {
+                        at == 0 || {
+                            let c = body.as_bytes()[at - 1];
+                            !(c.is_ascii_alphanumeric() || c == b'_')
+                        }
+                    })
+                {
+                    reached.push(name.clone());
+                }
+            }
+            i += 1;
+        }
+        for needed in [
+            "texel_a",
+            "texel_b",
+            "input_texel",
+            "floor_div",
+            "mask_q",
+            "mask_byte",
+            "mask_texel",
+            "pixel_q8",
+            "coord_q8",
+            "div28",
+            "unorm_byte",
+        ] {
+            assert!(
+                reached.iter().any(|r| r == needed),
+                "mask_stage does not reach {needed}"
+            );
+        }
+        for helper in ["load_a", "load_b", "sparse_bytes", "main"] {
+            assert!(
+                !reached.iter().any(|r| r == helper),
+                "mask_stage reaches {helper}"
+            );
+        }
+        let float = [
+            "f32",
+            "vec2f",
+            "vec3f",
+            "vec4f",
+            "floor(",
+            "fract(",
+            "round(",
+            "c.out_region",
+            "c.region_a",
+            "c.region_b",
+            "c.inv0",
+            "c.inv1",
+            "c.extra",
+            "c.settings",
+        ];
+        for name in reached.iter().filter(|n| *n != "unorm_byte") {
+            for token in float {
+                assert!(
+                    !functions[name].contains(token),
+                    "{name} (reached from mask_stage) uses {token}"
+                );
+            }
+        }
+        // `main` sends modes 21 to 23 to `mask_stage` before it forms `p`.
+        let main = &functions["main"];
+        let branch = main.find("c.info.x>=21u&&c.info.x<=23u").unwrap();
+        let call = main.find("mask_stage(vec2i(id.xy))").unwrap();
+        let p = main.find("let p=").unwrap();
+        assert!(branch < call && call < p);
+        assert!(main[branch..p].contains("return;"));
+        assert!(!main[branch..p].contains("load_"));
+        // The integer uniform is declared integer.
+        assert!(shader.contains("grid: array<vec4i, 16>"));
     }
 }

@@ -528,12 +528,14 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     (x + adj) as i32
 }
 
-/// Where a v3 mask stage reads its mask: the uniform `inv0`, `inv1` and `extra`
-/// slots. The lookup is always `SAMPLE_INTEGER` (`sample.rs`).
+/// Where a v3 mask stage reads its mask: the integer output ROI (`x`, `y`,
+/// level scale), the Q16 inverse and its i64 Q16 translation bits
+/// (`effects-q14.wgsl` `Config.grid` rows 3 to 5). The lookup is always
+/// `SAMPLE_INTEGER` (`sample.rs`).
 pub(crate) struct MaskSampler {
-    pub inv0: [f32; 4],
-    pub inv1: [f32; 4],
-    pub extra: [f32; 4],
+    pub origin: [i32; 3],
+    pub inverse: [i32; 4],
+    pub translation: [u32; 4],
 }
 
 /// An f32 that is exactly an `i32`.
@@ -553,15 +555,82 @@ pub(crate) fn mask_sampler(
     origin: [f32; 2],
     scale: f32,
 ) -> Option<MaskSampler> {
-    exact_i32(origin[0])?;
-    exact_i32(origin[1])?;
-    exact_i32(scale).filter(|s| *s >= 1)?;
+    let x = exact_i32(origin[0])?;
+    let y = exact_i32(origin[1])?;
+    let scale = exact_i32(scale).filter(|s| *s >= 1)?;
     let q = crate::sample::integer_inverse(inverse(transform)?)?;
     Some(MaskSampler {
-        inv0: q.m.map(|v| f32::from_bits(v.cast_unsigned())),
-        inv1: [0.0; 4],
-        extra: crate::sample::pack_wide(q.tx, q.ty).map(f32::from_bits),
+        origin: [x, y, scale],
+        inverse: q.m,
+        translation: crate::sample::pack_wide(q.tx, q.ty),
     })
+}
+
+/// The integer texel map of one input of a v3 mask stage (`effects-q14.wgsl`
+/// `input_texel`). `out` and `input` are ROIs as `[x, y, scale]`, and `size` is
+/// the output size in pixels. Equal ROIs map pixel `i` to texel `i`: `[0; 4]`.
+/// Otherwise the texel of output pixel `i` is `floor((p - in_x) / in_scale)` at
+/// the center `p = out_x + (i + 1/2) * out_scale`. Doubled, every term is an
+/// integer: `floor((2 (out_x - in_x) + out_scale + i * 2 out_scale) / (2 in_scale))`,
+/// returned as `[numerator x, numerator y, step, divisor]`. `None` when an origin
+/// or a scale is not an exact integer, a scale is below 1, or the numerator of
+/// some pixel leaves `i32`: the host refuses the render (DQ3-4).
+pub(crate) fn input_map(out: [f32; 3], size: [u32; 2], input: [f32; 3]) -> Option<[i32; 4]> {
+    if out == input {
+        return Some([0; 4]);
+    }
+    let [ox, oy, os] = [exact_i32(out[0])?, exact_i32(out[1])?, exact_i32(out[2])?];
+    let [ix, iy, is] = [
+        exact_i32(input[0])?,
+        exact_i32(input[1])?,
+        exact_i32(input[2])?,
+    ];
+    if os < 1 || is < 1 {
+        return None;
+    }
+    let step = 2 * i64::from(os);
+    let numerator = |o: i32, i: i32, len: u32| -> Option<i32> {
+        let n = 2 * (i64::from(o) - i64::from(i)) + i64::from(os);
+        let last = i64::from(len.max(1) - 1) * step;
+        i32::try_from(last).ok()?;
+        i32::try_from(n + last).ok()?;
+        i32::try_from(n).ok()
+    };
+    Some([
+        numerator(ox, ix, size[0])?,
+        numerator(oy, iy, size[1])?,
+        i32::try_from(step).ok()?,
+        i32::try_from(2 * i64::from(is)).ok()?,
+    ])
+}
+
+/// The integer uniform of a v3 mask stage, `effects-q14.wgsl` `Config.grid`:
+/// row 0 the Q14 settings, rows 1 and 2 the `input_map` of inputs `a` and `b`,
+/// rows 3 to 5 the mask lookup (zero without a mask). The rows go into the
+/// `curve` slots of the M5 uniform, which no v3 stage reads otherwise. That
+/// uniform is shared with versions 1 and 2 and its Rust type is `[f32; 64]`,
+/// so the integers travel as f32 bit patterns (`f32::from_bits`, a copy). The
+/// shader declares the slots `array<vec4i, 16>`; no float is loaded or computed.
+pub(crate) fn mask_grid(
+    settings: [i32; 4],
+    a: [i32; 4],
+    b: [i32; 4],
+    sampler: Option<&MaskSampler>,
+) -> [f32; 64] {
+    let mut rows = [[0u32; 4]; 16];
+    rows[0] = settings.map(i32::cast_unsigned);
+    rows[1] = a.map(i32::cast_unsigned);
+    rows[2] = b.map(i32::cast_unsigned);
+    if let Some(s) = sampler {
+        rows[3] = [s.origin[0], s.origin[1], s.origin[2], 0].map(i32::cast_unsigned);
+        rows[4] = s.inverse.map(i32::cast_unsigned);
+        rows[5] = s.translation;
+    }
+    let mut out = [0.0; 64];
+    for (slot, bits) in out.iter_mut().zip(rows.as_flattened()) {
+        *slot = f32::from_bits(*bits);
+    }
+    out
 }
 
 /// The feature that render version 3 has no integer definition for, or `None`.

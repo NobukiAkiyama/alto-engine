@@ -813,28 +813,36 @@ export function maskAdjustQ14(orig, filt, f, blend) {
 }
 
 /**
- * The byte a v3 mask stage reads at pixel (x, y) of a level-0 tile at the origin.
+ * The byte a v3 mask stage reads at pixel (x, y) of a tile whose ROI has origin
+ * `origin` and level scale `scale` (default: level 0 at the origin).
  * `byteAt(x, y)` is the stored mask byte, 0 outside its tiles. As the host
  * (`renderer::mask_sampler`), every mask takes the Q16 inverse and Q8 pixel
  * centers, axis-aligned unit inverses included; there is no f32 lookup. A mask
- * without a Q16 inverse is refused (throws), as the host refuses the render.
- * Nearest; the texel is the floor.
+ * without a Q16 inverse, or a ROI whose origin is not an integer or whose scale
+ * is not an integer of at least 1, is refused (throws), as the host refuses the
+ * render. Nearest; the texel is the floor.
  */
-export function maskByteV3(byteAt, transform, x, y) {
+export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
   const inv = inverseF64(transform);
   const q = inv && quantizeInverse(inv);
   if (!q) throw new Error("v3 refuses a mask without a Q16 lookup");
-  const px = pixelQ8(0, x, 1);
-  const py = pixelQ8(0, y, 1);
+  if (!origin.every(Number.isInteger) || !Number.isInteger(scale) || scale < 1) {
+    throw new Error("v3 refuses a mask at a ROI without integer origin and scale");
+  }
+  const px = pixelQ8(origin[0], x, scale);
+  const py = pixelQ8(origin[1], y, scale);
   const pos = px === null || py === null ? null : sourceQ8(q, px, py);
   if (!pos) return 0;
   return byteAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
 }
 
-/** Q14 coverage of `mask` (`{ bytes, transform }`, one 256² R8 tile at key 0,0) at (x, y). */
-function maskCoverage(mask, x, y) {
+/**
+ * Q14 coverage of `mask` (`{ bytes, transform }`, one 256² R8 tile at key 0,0) at
+ * pixel (x, y) of a tile with ROI `frame` (`{ origin, scale }`).
+ */
+function maskCoverage(mask, x, y, frame) {
   const byteAt = (tx, ty) => (tx >= 0 && ty >= 0 && tx < 256 && ty < 256 ? mask.bytes[ty * 256 + tx] : 0);
-  return BigInt(byteQ14(maskByteV3(byteAt, mask.transform ?? IDENT, x, y)));
+  return BigInt(byteQ14(maskByteV3(byteAt, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
 }
 
 /**
@@ -846,17 +854,20 @@ function maskCoverage(mask, x, y) {
  * A `mask` is mode 21: the mask and the opacity once, then mode 19 at opacity 1.
  * `{ adjust, opacity, mode, mask }` is a color-adjust adjustment layer: mode 17,
  * then mode 23 with a mask or a non-normal blend, else mode 20 below opacity 1.
- * A mask is `{ bytes, transform }` (see `maskCoverage`).
+ * A mask is `{ bytes, transform }` (see `maskCoverage`). The tile's ROI has
+ * origin `origin` and level scale `scale`; images are the tile's pixels, and only
+ * the mask lookup depends on where the tile is.
  */
-export function renderM5V3(layers, w = 256, h = 256) {
+export function renderM5V3(layers, w = 256, h = 256, origin = [0, 0], scale = 1) {
   const out = new Uint8Array(w * h * 4);
+  const frame = { origin, scale };
   for (let i = 0; i < out.length; i += 4) {
-    out.set(resolveQ14(stackM5V3(layers, i, (i / 4) % w, Math.floor(i / 4 / w))), i);
+    out.set(resolveQ14(stackM5V3(layers, i, (i / 4) % w, Math.floor(i / 4 / w), frame)), i);
   }
   return out;
 }
 
-function stackM5V3(layers, i, x, y) {
+function stackM5V3(layers, i, x, y, frame) {
   const Q = 16384n;
   const big = (q) => q.map(BigInt);
   let accum = [0n, 0n, 0n, 0n];
@@ -866,7 +877,7 @@ function stackM5V3(layers, i, x, y) {
     if (layer.adjust) {
       const adjusted = big(colorAdjustStageQ14(accum.map(Number), layer.adjust));
       if (layer.mask || mode !== 0) {
-        const m = layer.mask ? maskCoverage(layer.mask, x, y) : Q;
+        const m = layer.mask ? maskCoverage(layer.mask, x, y, frame) : Q;
         accum = maskAdjustQ14(accum, adjusted, m * opacity, mode);
       } else {
         accum = opacity === Q ? adjusted : accum.map((v, c) => cqDiv(v * (Q - opacity) + adjusted[c] * opacity));
@@ -874,18 +885,18 @@ function stackM5V3(layers, i, x, y) {
       continue;
     }
     let src;
-    if (layer.group) src = stackM5V3(layer.group, i, x, y);
+    if (layer.group) src = stackM5V3(layer.group, i, x, y, frame);
     else {
       let q = big(ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4))));
       for (const effect of layer.effects || []) {
         const adjusted = big(colorAdjustStageQ14(q.map(Number), effect));
-        q = effect.selection ? maskSelectQ14(q, adjusted, maskCoverage(effect.selection, x, y)) : adjusted;
+        q = effect.selection ? maskSelectQ14(q, adjusted, maskCoverage(effect.selection, x, y, frame)) : adjusted;
       }
       src = q;
     }
     let op = opacity;
     if (layer.mask) {
-      src = maskLayerQ14(src, maskCoverage(layer.mask, x, y) * opacity);
+      src = maskLayerQ14(src, maskCoverage(layer.mask, x, y, frame) * opacity);
       op = Q;
     }
     const straight = cqStraight(src);
