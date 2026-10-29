@@ -234,6 +234,8 @@ export function parityCases() {
   base("large-translation", [raster(ramp(256, 256), 0, 1, true, [0.1, 0, 0, 0.1, 4000, 0])], { w: 4096, h: 256, tx: 15 });
   // Inverse translation is -8400000px. The origin tile's left pixels have a
   // source Q8 past -2^23 px, so the whole 256px canvas is transparent.
+  // Every source Q8 of the tile is past 2^23 px and reaches none of the layer's
+  // tiles: transparent in every version (v3 skips the draw, DQ3-4).
   base("large-translation-out-of-range", [raster(ramp(256, 256), 0, 1, true, [0.01, 0, 0, 0.01, 84000, 0])]);
   return cases;
 }
@@ -388,13 +390,42 @@ function fetchFloat(tiles, inv, p) {
   });
 }
 const F64_EXACT_INT = 9007199254740992;
-function quantizeQ16(v) {
+/**
+ * `x` rounded exactly half away from zero (Rust `f64::round`): the fraction
+ * `a - floor(a)` is exact for `|a| < 2^53` (Sterbenz), so no sum is rounded
+ * first. `sign * floor(|x| + 0.5)` is not exact: `0.5 - 2^-54` plus `0.5` is 1.
+ */
+export function roundHalfAway(x) {
+  const a = Math.abs(x);
+  const fl = Math.floor(a);
+  const r = a - fl >= 0.5 ? fl + 1 : fl;
+  // Q16 values are integers: no -0.
+  return x < 0 && r !== 0 ? -r : r;
+}
+/** Q16 of render version 3 (Rust `sample::integer_inverse`), exact. */
+export function quantizeQ16(v) {
+  return quantizeQ16With(v, roundHalfAway);
+}
+/**
+ * Q16 of render version 2 (Rust `sample::integer_inverse_v2`), its frozen
+ * `floor(x + 0.5)` rounding, so v2 quantization and hashes never move.
+ */
+export function quantizeQ16V2(v) {
+  return quantizeQ16With(v, (scaled) => (scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5)));
+}
+function quantizeQ16With(v, round) {
   if (!Number.isFinite(v)) return null;
   const scaled = v * 65536;
   if (!Number.isFinite(scaled) || Math.abs(scaled) >= F64_EXACT_INT) return null;
-  return scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5);
+  return round(scaled);
+}
+function quantizeInverseV2(inv) {
+  return quantizeInverseWith(inv, quantizeQ16V2);
 }
 function quantizeInverse(inv) {
+  return quantizeInverseWith(inv, quantizeQ16);
+}
+function quantizeInverseWith(inv, quantizeQ16) {
   const m = inv.slice(0, 4).map(quantizeQ16);
   if (m.some((v) => v === null)) return null;
   for (const v of m) {
@@ -493,7 +524,7 @@ function axisUnit(inv) {
 }
 function fetch(tiles, inv, p, originPx, scale, x, y, version) {
   const inv32 = inv.map(f);
-  const q = quantizeInverse(inv);
+  const q = quantizeInverseV2(inv);
   if (version < RENDER_VERSION || axisUnit(inv32) || !q) return fetchFloat(tiles, inv32, p);
   return fetchInteger(tiles, q, originPx, scale, x, y);
 }
@@ -542,7 +573,7 @@ function walk(node, parent, ops, version = RENDER_VERSION) {
   }
 }
 function composite(ops, width, height, origin, scale, originPx, scaleI, version) {
-  if (version === 3) return compositeInteger(ops, width, height, origin, scale, originPx, scaleI);
+  if (version === 3) return compositeInteger(ops, width, height, originPx, scaleI);
   const out = new Uint8Array(256 * 256 * 4);
   const w = f(width);
   const h = f(height);
@@ -684,13 +715,39 @@ const Q14_ONE = 16384;
 const Q14_HALF = 8192;
 const Q14_LUMA = [3483, 11718, 1183];
 
-/** Q14 of a color-adjust setting. 1 is 16384. Half away from zero. */
-function colorAdjustQ14(value) {
+const F32_VALUE = new Float32Array(1);
+const F32_BITS = new Uint32Array(F32_VALUE.buffer);
+/**
+ * `v * 16384` rounded half away from zero, exactly, for an f32 `v` with
+ * `|v| <= 4` (Rust `q14_round`). Evaluated on the f32 bits in BigInt: the f32
+ * sum with one half that a float rounding needs is not exact.
+ */
+export function q14Round(v) {
+  F32_VALUE[0] = v;
+  const bits = F32_BITS[0];
+  const exponent = (bits >>> 23) & 0xff;
+  const fraction = BigInt(bits & 0x7fffff);
+  const [m, e] = exponent === 0 ? [fraction, -149] : [fraction | 0x800000n, exponent - 150];
+  const shift = e + 14;
+  let magnitude;
+  if (shift >= 0) magnitude = m << BigInt(shift);
+  else if (shift < -40) magnitude = 0n;
+  else magnitude = (m + (1n << BigInt(-shift - 1))) >> BigInt(-shift);
+  const q = Number(magnitude);
+  return bits >>> 31 && q ? -q : q;
+}
+
+/** Q14 of a color-adjust setting. 1 is 16384. Clamped to [-1, 4], then `q14Round`. */
+export function colorAdjustQ14(value) {
   if (!Number.isFinite(value)) return 0;
-  const clamped = f(Math.min(4, Math.max(-1, value)));
-  const x = f(clamped * 16384);
-  const adj = x < 0 || Object.is(x, -0) ? -0.5 : 0.5;
-  return Math.trunc(f(x + adj));
+  return q14Round(f(Math.min(4, Math.max(-1, f(value)))));
+}
+
+/** Q14 of a layer opacity (Rust `composite_opacity_q14`): clamped to 0..1, then `q14Round`; NaN is 0. */
+export function opacityQ14(value) {
+  const v = f(value);
+  if (Number.isNaN(v)) return 0;
+  return q14Round(Math.min(1, Math.max(0, v)));
 }
 
 function byteQ14(byte) {
@@ -813,36 +870,71 @@ export function maskAdjustQ14(orig, filt, f, blend) {
 }
 
 /**
- * The byte a v3 mask stage reads at pixel (x, y) of a tile whose ROI has origin
- * `origin` and level scale `scale` (default: level 0 at the origin).
- * `byteAt(x, y)` is the stored mask byte, 0 outside its tiles. As the host
- * (`renderer::mask_sampler`), every mask takes the Q16 inverse and Q8 pixel
- * centers, axis-aligned unit inverses included; there is no f32 lookup. A mask
- * without a Q16 inverse, or a ROI whose origin is not an integer or whose scale
- * is not an integer of at least 1, is refused (throws), as the host refuses the
- * render. Nearest; the texel is the floor.
+ * The stored texel a v3 stage reads at pixel (x, y) of a tile whose ROI has
+ * origin `origin` and level scale `scale` (default: level 0 at the origin): the
+ * raster of mode 18, or the mask of modes 21 to 23. `texelAt(x, y)` is the
+ * stored texel, transparent outside its tiles. As the host
+ * (`renderer::mask_sampler`), every lookup takes the Q16 inverse and Q8 pixel
+ * centers, axis-aligned unit inverses included; there is no f32 lookup. A
+ * transform without a Q16 inverse, or a ROI whose origin is not an i32 or whose
+ * scale is not an i32 of at least 1, is refused (throws), as the host refuses
+ * the render. A pixel without an i32 Q8 position is `null` (transparent).
+ * Nearest; the texel is the floor.
  */
-export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
+export function lookupV3(texelAt, transform, x, y, origin = [0, 0], scale = 1) {
   const inv = inverseF64(transform);
   const q = inv && quantizeInverse(inv);
-  if (!q) throw new Error("v3 refuses a mask without a Q16 lookup");
-  if (!origin.every(Number.isInteger) || !Number.isInteger(scale) || scale < 1) {
-    throw new Error("v3 refuses a mask at a ROI without integer origin and scale");
+  if (!q) throw new Error("v3 refuses a lookup without a Q16 inverse");
+  if (!origin.every(fitsI32) || !fitsI32(scale) || scale < 1) {
+    throw new Error("v3 refuses a lookup at a ROI without i32 integer origin and scale");
   }
   const px = pixelQ8(origin[0], x, scale);
   const py = pixelQ8(origin[1], y, scale);
   const pos = px === null || py === null ? null : sourceQ8(q, px, py);
-  if (!pos) return 0;
-  return byteAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+  if (!pos) return null;
+  return texelAt(floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+}
+
+/** The mask byte of `lookupV3`; `byteAt(x, y)` is the stored byte, 0 outside its tiles. */
+export function maskByteV3(byteAt, transform, x, y, origin = [0, 0], scale = 1) {
+  return lookupV3(byteAt, transform, x, y, origin, scale) ?? 0;
 }
 
 /**
- * Q14 coverage of `mask` (`{ bytes, transform }`, one 256² R8 tile at key 0,0) at
- * pixel (x, y) of a tile with ROI `frame` (`{ origin, scale }`).
+ * A texel source over `tiles` (`[{ key: [tx, ty], bytes }]`, 256² tiles of
+ * `channels` bytes per texel), transparent outside them.
+ */
+function tileTexels(tiles, channels) {
+  const byKey = new Map(tiles.map((t) => [`${t.key[0]},${t.key[1]}`, t.bytes]));
+  return (x, y) => {
+    const kx = Math.floor(x / 256), ky = Math.floor(y / 256);
+    const bytes = byKey.get(`${kx},${ky}`);
+    if (!bytes) return channels === 1 ? 0 : [0, 0, 0, 0];
+    const i = ((y - ky * 256) * 256 + x - kx * 256) * channels;
+    return channels === 1 ? bytes[i] : Array.from(bytes.subarray(i, i + 4));
+  };
+}
+
+/**
+ * Q14 coverage of `mask` at pixel (x, y) of a tile with ROI `frame`
+ * (`{ origin, scale }`). A mask is `{ bytes, transform }` (one 256² R8 tile at
+ * key 0,0) or `{ tiles, transform }` (R8 tiles by key, `tileTexels`); its
+ * transform is the document transform, after linking.
  */
 function maskCoverage(mask, x, y, frame) {
-  const byteAt = (tx, ty) => (tx >= 0 && ty >= 0 && tx < 256 && ty < 256 ? mask.bytes[ty * 256 + tx] : 0);
-  return BigInt(byteQ14(maskByteV3(byteAt, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
+  if (!mask.at) mask.at = tileTexels(mask.tiles ?? [{ key: [0, 0], bytes: mask.bytes }], 1);
+  return BigInt(byteQ14(maskByteV3(mask.at, mask.transform ?? IDENT, x, y, frame.origin, frame.scale)));
+}
+
+/**
+ * The stored bytes of a raster layer at pixel (x, y): `image` is the tile's own
+ * pixels (mode 18 of a raster drawn as it is); `{ tiles, transform }` are RGBA
+ * tiles by key under the layer's document transform (the Q16 nearest lookup).
+ */
+function rasterBytes(layer, i, x, y, frame) {
+  if (!layer.tiles) return Array.from(layer.image.pixels.subarray(i, i + 4));
+  if (!layer.at) layer.at = tileTexels(layer.tiles, 4);
+  return lookupV3(layer.at, layer.transform ?? IDENT, x, y, frame.origin, frame.scale) ?? [0, 0, 0, 0];
 }
 
 /**
@@ -854,9 +946,9 @@ function maskCoverage(mask, x, y, frame) {
  * A `mask` is mode 21: the mask and the opacity once, then mode 19 at opacity 1.
  * `{ adjust, opacity, mode, mask }` is a color-adjust adjustment layer: mode 17,
  * then mode 23 with a mask or a non-normal blend, else mode 20 below opacity 1.
- * A mask is `{ bytes, transform }` (see `maskCoverage`). The tile's ROI has
- * origin `origin` and level scale `scale`; images are the tile's pixels, and only
- * the mask lookup depends on where the tile is.
+ * A mask is `{ bytes, transform }` or `{ tiles, transform }` (see `maskCoverage`).
+ * A raster's pixels are `image` (the tile's own pixels) or `{ tiles, transform }`
+ * (see `rasterBytes`). The tile's ROI has origin `origin` and level scale `scale`.
  */
 export function renderM5V3(layers, w = 256, h = 256, origin = [0, 0], scale = 1) {
   const out = new Uint8Array(w * h * 4);
@@ -887,7 +979,7 @@ function stackM5V3(layers, i, x, y, frame) {
     let src;
     if (layer.group) src = stackM5V3(layer.group, i, x, y, frame);
     else {
-      let q = big(ingressQ14(Array.from(layer.image.pixels.subarray(i, i + 4))));
+      let q = big(ingressQ14(rasterBytes(layer, i, x, y, frame)));
       for (const effect of layer.effects || []) {
         const adjusted = big(colorAdjustStageQ14(q.map(Number), effect));
         q = effect.selection ? maskSelectQ14(q, adjusted, maskCoverage(effect.selection, x, y, frame)) : adjusted;
@@ -1057,30 +1149,48 @@ export function compositeQ14Blend(dst, src, pre, sa, mode) {
   if (out.some((v) => v > oa)) throw new Error("Q14 RGB exceeds alpha");
   return [...out, oa];
 }
-const cqOpacity = (v) => BigInt(Math.trunc(f(f(f(Math.min(1, Math.max(0, f(v)))) * 16384) + 0.5)));
-function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
+const cqOpacity = (v) => BigInt(opacityQ14(v));
+/**
+ * Render version 3 integer 4-tap or nearest: Rust `sample::axis_unit_q16` on the
+ * Q16 coefficients (`m00, m10, m01, m11`), within 6 of 0 off the axes and of
+ * ±65536 on them.
+ */
+export function axisUnitQ16(m) {
+  const near = (v, to) => Math.abs(Math.abs(v) - to) <= 6;
+  return near(m[1], 0) && near(m[2], 0) && near(m[0], 65536) && near(m[3], 65536);
+}
+/** v3 nearest (`SAMPLE_NEAREST`): the texel under the Q8 position. */
+function fetchNearest(tiles, q, originPx, scale, x, y) {
+  const px = pixelQ8(originPx[0], x, scale);
+  const py = pixelQ8(originPx[1], y, scale);
+  const pos = px === null || py === null ? null : sourceQ8(q, px, py);
+  if (!pos) return [0, 0, 0, 0];
+  return sampleU8(tiles, floorFracQ8(pos[0])[0], floorFracQ8(pos[1])[0]);
+}
+/**
+ * Render version 3 integer tile compositor (Rust `composite_integer`). A pixel
+ * is on the canvas when its doubled center `2 origin + (2 i + 1) scale` is in
+ * `[0, 2 end)`; every draw is the Q16 lookup (nearest or the integer 4-tap).
+ * There is no f32 fetch and no f32 canvas test.
+ */
+function compositeInteger(ops, width, height, originPx, scaleI) {
   for (const op of ops) if (op.mode >= 17) throw new Error(`unspecified blend mode ${op.mode}`);
   const out = new Uint8Array(256 * 256 * 4);
   // Quantize once on the host, including the inverse, before evaluating pixels.
   const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.inv ? quantizeInverse(op.inv) : null }));
+  const on = (o, i, end) => { const c = 2 * o + (2 * i + 1) * scaleI; return c >= 0 && c < 2 * end; };
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
-    const p = [add(origin[0], mul(add(f(x), f(0.5)), scale)), add(origin[1], mul(add(f(y), f(0.5)), scale))];
     const stack = []; let accum = [0n, 0n, 0n, 0n];
-    if (p[0] >= 0 && p[1] >= 0 && p[0] < width && p[1] < height) for (const op of prepared) {
+    if (on(originPx[0], x, width) && on(originPx[1], y, height)) for (const op of prepared) {
       if (op.t === "push") { stack.push(accum); accum = [0n, 0n, 0n, 0n]; }
       else if (op.t === "pop") {
         const s = cqStraight(accum), sa = cqMul(accum[3], op.opacityQ);
         accum = compositeQ14Blend(stack.pop(), s, s.map((v) => cqMul(v, sa)), sa, op.mode);
       } else {
-        const inv = op.inv.map(f);
-        let bytes;
-        if (axisUnit(inv)) {
-          const q = [add(add(mul(inv[0], p[0]), mul(inv[2], p[1])), inv[4]), add(add(mul(inv[1], p[0]), mul(inv[3], p[1])), inv[5])];
-          bytes = sampleU8(op.tiles, Math.floor(q[0]), Math.floor(q[1]));
-        } else {
-          if (!op.q) throw new Error("v3 filtered f32 fallback is unspecified");
-          bytes = fetchInteger(op.tiles, op.q, originPx, scaleI, x, y, true);
-        }
+        if (!op.q) throw new Error("v3 refuses a draw without a Q16 inverse");
+        const bytes = axisUnitQ16(op.q.m)
+          ? fetchNearest(op.tiles, op.q, originPx, scaleI, x, y)
+          : fetchInteger(op.tiles, op.q, originPx, scaleI, x, y, true);
         const s = bytes.slice(0, 3).map((v) => BigInt(byteQ14(v)));
         const pre = bytes.slice(0, 3).map((v) => cqMul(BigInt(premulByteQ14(v, bytes[3])), op.opacityQ));
         const sa = cqMul(BigInt(byteQ14(bytes[3])), op.opacityQ);
@@ -1091,6 +1201,23 @@ function compositeInteger(ops, width, height, origin, scale, originPx, scaleI) {
     for (let c = 0; c < 4; c++) out[i + c] = Math.min(255, Math.max(0, Number(cqDiv(accum[c] * 255n))));
   }
   return out;
+}
+
+/**
+ * Render version 3 plain tile (the integer tile compositor) for the real-renderer
+ * cases: `layers` are `{ tiles: [{ tx, ty, pixels }], transform, opacity, mode }`,
+ * bottom first, under a root group that does not isolate; the tile has origin
+ * `originPx` at level 0 and the canvas is `[0, width) x [0, height)`.
+ */
+export function renderPlainV3(layers, width, height, originPx) {
+  const ops = [];
+  for (const l of layers) {
+    const inv = inverseF64(l.transform);
+    if (!inv) continue;
+    const tiles = [...l.tiles].sort((a, b) => a.tx - b.tx || a.ty - b.ty);
+    ops.push({ t: "draw", inv, opacity: f(l.opacity), mode: l.mode, tiles });
+  }
+  return compositeInteger(ops, width, height, originPx, 1);
 }
 
 /** Every v3 scene the host draws is integer-exact and enforced; refused scenes are not. */

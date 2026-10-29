@@ -1,18 +1,22 @@
 // Render version 3 M5 stages. Appended after q14.wgsl and blend-q14.wgsl.
-// Every intermediate is premultiplied Q14 (0..=16384) in rgba16uint. No float
-// texture is read or written; the atlas is read with textureLoad + unorm_byte.
+// Every intermediate is premultiplied Q14 (0..=16384) in rgba16uint, and every
+// stage is integer from the pixel index on: no float position, region, inverse
+// or uniform. Inputs are placed by `input_texel` (renderer.rs `input_map`), the
+// atlas (raster tiles in mode 18, masks in modes 21 to 23) by `lookup` on the
+// Q16 inverse and Q8 pixel centers (renderer.rs `mask_sampler`). The only float
+// value is the Rgba8Unorm atlas texel, which `atlas_bytes` turns back into its
+// bytes with `unorm_byte`. See doc/design/2026-10-28-v3-integer-mask.md.
 // Bindings match effects.wgsl except that binding 2 (the clip base) is unused, so
 // the derived layout omits it and the host does not bind it. The host
 // rejects every v3 scene that needs a stage not listed here (renderer.rs
 // `v3_gap`), so unknown modes are never dispatched and write zero.
 // Modes 21, 22 and 23 are the pixel-mask stages; v2 modes 4, 5 and 7 in
-// effects.wgsl are not changed. They take everything from the integer
-// `grid` (renderer.rs `mask_grid`) and the integer pixel index: no float
-// position, region or uniform. The only float is the atlas `.r`, which
-// `unorm_byte` turns back into its byte.
+// effects.wgsl are not changed.
 struct Tile { xy: vec2i, slot: u32, pad: u32 };
-// `grid` is the `curve` slot of effects.wgsl, which no v3 stage reads as a curve.
-struct Config { out_region: vec4f, region_a: vec4f, region_b: vec4f, inv0: vec4f, inv1: vec4f, settings: vec4f, info: vec4u, extra: vec4f, grid: array<vec4i, 16>, sizes: vec4u, output_clip: vec4u };
+// The six slots before `info` are the f32 regions, inverse and settings of
+// effects.wgsl. No v3 stage reads them, and the host leaves them zero. `grid` is
+// the `curve` slot of effects.wgsl (renderer.rs `mask_grid`).
+struct Config { unused: array<vec4u, 6>, info: vec4u, extra: vec4u, grid: array<vec4i, 16>, sizes: vec4u, output_clip: vec4u };
 @group(0) @binding(0) var a: texture_2d<u32>;
 @group(0) @binding(1) var b: texture_2d<u32>;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
@@ -21,18 +25,6 @@ struct Config { out_region: vec4f, region_a: vec4f, region_b: vec4f, inv0: vec4f
 @group(0) @binding(6) var<uniform> c: Config;
 const Q14_ONE: i32 = 16384;
 const Q14_HALF: i32 = 8192;
-fn load_a(p:vec2f)->vec4i { let q=vec2i(floor((p-c.region_a.xy)/c.region_a.z));if any(q<vec2i(0))||any(q>=vec2i(c.sizes.xy)){return vec4i(0);}return vec4i(textureLoad(a,q,0)); }
-fn load_b(p:vec2f)->vec4i { let q=vec2i(floor((p-c.region_b.xy)/c.region_b.z));if any(q<vec2i(0))||any(q>=vec2i(c.sizes.zw)){return vec4i(0);}return vec4i(textureLoad(b,q,0)); }
-// The same nearest lookup as effects.wgsl `sparse`, returning the stored bytes.
-fn sparse_bytes(p:vec2f)->vec4u {
- let q=vec2f(c.inv0.x*p.x+c.inv0.z*p.y+c.inv1.x,c.inv0.y*p.x+c.inv0.w*p.y+c.inv1.y);
- let key=vec2i(floor(q/256.0));var lo=0u;var hi=c.info.z;
- loop {if lo>=hi{break;}let mid=(lo+hi)/2u;let t=tiles[mid];if t.xy.x<key.x||(t.xy.x==key.x&&t.xy.y<key.y){lo=mid+1u;}else{hi=mid;}}
- if lo>=c.info.z{return vec4u(0u);}let t=tiles[lo];if any(t.xy!=key){return vec4u(0u);}
- if t.slot==0xffffffffu{return vec4u(255u,0u,51u,255u);}
- let s=textureLoad(atlas,vec2i(floor(q))-key*256,i32(t.slot),0);
- return vec4u(unorm_byte(s.r),unorm_byte(s.g),unorm_byte(s.b),unorm_byte(s.a));
-}
 // Floor of n / d for d > 0. WGSL `/` truncates toward zero, so a negative
 // quotient with a remainder is one less.
 fn floor_div(n: i32, d: i32) -> i32 {
@@ -51,32 +43,43 @@ fn input_texel(ix: vec2i, m: vec4i) -> vec2i {
 }
 fn texel_a(ix: vec2i)->vec4i { let q=input_texel(ix,c.grid[1]);if any(q<vec2i(0))||any(q>=vec2i(c.sizes.xy)){return vec4i(0);}return vec4i(textureLoad(a,q,0)); }
 fn texel_b(ix: vec2i)->vec4i { let q=input_texel(ix,c.grid[2]);if any(q<vec2i(0))||any(q>=vec2i(c.sizes.zw)){return vec4i(0);}return vec4i(textureLoad(b,q,0)); }
-// The mask byte at output pixel `ix`, nearest only (doc/design/2026-10-28-v3-integer-mask.md).
-// Always the Q16 lookup (sample.rs SAMPLE_INTEGER); there is no f32 route, and
-// the host refuses a mask it cannot express this way. `grid[3]` is the output
-// ROI origin and scale, `grid[4]` the Q16 inverse and `grid[5]` the i64 Q16
-// translation (lo, hi, lo, hi). The texel is the arithmetic `>> 8` of the Q8
-// position; there are no weights. Out of range is byte 0.
-fn mask_texel(x: i32, y: i32) -> u32 {
+// The bytes of atlas texel `local` in layer `slot`. This is the one float read
+// of a v3 stage: the atlas is the Rgba8Unorm one of versions 1 and 2, and
+// `unorm_byte` returns each channel to its exact byte (`Gpu::atlas_read`).
+fn atlas_bytes(local: vec2i, slot: i32) -> vec4u {
+ let s=textureLoad(atlas,local,slot,0);
+ return vec4u(unorm_byte(s.r),unorm_byte(s.g),unorm_byte(s.b),unorm_byte(s.a));
+}
+// The stored bytes of texel (x, y) of the uploaded tiles, found by the binary
+// search of effects.wgsl `sparse`. No tile is transparent; a missing slot is the
+// v2 debug color (1, 0, 0.2, 1), which a mask reads as byte 255.
+fn tile_texel(x: i32, y: i32) -> vec4u {
  let key=vec2i(x>>8,y>>8);var lo=0u;var hi=c.info.z;
  loop {if lo>=hi{break;}let mid=(lo+hi)/2u;let t=tiles[mid];if t.xy.x<key.x||(t.xy.x==key.x&&t.xy.y<key.y){lo=mid+1u;}else{hi=mid;}}
- if lo>=c.info.z{return 0u;}let t=tiles[lo];if any(t.xy!=key){return 0u;}
- if t.slot==0xffffffffu{return 255u;}
- return unorm_byte(textureLoad(atlas,vec2i(x,y)-key*256,i32(t.slot),0).r);
+ if lo>=c.info.z{return vec4u(0u);}let t=tiles[lo];if any(t.xy!=key){return vec4u(0u);}
+ if t.slot==0xffffffffu{return vec4u(255u,0u,51u,255u);}
+ return atlas_bytes(vec2i(x,y)-key*256,i32(t.slot));
 }
-fn mask_byte(ix: vec2i) -> u32 {
+// The tile bytes under output pixel `ix`, nearest only (sample.rs
+// SAMPLE_INTEGER positions; doc/design/2026-10-28-v3-integer-mask.md). Mode 18
+// reads its raster and modes 21 to 23 their mask this way. `grid[3]` is the
+// output ROI origin and scale, `grid[4]` the Q16 inverse and `grid[5]` the i64
+// Q16 translation (lo, hi, lo, hi). The texel is the arithmetic `>> 8` of the
+// Q8 position; there are no weights. Out of range is transparent (byte 0).
+fn lookup(ix: vec2i) -> vec4u {
  let o=c.grid[3];
  let px=pixel_q8(o.x,ix.x,o.z);let py=pixel_q8(o.y,ix.y,o.z);
- if px.ok==0u||py.ok==0u{return 0u;}
+ if px.ok==0u||py.ok==0u{return vec4u(0u);}
  let m=c.grid[4];let t=bitcast<vec4u>(c.grid[5]);
  let qx=coord_q8(m.x,m.z,Wide(t.x,t.y),px.v,py.v);let qy=coord_q8(m.y,m.w,Wide(t.z,t.w),px.v,py.v);
- if qx.ok==0u||qy.ok==0u{return 0u;}
- return mask_texel(qx.v>>8,qy.v>>8);
+ if qx.ok==0u||qy.ok==0u{return vec4u(0u);}
+ return tile_texel(qx.v>>8,qy.v>>8);
 }
-// Mask coverage in Q14; 16384 when the stage has no mask (`settings.y == 0`).
+// Mask coverage in Q14 from the mask byte (R); 16384 when the stage has no
+// mask (`settings.y == 0`).
 fn mask_q(ix: vec2i, has: i32) -> i32 {
  if has==0{return Q14_ONE;}
- return i32(byte_q14(mask_byte(ix)));
+ return i32(byte_q14(lookup(ix).r));
 }
 // `(n + 2^27) >> 28` for n >= 0: the one rounding of the Q28 mask factor.
 // Every mask term is non-negative and below 2^43, so no sign branch is needed.
@@ -160,26 +163,23 @@ fn mask_stage(ix: vec2i) -> vec4i {
  }
  return out;
 }
+// Every mode works on the integer pixel index; settings are `grid[0]`.
 @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id:vec3u){
  if any(id.xy>=c.output_clip.xy){return;}
- // The mask stages never form the float center `p`.
- if c.info.x>=21u&&c.info.x<=23u{
-  textureStore(output,vec2i(id.xy),vec4u(clamp(mask_stage(vec2i(id.xy)),vec4i(0),vec4i(Q14_ONE))));
-  return;
- }
- let p=c.out_region.xy+(vec2f(id.xy)+0.5)*c.out_region.z;var out=vec4i(0);
- let settings=bitcast<vec4i>(c.settings);
- if c.info.x==8u{out=load_a(p);}
- else if c.info.x==17u{out=color_adjust_q14(load_a(p),settings);}
+ let ix=vec2i(id.xy);let settings=c.grid[0];var out=vec4i(0);
+ if c.info.x==8u{out=texel_a(ix);}
+ else if c.info.x==17u{out=color_adjust_q14(texel_a(ix),settings);}
  else if c.info.x==18u{
-  let v=sparse_bytes(p);
+  // Raster ingress: the stored bytes, premultiplied into Q14.
+  let v=lookup(ix);
   out=vec4i(i32(premul_byte_q14(v.r,v.a)),i32(premul_byte_q14(v.g,v.a)),i32(premul_byte_q14(v.b,v.a)),i32(byte_q14(v.a)));
- }else if c.info.x==19u{out=layer_q14(load_a(p),load_b(p),settings.x,u32(settings.y));}
+ }else if c.info.x==19u{out=layer_q14(texel_a(ix),texel_b(ix),settings.x,u32(settings.y));}
  else if c.info.x==20u{
   // Adjustment-layer opacity: a premultiplied mix of the backdrop and the
   // adjusted copy, every channel with the same weight.
-  let o=load_a(p);let f=load_b(p);let w=settings.x;
+  let o=texel_a(ix);let f=texel_b(ix);let w=settings.x;
   for(var i=0u;i<4u;i++){out[i]=div_q(o[i]*(Q14_ONE-w)+f[i]*w,Q14_ONE);}
  }
- textureStore(output,vec2i(id.xy),vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
+ else if c.info.x>=21u&&c.info.x<=23u{out=mask_stage(ix);}
+ textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

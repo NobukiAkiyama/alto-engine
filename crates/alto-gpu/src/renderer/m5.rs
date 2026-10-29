@@ -85,9 +85,30 @@ fn target_format(exact: bool) -> wgpu::TextureFormat {
         wgpu::TextureFormat::Rgba16Float
     }
 }
-/// Q14 integers in the f32 bit patterns of a stage uniform.
-fn q14_settings(values: [i32; 4]) -> [f32; 4] {
-    values.map(|v| f32::from_bits(v as u32))
+/// The uniform of the version 3 resolve (`effects-resolve-q14.wgsl`): the
+/// on-canvas pixel rectangle (`resolve_span`) and the cache slot.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct IntegerResolve {
+    span: [u32; 4],
+    info: [u32; 4],
+}
+/// The integer origin of a version 3 display tile ROI. Version 3 composes M5
+/// only at level 0 (higher levels are the integer pyramid), and its ROIs are the
+/// display tile's (`v3_gap` refuses blurs, the only stage that grows one). `Roi`
+/// carries the origin in f32, so this recomputes it from the key in i64 and
+/// refuses the tile unless the f32 is that integer and fits i32.
+fn integer_origin(key: CacheKey, roi: Roi) -> Result<[i32; 2]> {
+    let exact = |k: i32, v: f32| {
+        let o = i64::from(k).checked_mul(256)?;
+        (key.0 == 0 && v as f64 == o as f64).then_some(i32::try_from(o).ok()?)
+    };
+    match (exact(key.1, roi.x), exact(key.2, roi.y)) {
+        (Some(x), Some(y)) if roi.scale == 1.0 => Ok([x, y]),
+        _ => Err(RenderError::GpuUnsupported(
+            "v3 M5 tile has no integer origin".into(),
+        )),
+    }
 }
 #[derive(Clone)]
 struct Target {
@@ -238,14 +259,13 @@ impl Context<'_> {
     fn zero(&mut self, roi: Roi) -> Result<Target> {
         let out = self.alloc(roi)?;
         let d = self.dummy();
-        self.dispatch(
-            &out,
-            &d,
-            &d,
-            &d,
-            Self::params(6, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
-            &[],
-        )?;
+        // Version 3 has no mode 6 and writes zero for it; it reads nothing.
+        let p = if self.resources.exact {
+            Self::q14_params(6, roi, [None, None], [0; 4], None)?
+        } else {
+            Self::params(6, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        };
+        self.dispatch(&out, &d, &d, &d, p, &[])?;
         Ok(out)
     }
     fn crop(&mut self, input: Target, roi: Roi) -> Result<Target> {
@@ -258,14 +278,12 @@ impl Context<'_> {
             return Ok(input);
         }
         let out = self.alloc(roi)?;
-        self.dispatch(
-            &out,
-            &input,
-            &input,
-            &input,
-            Self::params(8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
-            &[],
-        )?;
+        let p = if self.resources.exact {
+            Self::q14_params(8, roi, [Some(input.roi), None], [0; 4], None)?
+        } else {
+            Self::params(8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        };
+        self.dispatch(&out, &input, &input, &input, p, &[])?;
         Ok(out)
     }
     fn alloc(&mut self, roi: Roi) -> Result<Target> {
@@ -382,9 +400,13 @@ impl Context<'_> {
                 "effect command buffers exceed GPU memory budget".into(),
             ));
         }
-        params.out_region = output.roi.uniform();
-        params.region_a = a.roi.uniform();
-        params.region_b = b.roi.uniform();
+        // Version 3 reads no float slot (`effects-q14.wgsl` `Config.unused`): its
+        // regions are in `grid` (`q14_params`), and these stay zero.
+        if !self.resources.exact {
+            params.out_region = output.roi.uniform();
+            params.region_a = a.roi.uniform();
+            params.region_b = b.roi.uniform();
+        }
         params.info[2] = entries.len() as u32;
         params.sizes = [a.roi.w, a.roi.h, b.roi.w, b.roi.h];
         params.output_clip = [output.roi.w, output.roi.h, clip.roi.w, clip.roi.h];
@@ -543,12 +565,39 @@ impl Context<'_> {
             ..Params::zeroed()
         }
     }
+    /// The uniform of a version 3 stage (`effects-q14.wgsl`) writing `out`.
+    /// `inputs` are the ROIs of the inputs the mode reads (`a`, `b`); each texel
+    /// is placed from the integer pixel index (`input_map`). `lookup` is the atlas
+    /// read of mode 18 (the raster) or modes 21 to 23 (the mask), the Q16
+    /// `mask_sampler`. `settings` are Q14 integers. All of it is in `Config.grid`
+    /// (`mask_grid`); the float slots stay zero. An input region without an
+    /// integer definition is refused (DQ3-4), never placed in f32.
+    fn q14_params(
+        mode: u32,
+        out: Roi,
+        inputs: [Option<Roi>; 2],
+        settings: [i32; 4],
+        lookup: Option<&super::MaskSampler>,
+    ) -> Result<Params> {
+        let map = |input: Option<Roi>| match input {
+            None => Ok([0; 4]),
+            Some(input) => super::input_map(out.region(), [out.w, out.h], input.region())
+                .ok_or_else(|| {
+                    RenderError::GpuUnsupported(
+                        "v3 stage input region has no integer texel map".into(),
+                    )
+                }),
+        };
+        Ok(Params {
+            curve: super::mask_grid(settings, map(inputs[0])?, map(inputs[1])?, lookup),
+            info: [mode, 0, 0, crate::sample::SAMPLE_INTEGER],
+            ..Params::zeroed()
+        })
+    }
     /// A version 3 mask stage (modes 21 to 23) writing `out` from inputs `a` and
-    /// `b`. Every input texel is placed from the integer pixel index
-    /// (`input_map`), and the mask, if any, is read at `out` through
-    /// `mask_sampler`: the Q16 lookup only. An input region or a mask without an
-    /// integer definition is refused (DQ3-4), never sampled in f32. `settings`
-    /// are Q14 integers. All of it is in `Config.grid` (`mask_grid`).
+    /// `b`, with the mask, if any, read at `out` through `mask_sampler`: the Q16
+    /// lookup only. A mask without an integer definition is refused (DQ3-4),
+    /// never sampled in f32. See `q14_params`.
     fn mask_params(
         mode: u32,
         transform: Option<[f64; 6]>,
@@ -566,18 +615,53 @@ impl Context<'_> {
                 })
             })
             .transpose()?;
-        let map = |input: Roi| {
-            super::input_map(out.region(), [out.w, out.h], input.region()).ok_or_else(|| {
-                RenderError::GpuUnsupported(
-                    "v3 mask stage input region has no integer texel map".into(),
-                )
-            })
+        Self::q14_params(mode, out, [Some(a), Some(b)], settings, sampler.as_ref())
+    }
+    /// Version 3: the sampler of `tiles` drawn with document-to-pixel `transform`
+    /// at `roi`, and the tiles it can read, uploaded. The tiles are selected with
+    /// the sampler's own Q16 inverse and Q8 pixel centers (`v3_reach`), not with
+    /// the f64 inverse: the two differ by the quantization error, which grows
+    /// with the distance from the origin. A source that no pixel reaches uploads
+    /// nothing. Refused (`GpuUnsupported`, naming `what`) when the lookup has no
+    /// Q16 value or pixels that reach a tile have no exact shader value (DQ3-4).
+    fn lookup_entries(
+        &mut self,
+        tiles: &[crate::RenderTile],
+        transform: [f64; 6],
+        roi: Roi,
+        layer: Option<NodeId>,
+        what: &str,
+    ) -> Result<(Vec<Entry>, super::MaskSampler)> {
+        let unsupported =
+            || RenderError::GpuUnsupported(format!("v3 {what} ROI has no integer tile range"));
+        let sampler =
+            super::mask_sampler(transform, [roi.x, roi.y], roi.scale).ok_or_else(unsupported)?;
+        // The source's tiles, the stroke overrides of `layer` included.
+        let keys = tiles.iter().map(|t| t.key).chain(
+            self.overrides
+                .keys()
+                .filter(|(l, _)| Some(*l) == layer)
+                .map(|(_, k)| *k),
+        );
+        let [x, y, scale] = sampler.origin.map(i64::from);
+        let span = [0, 0, i64::from(roi.w), i64::from(roi.h)];
+        let reach = super::v3_reach(
+            &super::sampler_inverse(&sampler),
+            [x, y],
+            scale,
+            span,
+            0,
+            keys,
+        )
+        .map_err(|()| unsupported())?;
+        // Nothing reached: no tile is read (every pixel is transparent or byte 0).
+        let Some(range) = reach else {
+            return Ok((vec![], sampler));
         };
-        Ok(Params {
-            curve: super::mask_grid(settings, map(a)?, map(b)?, sampler.as_ref()),
-            info: [mode, 0, 0, crate::sample::SAMPLE_INTEGER],
-            ..Params::zeroed()
-        })
+        let entries = self.upload_entries(tiles, layer, |key| {
+            (range[0]..=range[2]).contains(&key.tx) && (range[1]..=range[3]).contains(&key.ty)
+        })?;
+        Ok((entries, sampler))
     }
     fn mask_entries(
         &mut self,
@@ -594,18 +678,8 @@ impl Context<'_> {
         if !self.resources.exact {
             return Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform));
         }
-        // Version 3 reads the mask through `mask_sampler` (modes 21 to 23), so its
-        // tiles are selected with the same Q16 inverse and Q8 pixel centers, not
-        // with the f64 inverse: the two differ by the quantization error, which
-        // grows with the distance from the origin.
-        let range = super::mask_sampler(transform, [roi.x, roi.y], roi.scale)
-            .and_then(|s| super::mask_tile_range(&s, [roi.w, roi.h]))
-            .ok_or_else(|| {
-                RenderError::GpuUnsupported("v3 mask ROI has no integer tile range".into())
-            })?;
-        let entries = self.upload_entries(&mask.tiles, layer, |key| {
-            (range[0]..=range[2]).contains(&key.tx) && (range[1]..=range[3]).contains(&key.ty)
-        })?;
+        // Version 3 reads the mask through `mask_sampler` (modes 21 to 23).
+        let (entries, _) = self.lookup_entries(&mask.tiles, transform, roi, layer, "mask")?;
         Ok((entries, transform))
     }
     fn vector(
@@ -818,18 +892,23 @@ impl Context<'_> {
             // Version 3 mode 19: the Q14 layer composite with the host-quantized
             // opacity. Clipping is refused. A masked node's opacity was consumed
             // by `apply_props` (mode 21), so it composites at opacity 1.
-            p = Self::params(19, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
             let opacity = if node.features.mask.is_some() {
                 1.0
             } else {
                 node.opacity
             };
-            p.settings = q14_settings([
-                crate::composite_opacity_q14(opacity),
-                node.blend as i32,
-                0,
-                0,
-            ]);
+            p = Self::q14_params(
+                19,
+                dst.roi,
+                [Some(dst.roi), Some(src.roi)],
+                [
+                    crate::composite_opacity_q14(opacity),
+                    node.blend as i32,
+                    0,
+                    0,
+                ],
+                None,
+            )?;
         } else {
             p = Self::params(1, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
             p.settings = [1.0, mode(node.blend), f32::from(clip.is_some()), 0.0];
@@ -880,19 +959,24 @@ impl Context<'_> {
             } => {
                 let out = self.alloc(roi)?;
                 // Version 1 and 2 keep the float formula in mode 3. Version 3
-                // uses the Q14 formula in mode 17. The uniform carries the Q14
-                // integers in the f32 bit patterns.
-                let exact = self.resources.exact;
-                let mut p = Self::params(if exact { 17 } else { 3 }, world);
-                p.settings = if exact {
-                    q14_settings([
-                        super::color_adjust_q14(brightness),
-                        super::color_adjust_q14(contrast),
-                        super::color_adjust_q14(saturation),
-                        0,
-                    ])
+                // uses the Q14 formula in mode 17, with the Q14 settings in `grid`.
+                let p = if self.resources.exact {
+                    Self::q14_params(
+                        17,
+                        roi,
+                        [Some(input.roi), None],
+                        [
+                            super::color_adjust_q14(brightness),
+                            super::color_adjust_q14(contrast),
+                            super::color_adjust_q14(saturation),
+                            0,
+                        ],
+                        None,
+                    )?
                 } else {
-                    [brightness, contrast, saturation, 0.0]
+                    let mut p = Self::params(3, world);
+                    p.settings = [brightness, contrast, saturation, 0.0];
+                    p
                 };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
@@ -1140,9 +1224,13 @@ impl Context<'_> {
                         mixed = out;
                     } else if node.opacity != 1.0 {
                         let out = self.alloc(desired)?;
-                        let mut p = Self::params(20, transform);
-                        p.settings =
-                            q14_settings([crate::composite_opacity_q14(node.opacity), 0, 0, 0]);
+                        let p = Self::q14_params(
+                            20,
+                            desired,
+                            [Some(input.roi), Some(filtered.roi)],
+                            [crate::composite_opacity_q14(node.opacity), 0, 0, 0],
+                            None,
+                        )?;
                         self.dispatch(&out, &input, &filtered, &input, p, &[])?;
                         mixed = out;
                     }
@@ -1302,20 +1390,30 @@ impl Context<'_> {
         let node = self.scene.nodes[index].clone();
         let source = match &node.content {
             RContent::Tiles(tiles) => {
+                let layer = if self.mask_preview {
+                    None
+                } else {
+                    Some(node.key)
+                };
+                // Version 3 mode 18 reads the nearest texel through the Q16 lookup
+                // (`mask_sampler`, as the masks) and premultiplies its bytes into
+                // Q14. A singular transform draws nothing, as the f64 selection
+                // below. Version 1 and 2 keep the f32 inverse and mode 0.
+                if self.resources.exact {
+                    if inverse(world).is_none() {
+                        return self.zero(roi);
+                    }
+                    let (entries, sampler) =
+                        self.lookup_entries(tiles, world, roi, layer, "raster")?;
+                    let out = self.alloc(roi)?;
+                    let p = Self::q14_params(18, roi, [None, None], [0; 4], Some(&sampler))?;
+                    let dummy = self.dummy();
+                    self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
+                    return Ok(out);
+                }
                 let out = self.alloc(roi)?;
-                let entries = self.entries(
-                    tiles,
-                    world,
-                    roi,
-                    if self.mask_preview {
-                        None
-                    } else {
-                        Some(node.key)
-                    },
-                )?;
-                // Version 3 premultiplies recovered unorm bytes into Q14. Version 1
-                // and 2 keep the float product in mode 0.
-                let p = Self::params(if self.resources.exact { 18 } else { 0 }, world);
+                let entries = self.entries(tiles, world, roi, layer)?;
+                let p = Self::params(0, world);
                 let dummy = self.dummy();
                 self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
                 out
@@ -1395,20 +1493,44 @@ impl Renderer {
                 w: 256,
                 h: 256,
             };
+            // Version 3 checks the integer origin before any stage, and resolves
+            // the canvas edge exactly (`resolve_span`), not in f32.
+            let origin = if exact {
+                Some(integer_origin(key, roi)?)
+            } else {
+                None
+            };
             let source = cx.node(scene.root, roi, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0)?;
             let view = cx.resources.pool[source.index]
                 .texture
                 .create_view(&Default::default());
-            let uniform = buffer(
-                &cx.r.device,
-                &cx.r.queue,
-                "M5 resolve config",
-                &[Config {
-                    origin_scale: [roi.x, roi.y, roi.scale, scene.canvas.x1 as f32],
-                    info: [slot, scene.canvas.y1 as u32, 0, 0],
-                }],
-                wgpu::BufferUsages::UNIFORM,
-            )?;
+            let uniform = if let Some([x, y]) = origin {
+                buffer(
+                    &cx.r.device,
+                    &cx.r.queue,
+                    "M5 integer resolve config",
+                    &[IntegerResolve {
+                        span: super::resolve_span(
+                            [i64::from(x), i64::from(y)],
+                            1,
+                            [i64::from(scene.canvas.x1), i64::from(scene.canvas.y1)],
+                        ),
+                        info: [slot, 0, 0, 0],
+                    }],
+                    wgpu::BufferUsages::UNIFORM,
+                )?
+            } else {
+                buffer(
+                    &cx.r.device,
+                    &cx.r.queue,
+                    "M5 resolve config",
+                    &[Config {
+                        origin_scale: [roi.x, roi.y, roi.scale, scene.canvas.x1 as f32],
+                        info: [slot, scene.canvas.y1 as u32, 0, 0],
+                    }],
+                    wgpu::BufferUsages::UNIFORM,
+                )?
+            };
             cx.r.retired
                 .classified_buffer(&uniform, MemoryClass::Effects);
             let bg = cx.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1456,8 +1578,8 @@ impl Renderer {
 }
 
 /// Version 3 refuses a non-normal adjustment-layer blend without a pixel mask
-/// (`v3_gap`) before any stage runs: its inputs would come through stages that
-/// still take f32 coordinates. It is never drawn in float (DQ3-4).
+/// (`v3_gap`) before any stage runs (#37, Linus 21:46). Its stages are integer
+/// since the float purge; drawing it is a scope change left for its own review.
 fn v3_adjustment_blend(masked: bool, blend: RenderBlend) -> Result<()> {
     if masked || blend == RenderBlend::Normal {
         return Ok(());
@@ -1637,18 +1759,54 @@ mod pool_tests {
         }
         out
     }
-    /// The v3 mask stages (modes 21 to 23) reach none of the f32 coordinate
-    /// helpers (`load_a`, `load_b`, `sparse_bytes`) and read no float region,
-    /// position or uniform: everything they call is integer, except
-    /// `unorm_byte`, which turns the `Rgba8Unorm` atlas `.r` back into its byte.
+    /// Float tokens a v3 stage must not contain: float types, float built-ins,
+    /// float literals (a digit, a point, a digit) and the f32 uniform slots.
+    fn float_tokens(body: &str) -> Vec<String> {
+        let mut found: Vec<String> = [
+            "f32",
+            "vec2f",
+            "vec3f",
+            "vec4f",
+            "floor(",
+            "fract(",
+            "round(",
+            "mix(",
+            "c.unused",
+            "c.extra",
+            "out_region",
+            "region_a",
+            "region_b",
+            "inv0",
+            "inv1",
+            "c.settings",
+            "origin_scale",
+        ]
+        .into_iter()
+        .filter(|t| body.contains(t))
+        .map(str::to_string)
+        .collect();
+        let b = body.as_bytes();
+        for i in 1..b.len().saturating_sub(1) {
+            if b[i] == b'.' && b[i - 1].is_ascii_digit() && b[i + 1].is_ascii_digit() {
+                found.push(format!("literal at {i}"));
+            }
+        }
+        found
+    }
+    /// The float purge: no v3 M5 stage (`effects-q14.wgsl`, every mode from
+    /// `main`) and not the v3 resolve reads or computes a float, except the
+    /// Rgba8Unorm atlas texel in `atlas_bytes`, which goes straight through
+    /// `unorm_byte` back to its bytes. The f32 coordinate helpers of earlier
+    /// versions (`load_a`, `load_b`, `sparse_bytes`) are gone, the uniform
+    /// declares no float field, and every mode reaches the integer placement.
     #[test]
-    fn v3_mask_stages_call_no_f32_coordinate_helper() {
+    fn v3_stages_call_no_f32_coordinate_helper() {
         let shader = strip_comments(&crate::integer_effects_shader());
         let functions = wgsl_functions(&shader);
-        for helper in ["load_a", "load_b", "sparse_bytes", "mask_stage", "main"] {
-            assert!(functions.contains_key(helper), "{helper} not found");
+        for gone in ["load_a", "load_b", "sparse_bytes", "sparse", "load_clip"] {
+            assert!(!functions.contains_key(gone), "{gone} is still defined");
         }
-        let mut reached = vec!["mask_stage".to_string()];
+        let mut reached = vec!["main".to_string()];
         let mut i = 0;
         while i < reached.len() {
             let body = &functions[&reached[i]];
@@ -1667,62 +1825,185 @@ mod pool_tests {
             i += 1;
         }
         for needed in [
+            "mask_stage",
             "texel_a",
             "texel_b",
             "input_texel",
             "floor_div",
+            "color_adjust_q14",
+            "layer_q14",
+            "lookup",
+            "tile_texel",
+            "atlas_bytes",
             "mask_q",
-            "mask_byte",
-            "mask_texel",
             "pixel_q8",
             "coord_q8",
             "div28",
             "unorm_byte",
+            "premul_byte_q14",
+            "byte_q14",
         ] {
             assert!(
                 reached.iter().any(|r| r == needed),
-                "mask_stage does not reach {needed}"
+                "main does not reach {needed}"
             );
         }
-        for helper in ["load_a", "load_b", "sparse_bytes", "main"] {
+        for name in reached
+            .iter()
+            .filter(|n| !["unorm_byte", "atlas_bytes"].contains(&n.as_str()))
+        {
+            let tokens = float_tokens(&functions[name]);
             assert!(
-                !reached.iter().any(|r| r == helper),
-                "mask_stage reaches {helper}"
+                tokens.is_empty(),
+                "{name} (reached from main) uses {tokens:?}"
             );
         }
-        let float = [
-            "f32",
-            "vec2f",
-            "vec3f",
-            "vec4f",
-            "floor(",
-            "fract(",
-            "round(",
-            "c.out_region",
-            "c.region_a",
-            "c.region_b",
-            "c.inv0",
-            "c.inv1",
-            "c.extra",
-            "c.settings",
-        ];
-        for name in reached.iter().filter(|n| *n != "unorm_byte") {
-            for token in float {
-                assert!(
-                    !functions[name].contains(token),
-                    "{name} (reached from mask_stage) uses {token}"
-                );
+        // The atlas is read only in `atlas_bytes`, and each channel goes through
+        // `unorm_byte`.
+        assert_eq!(shader.matches("textureLoad(atlas").count(), 1);
+        let atlas = &functions["atlas_bytes"];
+        assert!(atlas.contains("textureLoad(atlas"));
+        for ch in ["s.r", "s.g", "s.b", "s.a"] {
+            assert!(atlas.contains(&format!("unorm_byte({ch})")), "{ch}");
+        }
+        // The uniform declares integers only.
+        let config = &shader[shader.find("struct Config").unwrap()..];
+        let config = &config[..config.find('}').unwrap()];
+        assert!(float_tokens(config).is_empty(), "{config}");
+        assert!(config.contains("grid: array<vec4i, 16>"));
+        // The v3 resolve is integer throughout, its canvas test included.
+        let resolve = strip_comments(include_str!("../../shaders/effects-resolve-q14.wgsl"));
+        assert!(
+            float_tokens(&resolve).is_empty(),
+            "{:?}",
+            float_tokens(&resolve)
+        );
+        assert!(resolve.contains("all(id.xy>=c.span.xy)&&all(id.xy<c.span.zw)"));
+    }
+    /// Every function `main` reaches in `src`, `main` included.
+    fn reached_from_main(functions: &HashMap<String, String>) -> Vec<String> {
+        let mut reached = vec!["main".to_string()];
+        let mut i = 0;
+        while i < reached.len() {
+            let body = &functions[&reached[i]];
+            for name in functions.keys() {
+                if !reached.contains(name)
+                    && body.match_indices(&format!("{name}(")).any(|(at, _)| {
+                        at == 0 || {
+                            let c = body.as_bytes()[at - 1];
+                            !(c.is_ascii_alphanumeric() || c == b'_')
+                        }
+                    })
+                {
+                    reached.push(name.clone());
+                }
+            }
+            i += 1;
+        }
+        reached
+    }
+    /// The plain-path float purge: the v3 integer tile compositor
+    /// (`integer_composite_shader`) has no f32 fetch, f32 canvas test or float
+    /// uniform. Everything `main` reaches is integer except the atlas texel in
+    /// `sample_byte`, which goes straight through `unorm_byte`.
+    #[test]
+    fn v3_plain_compositor_reads_no_float() {
+        let shader = strip_comments(&crate::integer_composite_shader());
+        let functions = wgsl_functions(&shader);
+        for gone in ["fetch_legacy", "sample_texel", "fetch"] {
+            assert!(!functions.contains_key(gone), "{gone} is still defined");
+        }
+        let reached = reached_from_main(&functions);
+        for needed in [
+            "fetch_bytes",
+            "fetch_integer",
+            "sample_byte",
+            "channel_byte",
+            "pixel_q8",
+            "coord_q8",
+            "unorm_byte",
+            "blend_q",
+        ] {
+            assert!(
+                reached.iter().any(|r| r == needed),
+                "main does not reach {needed}"
+            );
+        }
+        // `origin_scale` and `inv0` are integer fields here (the struct
+        // declarations are checked below).
+        let tokens = |body: &str| -> Vec<String> {
+            float_tokens(body)
+                .into_iter()
+                .filter(|t| t != "origin_scale" && t != "inv0")
+                .collect()
+        };
+        for name in reached
+            .iter()
+            .filter(|n| !["unorm_byte", "sample_byte"].contains(&n.as_str()))
+        {
+            let found = tokens(&functions[name]);
+            assert!(
+                found.is_empty(),
+                "{name} (reached from main) uses {found:?}"
+            );
+        }
+        let sample = &functions["sample_byte"];
+        assert_eq!(shader.matches("textureLoad(atlas").count(), 1);
+        assert!(sample.contains("textureLoad(atlas"));
+        for ch in ["s.r", "s.g", "s.b", "s.a"] {
+            assert!(sample.contains(&format!("unorm_byte({ch})")), "{ch}");
+        }
+        assert!(tokens(&sample.replace("textureLoad(atlas", "")).is_empty());
+        for decl in ["struct Command", "struct Config"] {
+            let at = &shader[shader.find(decl).unwrap()..];
+            let body = &at[..at.find('}').unwrap()];
+            assert!(tokens(body).is_empty(), "{body}");
+        }
+        assert!(shader.contains("all(id.xy>=config.span.xy) && all(id.xy<config.span.zw)"));
+        assert!(shader.contains("let fx = select(qx.v - (x << 8), 0, c.info.w == 2u);"));
+        assert!(shader.contains("let fy = select(qy.v - (y << 8), 0, c.info.w == 2u);"));
+    }
+    /// The v3 resolve span is exactly the pixels whose center is on the canvas,
+    /// at origins where an f32 center is not exact (past 2^24 px) and on both
+    /// sides of 0.
+    #[test]
+    fn v3_resolve_span_is_exact() {
+        let span = super::super::resolve_span;
+        assert_eq!(span([0, 0], 1, [256, 256]), [0, 0, 256, 256]);
+        assert_eq!(span([999_936, 0], 1, [1_000_036, 77]), [0, 0, 100, 77]);
+        assert_eq!(span([-44, 37], 1, [1_000, 400]), [44, 0, 256, 256]);
+        assert_eq!(span([-300, 0], 1, [-10, 400]), [0; 4]);
+        for (origin, scale) in [
+            (0i64, 1i64),
+            (-1, 1),
+            (16_777_216, 1),
+            (33_554_432 + 256, 2),
+            (-8_388_608, 4),
+            (999_936, 1),
+        ] {
+            for end in [
+                origin - 1,
+                origin,
+                origin + 1,
+                origin + 77,
+                origin + 255,
+                origin + 256 * scale,
+            ] {
+                let [x0, _, x1, _] = span([origin, 0], scale, [end, 1 << 40]);
+                for i in 0..256i64 {
+                    // The center in exact doubled integers.
+                    let c = 2 * origin + (2 * i + 1) * scale;
+                    let on = c >= 0 && c < 2 * end;
+                    assert_eq!(
+                        (x0..x1).contains(&(i as u32)),
+                        on,
+                        "origin {origin} scale {scale} end {end} pixel {i}"
+                    );
+                }
             }
         }
-        // `main` sends modes 21 to 23 to `mask_stage` before it forms `p`.
-        let main = &functions["main"];
-        let branch = main.find("c.info.x>=21u&&c.info.x<=23u").unwrap();
-        let call = main.find("mask_stage(vec2i(id.xy))").unwrap();
-        let p = main.find("let p=").unwrap();
-        assert!(branch < call && call < p);
-        assert!(main[branch..p].contains("return;"));
-        assert!(!main[branch..p].contains("load_"));
-        // The integer uniform is declared integer.
-        assert!(shader.contains("grid: array<vec4i, 16>"));
+        // f32 would round the canvas edge 16777217 to 16777216 and drop pixel 0.
+        assert_eq!(span([16_777_216, 0], 1, [16_777_217, 1]), [0, 0, 1, 1]);
+        assert_eq!(16_777_217f32, 16_777_216f32);
     }
 }

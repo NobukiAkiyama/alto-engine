@@ -57,6 +57,16 @@ struct Config {
     origin_scale: [f32; 4],
     info: [u32; 4],
 }
+/// The version 3 tile compositor uniform (`integer_composite_shader`): the
+/// integer origin and level scale, the command count and cache slot, and the
+/// on-canvas pixel rectangle (`resolve_span`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct IntegerConfig {
+    pub origin_scale: [i32; 4],
+    pub info: [u32; 4],
+    pub span: [u32; 4],
+}
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ViewUniform {
@@ -166,6 +176,8 @@ enum PlanTask {
         min: [f64; 2],
         max: [f64; 2],
         start: u32,
+        /// Render version 3: the integer draw; its keys select the tiles.
+        v3: Option<PlainDraw>,
     },
 }
 struct TileJob {
@@ -518,21 +530,21 @@ fn mode(m: RenderBlend) -> f32 {
 }
 
 /// Q14 quantize of a color-adjust setting. 1.0 is 16384. The value is clamped
-/// to [-1, 4], multiplied by 16384 in f32, and rounded half away from zero.
-/// Render version 3 stores these bits in the mode 17 uniform.
+/// to [-1, 4], and `value * 16384` is rounded half away from zero exactly
+/// (`q14_round`, integer). A value that is not finite is 0.
+/// Render version 3 stores these Q14 integers in the mode 17 uniform.
 pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     if !value.is_finite() {
         return 0;
     }
-    let x = value.clamp(-1.0, 4.0) * 16384.0;
-    let adj = if x.is_sign_negative() { -0.5 } else { 0.5 };
-    (x + adj) as i32
+    crate::q14_round(value.clamp(-1.0, 4.0))
 }
 
-/// Where a v3 mask stage reads its mask: the integer output ROI (`x`, `y`,
-/// level scale), the Q16 inverse and its i64 Q16 translation bits
-/// (`effects-q14.wgsl` `Config.grid` rows 3 to 5). The lookup is always
-/// `SAMPLE_INTEGER` (`sample.rs`).
+/// Where a v3 stage reads the atlas: the mask of modes 21 to 23, or the raster
+/// tiles of mode 18. The integer output ROI (`x`, `y`, level scale), the Q16
+/// inverse and its i64 Q16 translation bits (`effects-q14.wgsl` `Config.grid`
+/// rows 3 to 5). The positions are always `SAMPLE_INTEGER` (`sample.rs`), and the
+/// texel is the nearest one (`effects-q14.wgsl` `lookup`).
 pub(crate) struct MaskSampler {
     pub origin: [i32; 3],
     pub inverse: [i32; 4],
@@ -567,39 +579,150 @@ pub(crate) fn mask_sampler(
     })
 }
 
-/// The mask tile keys a v3 mask stage with sampler `s` can read over an output
-/// of `size` pixels, as `[min tx, min ty, max tx, max ty]` (inclusive). Each
-/// corner pixel is evaluated with the shader's own integers (`pixel_q8`,
-/// `coord_q8` on the packed Q16 bits) and its texel `q >> 8` taken to its tile
-/// `>> 8`. The Q24 sum is exact and affine in the pixel index, and the rounding
-/// and the shifts are monotone, so the four corners bound every pixel of the
-/// output. `None` when a corner leaves the integer range (the shader would read
-/// byte 0 there instead of a texel): the host refuses the render (DQ3-4).
-pub(crate) fn mask_tile_range(s: &MaskSampler, size: [u32; 2]) -> Option<[i32; 4]> {
-    let [ox, oy, scale] = s.origin;
+/// The Q16 inverse of a [`MaskSampler`], unpacked.
+pub(crate) fn sampler_inverse(s: &MaskSampler) -> crate::sample::IntegerInverse {
     let wide = |lo: u32, hi: u32| ((u64::from(hi) << 32) | u64::from(lo)) as i64;
     let t = s.translation;
-    let inv = crate::sample::IntegerInverse {
+    crate::sample::IntegerInverse {
         m: s.inverse,
         tx: wide(t[0], t[1]),
         ty: wide(t[2], t[3]),
-    };
-    let last = |n: u32| i32::try_from(n.checked_sub(1)?).ok();
-    let (w, h) = (last(size[0])?, last(size[1])?);
-    let mut range = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
-    for (x, y) in [(0, 0), (w, 0), (0, h), (w, h)] {
-        let px = crate::sample::pixel_q8(ox, x, scale)?;
-        let py = crate::sample::pixel_q8(oy, y, scale)?;
-        let [qx, qy] = crate::sample::source_q8(&inv, px, py)?;
-        let (kx, ky) = ((qx >> 8) >> 8, (qy >> 8) >> 8);
-        range = [
-            range[0].min(kx),
-            range[1].min(ky),
-            range[2].max(kx),
-            range[3].max(ky),
-        ];
     }
-    Some(range)
+}
+
+/// What the integer lookup (`pixel_q8`, `coord_q8`) of the pixels
+/// `[x0, x1) x [y0, y1)` of a target at `origin` and level `scale` reads,
+/// evaluated exactly in i128 at the four corners. The Q24 sum is affine in the
+/// pixel index, and the half-away rounding and the floors are monotone, so the
+/// corners bound every pixel.
+///
+/// i128 bound (Linus 05:25). The inputs are a Q16 coefficient `|m| < 2^31`
+/// (`quantize_coeff`), a Q16 translation `|t| < 2^53` (`quantize_translation`),
+/// and from the callers an origin `|o| < 2^70` (a tile key below 2^31 times a
+/// tile of at most `256 << 30` px, `invalidate_reach`), a pixel index
+/// `0 <= i < 2^39` and a scale `1 <= s < 2^31`. Then a pixel center
+/// `o * 256 + (i * 256 + 128) * s` is below `2^78 + 2^79 < 2^80`, each product
+/// `m * center` below `2^111`, `t * 256` below `2^61`, and the Q24 sum below
+/// `2^113`: far inside i128. Every step is still checked: an input outside
+/// those bounds gives `None`, which `v3_reach` refuses (GpuUnsupported) and
+/// `invalidate_reach` treats as reaching the tile.
+pub(crate) struct ExactReach {
+    /// Inclusive source tile keys `[min x, min y, max x, max y]`, with `reach`
+    /// more texels on each axis (1 for the 4-tap, 0 for nearest).
+    pub keys: [i128; 4],
+    /// Whether every corner's Q8 pixel center fits i32 (the shader's `pixel_q8`).
+    pub centers_fit: bool,
+    /// Per axis, whether some corner's source Q8 leaves i32: the shader drops
+    /// (makes transparent) exactly those pixels, since its 64-bit sums cannot
+    /// overflow first (each product is below 2^62, the translation below 2^61).
+    pub dropped: [bool; 2],
+}
+
+pub(crate) fn exact_reach(
+    inv: &crate::sample::IntegerInverse,
+    origin: [i64; 2],
+    scale: i64,
+    span: [i64; 4],
+    reach: i32,
+) -> Option<ExactReach> {
+    let center = |o: i64, i: i64| {
+        let step = i128::from(i)
+            .checked_mul(256)?
+            .checked_add(128)?
+            .checked_mul(i128::from(scale))?;
+        i128::from(o).checked_mul(256)?.checked_add(step)
+    };
+    let source = |m0: i32, px: i128, m1: i32, py: i128, t: i64| {
+        let sum = i128::from(m0)
+            .checked_mul(px)?
+            .checked_add(i128::from(m1).checked_mul(py)?)?
+            .checked_add(i128::from(t).checked_mul(256)?)?;
+        let half = 1i128 << 15;
+        Some(
+            (if sum >= 0 {
+                sum.checked_add(half)?
+            } else {
+                sum.checked_sub(half)?
+            }) >> 16,
+        )
+    };
+    let i32_range = i128::from(i32::MIN)..=i128::from(i32::MAX);
+    let mut out = ExactReach {
+        keys: [i128::MAX, i128::MAX, i128::MIN, i128::MIN],
+        centers_fit: true,
+        dropped: [false; 2],
+    };
+    let [x0, y0, x1, y1] = span;
+    for (x, y) in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)] {
+        let (px, py) = (center(origin[0], x)?, center(origin[1], y)?);
+        out.centers_fit &= i32_range.contains(&px) && i32_range.contains(&py);
+        let q = [
+            source(inv.m[0], px, inv.m[2], py, inv.tx)?,
+            source(inv.m[1], px, inv.m[3], py, inv.ty)?,
+        ];
+        for (axis, q) in q.into_iter().enumerate() {
+            out.dropped[axis] |= !i32_range.contains(&q);
+            let texel = q >> 8;
+            out.keys[axis] = out.keys[axis].min(texel >> 8);
+            out.keys[axis + 2] = out.keys[axis + 2].max((texel + i128::from(reach)) >> 8);
+        }
+    }
+    Some(out)
+}
+
+/// The tiles a v3 atlas read (a plain draw, mode 18's raster, a mask) needs on
+/// the pixels `span` of a target at `origin` and `scale` (Linus 04:40, DQ3-4):
+/// `Ok(None)` when no tile of `keys` (the source's tiles) is in the
+/// [`exact_reach`] range, so the read contributes nothing and is skipped;
+/// otherwise the inclusive key range to select. `Err` only when pixels that do
+/// reach a tile cannot be computed exactly by the shader: a Q8 pixel center
+/// outside i32 (a tile origin at 2^23 px or past), or a pixel the shader drops
+/// for a source Q8 outside i32 that could read a listed tile (the tiles in
+/// range must lie in texels `-2^23 + reach ..= 2^23 - 1` on every axis that
+/// drops a pixel).
+pub(crate) fn v3_reach(
+    inv: &crate::sample::IntegerInverse,
+    origin: [i64; 2],
+    scale: i64,
+    span: [i64; 4],
+    reach: i32,
+    keys: impl Iterator<Item = TileKey>,
+) -> std::result::Result<Option<[i32; 4]>, ()> {
+    if span[0] >= span[2] || span[1] >= span[3] {
+        return Ok(None);
+    }
+    let r = exact_reach(inv, origin, scale, span, reach).ok_or(())?;
+    let mut present = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for k in keys {
+        let (x, y) = (i128::from(k.tx), i128::from(k.ty));
+        if (r.keys[0]..=r.keys[2]).contains(&x) && (r.keys[1]..=r.keys[3]).contains(&y) {
+            present = [
+                present[0].min(k.tx),
+                present[1].min(k.ty),
+                present[2].max(k.tx),
+                present[3].max(k.ty),
+            ];
+        }
+    }
+    if present[0] > present[2] {
+        return Ok(None);
+    }
+    if !r.centers_fit {
+        return Err(());
+    }
+    let low = -(1i64 << 23) + i64::from(reach);
+    let high = (1i64 << 23) - 1;
+    for axis in 0..2 {
+        let (first, last) = (
+            i64::from(present[axis]) * 256,
+            i64::from(present[axis + 2]) * 256 + 255,
+        );
+        if r.dropped[axis] && (first < low || last > high) {
+            return Err(());
+        }
+    }
+    let clamp = |v: i128| v.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32;
+    Ok(Some(r.keys.map(clamp)))
 }
 
 /// The integer texel map of one input of a v3 mask stage (`effects-q14.wgsl`
@@ -640,9 +763,101 @@ pub(crate) fn input_map(out: [f32; 3], size: [u32; 2], input: [f32; 3]) -> Optio
     ])
 }
 
-/// The integer uniform of a v3 mask stage, `effects-q14.wgsl` `Config.grid`:
+/// The pixel-index rectangle `[x0, y0, x1, y1)` of a 256² tile whose pixel
+/// centers lie on the canvas, for `effects-resolve-q14.wgsl`. The tile has
+/// integer origin `origin` and level scale `scale`; pixel `i` is on the canvas
+/// when `0 <= origin + (i + 1/2) * scale < end`, the test of the v1/v2 resolve,
+/// here doubled and exact in i64. An empty rectangle is all zero.
+pub(crate) fn resolve_span(origin: [i64; 2], scale: i64, end: [i64; 2]) -> [u32; 4] {
+    let axis = |o: i64, e: i64| {
+        let inside = |i: i64| (0..2 * e).contains(&(2 * o + (2 * i + 1) * scale));
+        let lo = (0..256).find(|&i| inside(i)).unwrap_or(256);
+        let hi = (lo..256)
+            .take_while(|&i| inside(i))
+            .last()
+            .map_or(lo, |i| i + 1);
+        (lo as u32, hi as u32)
+    };
+    let (x0, x1) = axis(origin[0], end[0]);
+    let (y0, y1) = axis(origin[1], end[1]);
+    if x0 == x1 || y0 == y1 {
+        return [0; 4];
+    }
+    [x0, y0, x1, y1]
+}
+
+/// How a version 3 plain draw (`integer_composite_shader`) reads its tiles in
+/// the level-0 display tile `key`: the Q16 inverse, the filter
+/// (`SAMPLE_NEAREST` for an axis-aligned unit inverse, `axis_unit_q16`, else
+/// the integer 4-tap `SAMPLE_INTEGER`), and the inclusive tile keys
+/// `[min tx, min ty, max tx, max ty]` its on-canvas pixels read (`None`: no
+/// pixel of the tile is on the canvas). There is no f32 fetch.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlainDraw {
+    pub inverse: crate::sample::IntegerInverse,
+    pub sample: u32,
+    pub keys: Option<[i32; 4]>,
+}
+
+impl PlainDraw {
+    /// Whether the draw reads source tile `k`.
+    fn reads(&self, k: TileKey) -> bool {
+        self.keys
+            .is_some_and(|[x0, y0, x1, y1]| (x0..=x1).contains(&k.tx) && (y0..=y1).contains(&k.ty))
+    }
+    /// The draw command. `submit_composite` turns the opacity and the mode into
+    /// their integers.
+    fn command(&self, opacity: f32, blend: RenderBlend, start: u32, count: u32) -> Command {
+        Command {
+            inv0: self.inverse.m.map(|v| f32::from_bits(v.cast_unsigned())),
+            inv1: [0.0, 0.0, opacity, mode(blend)],
+            info: [0, start, count, self.sample],
+            trans: crate::sample::pack_wide(self.inverse.tx, self.inverse.ty),
+        }
+    }
+}
+
+/// The [`PlainDraw`] of a draw with f64 inverse `inv` and source tiles `tiles`
+/// in the level-0 display tile `key` of a canvas ending at `end`. The pixels are
+/// those of `resolve_span`, and the tiles are chosen by [`v3_reach`] (the 4-tap
+/// also reads the next texel on each axis): a draw that reaches none of its
+/// tiles has `keys: None` and is skipped. Refused (`GpuUnsupported`, DQ3-4) when
+/// the inverse has no Q16 value, or pixels that reach a tile have no exact
+/// shader value; never sampled in f32.
+pub(crate) fn plain_draw_v3(
+    inv: [f64; 6],
+    key: CacheKey,
+    end: [i32; 2],
+    tiles: impl Iterator<Item = TileKey>,
+) -> Result<PlainDraw> {
+    let unsupported = |what: &str| RenderError::GpuUnsupported(format!("v3 draw {what}"));
+    if key.0 != 0 {
+        return Err(RenderError::Internal(
+            "v3 plain tile above level 0 (the pyramid builds those)".into(),
+        ));
+    }
+    let origin = [key.1, key.2].map(|k| i64::from(k) * 256);
+    let inverse = crate::sample::integer_inverse(inv)
+        .ok_or_else(|| unsupported("transform has no Q16 inverse"))?;
+    let nearest = crate::sample::axis_unit_q16(inverse.m);
+    let span = resolve_span(origin, 1, [i64::from(end[0]), i64::from(end[1])]).map(i64::from);
+    let keys = v3_reach(&inverse, origin, 1, span, i32::from(!nearest), tiles)
+        .map_err(|()| unsupported("ROI has no integer tile range"))?;
+    Ok(PlainDraw {
+        inverse,
+        sample: if nearest {
+            crate::sample::SAMPLE_NEAREST
+        } else {
+            crate::sample::SAMPLE_INTEGER
+        },
+        keys,
+    })
+}
+
+/// The integer uniform of a v3 M5 stage, `effects-q14.wgsl` `Config.grid`:
 /// row 0 the Q14 settings, rows 1 and 2 the `input_map` of inputs `a` and `b`,
-/// rows 3 to 5 the mask lookup (zero without a mask). The rows go into the
+/// rows 3 to 5 the atlas lookup: the mask of modes 21 to 23 or the raster of
+/// mode 18 (zero without one; `mask_sampler` builds both). The rows go into the
 /// `curve` slots of the M5 uniform, which no v3 stage reads otherwise. That
 /// uniform is shared with versions 1 and 2 and its Rust type is `[f32; 64]`,
 /// so the integers travel as f32 bit patterns (`f32::from_bits`, a copy). The
@@ -698,8 +913,9 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
             RContent::Text(_) => return Some("text"),
-            // Without a pixel mask, a non-normal blend would reach mode 23 through
-            // stages that still take f32 coordinates; refused until they do not.
+            // Without a pixel mask, a non-normal blend stays refused (#37, Linus
+            // 21:46). Its stages are integer since the float purge; drawing it
+            // through mode 23 is a scope change that needs its own review.
             RContent::Adjustment(e)
                 if !color_adjust(e) || (f.mask.is_none() && n.blend != RenderBlend::Normal) =>
             {
@@ -719,6 +935,21 @@ pub(crate) fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
 }
 pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
     alto_core::Affine2(m).apply(p)
+}
+/// The world transform and the key box of every source tile a stroke has
+/// touched, for the version 3 integer invalidation (`invalidate_reach`).
+fn stroke_reach(stroke: &GpuStroke) -> Option<([f64; 6], [i32; 4])> {
+    let keys = stroke.tiles.keys().fold(None, |b: Option<[i32; 4]>, k| {
+        Some(match b {
+            None => [k.tx, k.ty, k.tx, k.ty],
+            Some([x0, y0, x1, y1]) => [x0.min(k.tx), y0.min(k.ty), x1.max(k.tx), y1.max(k.ty)],
+        })
+    })?;
+    Some((stroke.world, keys))
+}
+/// The canvas end `[x1, y1]` of the version 3 resolve tests (they start at 0).
+fn canvas_end(scene: &RenderScene) -> [i32; 2] {
+    [scene.canvas.x1, scene.canvas.y1]
 }
 /// Bounding box of `[x0, y0, x1, y1]` mapped through `m`, as (min, max).
 fn bounds_through(m: [f64; 6], r: [f64; 4]) -> ([f64; 2], [f64; 2]) {
@@ -823,11 +1054,29 @@ impl TileJob {
                                 let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                     continue;
                                 };
-                                let (min, max) = bounds_through(inv, self.region);
-                                let x0 = (min[0] / 256.0).floor() as i32;
-                                let y0 = (min[1] / 256.0).floor() as i32;
-                                let x1 = (max[0] / 256.0).ceil() as i32;
-                                let y1 = (max[1] / 256.0).ceil() as i32;
+                                // Version 3 hides lower layers only behind the tiles the
+                                // integer sampler actually reads.
+                                let (x0, y0, x1, y1) = if scene.render_version == 3 {
+                                    match plain_draw_v3(
+                                        inv,
+                                        self.key,
+                                        canvas_end(scene),
+                                        ts.iter().map(|t| t.key),
+                                    )?
+                                    .keys
+                                    {
+                                        Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
+                                        None => continue,
+                                    }
+                                } else {
+                                    let (min, max) = bounds_through(inv, self.region);
+                                    (
+                                        (min[0] / 256.0).floor() as i32,
+                                        (min[1] / 256.0).floor() as i32,
+                                        (max[0] / 256.0).ceil() as i32,
+                                        (max[1] / 256.0).ceil() as i32,
+                                    )
+                                };
                                 let mut opaque = x1 > x0
                                     && y1 > y0
                                     && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
@@ -859,8 +1108,23 @@ impl TileJob {
                             return Ok(());
                         };
                         let (min, max) = bounds_through(inv, self.region);
-                        let x0 = (min[0] / 256.0).floor() as i32;
-                        let x1 = (max[0] / 256.0).ceil() as i32;
+                        let v3 = if scene.render_version == 3 {
+                            Some(plain_draw_v3(
+                                inv,
+                                self.key,
+                                canvas_end(scene),
+                                tiles.iter().map(|t| t.key),
+                            )?)
+                        } else {
+                            None
+                        };
+                        let (x0, x1) = match v3 {
+                            Some(d) => d.keys.map_or((0, 0), |k| (k[0], k[2] + 1)),
+                            None => (
+                                (min[0] / 256.0).floor() as i32,
+                                (max[0] / 256.0).ceil() as i32,
+                            ),
+                        };
                         let next = tiles.partition_point(|t| t.key.tx < x0);
                         let end = tiles.partition_point(|t| t.key.tx < x1);
                         self.stack.push(PlanTask::Tiles {
@@ -871,6 +1135,7 @@ impl TileJob {
                             min,
                             max,
                             start: self.sources.len() as u32,
+                            v3,
                         });
                     }
                     _ => {}
@@ -884,12 +1149,22 @@ impl TileJob {
                 min,
                 max,
                 start,
+                v3,
             } => {
                 let n = &scene.nodes[idx];
                 let RContent::Tiles(tiles) = &n.content else {
                     return Err(RenderError::Internal("tile plan changed".into()));
                 };
                 if next == end {
+                    if let Some(d) = v3 {
+                        // A draw that reaches none of its tiles is skipped (DQ3-4).
+                        if d.keys.is_some() {
+                            let count = self.sources.len() as u32 - start;
+                            self.commands
+                                .push(d.command(n.opacity, n.blend, start, count));
+                        }
+                        return Ok(());
+                    }
                     let packed = crate::sample::pack_inverse(inv, scene.render_version);
                     self.commands.push(Command {
                         inv0: packed.inv0,
@@ -910,11 +1185,16 @@ impl TileJob {
                 } else {
                     let t = &tiles[next];
                     let k = t.key;
-                    if (k.tx as f64 * 256.0) < max[0]
-                        && ((k.tx + 1) as f64 * 256.0) > min[0]
-                        && (k.ty as f64 * 256.0) < max[1]
-                        && ((k.ty + 1) as f64 * 256.0) > min[1]
-                    {
+                    let keep = match v3 {
+                        Some(d) => d.reads(k),
+                        None => {
+                            (k.tx as f64 * 256.0) < max[0]
+                                && ((k.tx + 1) as f64 * 256.0) > min[0]
+                                && (k.ty as f64 * 256.0) < max[1]
+                                && ((k.ty + 1) as f64 * 256.0) > min[1]
+                        }
+                    };
+                    if keep {
                         self.sources.push(PlannedSource {
                             xy: [k.tx, k.ty],
                             hash: t.hash,
@@ -928,6 +1208,7 @@ impl TileJob {
                         min,
                         max,
                         start,
+                        v3,
                     });
                 }
             }
@@ -1457,6 +1738,9 @@ impl Renderer {
             })
             .copied()
             .collect();
+        self.discard(keys);
+    }
+    fn discard(&mut self, keys: Vec<CacheKey>) {
         for k in keys {
             if let Some(c) = self.cache_map.remove(&k)
                 && !self.presentation.protects(c.slot)
@@ -1464,6 +1748,47 @@ impl Renderer {
                 self.cache_slots[c.slot as usize] = None;
             }
         }
+    }
+    /// Render version 3: discards every cached display tile whose level-0
+    /// pixels the integer lookup of a draw with `world` maps onto the source
+    /// tile keys `keys` (`exact_reach` over the whole tile, with the 4-tap's
+    /// extra texel). Every refusal and every byte of a v3 tile depends only on
+    /// the draws that reach it (`v3_reach`), so a tile kept here cannot change.
+    /// A draw without a Q16 inverse is refused on every tile: all are discarded.
+    pub fn invalidate_reach(&mut self, world: [f64; 6], keys: [i32; 4]) {
+        let Some(inv) = inverse(world) else {
+            return;
+        };
+        let Some(q) = crate::sample::integer_inverse(inv) else {
+            self.invalidate(None);
+            return;
+        };
+        self.presentation.changed();
+        self.reset_jobs();
+        let k = keys.map(i128::from);
+        let targets: Vec<_> = self
+            .cache_map
+            .keys()
+            .filter(|&&(l, x, y)| {
+                if !(0..=30).contains(&l) {
+                    return true;
+                }
+                let size = 256i64 << l;
+                let (Some(ox), Some(oy)) = (
+                    i64::from(x).checked_mul(size),
+                    i64::from(y).checked_mul(size),
+                ) else {
+                    return true;
+                };
+                // Outside the bounds of `exact_reach`: discard, conservatively.
+                let Some(r) = exact_reach(&q, [ox, oy], 1, [0, 0, size, size], 1) else {
+                    return true;
+                };
+                r.keys[0] <= k[2] && r.keys[2] >= k[0] && r.keys[1] <= k[3] && r.keys[3] >= k[1]
+            })
+            .copied()
+            .collect();
+        self.discard(targets);
     }
     fn cancel_prefetch(&mut self) {
         if self.prefetch_job.take().is_some() {
@@ -1654,6 +1979,7 @@ impl Renderer {
         ];
         struct Build<'a> {
             scene: &'a RenderScene,
+            key: CacheKey,
             region: [f64; 4],
             overrides: &'a BTreeMap<(NodeId, TileKey), ContentHash>,
         }
@@ -1706,31 +2032,34 @@ impl Renderer {
                             let Some(inv) = inverse(multiply(world, cn.transform)) else {
                                 continue;
                             };
-                            let corners = [
-                                [b.region[0], b.region[1]],
-                                [b.region[2], b.region[1]],
-                                [b.region[0], b.region[3]],
-                                [b.region[2], b.region[3]],
-                            ]
-                            .map(|p| point(inv, p));
-                            let x0 = (corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min)
-                                / 256.0)
-                                .floor() as i32;
-                            let y0 = (corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)
-                                / 256.0)
-                                .floor() as i32;
-                            let x1 = (corners
-                                .iter()
-                                .map(|p| p[0])
-                                .fold(f64::NEG_INFINITY, f64::max)
-                                / 256.0)
-                                .ceil() as i32;
-                            let y1 = (corners
-                                .iter()
-                                .map(|p| p[1])
-                                .fold(f64::NEG_INFINITY, f64::max)
-                                / 256.0)
-                                .ceil() as i32;
+                            // Version 3 hides lower layers only behind the tiles the
+                            // integer sampler actually reads.
+                            let (x0, y0, x1, y1) = if b.scene.render_version == 3 {
+                                match plain_draw_v3(
+                                    inv,
+                                    b.key,
+                                    canvas_end(b.scene),
+                                    ts.iter().map(|t| t.key).chain(
+                                        b.overrides
+                                            .keys()
+                                            .filter(|(l, _)| *l == cn.key)
+                                            .map(|(_, k)| *k),
+                                    ),
+                                )?
+                                .keys
+                                {
+                                    Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
+                                    None => continue,
+                                }
+                            } else {
+                                let (min, max) = bounds_through(inv, b.region);
+                                (
+                                    (min[0] / 256.0).floor() as i32,
+                                    (min[1] / 256.0).floor() as i32,
+                                    (max[0] / 256.0).ceil() as i32,
+                                    (max[1] / 256.0).ceil() as i32,
+                                )
+                            };
                             let mut opaque =
                                 x1 > x0 && y1 > y0 && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
                             for x in x0..x1 {
@@ -1801,13 +2130,28 @@ impl Renderer {
                             map.insert(*k, *hash);
                         }
                     }
+                    let v3 = if b.scene.render_version == 3 {
+                        Some(plain_draw_v3(
+                            inv,
+                            b.key,
+                            canvas_end(b.scene),
+                            map.keys().copied(),
+                        )?)
+                    } else {
+                        None
+                    };
                     let start = entries.len() as u32;
                     for (k, hash) in map {
-                        if k.tx as f64 * 256.0 >= maxx
-                            || (k.tx + 1) as f64 * 256.0 <= minx
-                            || k.ty as f64 * 256.0 >= maxy
-                            || (k.ty + 1) as f64 * 256.0 <= miny
-                        {
+                        let skip = match v3 {
+                            Some(d) => !d.reads(k),
+                            None => {
+                                k.tx as f64 * 256.0 >= maxx
+                                    || (k.tx + 1) as f64 * 256.0 <= minx
+                                    || k.ty as f64 * 256.0 >= maxy
+                                    || (k.ty + 1) as f64 * 256.0 <= miny
+                            }
+                        };
+                        if skip {
                             continue;
                         }
                         let slot = r.upload(hash, store, pinned, encoder, previews)?;
@@ -1816,6 +2160,14 @@ impl Renderer {
                             slot,
                             pad: 0,
                         });
+                    }
+                    if let Some(d) = v3 {
+                        // A draw that reaches none of its tiles is skipped (DQ3-4).
+                        if d.keys.is_some() {
+                            let count = entries.len() as u32 - start;
+                            commands.push(d.command(n.opacity, n.blend, start, count));
+                        }
+                        return Ok(());
                     }
                     let packed = crate::sample::pack_inverse(inv, b.scene.render_version);
                     commands.push(Command {
@@ -1838,6 +2190,7 @@ impl Renderer {
             self,
             &Build {
                 scene,
+                key,
                 region,
                 overrides: &overrides,
             },
@@ -2031,14 +2384,13 @@ impl Renderer {
         let integer = scene.render_version == 3;
         if integer {
             for c in &mut commands {
+                // Every v3 draw is integer (`plain_draw_v3`); there is no f32 fetch.
                 if c.info[0] == 0
-                    && c.info[3] == 0
-                    && !crate::sample::axis_unit([
-                        c.inv0[0], c.inv0[1], c.inv0[2], c.inv0[3], c.inv1[0], c.inv1[1],
-                    ])
+                    && ![crate::sample::SAMPLE_INTEGER, crate::sample::SAMPLE_NEAREST]
+                        .contains(&c.info[3])
                 {
-                    return Err(RenderError::GpuUnsupported(
-                        "v3 filtered f32 fallback is not specified".into(),
+                    return Err(RenderError::Internal(
+                        "v3 draw without an integer sampler".into(),
                     ));
                 }
                 c.inv1[2] = f32::from_bits(crate::composite_opacity_q14(c.inv1[2]) as u32);
@@ -2088,26 +2440,51 @@ impl Renderer {
         )?;
         self.retired.classified_buffer(&tb, MemoryClass::Fixed);
         let scale = 2f32.powi(key.0);
-        let ub = buffer(
-            &self.device,
-            &self.queue,
-            "tile config",
-            &[Config {
-                origin_scale: [
-                    key.1 as f32 * 256.0 * scale,
-                    key.2 as f32 * 256.0 * scale,
-                    scale,
-                    scene.canvas.x1 as f32,
-                ],
-                info: [
-                    commands.len() as u32,
-                    slot as u32,
-                    scene.canvas.y1 as u32,
-                    0,
-                ],
-            }],
-            wgpu::BufferUsages::UNIFORM,
-        )?;
+        let ub = if integer {
+            // Level 0 only (`plain_draw_v3`): the origin is the key times 256.
+            let origin = [key.1, key.2].map(|k| i64::from(k) * 256);
+            let [Ok(ox), Ok(oy)] = origin.map(i32::try_from) else {
+                return Err(RenderError::GpuUnsupported(
+                    "v3 tile has no integer origin".into(),
+                ));
+            };
+            buffer(
+                &self.device,
+                &self.queue,
+                "integer tile config",
+                &[IntegerConfig {
+                    origin_scale: [ox, oy, 1, 0],
+                    info: [commands.len() as u32, slot as u32, 0, 0],
+                    span: resolve_span(
+                        origin,
+                        1,
+                        [i64::from(scene.canvas.x1), i64::from(scene.canvas.y1)],
+                    ),
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?
+        } else {
+            buffer(
+                &self.device,
+                &self.queue,
+                "tile config",
+                &[Config {
+                    origin_scale: [
+                        key.1 as f32 * 256.0 * scale,
+                        key.2 as f32 * 256.0 * scale,
+                        scale,
+                        scene.canvas.x1 as f32,
+                    ],
+                    info: [
+                        commands.len() as u32,
+                        slot as u32,
+                        scene.canvas.y1 as u32,
+                        0,
+                    ],
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?
+        };
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compose"),
@@ -3311,14 +3688,21 @@ impl Renderer {
                 .damage
                 .map_or(damage, |d| crate::damage::union(d, damage)),
         );
+        let reach = stroke_reach(&stroke);
         self.stroke = Some(stroke);
         self.invalidate(Some(damage));
+        if self.integer_cache
+            && let Some((world, keys)) = reach
+        {
+            self.invalidate_reach(world, keys);
+        }
         Ok(Some(damage))
     }
     pub fn cancel_stroke(&mut self) {
         let Some(stroke) = self.stroke.take() else {
             return;
         };
+        let reach = stroke_reach(&stroke);
         for tile in stroke.tiles.into_values() {
             self.retired
                 .textures
@@ -3334,6 +3718,11 @@ impl Renderer {
         if let Some(damage) = stroke.damage {
             self.invalidate(Some(damage));
         }
+        if self.integer_cache
+            && let Some((world, keys)) = reach
+        {
+            self.invalidate_reach(world, keys);
+        }
     }
     /// Discards the display tiles an edit can change. Jobs always restart: they index
     /// the previous scene.
@@ -3344,6 +3733,14 @@ impl Renderer {
             Damage::Rects(rects) => {
                 for r in rects {
                     self.invalidate(Some(*r));
+                }
+            }
+            Damage::Sources { rects, sources } => {
+                for r in rects {
+                    self.invalidate(Some(*r));
+                }
+                for s in sources {
+                    self.invalidate_reach(s.world, s.keys);
                 }
             }
             Damage::All => self.invalidate(None),

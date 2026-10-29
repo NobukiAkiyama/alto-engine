@@ -51,6 +51,19 @@ pub const SAMPLE_F32: u32 = 0;
 /// `Command.info[3]`: the inverse is Q16 bitcast into the f32 slots, and the
 /// shader runs the integer 4-tap.
 pub const SAMPLE_INTEGER: u32 = 1;
+/// `Command.info[3]`, render version 3 only: the inverse is Q16 as for
+/// `SAMPLE_INTEGER`, and the texel is the nearest one, the floor of the Q8
+/// position (`axis_unit_q16` draws). Version 3 has no f32 fetch.
+pub const SAMPLE_NEAREST: u32 = 2;
+
+/// Render version 3: the integer counterpart of `axis_unit` on the Q16
+/// coefficients `m` (`m00, m10, m01, m11`). The f32 test `|v| < 0.0001` is
+/// `|v| * 65536 < 6.5536`, so a rounded Q16 coefficient within 6 of 0 (off the
+/// axes) or of ±65536 (on them) is axis-aligned and unit: the draw is nearest.
+pub fn axis_unit_q16(m: [i32; 4]) -> bool {
+    let near = |v: i32, to: i32| (i64::from(v).abs() - i64::from(to)).abs() <= 6;
+    near(m[1], 0) && near(m[2], 0) && near(m[0], 65536) && near(m[3], 65536)
+}
 
 /// Same thresholds as `fetch_legacy` in `composite.wgsl`.
 pub fn axis_unit(inv: [f32; 6]) -> bool {
@@ -62,7 +75,16 @@ pub fn axis_unit(inv: [f32; 6]) -> bool {
 /// Integers with magnitude below this are exact in `f64`.
 const F64_EXACT_INT: f64 = (1u64 << 53) as f64;
 
+/// Round half away from zero, exactly: `f64::round` decides on the value itself.
+/// Render version 3 (`integer_inverse`).
 fn round_half_away(scaled: f64) -> f64 {
+    scaled.round()
+}
+
+/// Render version 2's rounding, kept so its quantization and hashes never move:
+/// `(scaled + 0.5).floor()` rounds the sum first, so a value just below a tie
+/// (`0.5 - 2^-54`) goes up. Only `integer_inverse_v2` uses it.
+fn round_half_away_v2(scaled: f64) -> f64 {
     if scaled >= 0.0 {
         (scaled + 0.5).floor()
     } else {
@@ -70,8 +92,9 @@ fn round_half_away(scaled: f64) -> f64 {
     }
 }
 
-/// Rounded Q16, or `None` when `v` is not finite or `v * 65536` is not an exact `f64` integer.
-fn quantize_q16(v: f64) -> Option<f64> {
+/// Rounded Q16 with `round`, or `None` when `v` is not finite or `v * 65536` is
+/// not an exact `f64` integer. `v * 65536` is exact (a power of two).
+fn quantize_q16(v: f64, round: fn(f64) -> f64) -> Option<f64> {
     if !v.is_finite() {
         return None;
     }
@@ -79,12 +102,11 @@ fn quantize_q16(v: f64) -> Option<f64> {
     if !scaled.is_finite() || scaled.abs() >= F64_EXACT_INT {
         return None;
     }
-    Some(round_half_away(scaled))
+    Some(round(scaled))
 }
 
-/// Q16 coefficient. `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
-pub fn quantize_coeff(v: f64) -> Option<i32> {
-    let rounded = quantize_q16(v)?;
+fn coeff(v: f64, round: fn(f64) -> f64) -> Option<i32> {
+    let rounded = quantize_q16(v, round)?;
     if rounded > i32::MAX as f64 || rounded < (i32::MIN + 1) as f64 {
         None
     } else {
@@ -95,16 +117,25 @@ pub fn quantize_coeff(v: f64) -> Option<i32> {
 /// Q16 translation as `i64`. `None` when the rounded value is not exact in `f64`.
 /// `|q| < 2^53` implies the Q24 shift (`<< 8`) fits in `i64`.
 pub fn quantize_translation(v: f64) -> Option<i64> {
-    Some(quantize_q16(v)? as i64)
+    Some(quantize_q16(v, round_half_away)? as i64)
+}
+
+/// Q16 coefficient, rounded exactly half away from zero (render version 3).
+/// `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
+pub fn quantize_coeff(v: f64) -> Option<i32> {
+    coeff(v, round_half_away)
 }
 
 /// Coefficients in `m` (`m00, m10, m01, m11`) and translation, all Q16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntegerInverse {
     pub m: [i32; 4],
     pub tx: i64,
     pub ty: i64,
 }
 
+/// The Q16 inverse of render version 3, every value rounded exactly half away
+/// from zero.
 pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
     Some(IntegerInverse {
         m: [
@@ -115,6 +146,23 @@ pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
         ],
         tx: quantize_translation(inv[4])?,
         ty: quantize_translation(inv[5])?,
+    })
+}
+
+/// The Q16 inverse of render version 2 (`pack_inverse`), with its frozen
+/// rounding (`round_half_away_v2`).
+pub fn integer_inverse_v2(inv: [f64; 6]) -> Option<IntegerInverse> {
+    let round = round_half_away_v2;
+    let t = |v| Some(quantize_q16(v, round)? as i64);
+    Some(IntegerInverse {
+        m: [
+            coeff(inv[0], round)?,
+            coeff(inv[1], round)?,
+            coeff(inv[2], round)?,
+            coeff(inv[3], round)?,
+        ],
+        tx: t(inv[4])?,
+        ty: t(inv[5])?,
     })
 }
 
@@ -148,7 +196,7 @@ pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
     if render_version < RENDER_VERSION || axis_unit(f32_inv) {
         return float;
     }
-    let Some(q) = integer_inverse(inv) else {
+    let Some(q) = integer_inverse_v2(inv) else {
         log::warn!(
             "compositor inverse does not fit the integer sampler (translation {}, {}); using the f32 path",
             inv[4],
@@ -171,6 +219,7 @@ pub fn pack_inverse(inv: [f64; 6], render_version: u32) -> PackedInverse {
 
 /// Q8 source coordinate. `px` and `py` are Q8 pixel centers.
 /// `None` when the i64 sum overflows or the rounded coordinate does not fit in `i32`.
+#[cfg(test)]
 pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> Option<[i32; 2]> {
     Some([
         source_axis(inv.m[0], px, inv.m[2], py, inv.tx)?,
@@ -178,6 +227,7 @@ pub fn source_q8(inv: &IntegerInverse, px: i32, py: i32) -> Option<[i32; 2]> {
     ])
 }
 
+#[cfg(test)]
 fn source_axis(m0: i32, px: i32, m1: i32, py: i32, translation: i64) -> Option<i32> {
     let a = i64::from(m0).checked_mul(i64::from(px))?;
     let b = i64::from(m1).checked_mul(i64::from(py))?;
@@ -187,6 +237,7 @@ fn source_axis(m0: i32, px: i32, m1: i32, py: i32, translation: i64) -> Option<i
 }
 
 /// Round half away from zero, then arithmetic `>> 16`. `None` when the half-step overflows `i64`.
+#[cfg(test)]
 fn round_shr16(v: i64) -> Option<i64> {
     let half = 1i64 << 15;
     let adjusted = if v >= 0 {
@@ -206,6 +257,7 @@ pub fn floor_frac_q8(q: i32) -> (i32, i32) {
 
 /// Q8 pixel center. `origin_px` is the tile origin in document pixels.
 /// `None` when the center does not fit in `i32`.
+#[cfg(test)]
 pub fn pixel_q8(origin_px: i32, index: i32, scale: i32) -> Option<i32> {
     let term = i64::from(index).checked_mul(256)?.checked_add(128)?;
     let q = i64::from(origin_px)
