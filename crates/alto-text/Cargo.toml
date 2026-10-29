@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 alto-core = { path = "../alto-core" }
 alto-vector = { path = "../alto-vector" }
-rustybuzz = "0.20.1"
+rustybuzz = "=0.20.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

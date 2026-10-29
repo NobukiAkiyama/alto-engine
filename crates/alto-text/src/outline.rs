@@ -1,6 +1,6 @@
 //! Placed glyphs -> f64 vector paths for the shared lyon / 4x MSAA renderer, and
 //! per-size glyph runs whose outlines the renderer's glyph atlas rasterizes directly.
-use crate::font::FontSet;
+use crate::font::{FontData, FontSet};
 use crate::layout::{GlyphRef, TextLayout};
 use alto_core::AssetId;
 use alto_vector::{FillRule, GlyphOutline, PathCommand, PathData, StyledPath, TextGlyph, TextRun};
@@ -148,6 +148,59 @@ impl OutlineCache {
         }
         raw
     }
+}
+
+/// One outline command in font units (y up), exactly as the font stores it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RawCommand {
+    Move([f32; 2]),
+    Line([f32; 2]),
+    Quad([f32; 2], [f32; 2]),
+    Cubic([f32; 2], [f32; 2], [f32; 2]),
+    Close,
+}
+
+struct Raw {
+    cmds: Vec<RawCommand>,
+    open: bool,
+}
+impl OutlineBuilder for Raw {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.open = true;
+        self.cmds.push(RawCommand::Move([x, y]));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.cmds.push(RawCommand::Line([x, y]));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.cmds.push(RawCommand::Quad([x1, y1], [x, y]));
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.cmds
+            .push(RawCommand::Cubic([x1, y1], [x2, y2], [x, y]));
+    }
+    fn close(&mut self) {
+        if self.open {
+            self.open = false;
+            self.cmds.push(RawCommand::Close);
+        }
+    }
+}
+
+/// A glyph's units per em and outline, read from the font's own bytes and face
+/// (not `OutlineCache`, whose key holds neither). `None` when the face does not
+/// parse. Subpaths are closed as `glyph_paths` closes them.
+pub fn raw_outline(font: &FontData, glyph: u16) -> Option<(u16, Vec<RawCommand>)> {
+    let face = ttf_parser::Face::parse(&font.bytes, font.face_index).ok()?;
+    let mut raw = Raw {
+        cmds: vec![],
+        open: false,
+    };
+    face.outline_glyph(GlyphId(glyph), &mut raw);
+    if raw.open {
+        raw.cmds.push(RawCommand::Close);
+    }
+    Some((face.units_per_em(), raw.cmds))
 }
 
 /// The glyph's commands in node coordinates, or None outside the schema's limits.

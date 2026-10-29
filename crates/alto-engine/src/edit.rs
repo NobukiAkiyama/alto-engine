@@ -568,7 +568,7 @@ impl Engine {
                         ops.push(Op::SetVector { id: node.id, paths });
                     }
                 }
-                NodeKind::Text { content } => {
+                NodeKind::Text { content, .. } => {
                     let mut content = content.clone();
                     if let Some((sx, sy)) = text_scale {
                         let scale = ((sx + sy) * 0.5) as f32;
@@ -597,6 +597,7 @@ impl Engine {
                         ops.push(Op::SetText {
                             id: node.id,
                             content,
+                            bake: None,
                         });
                     }
                 }
@@ -839,7 +840,7 @@ impl Engine {
                         .collect();
                     ops.push(Op::SetVector { id: node.id, paths });
                 }
-                NodeKind::Text { content } => {
+                NodeKind::Text { content, .. } => {
                     let mut content = content.clone();
                     let scale = ((sx + sy) * 0.5) as f32;
                     content.style.size = (content.style.size * scale).clamp(0.01, 4096.0);
@@ -857,6 +858,7 @@ impl Engine {
                     ops.push(Op::SetText {
                         id: node.id,
                         content,
+                        bake: None,
                     });
                 }
                 _ => {}
@@ -1358,7 +1360,9 @@ impl Engine {
         self.transact(handle, "render.upgrade", ops, revision)
     }
 
-    /// The single `SetMeta` of [`Self::upgrade_render_version_unstable`].
+    /// The `SetMeta` of [`Self::upgrade_render_version_unstable`], then one `SetText`
+    /// per text node with its content unchanged and no bake: `transact` bakes
+    /// them (version 3 text draws from its bake only).
     pub fn render_upgrade_ops_unstable(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
         if !crate::unstable_render::unstable_render_v3_enabled() {
             return Err(bad(crate::unstable_render::UNSTABLE_RENDER_V3_OFF));
@@ -1370,7 +1374,17 @@ impl Engine {
         let mut meta = doc.meta.clone();
         meta.render_version = RENDER_VERSION_EXACT;
         meta.format_version = 4;
-        Ok(vec![Op::SetMeta { meta }])
+        let mut ops = vec![Op::SetMeta { meta }];
+        for node in doc.nodes.values() {
+            if let NodeKind::Text { content, .. } = &node.kind {
+                ops.push(Op::SetText {
+                    id: node.id,
+                    content: content.clone(),
+                    bake: None,
+                });
+            }
+        }
+        Ok(ops)
     }
 }
 
@@ -1382,7 +1396,7 @@ fn paths_ref(node: &Node) -> &Vec<StyledPath> {
 }
 fn node_text(node: &Node) -> &alto_text::TextContent {
     match &node.kind {
-        NodeKind::Text { content } => content,
+        NodeKind::Text { content, .. } => content,
         _ => unreachable!(),
     }
 }
