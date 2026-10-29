@@ -649,7 +649,8 @@ impl Engine {
             hashes.extend(selection.tiles.values().copied());
         }
         for h in hashes {
-            if !self.tiles.contains(&h) {
+            // Text bakes are blobs, not tiles.
+            if !self.tiles.contains(&h) && !self.blobs.contains_key(&h) {
                 warnings.push(Warning::new("MISSING_TILE").with("hash", h));
             }
         }

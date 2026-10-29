@@ -3,7 +3,7 @@
 use crate::{DocHandle, Engine, EngineError};
 use alto_core::text_bake::{BakeFont, BakeGlyph, BakeOutline, TextBake};
 use alto_core::{AssetId, ContentHash, NodeId};
-use alto_doc::{AssetKind, AssetRecord, DocError, Document, NodeKind, Op};
+use alto_doc::{AssetKind, AssetRecord, DocError, Document, Node, NodeKind, Op};
 
 type Assets = std::collections::BTreeMap<AssetId, AssetRecord>;
 use alto_text::{
@@ -274,30 +274,34 @@ impl Engine {
     }
 
     /// Fills in the bake of every text op of a render version 3 transaction that
-    /// has none (`InsertNode` / `ReplaceNode` of a text node, `SetText`), baked
-    /// against the asset table as the transaction leaves it at that op, and adds
-    /// a `SetText` re-bake for each text node using a font that a `SetAsset`
-    /// replaces (memo "字形の同一性"). A transaction that moves the document onto
-    /// version 3 counts. Ops that already carry a bake are kept as they are:
-    /// a bake is bytes, never recomputed from another peer's op. Returns the
-    /// blobs the ops now reference, for the caller to store.
+    /// has none (a text node inserted, replaced or restored, `SetText`), and adds
+    /// a `SetText` re-bake for every other text node when the transaction replaces
+    /// a font it uses (memo "字形の同一性") or moves the document onto version 3.
+    /// Every bake uses the asset table as the whole transaction leaves it, so op
+    /// order does not matter. Nodes the transaction removes are left alone. Ops
+    /// that already carry a bake are kept: a bake is bytes, never recomputed from
+    /// another peer's op. Returns the blobs the ops now reference.
     pub(crate) fn bake_ops(&self, doc: &Document, ops: &mut Vec<Op>) -> Vec<Vec<u8>> {
         let v3 = |m: &alto_doc::DocumentMeta| m.render_version >= alto_core::RENDER_VERSION_EXACT;
+        let font = |r: Option<&AssetRecord>| {
+            r.and_then(|r| {
+                matches!(r.kind, AssetKind::Font { .. }).then(|| (r.hash, r.kind.clone()))
+            })
+        };
+        // The transaction's end state: version, assets, replaced fonts, and the
+        // nodes it writes or removes.
         let mut exact = v3(&doc.meta);
+        let upgrades = ops
+            .iter()
+            .any(|op| matches!(op, Op::SetMeta { meta } if v3(meta)))
+            && !exact;
         let mut assets = doc.assets.clone();
         let mut replaced = std::collections::BTreeSet::new();
-        let mut texted = std::collections::BTreeSet::new();
-        let mut blobs = vec![];
-        for op in ops.iter_mut() {
+        let mut written = std::collections::BTreeSet::new();
+        for op in ops.iter() {
             match op {
                 Op::SetMeta { meta } => exact = v3(meta),
                 Op::SetAsset { id, record } => {
-                    let font = |r: Option<&AssetRecord>| {
-                        r.and_then(|r| {
-                            matches!(r.kind, AssetKind::Font { .. })
-                                .then_some((r.hash, r.kind.clone()))
-                        })
-                    };
                     if font(assets.get(id)).is_some()
                         && font(assets.get(id)) != font(record.as_ref())
                     {
@@ -308,45 +312,75 @@ impl Engine {
                         None => assets.remove(id),
                     };
                 }
-                Op::SetText { id, content, bake } => {
-                    texted.insert(*id);
-                    if exact && bake.is_none() {
-                        let bytes = self.bake_text(&assets, content).encode();
-                        *bake = Some(ContentHash::of(&bytes));
-                        blobs.push(bytes);
-                    }
+                Op::SetText { id, .. } | Op::ReplaceNode { id, .. } => {
+                    written.insert(*id);
                 }
-                Op::InsertNode { node, .. } | Op::ReplaceNode { node, .. } => {
-                    if let NodeKind::Text { content, bake } = &mut node.kind {
-                        texted.insert(node.id);
-                        if exact && bake.is_none() {
-                            let bytes = self.bake_text(&assets, content).encode();
-                            *bake = Some(ContentHash::of(&bytes));
-                            blobs.push(bytes);
+                Op::InsertNode { node, .. } => {
+                    written.insert(node.id);
+                }
+                Op::RestoreSubtree { nodes, .. } => written.extend(nodes.iter().map(|n| n.id)),
+                Op::RemoveNode { id } => {
+                    let mut stack = vec![*id];
+                    while let Some(n) = stack.pop() {
+                        written.insert(n);
+                        if let Some(children) = doc.nodes.get(&n).and_then(|n| n.children()) {
+                            stack.extend(children.iter().copied());
                         }
                     }
                 }
                 _ => {}
             }
         }
-        if exact {
-            for node in doc.nodes.values() {
-                let NodeKind::Text { content, .. } = &node.kind else {
-                    continue;
-                };
-                if texted.contains(&node.id)
-                    || !content.font_ids().iter().any(|f| replaced.contains(f))
-                {
-                    continue;
-                }
+        if !exact {
+            return vec![];
+        }
+        let mut blobs = vec![];
+        let mut bake = |content: &TextContent, slot: &mut Option<ContentHash>| {
+            if slot.is_none() {
                 let bytes = self.bake_text(&assets, content).encode();
-                ops.push(Op::SetText {
-                    id: node.id,
-                    content: content.clone(),
-                    bake: Some(ContentHash::of(&bytes)),
-                });
+                *slot = Some(ContentHash::of(&bytes));
                 blobs.push(bytes);
             }
+        };
+        for op in ops.iter_mut() {
+            let nodes: Vec<&mut Node> = match op {
+                Op::SetText {
+                    content,
+                    bake: slot,
+                    ..
+                } => {
+                    bake(content, slot);
+                    continue;
+                }
+                Op::InsertNode { node, .. } | Op::ReplaceNode { node, .. } => vec![node],
+                Op::RestoreSubtree { nodes, .. } => nodes.iter_mut().collect(),
+                _ => continue,
+            };
+            for node in nodes {
+                if let NodeKind::Text {
+                    content,
+                    bake: slot,
+                } = &mut node.kind
+                {
+                    bake(content, slot);
+                }
+            }
+        }
+        for node in doc.nodes.values() {
+            let NodeKind::Text { content, .. } = &node.kind else {
+                continue;
+            };
+            let stale = upgrades || content.font_ids().iter().any(|f| replaced.contains(f));
+            if !stale || written.contains(&node.id) {
+                continue;
+            }
+            let mut slot = None;
+            bake(content, &mut slot);
+            ops.push(Op::SetText {
+                id: node.id,
+                content: content.clone(),
+                bake: slot,
+            });
         }
         blobs
     }

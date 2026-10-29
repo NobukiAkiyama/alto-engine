@@ -389,3 +389,100 @@ fn text_bake_placeholder_and_fixture() {
     }
     assert_eq!(std::fs::read_to_string(path).unwrap(), text);
 }
+
+/// A copy of the Latin font's record pointing at the Japanese font's bytes.
+fn latin_as_jp(e: &Engine, d: DocHandle, latin: AssetId, jp: AssetId) -> alto_doc::AssetRecord {
+    let jp_record = e.document(d).unwrap().assets[&jp].clone();
+    let mut replacement = e.document(d).unwrap().assets[&latin].clone();
+    replacement.hash = jp_record.hash;
+    replacement.byte_len = jp_record.byte_len;
+    replacement
+}
+
+#[test]
+fn text_bake_uses_the_fonts_the_transaction_leaves() {
+    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let content = texts(latin, jp).remove(0).1;
+    let id = insert(&mut e, d, content.clone());
+    // A SetText before the font replacement still bakes with the new font.
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "edit then replace",
+        vec![
+            Op::SetText {
+                id,
+                content: Box::new(content),
+                bake: None,
+            },
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+        ],
+        rev,
+    )
+    .unwrap();
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    assert_eq!(bake.fonts[0].hash.to_string(), JP_BLAKE3);
+}
+
+#[test]
+fn text_bake_skips_nodes_the_transaction_removes() {
+    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "replace and delete",
+        vec![
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+            Op::RemoveNode { id },
+        ],
+        rev,
+    )
+    .expect("no re-bake is added for a removed node");
+    assert!(e.document(d).unwrap().node(id).is_err());
+}
+
+#[test]
+fn text_bake_on_any_move_onto_version_three_and_on_restore() {
+    // A bare SetMeta onto version 3 bakes the text it finds.
+    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
+    let id = insert(&mut e, d, texts(latin, jp).remove(1).1);
+    let mut meta = e.document(d).unwrap().meta.clone();
+    meta.render_version = RENDER_VERSION_EXACT;
+    meta.format_version = 4;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(d, "meta", vec![Op::SetMeta { meta }], rev)
+        .unwrap();
+    assert!(bake_of(&e, d, id).is_some());
+    // A restored subtree without a bake is baked.
+    let node = e.document(d).unwrap().node(id).unwrap().clone();
+    let (parent, rev) = (node.parent.unwrap(), e.document(d).unwrap().revision);
+    e.transact(d, "remove", vec![Op::RemoveNode { id }], rev)
+        .unwrap();
+    let mut unbaked = node;
+    if let NodeKind::Text { bake, .. } = &mut unbaked.kind {
+        *bake = None;
+    }
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "restore",
+        vec![Op::RestoreSubtree {
+            nodes: vec![unbaked],
+            parent,
+            index: 0,
+        }],
+        rev,
+    )
+    .unwrap();
+    let hash = bake_of(&e, d, id).expect("restored text is baked");
+    assert!(e.blobs.contains_key(&hash));
+}
