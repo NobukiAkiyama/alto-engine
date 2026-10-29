@@ -35,6 +35,8 @@ f64 の積和は、式と評価順が同じなら IEEE-754 で一つの値に決
 | Rust の GPU レンダラー、Rust の CPU 参照、JS の CPU 参照 | ベクター塗り、ぼかし、テキストの v3 実装。ただし、それらの変換の入力はこの文書の `FixedAffine` にする |
 | `plain_scene` の v3 での特異の判定 | damage の f64 の矩形（過剰な無効化はフォローアップ。正しさには影響しない） |
 
+既存のテキスト・ベクター塗りの設計メモは、`WorldQ` の線形部分を Q16 と書いている。この文書の Q32 を共通の v3 world 変換とし、それぞれの実装 PR で座標式・範囲・検査を Q32 に合わせて改訂する。Q16 へ早く丸めてから逆行列を作る経路を残さない。
+
 ## 決定
 
 ### 1. 保存形式：文書は f64 のまま、描画の入口で整数にする
@@ -58,7 +60,7 @@ FixedAffine {
 }
 ```
 
-f64 から量子化する規則：`v * 2^32`（並進は `v * 2^16`）を 0 から遠い側へ丸める。2 のべき乗を掛けても値は丸まらず（オーバーフローは範囲の検査で弾く）、`f64::round` は値そのもので結びを決めるので、この量子化は f64 の上で正確に計算できる。JS では既存の `roundHalfAway` を使う（`Math.round` は使わない）。NaN、無限大、範囲外の値は `None` を返し、v3 はそのノードを `GpuUnsupported` で拒否する。今の「transform has no Q16 inverse」と同じ扱いで、値をクランプすることはない。
+f64 からの量子化は、`to_bits()` / `DataView.getBigUint64` でビットを取り、整数として分解する。有限値の絶対値を `mantissa · 2^exponent` とし、線形部分は `mantissa · 2^(exponent+32)`、並進は `mantissa · 2^(exponent+16)` を整数だけで half away from zero に丸める。負号は丸めたあとに付ける。[v3 整数テキストのビット分解](2026-10-28-v3-integer-text.md#浮動小数のビットの整数分解) の `q_from_f64_bits` を `f ∈ {16,32}` に広げ、許容範囲を検査してから i64 にする。JS も同じビットと BigInt の式を使う。`v * 2^f`、`f64::round`、既存の JS `roundHalfAway` を v3 の描画中に呼ばない。NaN、無限大、範囲外の値は `None` を返し、v3 はそのノードを `GpuUnsupported` で拒否する。今の「transform has no Q16 inverse」と同じ扱いで、値をクランプすることはない。
 
 線形部分を Q32 にする理由は、逆行列の精度にある。Q16 のまま合成すると、スケール 0.01 は 655/65536（相対誤差 5.5e-4）になり、逆行列が 100 ではなく 100.05 になる。原点から 1 万 px 離れたところで 5 px ずれる。Q32 なら相対誤差は 2^-33 以下で、v2 の f64 の逆行列を Q16 にしたときとの差は、結びの近くにある値だけに限られる。
 
@@ -71,11 +73,11 @@ f64 から量子化する規則：`v * 2^32`（並進は `v * 2^16`）を 0 か�
 ```text
 W.a  = rq32(P.a·L.a + P.c·L.b)        W.c  = rq32(P.a·L.c + P.c·L.d)
 W.b  = rq32(P.b·L.a + P.d·L.b)        W.d  = rq32(P.b·L.c + P.d·L.d)
-W.tx = rq32(P.a·L.tx + P.c·L.ty) + P.tx
-W.ty = rq32(P.b·L.tx + P.d·L.ty) + P.ty
+W.tx = rq32(P.a·L.tx + P.c·L.ty + P.tx·2^32)
+W.ty = rq32(P.b·L.tx + P.d·L.ty + P.ty·2^32)
 ```
 
-`rq32(n)` は i128 の `n / 2^32` を 0 から遠い側へ丸める関数である。積は 2^92 未満、和は 2^93 未満なので、i128 に収まる。結果が上の範囲を出たら `None` を返す。合成の順番は、根から葉へ向かって左から畳み込む（今の `walk` と `PlanTask::Node` の順番と同じ）。丸めがあるので結合則は成り立たないが、順番が決まっているので値は一意になる。根は単位行列 `m = [2^32, 0, 0, 2^32]`、`t = [0, 0]` である。
+`rq32(n)` は i128 の `n / 2^32` を 0 から遠い側へ丸める関数である。並進は親の整数値を分子に足してから一度だけ丸める。例えば `P.tx=1`、子の寄与が `-0.5` Q16 のとき、正しい結果は `round_half_away(0.5)=1` で、子の寄与を先に丸めて `P.tx` を足すと 0 になってしまう。積は 2^92 未満、和は 2^93 未満なので、i128 に収まる。結果が上の範囲を出たら `None` を返す。合成の順番は、根から葉へ向かって左から畳み込む（今の `walk` と `PlanTask::Node` の順番と同じ）。丸めがあるので結合則は成り立たないが、順番が決まっているので値は一意になる。根は単位行列 `m = [2^32, 0, 0, 2^32]`、`t = [0, 0]` である。
 
 木の深さは `MAX_TREE_DEPTH = 128` までなので、丸めの累積は 128 × 2^-33 に収まる。
 
@@ -117,18 +119,18 @@ Q32 の量子化には、90° の倍数を正確にする副作用がある。`M
 
 1 本の PR で入れる。
 
-1. `crates/alto-core/src/lib.rs` の `Affine2` の隣に `FixedAffine`、`Affine2::fixed() -> Option<FixedAffine>`、`FixedAffine::concat`、`FixedAffine::det`、`rq32`、`rdiv` を置く。`alto-scene` の `plain_scene` も使うので、`alto-gpu` ではなく `alto-core` に置く。`crates/alto-gpu/src/sample.rs` には `fixed_inverse(&FixedAffine) -> Option<Option<IntegerInverse>>` を置く（外側の `None` は範囲外、内側の `None` は特異）。v2 の `integer_inverse_v2` と `pack_inverse` には手を入れない。
+1. `crates/alto-core/src/lib.rs` の `Affine2` の隣に `FixedAffine`、`Affine2::fixed() -> Option<FixedAffine>`、`FixedAffine::concat`、`FixedAffine::det`、ビット列の整数分解、`rq32`、`rdiv` を置く。`alto-scene` の `plain_scene` も使うので、`alto-gpu` ではなく `alto-core` に置く。`crates/alto-gpu/src/sample.rs` には `fixed_inverse(&FixedAffine) -> Option<Option<IntegerInverse>>` を置く（外側の `None` は範囲外、内側の `None` は特異）。v2 の `integer_inverse_v2` と `pack_inverse` には手を入れない。
 2. `renderer.rs`：`PlanTask::Node` の `world` を、v3 のときは `FixedAffine` で持つ。`plain_draw_v3` は f64 の逆行列ではなく `IntegerInverse` を受け取る。v1/v2 の分岐は `multiply` / `inverse` のまま残す。
 3. `renderer/m5.rs`：`stack` の `parent`、`mask_sampler`、ベクターのカバレッジ用の `multiply(world, mask.transform)` / `path.transform` を、v3 では `FixedAffine` にする。`RENDER_VERSION_EXACT` での分岐は、`blend` / `stage` / `raw_node` と同じ形にする。
 4. `alto-scene/src/damage.rs`：v3 の `plain_scene` の特異の判定を `Det == 0` にする。
 5. `cpu_composite.rs`：v3 の `walk` を `FixedAffine` で行い、`Op::Draw` に `IntegerInverse` を載せる。
-6. `tests/e2e/cpu-composite.js`：`fixedAffine`、`fixedConcat`、`fixedInverse` を BigInt で書く。f64 から BigInt への変換は、量子化して整数になった f64 からだけ行う（`BigInt(x)` は整数の f64 なら正確である）。v3 の `walk` / `lookupV3` / `renderPlainV3` はこれを使う。
+6. `tests/e2e/cpu-composite.js`：`fixedAffine`、`fixedConcat`、`fixedInverse` を BigInt で書く。入力の f64 はビット取得だけに使い、量子化も BigInt で行う。v3 の `walk` / `lookupV3` / `renderPlainV3` はこれを使う。
 7. ワークスペースの `serde_json` に `float_roundtrip` を有効にする（決定 5）。
 8. v3 のハッシュはこの PR で動いてよい。v3 はまだ固定していない（固定はリリース作業の 4 番）。v3 の期待値は同じ PR で更新し、どのケースが動いたかを PR の説明に書く。
 
 ### float の静的検査
 
-#38 のシェーダ関数に対する float の禁止検査を、ホストにも広げる。v3 の描画で到達する Rust の関数（`FixedAffine` の各関数、`fixed_inverse`、`plain_draw_v3`、`mask_sampler` の v3 の分岐、`v3_reach`）の本体に `f32` / `f64` が出てこないことを、テストで確かめる。例外は `Affine2::fixed` の入口（f64 を読む唯一の場所）と、`f32::from_bits` での整数の運搬だけで、例外は名前で列挙する。
+#38 のシェーダ関数に対する float の禁止検査を、ホストにも広げる。v3 の描画で到達する Rust の関数（`FixedAffine` の各関数、`fixed_inverse`、`plain_draw_v3`、`mask_sampler` の v3 の分岐、`v3_reach`）の本体に float の算術・比較・丸めが出てこないことを、テストで確かめる。例外は `Affine2::fixed` の入口でのビット取得と、`f32::from_bits` での整数の運搬だけで、例外は名前で列挙する。
 
 ## テスト
 
@@ -136,6 +138,7 @@ Q32 の量子化には、90° の倍数を正確にする副作用がある。`M
 | --- | --- |
 | 量子化の結び | `(k + 1/2) · 2^-32` と、その上下 1 ulp を正負それぞれで。並進は `2^-16` で同じく。`-0.0`、NaN、±∞、範囲の境界（`2^14` ちょうど、その 1 ulp 下）、subnormal |
 | 合成 | 深さ 128 のスケール 0.5 と 2 の交互、30° の回転を 12 回重ねたもの、範囲を出る合成（`None`）。Rust の結果を i128 の素朴な実装と照合する |
+| 並進の結び | 親の Q16 並進と子の寄与の符号が逆で、和全体が ±0.5 になる例。親を最後に足す二重丸めを検出する |
 | 逆行列 | 単位行列、90°/180°/270°（`Math.cos` / `Math.sin` で作ったもの）、`[1, 2, 2, 4, ·, ·]`（`Det == 0`）、`Det = ±1`（最小の非零）、`rdiv` の結びになる分子、逆係数が `i32` を出るもの |
 | Codex P2-1 の再現 | `[1, 0, -(2^-17 - 2^-70), 1, 0, 0]` で、先頭の画素が `[0, 0, 0, 255]` になること。実レンダラーの回帰テストにする |
 | Rust と JS の一致 | 固定シードの乱数で 10,000 個の局所変換の鎖（深さ 1〜8）を作り、`IntegerInverse` が Rust と JS で全部一致すること。乱数の列は Rust から書き出し、JS がそれを読む |
