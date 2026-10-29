@@ -8429,7 +8429,7 @@ fn v3_vector_fill_rules_and_paint_order_match_all_cpu_pixels() {
 }
 
 #[test]
-fn v3_blur_one_pixel_matches_integer_reference_on_metal() {
+fn v3_blur_one_pixel_matches_integer_reference() {
     let path = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 1.0]);
     let mut document = scene(
         RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
@@ -8490,7 +8490,7 @@ fn v3_blur_one_pixel_matches_integer_reference_on_metal() {
 }
 
 #[test]
-fn v3_blur_coarsen_and_resample_match_integer_reference_on_metal() {
+fn v3_blur_coarsen_and_resample_match_integer_reference() {
     let path = test_rectangle(0.0, 0.0, 256.0, 256.0, [1.0, 0.0, 0.0, 1.0]);
     let mut document = scene(
         RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
@@ -8572,7 +8572,7 @@ fn blur_pass_order_is_horizontal_first() {
 }
 
 #[test]
-fn v3_raster_blur_square_matches_integer_reference_on_metal() {
+fn v3_raster_blur_square_matches_integer_reference() {
     use alto_core::{PixelFormat, TileKey};
     // `blur-v3-square`: opaque red on transparent, 80..180, radius 8, level 0.
     let mut bytes = vec![0u8; 256 * 256 * 4];
@@ -8670,7 +8670,7 @@ fn v3_adjustment(kind: REffectKind, features: RFeatures) -> RNode {
 }
 
 #[test]
-fn v3_backdrop_blur_matches_the_layer_blur_on_metal() {
+fn v3_backdrop_blur_matches_the_layer_blur() {
     let blur = REffectKind::GaussianBlur {
         radius: 8.0,
         radius_q8: 2048,
@@ -8802,7 +8802,7 @@ fn v3_vector_curve_range_skips_only_that_path() {
 }
 
 #[test]
-fn v3_feathered_vector_mask_blurs_integer_coverage_on_metal() {
+fn v3_feathered_vector_mask_blurs_integer_coverage() {
     let source = test_rectangle(0.0, 0.0, 256.0, 256.0, [1.0, 0.0, 0.0, 0.5]);
     let mask = test_rectangle(40.5, 50.0, 180.25, 200.0, [1.0; 4]).data;
     let mut document = scene(
