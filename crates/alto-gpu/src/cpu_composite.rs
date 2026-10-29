@@ -7604,11 +7604,12 @@ fn plain_scene_gaps_are_explicit() {
             ..RFeatures::default()
         },
     );
+    // Invert has no integer stage; Gaussian blur does (checked below).
     let effects = scene(
         RContent::Tiles(Vec::new()),
         RFeatures {
             effects: vec![REffect {
-                kind: REffectKind::GaussianBlur { radius: 8.0 },
+                kind: REffectKind::Invert,
                 selection: None,
             }],
             ..RFeatures::default()
@@ -7648,9 +7649,12 @@ fn plain_scene_gaps_are_explicit() {
         assert_eq!(gap(scene), Some(reason));
         let mut v3 = scene.clone();
         v3.render_version = 3;
-        // A pixel mask and a color-adjust adjustment layer are the ones of these
-        // with integer stages.
-        let integer = reason == "adjustment" || reason == "mask";
+        // A pixel mask, a color-adjust adjustment layer, a filled vector and its
+        // vector mask or clip path are the ones of these with integer stages.
+        let integer = matches!(
+            reason,
+            "adjustment" | "mask" | "vector" | "vector mask" | "clip path"
+        );
         let expected = if integer {
             "v3-m5-integer"
         } else {
@@ -7666,8 +7670,9 @@ fn plain_scene_gaps_are_explicit() {
     v3.render_version = 3;
     assert_eq!(gap(&v3), None);
 
-    // Color-adjust layer effects are integer M5, selection-limited ones too (mode
-    // 22). Any other effect has no integer stage yet, with or without a selection.
+    // Color-adjust and Gaussian blur layer effects are integer M5, selection-limited
+    // ones too (mode 22). Any other effect has no integer stage yet, with or
+    // without a selection.
     // Blends of masked adjustment layers are mode 23. Without a mask a non-normal
     // blend is refused until the stages upstream of mode 23 are integer.
     let color_adjust = REffect {
@@ -7696,8 +7701,48 @@ fn plain_scene_gaps_are_explicit() {
     assert_eq!(crate::renderer::v3_gap(&layer), None);
     assert_eq!(gap(&layer), Some("v3-m5-integer"));
     let mut blur = layer.clone();
-    blur.nodes[0].features.effects[0].kind = REffectKind::GaussianBlur { radius: 8.0 };
-    assert_eq!(crate::renderer::v3_gap(&blur), Some("effects"));
+    blur.nodes[0].features.effects[0].kind = REffectKind::GaussianBlur {
+        radius: 8.0,
+        radius_q8: 2048,
+    };
+    assert_eq!(crate::renderer::v3_gap(&blur), None);
+    assert_eq!(gap(&blur), Some("v3-m5-integer"));
+    // A stroked path keeps the v2 tessellator, so it is refused.
+    let mut stroked = vector.clone();
+    stroked.render_version = 3;
+    stroked.nodes[0].content = RContent::Mesh(std::sync::Arc::new(vec![alto_vector::StyledPath {
+        data: PathData::default(),
+        fill: None,
+        stroke: Some(alto_vector::Stroke {
+            color: [1.0; 4],
+            width: 1.0,
+            cap: Default::default(),
+            join: Default::default(),
+            miter_limit: 4.0,
+        }),
+        fill_rule: FillRule::NonZero,
+    }]));
+    assert_eq!(crate::renderer::v3_gap(&stroked), Some("vector stroke"));
+    // A stroke that cannot change a pixel does not refuse the node: width
+    // +/-0, or an alpha below 2^-15 (its Q14 is 0). 2^-15 itself is visible.
+    for (width, alpha, visible) in [
+        (0.0f32, 1.0f32, false),
+        (-0.0, 1.0, false),
+        (1.0, 0.0, false),
+        (1.0, f32::from_bits(2f32.powi(-15).to_bits() - 1), false),
+        (1.0, 2f32.powi(-15), true),
+        (f32::from_bits(1), 1.0, true),
+    ] {
+        let mut s = stroked.clone();
+        let RContent::Mesh(paths) = &mut s.nodes[0].content else {
+            unreachable!()
+        };
+        let stroke = std::sync::Arc::make_mut(paths)[0].stroke.as_mut().unwrap();
+        stroke.width = width;
+        stroke.color[3] = alpha;
+        let want = visible.then_some("vector stroke");
+        assert_eq!(crate::renderer::v3_gap(&s), want, "{width} {alpha:e}");
+    }
     let mut multiply = adjustment.clone();
     multiply.render_version = 3;
     multiply.nodes[0].blend = RenderBlend::Multiply;
@@ -7712,7 +7757,8 @@ fn plain_scene_gaps_are_explicit() {
         selection: None,
     });
     assert_eq!(crate::renderer::v3_gap(&invert), Some("adjustment"));
-    // DQ3-4: a mask does not open a path for the features it is combined with.
+    // Integer vector coverage composes with pixel masks; unsupported stages
+    // remain refused when a pixel mask is present.
     let mut masked = mask.clone();
     masked.render_version = 3;
     for (reason, add) in [
@@ -7728,11 +7774,12 @@ fn plain_scene_gaps_are_explicit() {
         n.clip_path = f.clip_path.clone();
         n.clip = f.clip;
         n.effects = f.effects.clone();
-        assert_eq!(
-            crate::renderer::v3_gap(&v3),
-            Some(reason),
-            "mask + {reason}"
-        );
+        let expected = if matches!(reason, "vector mask" | "clip path") {
+            None
+        } else {
+            Some(reason)
+        };
+        assert_eq!(crate::renderer::v3_gap(&v3), expected, "mask + {reason}");
     }
 }
 
@@ -7894,8 +7941,11 @@ fn existing_v1_and_v2_hashes_are_unchanged() {
     );
 }
 
+static GPU_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn gpu_shader_matches_cpu_reference() {
+    let _gpu_lock = GPU_RENDERER_TEST_LOCK.lock().unwrap();
     let gpu = match Gpu::new() {
         Ok(Some(gpu)) => gpu,
         Ok(None) => {
@@ -8156,6 +8206,652 @@ fn gpu_shader_matches_cpu_reference() {
         failed.is_empty(),
         "GPU and CPU pixels differ:\n{}",
         failed.join("\n")
+    );
+}
+
+fn v3_vector_test_render_at(document: &RenderScene, key: (i32, i32, i32)) -> Option<Vec<u8>> {
+    v3_test_render_with(document, &alto_raster::ObjectStore::default(), key)
+}
+fn v3_test_render_with(
+    document: &RenderScene,
+    store: &alto_raster::ObjectStore,
+    key: (i32, i32, i32),
+) -> Option<Vec<u8>> {
+    v3_test_try_render(document, store, key).map(|r| r.expect("v3 vector tile"))
+}
+fn v3_test_try_render(
+    document: &RenderScene,
+    store: &alto_raster::ObjectStore,
+    key: (i32, i32, i32),
+) -> Option<Result<Vec<u8>, crate::RenderError>> {
+    let _gpu_lock = GPU_RENDERER_TEST_LOCK.lock().unwrap();
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+    let instance = wgpu::Instance::new(descriptor);
+    let mut renderer = match pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
+    {
+        Ok(renderer) => renderer,
+        Err(err)
+            if !cfg!(target_os = "macos")
+                && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+        {
+            eprintln!("v3 vector GPU parity skipped: {err}");
+            return None;
+        }
+        Err(err) => panic!("v3 vector GPU parity could not start: {err}"),
+    };
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let (device, done) = (renderer.device.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = device.poll(wgpu::PollType::Poll);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    let rendered = pollster::block_on(renderer.read_tile(document, store, key));
+    done.store(true, std::sync::atomic::Ordering::Release);
+    poller.join().unwrap();
+    Some(rendered)
+}
+fn v3_vector_test_render(document: &RenderScene) -> Option<Vec<u8>> {
+    v3_vector_test_render_at(document, (0, 0, 0))
+}
+fn blur_pass_reference(
+    input: &[[u16; 4]],
+    input_size: [usize; 2],
+    output_size: [usize; 2],
+    offset: [i32; 2],
+    vertical: bool,
+    weights: &[u32],
+) -> Vec<[u16; 4]> {
+    let mut output = vec![[0u16; 4]; output_size[0] * output_size[1]];
+    let radius = (weights.len() - 1) as i32;
+    for y in 0..output_size[1] {
+        for x in 0..output_size[0] {
+            let mut sum = [0u32; 4];
+            for i in -radius..=radius {
+                let tx = x as i32 + offset[0] + if vertical { 0 } else { i };
+                let ty = y as i32 + offset[1] + if vertical { i } else { 0 };
+                if tx < 0 || ty < 0 || tx >= input_size[0] as i32 || ty >= input_size[1] as i32 {
+                    continue;
+                }
+                let texel = input[ty as usize * input_size[0] + tx as usize];
+                for channel in 0..4 {
+                    sum[channel] += u32::from(texel[channel]) * weights[i.unsigned_abs() as usize];
+                }
+            }
+            output[y * output_size[0] + x] = sum.map(|v| ((v + 32768) >> 16) as u16);
+        }
+    }
+    output
+}
+
+fn test_rectangle(x0: f64, y0: f64, x1: f64, y1: f64, fill: [f32; 4]) -> alto_vector::StyledPath {
+    use alto_vector::PathCommand as P;
+    alto_vector::StyledPath {
+        data: PathData {
+            commands: vec![
+                P::Move { x: x0, y: y0 },
+                P::Line { x: x1, y: y0 },
+                P::Line { x: x1, y: y1 },
+                P::Line { x: x0, y: y1 },
+                P::Close,
+            ],
+        },
+        fill: Some(fill),
+        stroke: None,
+        fill_rule: FillRule::NonZero,
+    }
+}
+
+#[test]
+fn v3_vector_fill_reaches_metal_and_matches_q14_reference() {
+    let rectangle = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 0.5]);
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![rectangle])),
+        RFeatures::default(),
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let pixel = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * 256 + x) * 4;
+        image[i..i + 4].try_into().unwrap()
+    };
+    for (x, y, coverage) in [
+        (0, 0, 0),
+        (32, 50, 128),
+        (33, 50, 255),
+        (96, 50, 128),
+        (97, 50, 0),
+        (33, 101, 0),
+    ] {
+        let q14 = crate::raster_q8::source_over_q14([0; 4], [16384, 0, 0, 8192], coverage);
+        let byte = q14.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8);
+        assert_eq!(pixel(x, y), byte, "pixel ({x},{y})");
+    }
+}
+
+#[test]
+fn v3_vector_mask_and_clip_multiply_before_masking_source() {
+    let source = test_rectangle(0.0, 0.0, 256.0, 256.0, [1.0, 0.0, 0.0, 1.0]);
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![source])),
+        RFeatures {
+            vector_mask: Some(VectorMask {
+                path: test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0; 4]).data,
+                fill_rule: FillRule::NonZero,
+                feather: 0.0,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            clip_path: Some(ClipPath {
+                path: test_rectangle(64.5, 40.0, 128.5, 100.0, [1.0; 4]).data,
+                fill_rule: FillRule::NonZero,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            ..RFeatures::default()
+        },
+    );
+    document.nodes[0].opacity = 0.5;
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let pixel = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * 256 + x) * 4;
+        image[i..i + 4].try_into().unwrap()
+    };
+    for (x, mask, clip) in [
+        (31, 0u8, 0u8),
+        (32, 128, 0),
+        (64, 255, 128),
+        (65, 255, 255),
+        (95, 255, 255),
+        (96, 128, 255),
+        (97, 0, 255),
+    ] {
+        let k_mask = (u32::from(mask) * 16384 + 127) / 255;
+        let k_clip = (u32::from(clip) * 16384 + 127) / 255;
+        let k = (k_mask * k_clip + 8192) >> 14;
+        let q14 = ((8192 * k + 8192) >> 14) as u16;
+        let byte = ((u32::from(q14) * 255 + 8192) >> 14) as u8;
+        assert_eq!(pixel(x, 50), [byte, 0, 0, byte], "pixel {x}");
+    }
+}
+
+#[test]
+fn v3_vector_fill_rules_and_paint_order_match_all_cpu_pixels() {
+    let red = test_rectangle(15.5, 17.5, 178.5, 190.5, [1.0, 0.0, 0.0, 0.5]);
+    let green = test_rectangle(70.25, 35.75, 221.5, 205.25, [0.0, 1.0, 0.0, 0.7]);
+    let mut hole = test_rectangle(100.5, 60.5, 240.5, 230.5, [0.0, 0.0, 1.0, 0.8]);
+    hole.data.commands.extend(
+        test_rectangle(140.5, 100.5, 200.5, 170.5, [0.0; 4])
+            .data
+            .commands,
+    );
+    hole.fill_rule = FillRule::EvenOdd;
+    let paths = vec![red, green, hole];
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(paths.clone())),
+        RFeatures::default(),
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    let Some(gpu) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let mut expected = vec![0u8; 256 * 256 * 4];
+    let mut accum = vec![[0u16; 4]; 256 * 256];
+    for path in &paths {
+        let commands =
+            crate::raster_q8::map_path(&path.data, alto_core::FixedAffine::IDENTITY, 0).unwrap();
+        let rule = match path.fill_rule {
+            FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
+            FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
+        };
+        let coverage =
+            crate::raster_q8::rasterize(&commands, rule, [0, 0, 256, 256], 4096).unwrap();
+        let color = crate::raster_q8::color_q14(path.fill.unwrap()).unwrap();
+        for (out, k) in accum.iter_mut().zip(coverage) {
+            *out = crate::raster_q8::source_over_q14(*out, color, k);
+        }
+    }
+    for (dst, q14) in expected.as_chunks_mut::<4>().0.iter_mut().zip(accum) {
+        dst.copy_from_slice(&q14.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8));
+    }
+    assert_eq!(gpu, expected);
+}
+
+#[test]
+fn v3_blur_one_pixel_matches_integer_reference_on_metal() {
+    let path = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 1.0]);
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
+        RFeatures {
+            effects: vec![REffect {
+                kind: REffectKind::GaussianBlur {
+                    radius: 1.0,
+                    radius_q8: 256,
+                },
+                selection: None,
+            }],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(gpu) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let path_q =
+        crate::raster_q8::map_path(&path.data, alto_core::FixedAffine::IDENTITY, 0).unwrap();
+    let coverage = crate::raster_q8::rasterize(
+        &path_q,
+        crate::raster_q8::FillRule::NonZero,
+        [-1, -1, 258, 258],
+        4096,
+    )
+    .unwrap();
+    let source: Vec<[u16; 4]> = coverage
+        .into_iter()
+        .map(|k| crate::raster_q8::source_over_q14([0; 4], [16384, 0, 0, 16384], k))
+        .collect();
+    let weight = crate::renderer::blur_kernel_q16(1, 256).unwrap();
+    let mut middle = vec![[0u16; 4]; 256 * 258];
+    for y in 0..258usize {
+        for x in 0..256usize {
+            for channel in 0..4 {
+                let value = u32::from(source[y * 258 + x][channel]) * weight[1]
+                    + u32::from(source[y * 258 + x + 1][channel]) * weight[0]
+                    + u32::from(source[y * 258 + x + 2][channel]) * weight[1];
+                middle[y * 256 + x][channel] = ((value + 32768) >> 16) as u16;
+            }
+        }
+    }
+    let mut expected = vec![0u8; 256 * 256 * 4];
+    for y in 0..256usize {
+        for x in 0..256usize {
+            for channel in 0..4 {
+                let value = u32::from(middle[y * 256 + x][channel]) * weight[1]
+                    + u32::from(middle[(y + 1) * 256 + x][channel]) * weight[0]
+                    + u32::from(middle[(y + 2) * 256 + x][channel]) * weight[1];
+                let q14 = (value + 32768) >> 16;
+                expected[(y * 256 + x) * 4 + channel] = ((q14 * 255 + 8192) >> 14) as u8;
+            }
+        }
+    }
+    assert_eq!(gpu, expected);
+}
+
+#[test]
+fn v3_blur_coarsen_and_resample_match_integer_reference_on_metal() {
+    let path = test_rectangle(0.0, 0.0, 256.0, 256.0, [1.0, 0.0, 0.0, 1.0]);
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
+        RFeatures {
+            effects: vec![REffect {
+                kind: REffectKind::GaussianBlur {
+                    radius: 32.0,
+                    radius_q8: 8192,
+                },
+                selection: None,
+            }],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    let Some(gpu) = v3_vector_test_render_at(&document, (-2, 0, 0)) else {
+        return;
+    };
+    let commands =
+        crate::raster_q8::map_path(&path.data, alto_core::FixedAffine::IDENTITY, -1).unwrap();
+    let coverage = crate::raster_q8::rasterize(
+        &commands,
+        crate::raster_q8::FillRule::NonZero,
+        [-65, -65, 258, 258],
+        4096,
+    )
+    .unwrap();
+    let source: Vec<[u16; 4]> = coverage
+        .into_iter()
+        .map(|k| crate::raster_q8::source_over_q14([0; 4], [16384, 0, 0, 16384], k))
+        .collect();
+    let weights = crate::renderer::blur_kernel_q16(64, 16384).unwrap();
+    let horizontal = blur_pass_reference(&source, [258, 258], [130, 258], [64, 0], false, &weights);
+    let blurred = blur_pass_reference(&horizontal, [130, 258], [130, 130], [0, 64], true, &weights);
+    let mut expected = vec![0u8; 256 * 256 * 4];
+    for y in 0..256usize {
+        for x in 0..256usize {
+            let ux = 2 * (x + 2) + 1 - 2;
+            let uy = 2 * (y + 2) + 1 - 2;
+            let (ix, iy) = (ux >> 2, uy >> 2);
+            let (fx, fy) = ((ux & 3) << 6, (uy & 3) << 6);
+            let a = blurred[iy * 130 + ix];
+            let b = blurred[iy * 130 + ix + 1];
+            let d = blurred[(iy + 1) * 130 + ix];
+            let e = blurred[(iy + 1) * 130 + ix + 1];
+            for channel in 0..4 {
+                let ab =
+                    u32::from(a[channel]) * (256 - fx as u32) + u32::from(b[channel]) * fx as u32;
+                let de =
+                    u32::from(d[channel]) * (256 - fx as u32) + u32::from(e[channel]) * fx as u32;
+                let q14 = (ab * (256 - fy as u32) + de * fy as u32 + 32768) >> 16;
+                expected[(y * 256 + x) * 4 + channel] = ((q14 * 255 + 8192) >> 14) as u8;
+            }
+        }
+    }
+    assert_eq!(gpu, expected);
+}
+
+#[test]
+fn blur_pass_order_is_horizontal_first() {
+    let w = crate::renderer::blur_kernel_q16(1, 256).unwrap();
+    assert_eq!(w, vec![64112, 712]);
+    let rows = [
+        [13576u16, 5669, 12029],
+        [12278, 2833, 14383],
+        [3536, 5364, 12886],
+    ];
+    let input: Vec<[u16; 4]> = rows.as_flattened().iter().map(|&v| [v; 4]).collect();
+    let transposed: Vec<[u16; 4]> = (0..9).map(|i| input[(i % 3) * 3 + i / 3]).collect();
+    let pass = |input: &[[u16; 4]], vertical| {
+        blur_pass_reference(input, [3, 3], [3, 3], [0, 0], vertical, &w)
+    };
+    let horizontal_first = pass(&pass(&input, false), true);
+    let vertical_first = pass(&pass(&input, true), false);
+    assert_eq!(horizontal_first[4][0], 3117);
+    assert_eq!(vertical_first[4][0], 3116);
+    // Transposing the input swaps the two orders.
+    assert_eq!(pass(&pass(&transposed, true), false)[4][0], 3117);
+}
+
+#[test]
+fn v3_raster_blur_square_matches_integer_reference_on_metal() {
+    use alto_core::{PixelFormat, TileKey};
+    // `blur-v3-square`: opaque red on transparent, 80..180, radius 8, level 0.
+    let mut bytes = vec![0u8; 256 * 256 * 4];
+    for y in 80..180 {
+        for x in 80..180 {
+            bytes[(y * 256 + x) * 4..][..4].copy_from_slice(&[255, 0, 0, 255]);
+        }
+    }
+    let mut store = alto_raster::ObjectStore::default();
+    let hash = store.insert_tile(&alto_raster::TileData::new(PixelFormat::Rgba8, bytes).unwrap());
+    let mut document = scene(
+        RContent::Tiles(vec![crate::RenderTile {
+            key: TileKey { tx: 0, ty: 0 },
+            hash,
+        }]),
+        RFeatures {
+            effects: vec![REffect {
+                kind: REffectKind::GaussianBlur {
+                    radius: 8.0,
+                    radius_q8: 2048,
+                },
+                selection: None,
+            }],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(gpu) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+        return;
+    };
+    // The layer as an infinite plane (transparent outside), blurred, cropped.
+    let input: Vec<[u16; 4]> = (0..272 * 272)
+        .map(|i| {
+            let (x, y) = (i % 272 - 8, i / 272 - 8);
+            if (80..180).contains(&x) && (80..180).contains(&y) {
+                [16384, 0, 0, 16384]
+            } else {
+                [0; 4]
+            }
+        })
+        .collect();
+    let weights = crate::renderer::blur_kernel_q16(8, 2048).unwrap();
+    let middle = blur_pass_reference(&input, [272, 272], [256, 272], [8, 0], false, &weights);
+    let blurred = blur_pass_reference(&middle, [256, 272], [256, 256], [0, 8], true, &weights);
+    let expected: Vec<u8> = blurred
+        .iter()
+        .flat_map(|q| q.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8))
+        .collect();
+    assert_eq!(gpu, expected);
+}
+
+/// A v3 group of the opaque red square 80..180 (raster) and `top` above it.
+fn v3_square_under(top: RNode) -> (RenderScene, alto_raster::ObjectStore) {
+    use alto_core::{PixelFormat, TileKey};
+    let mut bytes = vec![0u8; 256 * 256 * 4];
+    for y in 80..180 {
+        for x in 80..180 {
+            bytes[(y * 256 + x) * 4..][..4].copy_from_slice(&[255, 0, 0, 255]);
+        }
+    }
+    let mut store = alto_raster::ObjectStore::default();
+    let hash = store.insert_tile(&alto_raster::TileData::new(PixelFormat::Rgba8, bytes).unwrap());
+    let mut document = scene(
+        RContent::Group {
+            children: vec![1, 2],
+            isolated: false,
+        },
+        RFeatures::default(),
+    );
+    let mut square = document.nodes[0].clone();
+    square.key = NodeId::new();
+    square.content = RContent::Tiles(vec![crate::RenderTile {
+        key: TileKey { tx: 0, ty: 0 },
+        hash,
+    }]);
+    document.nodes.push(square);
+    document.nodes.push(top);
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    (document, store)
+}
+
+fn v3_adjustment(kind: REffectKind, features: RFeatures) -> RNode {
+    let mut node = scene(
+        RContent::Adjustment(REffect {
+            kind,
+            selection: None,
+        }),
+        features,
+    )
+    .nodes
+    .remove(0);
+    node.key = NodeId::new();
+    node
+}
+
+#[test]
+fn v3_backdrop_blur_matches_the_layer_blur_on_metal() {
+    let blur = REffectKind::GaussianBlur {
+        radius: 8.0,
+        radius_q8: 2048,
+    };
+    let (document, store) = v3_square_under(v3_adjustment(blur, RFeatures::default()));
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(gpu) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+        return;
+    };
+    // An unmasked normal adjustment at opacity 1 replaces its backdrop.
+    let input: Vec<[u16; 4]> = (0..272 * 272)
+        .map(|i| {
+            let (x, y) = (i % 272 - 8, i / 272 - 8);
+            if (80..180).contains(&x) && (80..180).contains(&y) {
+                [16384, 0, 0, 16384]
+            } else {
+                [0; 4]
+            }
+        })
+        .collect();
+    let weights = crate::renderer::blur_kernel_q16(8, 2048).unwrap();
+    let middle = blur_pass_reference(&input, [272, 272], [256, 272], [8, 0], false, &weights);
+    let blurred = blur_pass_reference(&middle, [256, 272], [256, 256], [0, 8], true, &weights);
+    let expected: Vec<u8> = blurred
+        .iter()
+        .flat_map(|q| q.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8))
+        .collect();
+    assert_eq!(gpu, expected);
+}
+
+#[test]
+fn v3_adjustment_vector_mask_and_clip_path_are_refused() {
+    let adjust = REffectKind::ColorAdjust {
+        brightness: 0.2,
+        contrast: 1.0,
+        saturation: 1.0,
+    };
+    let path = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0; 4]).data;
+    for features in [
+        RFeatures {
+            vector_mask: Some(VectorMask {
+                path: path.clone(),
+                fill_rule: FillRule::NonZero,
+                feather: 0.0,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            ..RFeatures::default()
+        },
+        RFeatures {
+            clip_path: Some(ClipPath {
+                path: path.clone(),
+                fill_rule: FillRule::NonZero,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            ..RFeatures::default()
+        },
+    ] {
+        let (document, store) = v3_square_under(v3_adjustment(adjust.clone(), features));
+        // No integer mix of backdrop, adjusted copy and coverage is defined.
+        assert_eq!(crate::renderer::v3_gap(&document), Some("adjustment"));
+        assert_eq!(gap(&document), Some("v3-unsupported"));
+        let Some(result) = v3_test_try_render(&document, &store, (0, 0, 0)) else {
+            return;
+        };
+        assert!(
+            matches!(result, Err(crate::RenderError::GpuUnsupported(_))),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn v3_vector_transform_range_makes_the_node_transparent() {
+    // Validation keeps document points within 2^20, so this is unreachable from
+    // a document; a scene built directly still must not refuse the tile.
+    let rectangle = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 0.5]);
+    let mut far = test_rectangle(0.0, 0.0, 1.0, 1.0, [0.0, 0.0, 1.0, 1.0]);
+    far.data.commands[1] = alto_vector::PathCommand::Line { x: 1e30, y: 0.0 };
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![rectangle, far])),
+        RFeatures::default(),
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    let Some(gpu) = v3_vector_test_render(&document) else {
+        return;
+    };
+    assert!(gpu.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn v3_vector_curve_range_skips_only_that_path() {
+    use alto_vector::PathCommand as P;
+    let rectangle = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 0.5]);
+    // Its second difference is far past the 559_241 level pixels NMAX covers.
+    let far = alto_vector::StyledPath {
+        data: PathData {
+            commands: vec![
+                P::Move { x: 0.0, y: 0.0 },
+                P::Cubic {
+                    c1x: 600_000.0,
+                    c1y: 0.0,
+                    c2x: -600_000.0,
+                    c2y: 600_000.0,
+                    x: 1.0,
+                    y: 1.0,
+                },
+                P::Close,
+            ],
+        },
+        fill: Some([0.0, 0.0, 1.0, 1.0]),
+        stroke: None,
+        fill_rule: FillRule::NonZero,
+    };
+    let mut alone = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![rectangle.clone()])),
+        RFeatures::default(),
+    );
+    alone.render_version = alto_core::RENDER_VERSION_EXACT;
+    let mut both = alone.clone();
+    both.nodes[0].content = RContent::Mesh(std::sync::Arc::new(vec![far, rectangle]));
+    let Some(expected) = v3_vector_test_render(&alone) else {
+        return;
+    };
+    let gpu = v3_vector_test_render(&both).unwrap();
+    assert_eq!(gpu, expected);
+    assert!(gpu.iter().any(|&b| b != 0));
+}
+
+#[test]
+fn v3_feathered_vector_mask_blurs_integer_coverage_on_metal() {
+    let source = test_rectangle(0.0, 0.0, 256.0, 256.0, [1.0, 0.0, 0.0, 0.5]);
+    let mask = test_rectangle(40.5, 50.0, 180.25, 200.0, [1.0; 4]).data;
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![source])),
+        RFeatures {
+            vector_mask: Some(VectorMask {
+                path: mask.clone(),
+                fill_rule: FillRule::NonZero,
+                feather: 4.0,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(gpu) = v3_vector_test_render(&document) else {
+        return;
+    };
+    // R = 1024 at level 0: k = -4, no coarsening, r = 4, rho8 = 1024.
+    let commands = crate::raster_q8::map_path(&mask, alto_core::FixedAffine::IDENTITY, 0).unwrap();
+    let coverage = crate::raster_q8::rasterize(
+        &commands,
+        crate::raster_q8::FillRule::NonZero,
+        [-4, -4, 264, 264],
+        crate::raster_q8::CURVE_LIMIT,
+    )
+    .unwrap();
+    let white: Vec<[u16; 4]> = coverage
+        .into_iter()
+        .map(|k| crate::raster_q8::source_over_q14([0; 4], [16384; 4], k))
+        .collect();
+    let weights = crate::renderer::blur_kernel_q16(4, 1024).unwrap();
+    let middle = blur_pass_reference(&white, [264, 264], [256, 264], [4, 0], false, &weights);
+    let blurred = blur_pass_reference(&middle, [256, 264], [256, 256], [0, 4], true, &weights);
+    let mut expected = vec![0u8; 256 * 256 * 4];
+    for (out, k) in expected.as_chunks_mut::<4>().0.iter_mut().zip(&blurred) {
+        // Source (8192, 0, 0, 8192) times the coverage k, rounded once.
+        let q14 = (8192 * u32::from(k[3]) + 8192) >> 14;
+        let byte = ((q14 * 255 + 8192) >> 14) as u8;
+        out.copy_from_slice(&[byte, 0, 0, byte]);
+    }
+    assert_eq!(gpu, expected);
+    // The feather is a real ramp, not a hard edge.
+    let row: Vec<u8> = (36..46).map(|x| gpu[(120 * 256 + x) * 4 + 3]).collect();
+    assert!(
+        row.windows(2).all(|p| p[0] <= p[1]) && row[0] < row[9],
+        "{row:?}"
     );
 }
 

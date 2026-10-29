@@ -64,6 +64,7 @@ pub struct RMask {
 pub enum REffectKind {
     GaussianBlur {
         radius: f32,
+        radius_q8: u32,
     },
     ColorAdjust {
         brightness: f32,

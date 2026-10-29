@@ -2,7 +2,7 @@
 
 作成日：2026-10-28（Asia/Tokyo）
 
-状態：設計のみ。この文書は実装しない。ガウスぼかしの v3 は、[v3 整数合成](2026-10-28-v3-integer-compositing.md)（PR [#24](https://github.com/NobukiAkiyama/alto-engine/pull/24)、main の `5ce300e`）と [v3 整数マスク](2026-10-28-v3-integer-mask.md)（PR [#26](https://github.com/NobukiAkiyama/alto-engine/pull/26)、main の `7309b61`）と同じ不安定オプトインの向こうに置く。描画バージョン 1 と 2 のぼかしの式（`exp` の f32 の重み、`rgba16float` の中間、f32 の双線形の拡大）は凍結したままである。
+状態：Rust の核、シーンの値、ホスト（モード 24 と 25、`RoiQ`）は実装済み（ブランチ `codex/v3-vector-fill`、ベクター塗りと同じ変更）。Metal でラスターとベクターの入力の Rust の参照と全バイト一致を確かめた。残りは JS の参照（実装順の 5）、3 バックエンドでの固定（6）、measure の行（7）である。ガウスぼかしの v3 は、[v3 整数合成](2026-10-28-v3-integer-compositing.md)（PR [#24](https://github.com/NobukiAkiyama/alto-engine/pull/24)、main の `5ce300e`）と [v3 整数マスク](2026-10-28-v3-integer-mask.md)（PR [#26](https://github.com/NobukiAkiyama/alto-engine/pull/26)、main の `7309b61`）と同じ不安定オプトインの向こうに置く。描画バージョン 1 と 2 のぼかしの式（`exp` の f32 の重み、`rgba16float` の中間、f32 の双線形の拡大）は凍結したままである。
 
 関連：[v3 整数合成](2026-10-28-v3-integer-compositing.md)、[v3 整数マスク](2026-10-28-v3-integer-mask.md)、[v3 整数テキスト](2026-10-28-v3-integer-text.md)（PR [#31](https://github.com/NobukiAkiyama/alto-engine/pull/31)、main の `84d2efd`。粗い倍率 `k` の文は、この PR で下の「粗い倍率」に揃えて直した）、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)、[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)。
 
