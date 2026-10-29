@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 mod spike;
-use alto_core::{Affine2, AssetId, ContentHash, NodeId, PixelFormat, TileKey};
+use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
 use alto_gpu::renderer::{FinishControl, Renderer, Viewport};
@@ -670,6 +670,31 @@ impl Runtime {
             chain.push(node.props.transform.0);
             current = node.parent;
         }
+        let fixed_world = if doc.meta.render_version == 3 {
+            let mut fixed = FixedAffine::IDENTITY;
+            for &local in chain.iter().rev() {
+                fixed = fixed
+                    .concat(FixedAffine::from_affine(Affine2(local)).ok_or_else(|| {
+                        error("GPU_UNSUPPORTED: v3 stroke transform out of range")
+                    })?)
+                    .ok_or_else(|| error("GPU_UNSUPPORTED: v3 stroke transform out of range"))?;
+            }
+            if mask {
+                let props = &doc.node(id).map_err(error)?.props;
+                if !props.mask_linked {
+                    fixed = FixedAffine::IDENTITY;
+                }
+                fixed =
+                    fixed
+                        .concat(FixedAffine::from_affine(props.mask_transform).ok_or_else(
+                            || error("GPU_UNSUPPORTED: v3 mask transform out of range"),
+                        )?)
+                        .ok_or_else(|| error("GPU_UNSUPPORTED: v3 mask transform out of range"))?;
+            }
+            Some(fixed)
+        } else {
+            None
+        };
         let world = chain
             .into_iter()
             .rev()
@@ -705,6 +730,7 @@ impl Runtime {
                 erase && !mask,
                 mask,
                 world,
+                fixed_world,
             )
             .map_err(error)?;
         self.sampler = Some(StrokeSampler::new(cfg));

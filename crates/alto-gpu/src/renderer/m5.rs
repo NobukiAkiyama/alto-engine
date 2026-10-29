@@ -222,12 +222,12 @@ impl Resources {
 enum StackInput<'a> {
     Node {
         index: usize,
-        world: [f64; 6],
+        world: WorldTransform,
         depth: usize,
     },
     Siblings {
         children: &'a [usize],
-        world: [f64; 6],
+        world: WorldTransform,
         depth: usize,
     },
 }
@@ -600,7 +600,7 @@ impl Context<'_> {
     /// never sampled in f32. See `q14_params`.
     fn mask_params(
         mode: u32,
-        transform: Option<[f64; 6]>,
+        transform: Option<WorldTransform>,
         out: Roi,
         a: Roi,
         b: Roi,
@@ -608,7 +608,8 @@ impl Context<'_> {
     ) -> Result<Params> {
         let sampler = transform
             .map(|t| {
-                super::mask_sampler(t, [out.x, out.y], out.scale).ok_or_else(|| {
+                let fixed = t.fixed()?;
+                super::fixed_mask_sampler(&fixed, Self::integer_roi(out)?).ok_or_else(|| {
                     RenderError::GpuUnsupported(
                         "v3 mask transform or level has no integer lookup".into(),
                     )
@@ -616,6 +617,17 @@ impl Context<'_> {
             })
             .transpose()?;
         Self::q14_params(mode, out, [Some(a), Some(b)], settings, sampler.as_ref())
+    }
+    fn integer_roi(roi: Roi) -> Result<[i32; 3]> {
+        let invalid =
+            || RenderError::GpuUnsupported("v3 ROI has no integer origin or scale".into());
+        Ok([
+            super::exact_i32(roi.x).ok_or_else(invalid)?,
+            super::exact_i32(roi.y).ok_or_else(invalid)?,
+            super::exact_i32(roi.scale)
+                .filter(|s| *s >= 1)
+                .ok_or_else(invalid)?,
+        ])
     }
     /// Version 3: the sampler of `tiles` drawn with document-to-pixel `transform`
     /// at `roi`, and the tiles it can read, uploaded. The tiles are selected with
@@ -627,15 +639,15 @@ impl Context<'_> {
     fn lookup_entries(
         &mut self,
         tiles: &[crate::RenderTile],
-        transform: [f64; 6],
+        transform: WorldTransform,
         roi: Roi,
         layer: Option<NodeId>,
         what: &str,
     ) -> Result<(Vec<Entry>, super::MaskSampler)> {
         let unsupported =
             || RenderError::GpuUnsupported(format!("v3 {what} ROI has no integer tile range"));
-        let sampler =
-            super::mask_sampler(transform, [roi.x, roi.y], roi.scale).ok_or_else(unsupported)?;
+        let sampler = super::fixed_mask_sampler(&transform.fixed()?, Self::integer_roi(roi)?)
+            .ok_or_else(unsupported)?;
         // The source's tiles, the stroke overrides of `layer` included.
         let keys = tiles.iter().map(|t| t.key).chain(
             self.overrides
@@ -666,17 +678,20 @@ impl Context<'_> {
     fn mask_entries(
         &mut self,
         mask: &RMask,
-        world: [f64; 6],
+        world: WorldTransform,
         roi: Roi,
         layer: Option<NodeId>,
-    ) -> Result<(Vec<Entry>, [f64; 6])> {
+    ) -> Result<(Vec<Entry>, WorldTransform)> {
         let transform = if mask.linked {
-            multiply(world, mask.transform)
+            world.concat(mask.transform)?
         } else {
-            mask.transform
+            WorldTransform::root(self.scene.render_version).concat(mask.transform)?
         };
         if !self.resources.exact {
-            return Ok((self.entries(&mask.tiles, transform, roi, layer)?, transform));
+            return Ok((
+                self.entries(&mask.tiles, transform.legacy()?, roi, layer)?,
+                transform,
+            ));
         }
         // Version 3 reads the mask through `mask_sampler` (modes 21 to 23).
         let (entries, _) = self.lookup_entries(&mask.tiles, transform, roi, layer, "mask")?;
@@ -777,15 +792,24 @@ impl Context<'_> {
             input,
             false,
         )?;
-        let output = self.effects(coverage, &[effect], sample, world)?;
+        let output = self.effects(coverage, &[effect], sample, WorldTransform::Legacy(world))?;
         self.crop(output, roi)
     }
     fn vector_coverage(
         &mut self,
         node: &RNode,
-        world: [f64; 6],
+        world: WorldTransform,
         roi: Roi,
     ) -> Result<Option<Target>> {
+        if self.resources.exact {
+            if node.features.vector_mask.is_none() && node.features.clip_path.is_none() {
+                return Ok(None);
+            }
+            return Err(RenderError::Internal(
+                "v3 vector coverage reached M5".into(),
+            ));
+        }
+        let world = world.legacy()?;
         let mut result = None;
         if let Some(mask) = &node.features.vector_mask {
             result = Some(self.path_coverage(
@@ -814,7 +838,12 @@ impl Context<'_> {
         }
         Ok(result)
     }
-    fn apply_props(&mut self, source: Target, node: &RNode, world: [f64; 6]) -> Result<Target> {
+    fn apply_props(
+        &mut self,
+        source: Target,
+        node: &RNode,
+        world: WorldTransform,
+    ) -> Result<Target> {
         // Version 3 has no vector masks or clip paths (`v3_gap`). Without a pixel
         // mask, `blend` applies the opacity. With one, mode 21 applies the mask and
         // the opacity once, as one Q28 factor, and `blend` uses opacity 1.
@@ -852,7 +881,7 @@ impl Context<'_> {
             return Ok(source);
         }
         let out = self.alloc(source.roi)?;
-        let mut p = Self::params(4, world);
+        let mut p = Self::params(4, world.legacy()?);
         p.settings = [node.opacity, 0.0, 0.0, 0.0];
         let mut entries = vec![];
         if let Some(mask) = &node.features.mask {
@@ -867,13 +896,20 @@ impl Context<'_> {
                 },
             )?;
             entries = e;
-            p = Self::params(4, transform);
+            p = Self::params(4, transform.legacy()?);
             p.settings = [node.opacity, 1.0, 0.0, 0.0];
         }
         self.dispatch(&out, &source, &source, &source, p, &entries)?;
         if let Some(mask) = self.vector_coverage(node, world, source.roi)? {
             let masked = self.alloc(source.roi)?;
-            self.dispatch(&masked, &out, &mask, &out, Self::params(11, world), &[])?;
+            self.dispatch(
+                &masked,
+                &out,
+                &mask,
+                &out,
+                Self::params(11, world.legacy()?),
+                &[],
+            )?;
             Ok(masked)
         } else {
             Ok(out)
@@ -928,7 +964,7 @@ impl Context<'_> {
         input: Target,
         effect: &REffect,
         roi: Roi,
-        world: [f64; 6],
+        world: WorldTransform,
     ) -> Result<Target> {
         // A selection on a color-adjust is mode 22 below.
         if self.resources.exact && !matches!(effect.kind, REffectKind::ColorAdjust { .. }) {
@@ -943,7 +979,7 @@ impl Context<'_> {
                     input.clone()
                 } else {
                     let middle = self.alloc(roi.expand(0, r))?;
-                    let mut p = Self::params(2, world);
+                    let mut p = Self::params(2, world.legacy()?);
                     p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
                     self.dispatch(&middle, &input, &input, &input, p, &[])?;
                     let out = self.alloc(roi)?;
@@ -974,7 +1010,7 @@ impl Context<'_> {
                         None,
                     )?
                 } else {
-                    let mut p = Self::params(3, world);
+                    let mut p = Self::params(3, world.legacy()?);
                     p.settings = [brightness, contrast, saturation, 0.0];
                     p
                 };
@@ -989,7 +1025,7 @@ impl Context<'_> {
                 out_white,
             } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(13, world);
+                let mut p = Self::params(13, world.legacy()?);
                 p.settings = [in_black, in_white, gamma, out_black];
                 p.extra[0] = out_white;
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
@@ -1001,20 +1037,20 @@ impl Context<'_> {
                 lightness,
             } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(15, world);
+                let mut p = Self::params(15, world.legacy()?);
                 p.settings = [hue, saturation, lightness, 0.0];
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Invert => {
                 let out = self.alloc(roi)?;
-                let p = Self::params(14, world);
+                let p = Self::params(14, world.legacy()?);
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Curves { ref points } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(16, world);
+                let mut p = Self::params(16, world.legacy()?);
                 for (i, (x, y)) in points.iter().take(16).enumerate() {
                     p.curve[i * 4] = *x;
                     p.curve[i * 4 + 1] = *y;
@@ -1030,7 +1066,7 @@ impl Context<'_> {
             let p = if self.resources.exact {
                 Self::mask_params(22, Some(transform), roi, input.roi, filtered.roi, [0; 4])?
             } else {
-                Self::params(5, transform)
+                Self::params(5, transform.legacy()?)
             };
             self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
             Ok(out)
@@ -1043,7 +1079,7 @@ impl Context<'_> {
         input: Target,
         effects: &[REffect],
         desired: Roi,
-        world: [f64; 6],
+        world: WorldTransform,
     ) -> Result<Target> {
         let mut outputs = vec![desired; effects.len()];
         let mut roi = desired;
@@ -1065,7 +1101,7 @@ impl Context<'_> {
         input: StackInput<'_>,
         effects: &[REffect],
         desired: Roi,
-        world: [f64; 6],
+        world: WorldTransform,
     ) -> Result<Target> {
         let Some((effect, previous)) = effects.split_last() else {
             return match input {
@@ -1105,7 +1141,7 @@ impl Context<'_> {
                     &original,
                     &filtered,
                     &original,
-                    Self::params(5, transform),
+                    Self::params(5, transform.legacy()?),
                     &entries,
                 )?;
                 Ok(out)
@@ -1130,7 +1166,7 @@ impl Context<'_> {
         &mut self,
         children: &[usize],
         mut accum: Target,
-        world: [f64; 6],
+        world: WorldTransform,
         depth: usize,
     ) -> Result<Target> {
         let mut base = None;
@@ -1145,7 +1181,7 @@ impl Context<'_> {
                 }
                 continue;
             }
-            let transform = multiply(world, node.transform);
+            let transform = world.concat(node.transform)?;
             if let RContent::Adjustment(effect) = &node.content {
                 if self.resources.exact {
                     v3_adjustment_blend(node.features.mask.is_some(), node.blend)?;
@@ -1240,7 +1276,7 @@ impl Context<'_> {
                     || node.blend != RenderBlend::Normal
                 {
                     let out = self.alloc(desired)?;
-                    let mut p = Self::params(7, transform);
+                    let mut p = Self::params(7, transform.legacy()?);
                     p.settings = [node.opacity, 0.0, f32::from(node.features.clip), 0.0];
                     let mut entries = vec![];
                     if let Some(mask) = &node.features.mask {
@@ -1255,7 +1291,7 @@ impl Context<'_> {
                             },
                         )?;
                         entries = e;
-                        p = Self::params(7, t);
+                        p = Self::params(7, t.legacy()?);
                         p.settings = [node.opacity, 1.0, f32::from(node.features.clip), 0.0];
                     }
                     p.settings[2] = 0.0;
@@ -1270,7 +1306,7 @@ impl Context<'_> {
                         &input,
                         &mixed,
                         &mask,
-                        Self::params(12, transform),
+                        Self::params(12, transform.legacy()?),
                         &[],
                     )?;
                     mixed = out;
@@ -1282,7 +1318,7 @@ impl Context<'_> {
                         &input,
                         &mixed,
                         &input,
-                        Self::params(10, transform),
+                        Self::params(10, transform.legacy()?),
                         &[],
                     )?;
                     base = Some(out.clone());
@@ -1360,14 +1396,14 @@ impl Context<'_> {
         &mut self,
         index: usize,
         desired: Roi,
-        parent: [f64; 6],
+        parent: WorldTransform,
         depth: usize,
     ) -> Result<Target> {
         if depth > alto_core::MAX_TREE_DEPTH as usize {
             return Err(RenderError::InvalidArgument("effect graph too deep".into()));
         }
         let node = self.scene.nodes[index].clone();
-        let world = multiply(parent, node.transform);
+        let world = parent.concat(node.transform)?;
         let source = self.stack(
             StackInput::Node {
                 index,
@@ -1384,7 +1420,7 @@ impl Context<'_> {
         &mut self,
         index: usize,
         roi: Roi,
-        world: [f64; 6],
+        world: WorldTransform,
         depth: usize,
     ) -> Result<Target> {
         let node = self.scene.nodes[index].clone();
@@ -1400,7 +1436,7 @@ impl Context<'_> {
                 // Q14. A singular transform draws nothing, as the f64 selection
                 // below. Version 1 and 2 keep the f32 inverse and mode 0.
                 if self.resources.exact {
-                    if inverse(world).is_none() {
+                    if v3_inverse(world.fixed()?)?.is_none() {
                         return self.zero(roi);
                     }
                     let (entries, sampler) =
@@ -1412,14 +1448,18 @@ impl Context<'_> {
                     return Ok(out);
                 }
                 let out = self.alloc(roi)?;
-                let entries = self.entries(tiles, world, roi, layer)?;
-                let p = Self::params(0, world);
+                let entries = self.entries(tiles, world.legacy()?, roi, layer)?;
+                let p = Self::params(0, world.legacy()?);
                 let dummy = self.dummy();
                 self.dispatch(&out, &dummy, &dummy, &dummy, p, &entries)?;
                 out
             }
-            RContent::Mesh(paths) => self.vector(VectorContent::Paths(paths), world, roi, true)?,
-            RContent::Text(runs) => self.vector(VectorContent::Text(runs), world, roi, false)?,
+            RContent::Mesh(paths) => {
+                self.vector(VectorContent::Paths(paths), world.legacy()?, roi, true)?
+            }
+            RContent::Text(runs) => {
+                self.vector(VectorContent::Text(runs), world.legacy()?, roi, false)?
+            }
             RContent::Group { children, .. } => {
                 let blank = self.zero(roi)?;
                 self.children(children, blank, world, depth)?
@@ -1500,7 +1540,12 @@ impl Renderer {
             } else {
                 None
             };
-            let source = cx.node(scene.root, roi, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0)?;
+            let source = cx.node(
+                scene.root,
+                roi,
+                WorldTransform::root(scene.render_version),
+                0,
+            )?;
             let view = cx.resources.pool[source.index]
                 .texture
                 .create_view(&Default::default());
@@ -1693,7 +1738,7 @@ mod pool_tests {
             for at in [roi(0.0, 0.0, 0.5), roi(0.5, 0.0, 1.0)] {
                 assert!(unsupported(Context::mask_params(
                     mode,
-                    Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                    Some(WorldTransform::V3(alto_core::FixedAffine::IDENTITY)),
                     at,
                     at,
                     at,

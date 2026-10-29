@@ -2,7 +2,7 @@
 
 作成日：2026-10-29（Asia/Tokyo）
 
-状態：設計のみ。この文書は実装しない。実装は次の 1 本の PR で入れる（下の「実装」）。描画バージョン 1 と 2 の変換の計算（`alto_core::Affine2::concat` / `inverse`、`sample::integer_inverse_v2`、JS の `multiply` / `inverseF64` / `quantizeQ16V2`）は凍結したままである。
+状態：PR [#41](https://github.com/NobukiAkiyama/alto-engine/pull/41) で実装。この文書は設計判断を記録する。描画バージョン 1 と 2 の変換の計算（`alto_core::Affine2::concat` / `inverse`、`sample::integer_inverse_v2`、JS の `multiply` / `inverseF64` / `quantizeQ16V2`）は凍結したままである。
 
 関連：[v3 整数合成](2026-10-28-v3-integer-compositing.md)、[v3 整数マスク](2026-10-28-v3-integer-mask.md)、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)。出典は PR [#38](https://github.com/NobukiAkiyama/alto-engine/pull/38) の Codex レビュー P1-1（[コメント](https://github.com/NobukiAkiyama/alto-engine/pull/38#issuecomment-6477123007)）。
 
@@ -140,7 +140,7 @@ Q32 の量子化には、90° の倍数を正確にする副作用がある。`M
 | 合成 | 深さ 128 のスケール 0.5 と 2 の交互、30° の回転を 12 回重ねたもの、範囲を出る合成（`None`）。Rust の結果を i128 の素朴な実装と照合する |
 | 並進の結び | 親の Q16 並進と子の寄与の符号が逆で、和全体が ±0.5 になる例。親を最後に足す二重丸めを検出する |
 | 逆行列 | 単位行列、90°/180°/270°（`Math.cos` / `Math.sin` で作ったもの）、`[1, 2, 2, 4, ·, ·]`（`Det == 0`）、`Det = ±1`（最小の非零）、`rdiv` の結びになる分子、逆係数が `i32` を出るもの |
-| Codex P2-1 の再現 | `[1, 0, -(2^-17 - 2^-70), 1, 0, 0]` で、先頭の画素が `[0, 0, 0, 255]` になること。実レンダラーの回帰テストにする |
+| 旧 Q16 結びとの差 | `[1, 0, -(2^-17 - 2^-70), 1, 0, 0]` は v2 では Q16 の結び未満だが、v3 では局所行列の Q32 化で結びぴったりになる。`FixedAffine::inverse_q16` のせん断係数が `1` になることを検査する。旧 Q16 の丸めは既存の `q16_rounding_is_exact_half_away` で検査する |
 | Rust と JS の一致 | 固定シードの乱数で 10,000 個の局所変換の鎖（深さ 1〜8）を作り、`IntegerInverse` が Rust と JS で全部一致すること。乱数の列は Rust から書き出し、JS がそれを読む |
 | 描画の一致 | 既存の v3 parity のケース（plain、M5 の各モード、マスク）に回転とスケールのケースを足し、GPU と Rust の CPU 参照と JS の CPU 参照が全バイト一致すること |
 | v1/v2 不変 | `render-v1.txt`、`cpu-reference.txt`、`SHA256SUMS` の v1/v2 の値に差分がないこと。`PRESENT_DEFER_LIMIT = 40` も不変 |
@@ -151,7 +151,7 @@ Q32 の量子化には、90° の倍数を正確にする副作用がある。`M
 - v3 の描画で到達するホストの関数に、上の例外以外の float がないこと（静的検査）。
 - v1/v2 のハッシュが変わらないこと。
 
-## 未決
+## 検証結果と未決
 
-- 決定 5 の `float_roundtrip` で v1/v2 のハッシュが動いた場合の代案。
+- 決定 5 の `float_roundtrip` を有効にしても、v1/v2 の固定ハッシュは変わらなかった。
 - 範囲（スケール 2^14 倍、並進 2^31 px）が実際の文書で足りるか。足りないときは、`rdiv` を 256 ビットにして範囲を広げる（JS は BigInt なので変更不要）。

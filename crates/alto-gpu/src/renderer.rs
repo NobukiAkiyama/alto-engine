@@ -161,7 +161,7 @@ struct PlannedSource {
 enum PlanTask {
     Node {
         idx: usize,
-        world: [f64; 6],
+        world: WorldTransform,
         depth: u32,
     },
     Close {
@@ -244,6 +244,9 @@ pub struct GpuStroke {
     pub mask: bool,
     /// Layer to document transform, so damage is tracked in display coordinates.
     pub world: [f64; 6],
+    /// The same transform composed from the document's local matrices for v3
+    /// cache reach. It cannot be reconstructed from the rounded f64 world.
+    pub fixed_world: Option<alto_core::FixedAffine>,
     /// Document pixels this stroke has shown so far.
     pub damage: Option<Rect>,
 }
@@ -563,6 +566,7 @@ fn exact_i32(v: f32) -> Option<i32> {
 /// center needs an origin and a scale that are exact integers, with the scale at
 /// least 1. `None` when any of that fails or `transform` is singular: the host
 /// refuses the render (DQ3-4).
+#[cfg(test)]
 pub(crate) fn mask_sampler(
     transform: [f64; 6],
     origin: [f32; 2],
@@ -574,6 +578,21 @@ pub(crate) fn mask_sampler(
     let q = crate::sample::integer_inverse(inverse(transform)?)?;
     Some(MaskSampler {
         origin: [x, y, scale],
+        inverse: q.m,
+        translation: crate::sample::pack_wide(q.tx, q.ty),
+    })
+}
+
+pub(crate) fn fixed_mask_sampler(
+    transform: &alto_core::FixedAffine,
+    origin: [i32; 3],
+) -> Option<MaskSampler> {
+    if origin[2] < 1 {
+        return None;
+    }
+    let q = crate::sample::fixed_inverse(transform)??;
+    Some(MaskSampler {
+        origin,
         inverse: q.m,
         translation: crate::sample::pack_wide(q.tx, q.ty),
     })
@@ -817,15 +836,15 @@ impl PlainDraw {
     }
 }
 
-/// The [`PlainDraw`] of a draw with f64 inverse `inv` and source tiles `tiles`
+/// The [`PlainDraw`] of a draw with an integer Q16 inverse and source tiles `tiles`
 /// in the level-0 display tile `key` of a canvas ending at `end`. The pixels are
 /// those of `resolve_span`, and the tiles are chosen by [`v3_reach`] (the 4-tap
 /// also reads the next texel on each axis): a draw that reaches none of its
 /// tiles has `keys: None` and is skipped. Refused (`GpuUnsupported`, DQ3-4) when
-/// the inverse has no Q16 value, or pixels that reach a tile have no exact
+/// pixels that reach a tile have no exact
 /// shader value; never sampled in f32.
 pub(crate) fn plain_draw_v3(
-    inv: [f64; 6],
+    inverse: crate::sample::IntegerInverse,
     key: CacheKey,
     end: [i32; 2],
     tiles: impl Iterator<Item = TileKey>,
@@ -837,8 +856,6 @@ pub(crate) fn plain_draw_v3(
         ));
     }
     let origin = [key.1, key.2].map(|k| i64::from(k) * 256);
-    let inverse = crate::sample::integer_inverse(inv)
-        .ok_or_else(|| unsupported("transform has no Q16 inverse"))?;
     let nearest = crate::sample::axis_unit_q16(inverse.m);
     let span = resolve_span(origin, 1, [i64::from(end[0]), i64::from(end[1])]).map(i64::from);
     let keys = v3_reach(&inverse, origin, 1, span, i32::from(!nearest), tiles)
@@ -930,6 +947,65 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
 pub(crate) fn multiply(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
     alto_core::Affine2(a).concat(alto_core::Affine2(b)).0
 }
+
+/// A document-to-canvas matrix while rendering. Version 3 never performs
+/// arithmetic on the stored f64 values after `FixedAffine::from_affine`.
+#[derive(Clone, Copy)]
+pub(crate) enum WorldTransform {
+    Legacy([f64; 6]),
+    V3(alto_core::FixedAffine),
+}
+
+impl WorldTransform {
+    pub(crate) fn root(version: u32) -> Self {
+        if version == 3 {
+            Self::V3(alto_core::FixedAffine::IDENTITY)
+        } else {
+            Self::Legacy([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        }
+    }
+
+    pub(crate) fn concat(self, local: [f64; 6]) -> Result<Self> {
+        match self {
+            Self::Legacy(parent) => Ok(Self::Legacy(multiply(parent, local))),
+            Self::V3(parent) => {
+                let local = alto_core::FixedAffine::from_affine(alto_core::Affine2(local))
+                    .ok_or_else(|| {
+                        RenderError::GpuUnsupported("v3 transform out of range".into())
+                    })?;
+                let world = parent.concat(local).ok_or_else(|| {
+                    RenderError::GpuUnsupported("v3 composed transform out of range".into())
+                })?;
+                Ok(Self::V3(world))
+            }
+        }
+    }
+
+    pub(crate) fn legacy(self) -> Result<[f64; 6]> {
+        match self {
+            Self::Legacy(world) => Ok(world),
+            Self::V3(_) => Err(RenderError::Internal(
+                "v3 reached a legacy transform path".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn fixed(self) -> Result<alto_core::FixedAffine> {
+        match self {
+            Self::V3(world) => Ok(world),
+            Self::Legacy(_) => Err(RenderError::Internal(
+                "legacy render reached a v3 transform path".into(),
+            )),
+        }
+    }
+}
+
+pub(crate) fn v3_inverse(
+    world: alto_core::FixedAffine,
+) -> Result<Option<crate::sample::IntegerInverse>> {
+    crate::sample::fixed_inverse(&world)
+        .ok_or_else(|| RenderError::GpuUnsupported("v3 draw transform has no Q16 inverse".into()))
+}
 pub(crate) fn inverse(m: [f64; 6]) -> Option<[f64; 6]> {
     alto_core::Affine2(m).inverse().map(|m| m.0)
 }
@@ -938,14 +1014,14 @@ pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
 }
 /// The world transform and the key box of every source tile a stroke has
 /// touched, for the version 3 integer invalidation (`invalidate_reach`).
-fn stroke_reach(stroke: &GpuStroke) -> Option<([f64; 6], [i32; 4])> {
+fn stroke_reach(stroke: &GpuStroke) -> Option<(Option<alto_core::FixedAffine>, [i32; 4])> {
     let keys = stroke.tiles.keys().fold(None, |b: Option<[i32; 4]>, k| {
         Some(match b {
             None => [k.tx, k.ty, k.tx, k.ty],
             Some([x0, y0, x1, y1]) => [x0.min(k.tx), y0.min(k.ty), x1.max(k.tx), y1.max(k.ty)],
         })
     })?;
-    Some((stroke.world, keys))
+    Some((stroke.fixed_world, keys))
 }
 /// The canvas end `[x1, y1]` of the version 3 resolve tests (they start at 0).
 fn canvas_end(scene: &RenderScene) -> [i32; 2] {
@@ -977,7 +1053,7 @@ impl TileJob {
             ],
             stack: vec![PlanTask::Node {
                 idx: scene.root,
-                world: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                world: WorldTransform::root(scene.render_version),
                 depth: 0,
             }],
             commands: Vec::new(),
@@ -1022,7 +1098,7 @@ impl TileJob {
                 if !n.visible || n.opacity <= 0.0 {
                     return Ok(());
                 }
-                let world = multiply(world, n.transform);
+                let world = world.concat(n.transform)?;
                 match &n.content {
                     RContent::Group { children, isolated } => {
                         let isolate =
@@ -1051,32 +1127,37 @@ impl TileJob {
                                 continue;
                             }
                             if let RContent::Tiles(ts) = &cn.content {
-                                let Some(inv) = inverse(multiply(world, cn.transform)) else {
-                                    continue;
-                                };
+                                let child_world = world.concat(cn.transform)?;
                                 // Version 3 hides lower layers only behind the tiles the
                                 // integer sampler actually reads.
-                                let (x0, y0, x1, y1) = if scene.render_version == 3 {
-                                    match plain_draw_v3(
-                                        inv,
-                                        self.key,
-                                        canvas_end(scene),
-                                        ts.iter().map(|t| t.key),
-                                    )?
-                                    .keys
-                                    {
-                                        Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
-                                        None => continue,
-                                    }
-                                } else {
-                                    let (min, max) = bounds_through(inv, self.region);
-                                    (
-                                        (min[0] / 256.0).floor() as i32,
-                                        (min[1] / 256.0).floor() as i32,
-                                        (max[0] / 256.0).ceil() as i32,
-                                        (max[1] / 256.0).ceil() as i32,
-                                    )
-                                };
+                                let (x0, y0, x1, y1) =
+                                    if let WorldTransform::V3(fixed) = child_world {
+                                        let Some(inv) = v3_inverse(fixed)? else {
+                                            continue;
+                                        };
+                                        match plain_draw_v3(
+                                            inv,
+                                            self.key,
+                                            canvas_end(scene),
+                                            ts.iter().map(|t| t.key),
+                                        )?
+                                        .keys
+                                        {
+                                            Some([x0, y0, x1, y1]) => (x0, y0, x1 + 1, y1 + 1),
+                                            None => continue,
+                                        }
+                                    } else {
+                                        let Some(inv) = inverse(child_world.legacy()?) else {
+                                            continue;
+                                        };
+                                        let (min, max) = bounds_through(inv, self.region);
+                                        (
+                                            (min[0] / 256.0).floor() as i32,
+                                            (min[1] / 256.0).floor() as i32,
+                                            (max[0] / 256.0).ceil() as i32,
+                                            (max[1] / 256.0).ceil() as i32,
+                                        )
+                                    };
                                 let mut opaque = x1 > x0
                                     && y1 > y0
                                     && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
@@ -1104,19 +1185,26 @@ impl TileJob {
                         }
                     }
                     RContent::Tiles(tiles) => {
-                        let Some(inv) = inverse(world) else {
-                            return Ok(());
-                        };
-                        let (min, max) = bounds_through(inv, self.region);
-                        let v3 = if scene.render_version == 3 {
-                            Some(plain_draw_v3(
-                                inv,
-                                self.key,
-                                canvas_end(scene),
-                                tiles.iter().map(|t| t.key),
-                            )?)
-                        } else {
-                            None
+                        let (inv, min, max, v3) = match world {
+                            WorldTransform::V3(fixed) => {
+                                let Some(q) = v3_inverse(fixed)? else {
+                                    return Ok(());
+                                };
+                                let draw = plain_draw_v3(
+                                    q,
+                                    self.key,
+                                    canvas_end(scene),
+                                    tiles.iter().map(|t| t.key),
+                                )?;
+                                ([0.0; 6], [0.0; 2], [0.0; 2], Some(draw))
+                            }
+                            WorldTransform::Legacy(world) => {
+                                let Some(inv) = inverse(world) else {
+                                    return Ok(());
+                                };
+                                let (min, max) = bounds_through(inv, self.region);
+                                (inv, min, max, None)
+                            }
                         };
                         let (x0, x1) = match v3 {
                             Some(d) => d.keys.map_or((0, 0), |k| (k[0], k[2] + 1)),
@@ -1756,12 +1844,20 @@ impl Renderer {
     /// the draws that reach it (`v3_reach`), so a tile kept here cannot change.
     /// A draw without a Q16 inverse is refused on every tile: all are discarded.
     pub fn invalidate_reach(&mut self, world: [f64; 6], keys: [i32; 4]) {
-        let Some(inv) = inverse(world) else {
-            return;
-        };
-        let Some(q) = crate::sample::integer_inverse(inv) else {
+        let Some(fixed) = alto_core::FixedAffine::from_affine(alto_core::Affine2(world)) else {
             self.invalidate(None);
             return;
+        };
+        self.invalidate_reach_fixed(fixed, keys);
+    }
+    fn invalidate_reach_fixed(&mut self, world: alto_core::FixedAffine, keys: [i32; 4]) {
+        let q = match crate::sample::fixed_inverse(&world) {
+            Some(Some(q)) => q,
+            Some(None) => return,
+            None => {
+                self.invalidate(None);
+                return;
+            }
         };
         self.presentation.changed();
         self.reset_jobs();
@@ -1988,7 +2084,7 @@ impl Renderer {
             r: &mut Renderer,
             b: &Build<'_>,
             idx: usize,
-            world: [f64; 6],
+            world: WorldTransform,
             depth: u32,
             commands: &mut Vec<Command>,
             entries: &mut Vec<Entry>,
@@ -2005,7 +2101,7 @@ impl Renderer {
             if !n.visible || n.opacity <= 0.0 {
                 return Ok(());
             }
-            let world = multiply(world, n.transform);
+            let world = world.concat(n.transform)?;
             match &n.content {
                 RContent::Group { children, isolated } => {
                     let isolate = *isolated || n.opacity < 1.0 || n.blend != RenderBlend::Normal;
@@ -2029,12 +2125,13 @@ impl Renderer {
                             continue;
                         }
                         if let RContent::Tiles(ts) = &cn.content {
-                            let Some(inv) = inverse(multiply(world, cn.transform)) else {
-                                continue;
-                            };
+                            let child_world = world.concat(cn.transform)?;
                             // Version 3 hides lower layers only behind the tiles the
                             // integer sampler actually reads.
-                            let (x0, y0, x1, y1) = if b.scene.render_version == 3 {
+                            let (x0, y0, x1, y1) = if let WorldTransform::V3(fixed) = child_world {
+                                let Some(inv) = v3_inverse(fixed)? else {
+                                    continue;
+                                };
                                 match plain_draw_v3(
                                     inv,
                                     b.key,
@@ -2052,6 +2149,9 @@ impl Renderer {
                                     None => continue,
                                 }
                             } else {
+                                let Some(inv) = inverse(child_world.legacy()?) else {
+                                    continue;
+                                };
                                 let (min, max) = bounds_through(inv, b.region);
                                 (
                                     (min[0] / 256.0).floor() as i32,
@@ -2103,26 +2203,16 @@ impl Renderer {
                     }
                 }
                 RContent::Tiles(tiles) => {
-                    let Some(inv) = inverse(world) else {
-                        return Ok(());
+                    let (inv, minx, maxx, miny, maxy) = match world {
+                        WorldTransform::Legacy(world) => {
+                            let Some(inv) = inverse(world) else {
+                                return Ok(());
+                            };
+                            let (min, max) = bounds_through(inv, b.region);
+                            (inv, min[0], max[0], min[1], max[1])
+                        }
+                        WorldTransform::V3(_) => ([0.0; 6], 0.0, 0.0, 0.0, 0.0),
                     };
-                    let corners = [
-                        [b.region[0], b.region[1]],
-                        [b.region[2], b.region[1]],
-                        [b.region[0], b.region[3]],
-                        [b.region[2], b.region[3]],
-                    ]
-                    .map(|p| point(inv, p));
-                    let minx = corners.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
-                    let maxx = corners
-                        .iter()
-                        .map(|p| p[0])
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let miny = corners.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
-                    let maxy = corners
-                        .iter()
-                        .map(|p| p[1])
-                        .fold(f64::NEG_INFINITY, f64::max);
                     let mut map: BTreeMap<TileKey, ContentHash> =
                         tiles.iter().map(|t| (t.key, t.hash)).collect();
                     for ((layer, k), hash) in b.overrides {
@@ -2130,9 +2220,12 @@ impl Renderer {
                             map.insert(*k, *hash);
                         }
                     }
-                    let v3 = if b.scene.render_version == 3 {
+                    let v3 = if let WorldTransform::V3(fixed) = world {
+                        let Some(q) = v3_inverse(fixed)? else {
+                            return Ok(());
+                        };
                         Some(plain_draw_v3(
-                            inv,
+                            q,
                             b.key,
                             canvas_end(b.scene),
                             map.keys().copied(),
@@ -2195,7 +2288,7 @@ impl Renderer {
                 overrides: &overrides,
             },
             scene.root,
-            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            WorldTransform::root(scene.render_version),
             0,
             &mut commands,
             &mut entries,
@@ -3372,6 +3465,7 @@ impl Renderer {
         erase: bool,
         mask: bool,
         world: [f64; 6],
+        fixed_world: Option<alto_core::FixedAffine>,
     ) -> Result<()> {
         if self.stroke.is_some() {
             return Err(RenderError::Conflict("stroke already active".into()));
@@ -3387,6 +3481,7 @@ impl Renderer {
             epoch: 0,
             mask,
             world,
+            fixed_world,
             damage: None,
         });
         Ok(())
@@ -3692,9 +3787,13 @@ impl Renderer {
         self.stroke = Some(stroke);
         self.invalidate(Some(damage));
         if self.integer_cache
-            && let Some((world, keys)) = reach
+            && let Some((fixed_world, keys)) = reach
         {
-            self.invalidate_reach(world, keys);
+            if let Some(fixed) = fixed_world {
+                self.invalidate_reach_fixed(fixed, keys);
+            } else {
+                self.invalidate(None);
+            }
         }
         Ok(Some(damage))
     }
@@ -3719,9 +3818,13 @@ impl Renderer {
             self.invalidate(Some(damage));
         }
         if self.integer_cache
-            && let Some((world, keys)) = reach
+            && let Some((fixed_world, keys)) = reach
         {
-            self.invalidate_reach(world, keys);
+            if let Some(fixed) = fixed_world {
+                self.invalidate_reach_fixed(fixed, keys);
+            } else {
+                self.invalidate(None);
+            }
         }
     }
     /// Discards the display tiles an edit can change. Jobs always restart: they index
@@ -3740,7 +3843,11 @@ impl Renderer {
                     self.invalidate(Some(*r));
                 }
                 for s in sources {
-                    self.invalidate_reach(s.world, s.keys);
+                    if let Some(fixed) = s.fixed_world {
+                        self.invalidate_reach_fixed(fixed, s.keys);
+                    } else {
+                        self.invalidate_reach(s.world, s.keys);
+                    }
                 }
             }
             Damage::All => self.invalidate(None),

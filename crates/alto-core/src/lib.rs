@@ -1,6 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, str::FromStr};
 
+mod fixed_affine;
+pub use fixed_affine::{FixedAffine, q_from_f64_bits};
+
 pub const TILE: u32 = 256;
 /// Isolated groups the compositor can have open at once. The composite shader
 /// keeps 32 slots and rejects another push once this many isolates are already open.

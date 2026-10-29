@@ -4,7 +4,7 @@
 //! the tiles it can change. The comparison runs on render scenes, not on document
 //! operations: the scene is exactly what the compositor reads.
 use crate::{RContent, RNode, RenderScene, RenderTile};
-use alto_core::{Affine2, NodeId, Rect, TILE};
+use alto_core::{Affine2, FixedAffine, NodeId, Rect, TILE};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +29,7 @@ pub enum Damage {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceDamage {
     pub world: [f64; 6],
+    pub fixed_world: Option<FixedAffine>,
     pub keys: [i32; 4],
 }
 
@@ -66,27 +67,44 @@ pub fn plain_scene(scene: &RenderScene) -> bool {
 struct Placed<'a> {
     node: &'a RNode,
     world: [f64; 6],
+    fixed_world: Option<FixedAffine>,
     shown: bool,
     children: Vec<NodeId>,
 }
 
 fn place(scene: &RenderScene) -> Option<HashMap<NodeId, Placed<'_>>> {
     let mut out = HashMap::new();
-    let mut stack = vec![(scene.root, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], true)];
-    while let Some((idx, parent, parent_shown)) = stack.pop() {
+    let mut stack = vec![(
+        scene.root,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        FixedAffine::IDENTITY,
+        true,
+    )];
+    while let Some((idx, parent, fixed_parent, parent_shown)) = stack.pop() {
         let node = scene.nodes.get(idx)?;
         let world = Affine2(parent).concat(Affine2(node.transform)).0;
+        let fixed_world = if scene.render_version == 3 {
+            Some(fixed_parent.concat(FixedAffine::from_affine(Affine2(node.transform))?)?)
+        } else {
+            None
+        };
         let shown = parent_shown && node.visible && node.opacity > 0.0;
         let mut children = Vec::new();
         if let RContent::Group { children: c, .. } = &node.content {
             for &child in c {
                 children.push(scene.nodes.get(child)?.key);
-                stack.push((child, world, shown));
+                stack.push((
+                    child,
+                    world,
+                    fixed_world.unwrap_or(FixedAffine::IDENTITY),
+                    shown,
+                ));
             }
         }
         let placed = Placed {
             node,
             world,
+            fixed_world,
             shown,
             children,
         };
@@ -96,6 +114,13 @@ fn place(scene: &RenderScene) -> Option<HashMap<NodeId, Placed<'_>>> {
         }
     }
     Some(out)
+}
+
+fn invertible(p: &Placed<'_>) -> bool {
+    match p.fixed_world {
+        Some(world) => world.determinant().is_some_and(|det| det != 0),
+        None => Affine2(p.world).inverse().is_some(),
+    }
 }
 
 /// Document pixels a layer-space rectangle can affect once drawn through `world`.
@@ -160,12 +185,13 @@ fn add_node(
             continue;
         }
         if let RContent::Tiles(tiles) = &p.node.content
-            && Affine2(p.world).inverse().is_some()
+            && invertible(p)
         {
             out.extend(tiles.iter().map(|t| tile_rect(p.world, t)));
             if let Some(keys) = key_box(tiles.iter()) {
                 sources.push(SourceDamage {
                     world: p.world,
+                    fixed_world: p.fixed_world,
                     keys,
                 });
             }
@@ -211,6 +237,7 @@ fn changed_tiles<'a>(old: &'a [RenderTile], new: &'a [RenderTile]) -> Vec<&'a Re
 
 fn same_composite(a: &Placed<'_>, b: &Placed<'_>) -> bool {
     a.world == b.world
+        && a.fixed_world == b.fixed_world
         && a.node.opacity == b.node.opacity
         && a.node.blend == b.node.blend
         && a.children == b.children
@@ -254,13 +281,14 @@ pub fn scene_damage(old: &RenderScene, new: &RenderScene) -> Damage {
             continue;
         }
         if let (RContent::Tiles(x), RContent::Tiles(y)) = (&a.node.content, &b.node.content)
-            && Affine2(b.world).inverse().is_some()
+            && invertible(b)
         {
             let changed = changed_tiles(x, y);
             rects.extend(changed.iter().map(|t| tile_rect(b.world, t)));
             if let Some(keys) = key_box(changed.into_iter()) {
                 sources.push(SourceDamage {
                     world: b.world,
+                    fixed_world: b.fixed_world,
                     keys,
                 });
             }
@@ -364,6 +392,7 @@ mod tests {
             sources,
             vec![SourceDamage {
                 world: ID,
+                fixed_world: Some(FixedAffine::IDENTITY),
                 keys: [1, 0, 1, 0]
             }]
         );
@@ -375,16 +404,33 @@ mod tests {
         };
         assert!(sources.contains(&SourceDamage {
             world: ID,
+            fixed_world: Some(FixedAffine::IDENTITY),
             keys: [0, 0, 1, 0]
         }));
         assert!(sources.contains(&SourceDamage {
             world: [1.0, 0.0, 0.0, 1.0, 300.5, 0.0],
+            fixed_world: FixedAffine::from_affine(Affine2([1.0, 0.0, 0.0, 1.0, 300.5, 0.0])),
             keys: [0, 0, 1, 0]
         }));
         // Versions 1 and 2 keep plain rectangles.
         let mut v2 = f.scene.clone();
         v2.nodes[1].content = RContent::Tiles(vec![tile(0, 0, b"a0"), tile(1, 0, b"painted")]);
         assert!(matches!(scene_damage(&f.scene, &v2), Damage::Rects(_)));
+    }
+
+    #[test]
+    fn v3_singular_decision_uses_the_integer_determinant() {
+        let mut scene = fixture().scene;
+        scene.render_version = 3;
+        scene.nodes[1].transform = [2f64.powi(-20), 0.0, 0.0, 2f64.powi(-20), 0.0, 0.0];
+        let placed = place(&scene).unwrap();
+        let layer = placed.get(&scene.nodes[1].key).unwrap();
+        assert!(Affine2(layer.world).inverse().is_none());
+        assert_ne!(layer.fixed_world.unwrap().determinant(), Some(0));
+        assert!(invertible(layer));
+        scene.nodes[1].transform = [1.0, 2.0, 2.0, 4.0, 0.0, 0.0];
+        let placed = place(&scene).unwrap();
+        assert!(!invertible(placed.get(&scene.nodes[1].key).unwrap()));
     }
 
     #[test]

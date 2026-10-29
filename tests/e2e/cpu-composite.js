@@ -12,6 +12,8 @@
  * outside i32 is transparent.
  * The browser suite compares version 2 bytes with production readTile output.
  */
+import { FIXED_IDENTITY, fixedAffine, fixedConcat, fixedInverse } from "./fixed-affine.js";
+
 export const RENDER_VERSION_F32 = 1;
 export const RENDER_VERSION = 2;
 const f = Math.fround;
@@ -560,16 +562,20 @@ function inverseF64(m) {
 function walk(node, parent, ops, version = RENDER_VERSION) {
   const opacity = version === 3 ? f(node.opacity) : node.opacity;
   if (!node.visible || opacity <= 0) return;
-  const world = multiply(parent, node.transform);
+  const local = version === 3 ? fixedAffine(node.transform) : null;
+  if (version === 3 && !local) throw Error("v3 transform out of range");
+  const world = version === 3 ? fixedConcat(parent, local) : multiply(parent, node.transform);
+  if (!world) throw Error("v3 composed transform out of range");
   if (node.type === "group") {
     const isolate = node.isolated || opacity < 1 || node.mode !== 0;
     if (isolate) ops.push({ t: "push" });
     for (const child of node.children) walk(child, world, ops, version);
     if (isolate) ops.push({ t: "pop", opacity: f(node.opacity), mode: node.mode });
   } else {
-    const inv = inverseF64(world);
-    if (!inv) return;
-    ops.push({ t: "draw", inv, opacity: f(node.opacity), mode: node.mode, tiles: splitTiles(node.image) });
+    const inv = version === 3 ? fixedInverse(world) : inverseF64(world);
+    if (inv === undefined) throw Error("v3 transform has no Q16 inverse");
+    if (inv === null) return;
+    ops.push({ t: "draw", ...(version === 3 ? { q: inv } : { inv }), opacity: f(node.opacity), mode: node.mode, tiles: splitTiles(node.image) });
   }
 }
 function composite(ops, width, height, origin, scale, originPx, scaleI, version) {
@@ -608,7 +614,7 @@ export function renderCase(testCase, version = RENDER_VERSION) {
     validate(testCase.nodes);
   }
   const ops = [];
-  for (const node of testCase.nodes) walk(node, IDENT, ops, version);
+  for (const node of testCase.nodes) walk(node, version === 3 ? FIXED_IDENTITY : IDENT, ops, version);
   const scaleI = 2 ** testCase.level;
   const scale = f(scaleI);
   const origin = [f(testCase.tx * 256 * scale), f(testCase.ty * 256 * scale)];
@@ -882,8 +888,8 @@ export function maskAdjustQ14(orig, filt, f, blend) {
  * Nearest; the texel is the floor.
  */
 export function lookupV3(texelAt, transform, x, y, origin = [0, 0], scale = 1) {
-  const inv = inverseF64(transform);
-  const q = inv && quantizeInverse(inv);
+  const world = Array.isArray(transform) ? fixedAffine(transform) : transform;
+  const q = world && fixedInverse(world);
   if (!q) throw new Error("v3 refuses a lookup without a Q16 inverse");
   if (!origin.every(fitsI32) || !fitsI32(scale) || scale < 1) {
     throw new Error("v3 refuses a lookup at a ROI without i32 integer origin and scale");
@@ -1177,7 +1183,7 @@ function compositeInteger(ops, width, height, originPx, scaleI) {
   for (const op of ops) if (op.mode >= 17) throw new Error(`unspecified blend mode ${op.mode}`);
   const out = new Uint8Array(256 * 256 * 4);
   // Quantize once on the host, including the inverse, before evaluating pixels.
-  const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.inv ? quantizeInverse(op.inv) : null }));
+  const prepared = ops.map((op) => ({ ...op, opacityQ: op.opacity === undefined ? 0n : cqOpacity(op.opacity), q: op.q ?? null }));
   const on = (o, i, end) => { const c = 2 * o + (2 * i + 1) * scaleI; return c >= 0 && c < 2 * end; };
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
     const stack = []; let accum = [0n, 0n, 0n, 0n];
@@ -1212,10 +1218,13 @@ function compositeInteger(ops, width, height, originPx, scaleI) {
 export function renderPlainV3(layers, width, height, originPx) {
   const ops = [];
   for (const l of layers) {
-    const inv = inverseF64(l.transform);
-    if (!inv) continue;
+    const world = fixedAffine(l.transform);
+    if (!world) throw Error("v3 transform out of range");
+    const q = fixedInverse(world);
+    if (q === undefined) throw Error("v3 transform has no Q16 inverse");
+    if (q === null) continue;
     const tiles = [...l.tiles].sort((a, b) => a.tx - b.tx || a.ty - b.ty);
-    ops.push({ t: "draw", inv, opacity: f(l.opacity), mode: l.mode, tiles });
+    ops.push({ t: "draw", q, opacity: f(l.opacity), mode: l.mode, tiles });
   }
   return compositeInteger(ops, width, height, originPx, 1);
 }

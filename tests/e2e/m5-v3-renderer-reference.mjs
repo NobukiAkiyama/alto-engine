@@ -7,6 +7,7 @@
 // transparent; level 1 as the integer pyramid of its four level-0 tiles), then
 // for each value `opacityQ14` and `colorAdjustQ14` as little-endian i32.
 import { colorAdjustGradient, colorAdjustQ14, downsampleQ14, opacityQ14, renderM5V3, renderPlainV3 } from "./cpu-composite.js";
+import { fixedAffine, fixedConcat } from "./fixed-affine.js";
 
 const gradient = colorAdjustGradient().pixels;
 const wrap = (v) => ((v % 256) + 256) % 256;
@@ -34,7 +35,16 @@ function tile([kind, seed]) {
   throw new Error(`unknown tile ${kind}`);
 }
 const tiles = (list) => list.map(([key, spec]) => ({ key, bytes: tile(spec) }));
-const mask = (m) => m && { transform: m.transform, tiles: tiles(m.tiles) };
+const mask = (m) => {
+  if (!m) return null;
+  const local = fixedAffine(m.transform);
+  if (!local) throw Error("v3 mask transform out of range");
+  const parent = m.parent ? fixedAffine(m.parent) : null;
+  if (m.parent && !parent) throw Error("v3 parent transform out of range");
+  const transform = parent ? fixedConcat(parent, local) : local;
+  if (!transform) throw Error("v3 linked mask transform out of range");
+  return { transform, tiles: tiles(m.tiles) };
+};
 const settings = ([contrast, saturation, brightness]) => ({ contrast, saturation, brightness });
 
 function layers(spec) {
