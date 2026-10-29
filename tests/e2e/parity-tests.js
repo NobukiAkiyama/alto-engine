@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, parityCases, renderCase, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, parityCases, renderBlurV3, renderCase, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -632,6 +632,175 @@ export async function runParityTests(engine, log) {
         assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
         return formatMeasure(row);
       });
+    }
+    // v3 Gaussian blur (doc/design/2026-10-28-v3-integer-blur.md), integer-exact at
+    // level 0 (which never coarsens) against `renderBlurV3`, an independent JS
+    // reference that blurs the layer as an infinite plane and cuts the tile. Each
+    // tile is also re-read and read cold, and level 1 cold equals level 1 warm.
+    {
+      const rect = (w, h, [x0, y0, x1, y1]) => {
+        const image = solid(w, h, [0, 0, 0, 0]);
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) image.pixels.set([255, 0, 0, 255], (y * w + x) * 4);
+        return image;
+      };
+      const cases = [
+        { name: "blur-v3-square", image: square, radii: [8] },
+        { name: "blur-v3-gradient", image: () => colorAdjustGradient(), radii: [12] },
+        // R = 0 passes through; 1/512 is the tie R = 1; 64 is 129 taps.
+        ...[0.001, 1 / 512, 1, 63.99, 64].map((radius) => ({ name: `blur-v3-radii r=${radius}`, image: square, radii: [radius] })),
+        { name: "blur-v3-stack", image: square, radii: [6, 9] },
+        // A rectangle across the tile seams of a 512x512 document.
+        ...[[0, 0], [1, 0], [0, 1], [1, 1]].map((tile) => ({
+          name: `blur-v3-seam (${tile[0]}, ${tile[1]})`,
+          fixture: "render-v3-empty-512x512.alto",
+          canvas: [512, 512],
+          tile,
+          image: () => rect(512, 512, [220, 220, 290, 290]),
+          radii: [12],
+        })),
+      ];
+      for (const testCase of cases) {
+        await test(testCase.name, async () => {
+          const fixtureName = testCase.fixture ?? "render-v3-empty.alto";
+          const fixture = await fetch(`../../tests/fixtures/${fixtureName}`);
+          assert(fixture.ok, `${fixtureName} status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          assert(doc.getSnapshot().meta.render_version === 3, `${fixtureName} is not v3`);
+          const image = testCase.image();
+          const asset = await imported(engine, image);
+          let layer;
+          await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+          await doc.effects.set(layer, testCase.radii.map((radius) => ({ type: "gaussian_blur", radius })));
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          const [tx, ty] = testCase.tile ?? [0, 0];
+          const cpu = renderBlurV3(image, testCase.radii, [tx, ty], testCase.canvas ?? [256, 256]);
+          const gpu = await gpuTile(engine, { level: 0, tx, ty });
+          const again = await gpuTile(engine, { level: 0, tx, ty });
+          const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
+          assert(same(again, gpu), `${testCase.name} re-read differs: ${diff(gpu, again)}`);
+          assert(same(cold, gpu), `${testCase.name} cold differs: ${diff(gpu, cold)}`);
+          const row = { ...measureRow({ name: testCase.name, nodes: [], level: 0, tx, ty }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`${testCase.name} (enforced): ${formatMeasure(row)}`);
+          assert(same(cpu, gpu), formatMeasure(row));
+          if (!testCase.tile) {
+            const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
+            const coldLevel1 = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
+            assert(same(coldLevel1, warm), `${testCase.name} cold level 1 differs from warm: ${diff(warm, coldLevel1)}`);
+          }
+          return formatMeasure(row);
+        });
+      }
+    }
+    // v3 vector fill (doc/design/2026-10-28-v3-integer-vector-fill.md), integer-exact
+    // against `renderVectorV3`, an independent JS rasterizer. Colours are exact in
+    // f32 so the document's stored values are the JS values.
+    {
+      const rect = (x0, y0, x1, y1, reverse = false) => {
+        const pts = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        if (reverse) pts.reverse();
+        return [{ op: "move", x: pts[0][0], y: pts[0][1] }, ...pts.slice(1).map(([x, y]) => ({ op: "line", x, y })), { op: "close" }];
+      };
+      const circle = (cx, cy, r) => {
+        const k = 0.5522847498 * r;
+        return [
+          { op: "move", x: cx + r, y: cy },
+          { op: "cubic", c1x: cx + r, c1y: cy + k, c2x: cx + k, c2y: cy + r, x: cx, y: cy + r },
+          { op: "cubic", c1x: cx - k, c1y: cy + r, c2x: cx - r, c2y: cy + k, x: cx - r, y: cy },
+          { op: "cubic", c1x: cx - r, c1y: cy - k, c2x: cx - k, c2y: cy - r, x: cx, y: cy - r },
+          { op: "cubic", c1x: cx + k, c1y: cy - r, c2x: cx + r, c2y: cy - k, x: cx + r, y: cy },
+          { op: "close" },
+        ];
+      };
+      const star = (cx, cy, r) => {
+        const pts = [0, 1, 2, 3, 4].map((i) => {
+          const a = ((-90 + 144 * i) * Math.PI) / 180;
+          return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+        });
+        return [{ op: "move", x: pts[0][0], y: pts[0][1] }, ...pts.slice(1).map(([x, y]) => ({ op: "line", x, y })), { op: "close" }];
+      };
+      const fill = (commands, color, rule = "non_zero") => ({ data: { commands }, fill: color, stroke: null, fill_rule: rule });
+      const red = [1, 0, 0, 1], halfRed = [1, 0, 0, 0.5], blue = [0, 0, 1, 0.75], green = [0, 1, 0, 0.5];
+      const angle = 0.3;
+      const rotation = [Math.cos(angle), Math.sin(angle), -Math.sin(angle), Math.cos(angle),
+        128 - (Math.cos(angle) - Math.sin(angle)) * 128, 128 - (Math.sin(angle) + Math.cos(angle)) * 128];
+      const opaqueGradient = () => {
+        const image = colorAdjustGradient();
+        for (let i = 3; i < image.pixels.length; i += 4) image.pixels[i] = 255;
+        return image;
+      };
+      const vectorCases = [
+        { name: "vector-v3-square", paths: [fill(rect(32, 32, 200, 200), red)] },
+        { name: "vector-v3-fractional", paths: [fill(rect(32.5, 32.5, 200.5, 200.5), red)] },
+        { name: "vector-v3-circle", paths: [fill(circle(128, 128, 80), blue)] },
+        { name: "vector-v3-fill-rules star non-zero", paths: [fill(star(128, 128, 100), red)] },
+        { name: "vector-v3-fill-rules star even-odd", paths: [fill(star(128, 128, 100), red, "even_odd")] },
+        ...["non_zero", "even_odd"].flatMap((rule) => [false, true].map((reverse) => ({
+          name: `vector-v3-fill-rules hole ${rule}${reverse ? " reversed" : ""}`,
+          paths: [fill([...rect(32, 32, 224, 224, reverse), ...rect(96.25, 96.75, 160.5, 160, !reverse)], blue, rule)],
+        }))),
+        ...["non_zero", "even_odd"].map((rule) => ({
+          name: `vector-v3-shared-edge ${rule}`,
+          paths: [fill([...rect(32.5, 32.5, 200.5, 200.5), ...rect(96.5, 32.5, 200.5, 200.5)], red, rule)],
+        })),
+        { name: "vector-v3-overlap", paths: [fill(rect(15.5, 17.5, 178.5, 190.5), halfRed), fill(rect(70.25, 35.75, 221.5, 205.25), green), fill(circle(150, 150, 70), [0, 0, 1, 0.5])] },
+        { name: "vector-v3-rotated", transform: rotation, paths: [fill(circle(128, 128, 80), blue), fill(star(128, 128, 60), halfRed, "even_odd")] },
+        ...[[0, 0], [1, 0], [0, 1], [1, 1]].map((tile) => ({
+          name: `vector-v3-seam (${tile[0]}, ${tile[1]})`, fixture: "render-v3-empty-512x512.alto", canvas: [512, 512], tile,
+          paths: [fill(circle(256, 256, 80), blue)],
+        })),
+        // A cubic far past NMAX skips its path (VECTOR_CURVE_RANGE); the square draws.
+        { name: "vector-v3-curve-range", paths: [
+          fill([{ op: "move", x: 0, y: 0 }, { op: "cubic", c1x: 600000, c1y: 0, c2x: -600000, c2y: 600000, x: 1, y: 1 }, { op: "close" }], blue),
+          fill(rect(32.5, 32.5, 100.5, 100.5), red),
+        ] },
+        { name: "vector-v3-degenerate", paths: [
+          fill(rect(40, 40, 40, 200), red),
+          fill([{ op: "move", x: 30, y: 60 }, { op: "line", x: 220, y: 60 }, { op: "close" }], red),
+          fill([{ op: "move", x: 100, y: 100 }], red),
+          fill([{ op: "move", x: 120, y: 120 }, { op: "line", x: 200, y: 130 }, { op: "line", x: 150, y: 210 }], blue),
+        ] },
+        // A vector mask and a clip path on a raster: coverages multiplied once.
+        { name: "vector-v3-clip", image: opaqueGradient,
+          vectorMask: { path: { commands: circle(120, 128, 90) }, fill_rule: "non_zero", feather: 0, enabled: true },
+          clipPath: { path: { commands: rect(64.5, 20.25, 230.75, 200.5) }, fill_rule: "even_odd", enabled: true } },
+      ];
+      for (const testCase of vectorCases) {
+        await test(testCase.name, async () => {
+          const fixtureName = testCase.fixture ?? "render-v3-empty.alto";
+          const fixture = await fetch(`../../tests/fixtures/${fixtureName}`);
+          assert(fixture.ok, `${fixtureName} status ${fixture.status}`);
+          const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+          assert(doc.getSnapshot().meta.render_version === 3, `${fixtureName} is not v3`);
+          const image = testCase.image?.();
+          let id;
+          if (image) {
+            const asset = await imported(engine, image);
+            await doc.transact("raster", (tx) => { id = tx.addRasterFromAsset(asset); });
+          } else {
+            await doc.transact("vector", (tx) => {
+              id = tx.addVector(testCase.paths);
+              if (testCase.transform) tx.setTransform(id, testCase.transform);
+            });
+          }
+          if (testCase.vectorMask) await doc.vectors.setMask(id, testCase.vectorMask);
+          if (testCase.clipPath) await doc.vectors.setClipPath(id, testCase.clipPath);
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          const [tx, ty] = testCase.tile ?? [0, 0];
+          const cpu = renderVectorV3({ ...testCase, image }, [tx, ty], testCase.canvas ?? [256, 256]);
+          const gpu = await gpuTile(engine, { level: 0, tx, ty });
+          const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
+          assert(same(cold, gpu), `${testCase.name} cold differs: ${diff(gpu, cold)}`);
+          const row = { ...measureRow({ name: testCase.name, nodes: [], level: 0, tx, ty }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`${testCase.name} (enforced): ${formatMeasure(row)}`);
+          assert(same(cpu, gpu), formatMeasure(row));
+          assert(testCase.name.includes("degenerate") || gpu.some((v, i) => i % 4 === 3 && v > 0), `${testCase.name} drew nothing`);
+          return formatMeasure(row);
+        });
+      }
     }
     // v3 pixel masks (doc/design/2026-10-28-v3-integer-mask.md), integer-exact:
     // layer masks (mode 21), selection-limited color-adjust (mode 22) and masked

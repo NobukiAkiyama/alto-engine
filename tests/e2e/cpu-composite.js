@@ -12,7 +12,7 @@
  * outside i32 is transparent.
  * The browser suite compares version 2 bytes with production readTile output.
  */
-import { FIXED_IDENTITY, fixedAffine, fixedConcat, fixedInverse } from "./fixed-affine.js";
+import { FIXED_IDENTITY, f64Bits, fixedAffine, fixedConcat, fixedInverse, qFromF64Bits } from "./fixed-affine.js";
 
 export const RENDER_VERSION_F32 = 1;
 export const RENDER_VERSION = 2;
@@ -1005,6 +1005,373 @@ function stackM5V3(layers, i, x, y, frame) {
     }
   }
   return accum;
+}
+
+// Render version 3 Gaussian blur (doc/design/2026-10-28-v3-integer-blur.md),
+// written independently of `alto_core::blur` and `renderer.rs`. Bits and the
+// kernel are BigInt; pixel sums stay below 2^31 and use Number.
+const f32Bits = (x) => {
+  const view = new DataView(new ArrayBuffer(4));
+  view.setFloat32(0, x);
+  return view.getUint32(0);
+};
+
+/** `floor(radius * 256 + 1/2)` of the stored f64, from its bits (Rust `blur_radius_q8_f64`). */
+export function blurRadiusQ8(radius) {
+  // The document validates 0..=64; outside it Rust refuses rather than decodes.
+  if (!(radius >= 0 && radius <= 64)) throw new RangeError(`v3 blur radius out of range: ${radius}`);
+  const bits = f64Bits(radius);
+  const e = Number((bits >> 52n) & 0x7ffn);
+  if (e === 0) return 0;
+  const m = (bits & ((1n << 52n) - 1n)) | (1n << 52n);
+  const s = 1067 - e;
+  if (s <= 0) return Number(m << BigInt(-s));
+  if (s >= 54) return 0;
+  return Number((m + (1n << BigInt(s - 1))) >> BigInt(s));
+}
+
+/** The same for an f32 feather (Rust `blur_radius_q8_f32`). */
+export function blurRadiusQ8F32(feather) {
+  if (!(feather >= 0 && Math.fround(feather) <= 64)) throw new RangeError(`v3 feather out of range: ${feather}`);
+  const bits = f32Bits(feather);
+  const e = (bits >>> 23) & 0xff;
+  if (e === 0) return 0;
+  const m = BigInt((bits & 0x7fffff) | 0x800000);
+  const s = 142 - e;
+  if (s <= 0) return Number(m << BigInt(-s));
+  if (s >= 25) return 0;
+  return Number((m + (1n << BigInt(s - 1))) >> BigInt(s));
+}
+
+/** The least k with `64 * 2^k >= rf`, from the f32 bits; null for 0 (Rust `blur_coarsen_k`). */
+export function blurCoarsenK(rf) {
+  // Defined on non-negative finite f32 bits (Rust returns None otherwise).
+  if (!(rf >= 0 && Number.isFinite(rf))) return null;
+  const bits = f32Bits(rf);
+  const e = (bits >>> 23) & 0xff;
+  const frac = bits & 0x7fffff;
+  if (e === 0 && frac === 0) return null;
+  const [m, power] = e === 0 ? [frac, -149] : [frac | 0x800000, e - 150];
+  const clog2 = m <= 1 ? 0 : (m - 1).toString(2).length;
+  return clog2 + power - 6;
+}
+
+/** Half kernel `w[0..=r]` in Q16, `w[0] + 2 * sum(w[1..])` exactly 65536 (memo "重みの生成"). */
+export function blurKernelQ16(r, rho8) {
+  if (!Number.isInteger(r) || r < 1 || r > 64 || !Number.isInteger(rho8) || rho8 < 0 || rho8 > 16384) {
+    throw new RangeError(`v3 blur kernel out of range: (${r}, ${rho8})`);
+  }
+  const ONE = 1n << 32n;
+  const divR = (n, d) => (n + d / 2n) / d;
+  const rho = BigInt(Math.max(rho8, 256));
+  const g = [];
+  for (let i = 0n; i <= BigInt(r); i++) {
+    const y = divR(4608n * i * i * ONE, rho * rho);
+    let h = ONE;
+    for (let k = 6n; k >= 1n; k--) h = ONE - divR(y * h, k * ONE);
+    for (let n = 0; n < 6; n++) h = (h * h + (1n << 31n)) >> 32n;
+    g.push(h);
+  }
+  const tails = new Array(r + 2).fill(0n);
+  for (let k = r; k >= 1; k--) tails[k] = tails[k + 1] + g[k];
+  const total = g[0] + 2n * tails[1];
+  const p = new Array(r + 2).fill(0n);
+  for (let k = 1; k <= r; k++) p[k] = divR(65536n * tails[k], total);
+  const w = [Number(65536n - 2n * p[1])];
+  for (let k = 1; k <= r; k++) w.push(Number(p[k] - p[k + 1]));
+  return w;
+}
+
+/**
+ * One pass over a `w x h` plane of Q14 RGBA (`Array` of 4-arrays), the same size
+ * out; outside the plane is transparent. `vertical` picks the axis.
+ */
+export function blurPassQ14(plane, w, h, weights, vertical) {
+  const r = weights.length - 1;
+  const out = new Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const acc = [0, 0, 0, 0];
+    for (let i = -r; i <= r; i++) {
+      const sx = vertical ? x : x + i, sy = vertical ? y + i : y;
+      if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+      const q = plane[sy * w + sx], k = weights[Math.abs(i)];
+      for (let c = 0; c < 4; c++) acc[c] += q[c] * k;
+    }
+    out[y * w + x] = acc.map((v) => Math.floor((v + 32768) / 65536));
+  }
+  return out;
+}
+
+/**
+ * A level-0 tile of one raster layer (`image`, straight RGBA at the document
+ * origin) with Gaussian blurs `radii` (document f64 values, in effect order) on
+ * a `canvas` of `[w, h]`. The layer is blurred as an infinite transparent plane
+ * and cut, as the GPU's ROI chain gives (memo "端"); level 0 never coarsens
+ * (`blurCoarsenK(rf) <= 0` for every valid radius).
+ */
+export function renderBlurV3(image, radii, tile = [0, 0], canvas = [256, 256]) {
+  const taps = radii.map(blurRadiusQ8).filter((q) => q > 0).map((q) => [Math.ceil(q / 256), q]);
+  const pad = taps.reduce((sum, [r]) => sum + r, 0);
+  const w = image.w + 2 * pad, h = image.h + 2 * pad;
+  let plane = new Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ix = x - pad, iy = y - pad;
+    const inside = ix >= 0 && iy >= 0 && ix < image.w && iy < image.h;
+    const i = (iy * image.w + ix) * 4;
+    plane[y * w + x] = inside ? ingressQ14(Array.from(image.pixels.subarray(i, i + 4))) : [0, 0, 0, 0];
+  }
+  for (const [r, rho8] of taps) {
+    const weights = blurKernelQ16(r, rho8);
+    plane = blurPassQ14(blurPassQ14(plane, w, h, weights, false), w, h, weights, true);
+  }
+  const out = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const dx = tile[0] * 256 + x, dy = tile[1] * 256 + y;
+    // Outside the canvas `[0, w) x [0, h)` the resolve writes transparent.
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1]) continue;
+    const px = dx + pad, py = dy + pad;
+    if (px >= w || py >= h) continue;
+    out.set(resolveQ14(plane[py * w + px]), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
+// Render version 3 vector fill (doc/design/2026-10-28-v3-integer-vector-fill.md),
+// written independently of `raster_q8.rs`: Q8 points from the f64 bits through
+// the Q32 world, a sparse-cell nonzero integration, 16 even-odd sub-scanlines,
+// and the Q14 source-over of `vector-q14.wgsl`. Exact integers throughout.
+const VECTOR_NMAX = 4096n;
+
+/** Half-away `n / d` for BigInt (Rust `raster_q8::div_q`). */
+const vDiv = (n, d) => (n < 0n ? -((-n + d / 2n) / d) : (n + d / 2n) / d);
+
+/** A path's commands as Q8 level-0 points under `world` (Rust `map_path`). */
+function vectorQ8(commands, world) {
+  const pt = (x, y) => {
+    const X = qFromF64Bits(f64Bits(x), 16), Y = qFromF64Bits(f64Bits(y), 16);
+    const axis = (a, b, t) => vDiv(a * X + b * Y + (t << 32n), 1n << 40n);
+    return [axis(world.m[0], world.m[2], world.t[0]), axis(world.m[1], world.m[3], world.t[1])];
+  };
+  return commands.map((c) => {
+    switch (c.op) {
+      case "move": return ["M", pt(c.x, c.y)];
+      case "line": return ["L", pt(c.x, c.y)];
+      case "quad": return ["Q", pt(c.cx, c.cy), pt(c.x, c.y)];
+      case "cubic": return ["C", pt(c.c1x, c.c1y), pt(c.c2x, c.c2y), pt(c.x, c.y)];
+      case "close": return ["Z"];
+      default: throw new Error(`unknown path op ${c.op}`);
+    }
+  });
+}
+
+/** Smallest n in 1..=4096 with 65536 n^4 >= K^2 D, or null (VECTOR_CURVE_RANGE). */
+function vectorDivisions(d, k) {
+  const need = k * k * d;
+  for (let n = 1n; n <= VECTOR_NMAX; n++) if (65536n * n ** 4n >= need) return n;
+  return null;
+}
+const secondDifference = (p, c, q) => {
+  const x = p[0] - 2n * c[0] + q[0], y = p[1] - 2n * c[1] + q[1];
+  return x * x + y * y;
+};
+
+/** Closed polygons (segments) of Q8 commands, or null when a curve is out of range. */
+function vectorSegments(commands) {
+  const segments = [];
+  let start = null, current = null;
+  const edge = (a, b) => { if (a[0] !== b[0] || a[1] !== b[1]) segments.push([a, b]); };
+  const close = () => { if (current && start) { edge(current, start); current = start; } };
+  for (const [op, ...p] of commands) {
+    if (op === "M") { close(); start = current = p[0]; continue; }
+    if (op === "L") { if (current) edge(current, p[0]); else start = p[0]; current = p[0]; continue; }
+    if (op === "Z") { close(); continue; }
+    const a = current;
+    const ctrl = op === "Q" ? [a, p[0], p[1]] : [a, p[0], p[1], p[2]];
+    const d = op === "Q" ? secondDifference(a, p[0], p[1])
+      : [secondDifference(a, p[0], p[1]), secondDifference(p[0], p[1], p[2])].reduce((x, y) => (x > y ? x : y));
+    const n = vectorDivisions(d, op === "Q" ? 10n : 30n);
+    if (n === null) return null;
+    const binomial = op === "Q" ? [1n, 2n, 1n] : [1n, 3n, 3n, 1n];
+    const degree = BigInt(binomial.length - 1);
+    for (let i = 1n; i <= n; i++) {
+      const j = n - i;
+      const next = [0, 1].map((axis) => vDiv(
+        ctrl.reduce((sum, q, k) => sum + binomial[k] * j ** (degree - BigInt(k)) * i ** BigInt(k) * q[axis], 0n),
+        n ** degree,
+      ));
+      edge(current, next);
+      current = next;
+    }
+  }
+  close();
+  return segments;
+}
+
+/**
+ * Coverage bytes of one path over the `[ox, oy, 256, 256]` window (level-0
+ * pixels), or null when a curve is out of range (the path is skipped).
+ */
+function vectorCoverage(commands, rule, [ox, oy]) {
+  const points = commands.flatMap(([, ...p]) => p);
+  const bytes = new Uint8Array(65536);
+  if (!points.length) return bytes;
+  // Shift to non-negative Q8 (the origin A): the half-away rounding below is
+  // not translation invariant across zero.
+  const min = [0, 1].map((a) => points.reduce((m, p) => (p[a] < m ? p[a] : m), points[0][a]));
+  const origin = min.map((v) => (v >= 0n ? v / 256n : -((-v + 255n) / 256n)));
+  const shifted = commands.map(([op, ...p]) => [op, ...p.map((q) => [q[0] - origin[0] * 256n, q[1] - origin[1] * 256n])]);
+  const segments = vectorSegments(shifted);
+  if (segments === null) return null;
+  const lx = BigInt(ox) - origin[0], ly = BigInt(oy) - origin[1];
+  const XL = lx * 256n, XR = XL + 65536n, YT = ly * 256n, YB = YT + 65536n;
+  const floorDiv = (v, d) => (v >= 0n ? v / d : -((-v + d - 1n) / d));
+  const floor256 = (v) => floorDiv(v, 256n);
+  const lerpY = (a, b, y) => vDiv(a[0] * (b[1] - a[1]) + (b[0] - a[0]) * (y - a[1]), b[1] - a[1]);
+  const coverageByte = (e) => Number(((e > 131072n ? 131072n : e) * 255n + 65536n) >> 17n);
+  if (rule === "even_odd") {
+    for (let row = 0n; row < 256n; row++) {
+      const tally = new Array(256).fill(0n);
+      for (let sub = 0n; sub < 16n; sub++) {
+        const y = YT + row * 256n + sub * 16n + 8n;
+        const xs = [];
+        for (const [p, q] of segments) {
+          const [a, b] = p[1] < q[1] ? [p, q] : [q, p];
+          if (a[1] <= y && y < b[1]) xs.push(lerpY(a, b, y));
+        }
+        xs.sort((u, v) => (u < v ? -1 : u > v ? 1 : 0));
+        for (let k = 0; k + 1 < xs.length; k += 2) {
+          const left = xs[k] > XL ? xs[k] : XL, right = xs[k + 1] < XR ? xs[k + 1] : XR;
+          for (let cx = 0n; cx < 256n; cx++) {
+            const c0 = XL + cx * 256n, c1 = c0 + 256n;
+            const lo = left > c0 ? left : c0, hi = right < c1 ? right : c1;
+            if (hi > lo) tally[cx] += hi - lo;
+          }
+        }
+      }
+      for (let cx = 0; cx < 256; cx++) bytes[Number(row) * 256 + cx] = coverageByte(32n * tally[cx]);
+    }
+    return bytes;
+  }
+  // Nonzero: cover and area per touched cell, kept in a sparse map.
+  const cells = new Map();
+  const cell = (cx, cy) => {
+    const key = `${cx},${cy}`;
+    if (!cells.has(key)) cells.set(key, { cover: 0n, area: 0n });
+    return cells.get(key);
+  };
+  for (const [p, q] of segments) {
+    if (p[1] === q[1]) continue;
+    const [a, b, dir] = p[1] < q[1] ? [p, q, 1n] : [q, p, -1n];
+    for (let row = floor256(a[1]) > ly ? floor256(a[1]) : ly; row <= floor256(b[1]) && row < ly + 256n; row++) {
+      let top = a[1] > row * 256n ? a[1] : row * 256n; if (top < YT) top = YT;
+      let bottom = b[1] < row * 256n + 256n ? b[1] : row * 256n + 256n; if (bottom > YB) bottom = YB;
+      if (bottom <= top) continue;
+      const xa = top === a[1] ? a[0] : lerpY(a, b, top);
+      const xb = bottom === b[1] ? b[0] : lerpY(a, b, bottom);
+      // Split the row piece at every column boundary inside it (window columns only).
+      const pts = [[xa, top]];
+      const lo = xa < xb ? xa : xb, hi = xa < xb ? xb : xa;
+      const span = bottom - top, run = hi - lo;
+      const cuts = [];
+      for (let col = floor256(lo) > lx ? floor256(lo) : lx; col <= floor256(hi) && col <= lx + 256n; col++) {
+        const x = col * 256n;
+        if (lo < x && x < hi) {
+          const dist = x > xa ? x - xa : xa - x;
+          cuts.push([x, vDiv(top * run + span * dist, run)]);
+        }
+      }
+      cuts.sort((u, v) => (xa < xb ? (u[0] < v[0] ? -1 : 1) : (u[0] > v[0] ? -1 : 1)));
+      pts.push(...cuts, [xb, bottom]);
+      for (let k = 0; k + 1 < pts.length; k++) {
+        let [ux, va] = pts[k], [vx, vb] = pts[k + 1];
+        const dy = vb - va;
+        if (dy === 0n || (ux >= XR && vx >= XR)) continue;
+        if (ux <= XL && vx <= XL) ux = vx = XL;
+        const cx = floorDiv(ux + vx, 512n) - lx;
+        const cy = floorDiv(va + vb, 512n) - ly;
+        if (cx < 0n || cy < 0n || cx >= 256n || cy >= 256n) continue;
+        const c = cell(cx, cy);
+        c.cover += dir * dy;
+        c.area += dir * (ux + vx - 2n * (lx + cx) * 256n) * dy;
+      }
+    }
+  }
+  for (let cy = 0n; cy < 256n; cy++) {
+    let sum = 0n;
+    for (let cx = 0n; cx < 256n; cx++) {
+      const c = cells.get(`${cx},${cy}`);
+      if (c) sum += c.cover;
+      const n = sum * 512n - (c ? c.area : 0n);
+      bytes[Number(cy * 256n + cx)] = coverageByte(n < 0n ? -n : n);
+    }
+  }
+  return bytes;
+}
+
+/** Q14 of a stored f32 colour channel (`Math.fround`), half away; exact. */
+const vectorColorQ14 = (v) => Math.floor(Math.fround(v) * 16384 + 0.5);
+
+/** One Q14 source-over of `color` (straight Q14) at coverage byte `b`. */
+function vectorPaintQ14(dst, color, b) {
+  const f = byteQ14(b) * color[3];
+  const sa = Math.floor((f + 8192) / 16384);
+  return dst.map((d, c) => {
+    const s = c === 3 ? sa : Number((BigInt(color[c]) * BigInt(f) + (1n << 27n)) >> 28n);
+    return Math.floor((s * 16384 + d * (16384 - sa) + 8192) / 16384);
+  });
+}
+
+/** The Q14 coverage of a white mask/clip path at each pixel (`vector_q14` with white). */
+function vectorMaskQ14(path, world, tile) {
+  const bytes = vectorCoverage(vectorQ8(path.commands, world), path.fill_rule ?? "non_zero", tile) ?? new Uint8Array(65536);
+  return Array.from(bytes, byteQ14);
+}
+
+/**
+ * A level-0 tile of one layer at node transform `transform`: a vector node
+ * (`paths`, styled paths in the document JSON) or a raster (`image` at the
+ * origin), with an optional `vectorMask` and `clipPath` (feather 0), on a
+ * `canvas`. Their coverages are multiplied once and applied once (mode 26).
+ */
+export function renderVectorV3({ paths, image, transform = IDENT, vectorMask, clipPath }, tile = [0, 0], canvas = [256, 256]) {
+  // Rust refuses a world outside the FixedAffine range (GpuUnsupported); only a
+  // point the Q8 grid cannot hold makes the node transparent (`map_path`).
+  const world = fixedAffine(transform);
+  if (!world) throw new Error("v3 refuses a transform outside the fixed affine range");
+  const origin = [tile[0] * 256, tile[1] * 256];
+  let q;
+  if (paths) {
+    q = Array.from({ length: 65536 }, () => [0, 0, 0, 0]);
+    for (const path of paths) {
+      if (!path.fill) continue;
+      const color = path.fill.map(vectorColorQ14);
+      if (color[3] === 0) continue;
+      const bytes = vectorCoverage(vectorQ8(path.data.commands, world), path.fill_rule ?? "non_zero", origin);
+      if (!bytes) continue;
+      for (let i = 0; i < 65536; i++) q[i] = vectorPaintQ14(q[i], color, bytes[i]);
+    }
+  } else {
+    // A raster reads its texel through the v3 Q16 nearest lookup of `transform`.
+    const texelAt = (tx, ty) => {
+      if (tx < 0 || ty < 0 || tx >= image.w || ty >= image.h) return [0, 0, 0, 0];
+      const k = (ty * image.w + tx) * 4;
+      return Array.from(image.pixels.subarray(k, k + 4));
+    };
+    q = Array.from({ length: 65536 }, (_, i) =>
+      ingressQ14(lookupV3(texelAt, transform, i % 256, Math.floor(i / 256), origin, 1) ?? [0, 0, 0, 0]));
+  }
+  // A disabled mask or clip path is none (Rust filters on `enabled`).
+  const masks = [vectorMask, clipPath].filter((m) => m && m.enabled !== false).map((m) => vectorMaskQ14(m.path, fixedConcat(world, fixedAffine(m.transform ?? IDENT)), origin));
+  if (masks.length) {
+    const k = masks.length === 2 ? masks[0].map((a, i) => Number(divQBig(BigInt(a * masks[1][i]), 16384n))) : masks[0];
+    q = q.map((v, i) => v.map((c) => Number(divQBig(BigInt(c * k[i]), 16384n))));
+  }
+  const out = new Uint8Array(65536 * 4);
+  for (let i = 0; i < 65536; i++) {
+    const x = origin[0] + (i % 256), y = origin[1] + Math.floor(i / 256);
+    if (x >= 0 && y >= 0 && x < canvas[0] && y < canvas[1]) out.set(resolveQ14(q[i]), i * 4);
+  }
+  return out;
 }
 
 /**
