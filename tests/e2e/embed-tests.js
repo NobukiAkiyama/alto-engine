@@ -78,6 +78,17 @@ async function quadrants(engine, doc) {
   await doc.transact("image.import", (tx) => tx.addRasterFromAsset(image));
 }
 
+/** Keep one 65-tile stroke, but let the GPU finish between groups of inputs. */
+async function inputWideStrokeInBatches(engine, stroke, count = 65) {
+  for (let i = 0; i < count; i++) {
+    stroke.input({ x: 128 + i * 256, y: 128 });
+    if ((i + 1) % 16 === 0 && i + 1 < count) {
+      await stroke.flush();
+      await unstable(engine).settle();
+    }
+  }
+}
+
 export async function runEmbedTests(_playground, log) {
   const results = [];
   const test = async (label, fn) => {
@@ -144,7 +155,7 @@ export async function runEmbedTests(_playground, log) {
         await doc.transact("layer",tx=>{layer=tx.addRaster();});
         const before=await doc.snapshotHash(),snap=doc.getSnapshot();
         const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1},color:[1,0,0,1]});
-        for(let i=0;i<65;i++) s.input({x:128+i*256,y:128});
+        await inputWideStrokeInBatches(engine, s);
         await testing(engine).request("injectReadbackFailure",{after});
         assert(await rejectsWith(s.end(),"INTERNAL"),"failure missing");
         assert(await doc.snapshotHash()===before,"partial CPU commit");
@@ -159,7 +170,7 @@ export async function runEmbedTests(_playground, log) {
       const doc=await engine.createDocument({width:256,height:256});let layer;
       await doc.transact("layer",tx=>{layer=tx.addRaster();});const before=await doc.snapshotHash();
       const s=doc.tools.begin("brush",{layer,tip:{size:8,hardness:1}});
-      for(let i=0;i<65;i++) s.input({x:128+i*256,y:128});
+      await inputWideStrokeInBatches(engine, s);
       let cancel;
       const off=unstable(engine).onDiagnostic(d=>{if(d.finishStage==="readback") {off();cancel=s.cancel();}});
       const failed=await rejectsWith(s.end(),"CONFLICT");await cancel;
