@@ -784,8 +784,8 @@ export async function runParityTests(engine, log) {
       });
     }
     // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
-    // hierarchy in many steps over several ticks, and still equals the warm pyramid.
-    await test("v3 cold pyramid is built incrementally across ticks", async () => {
+    // hierarchy in bounded steps, yielding if needed, and equals the warm pyramid.
+    await test("v3 cold pyramid builds in bounded steps", async () => {
       const fixture = await fetch("../../tests/fixtures/render-v3-empty-4096x256.alto");
       assert(fixture.ok, `v3 fixture status ${fixture.status}`);
       const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
@@ -812,16 +812,24 @@ export async function runParityTests(engine, log) {
         await testing(engine).request("enablePrefetch");
       }
       const steps = frame.profile?.steps ?? 0;
-      log(`v3 cold pyramid: ${steps} steps over ${frame.ticks} ticks, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
+      log(`v3 cold pyramid: ${steps} steps over ${frame.diagnosticTicks} diagnostic ticks (${frame.ticks} wait ticks), max Worker tick ${frame.maxWorkerTickMs?.toFixed?.(1)} ms, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
       assert(steps >= 31, `cold level 4 built in ${steps} steps; expected one per leaf or downsample`);
-      assert(frame.ticks >= 2, `cold level 4 finished in ${frame.ticks} tick(s); the Worker was not handed back`);
+      // Every synchronous Worker tick since resetRenderCache is measured,
+      // including automatic drain ticks. Allow the 8 ms renderer budget,
+      // one final step past its deadline, and 8 ms for scene/Worker overhead.
+      const maxStepMs = frame.profile?.maxStepMs;
+      const maxTickMs = frame.maxWorkerTickMs;
+      assert(frame.diagnosticTicks >= frame.ticks && frame.ticks >= 1 && Number.isFinite(maxTickMs) && Number.isFinite(maxStepMs),
+        `missing cold pyramid tick timing: ${frame.diagnosticTicks} diagnostic ticks, ${frame.ticks} wait ticks, max ${maxTickMs} ms`);
+      assert(maxTickMs <= 16 + maxStepMs,
+        `cold level 4 blocked the Worker for ${maxTickMs} ms in one tick; max step ${maxStepMs} ms`);
       const shown = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0 }));
       const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0, fresh: true }));
       const cpu = renderPyramidCase({ w: 4096, h: 256, level: 4, tx: 0, ty: 0,
         nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
       assert(same(cpu, shown), `displayed level 4: ${diff(cpu, shown)}`);
       assert(same(cpu, cold), `cold readback level 4: ${diff(cpu, cold)}`);
-      return `${steps} steps, ${frame.ticks} ticks`;
+      return `${steps} steps, ${frame.diagnosticTicks} diagnostic ticks`;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });

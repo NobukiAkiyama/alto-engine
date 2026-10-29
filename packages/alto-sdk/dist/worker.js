@@ -36,6 +36,9 @@ self.addEventListener("error", (e) => {
     });
 });
 let diagnosticProfiles = null;
+let profilingEnabled = false;
+// Synchronous Worker time for every tick after a profiled cache reset.
+let diagnosticTickMs = null;
 let injectedStorageFault = null;
 const readableAfterFailure = new Set([
     "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
@@ -927,14 +930,19 @@ async function execute(m) {
             return true;
         case "setProfiling":
             runtime.setProfiling(!!m.enabled);
+            profilingEnabled = !!m.enabled;
+            if (!profilingEnabled)
+                diagnosticTickMs = null;
             return true;
         case "waitFrame": {
             let frame;
             // Ticks this request took; each one returns control to the Worker loop.
             let ticks = 0;
             const profiles = diagnosticProfiles || [];
+            const tickMs = diagnosticTickMs || [];
             try {
                 do {
+                    const tickStart = performance.now();
                     applyPendingView();
                     pumpDecodes();
                     frame = takeFrame(8, true);
@@ -943,6 +951,7 @@ async function execute(m) {
                     if (frame.profile)
                         profiles.push(frame.profile);
                     noteDeferred(frame, "wait");
+                    tickMs.push(performance.now() - tickStart);
                     if (frame.pending)
                         await yieldTask();
                     else if (frame.presentDeferred)
@@ -958,12 +967,15 @@ async function execute(m) {
             }
             await runtime.gpuIdle();
             diagnosticProfiles = null;
+            diagnosticTickMs = null;
             frameSettled = true;
             prefetchSpentMs = 0;
             if (profiles.length) {
                 frame.profile = Object.fromEntries(Object.keys(profiles[0]).map((key) => [key, key === "maxStepMs" ? profiles.reduce((max, profile) => Math.max(max, profile[key]), 0) : profiles.reduce((sum, profile) => sum + profile[key], 0)]));
             }
-            const value = { ...frame, viewVersion, ticks };
+            const value = { ...frame, viewVersion, ticks,
+                diagnosticTicks: tickMs.length,
+                maxWorkerTickMs: tickMs.reduce((max, ms) => Math.max(max, ms), 0) };
             postMessage({ t: "frame", value });
             return value;
         }
@@ -978,6 +990,7 @@ function resetRenderCache(cpu) {
     prefetchDisabled = true;
     runtime.resetRenderCache(cpu);
     diagnosticProfiles = [];
+    diagnosticTickMs = profilingEnabled ? [] : null;
 }
 function applyPendingView() {
     if (runtime && pendingResize) {
@@ -1020,6 +1033,7 @@ async function drain() {
                 wantTick = false;
                 if (runtime)
                     try {
+                        const tickStart = performance.now();
                         const value = { ...takeFrame(8, false), viewVersion };
                         pumpDecodes();
                         if (value.profile && diagnosticProfiles)
@@ -1034,6 +1048,8 @@ async function drain() {
                         // spinning: on a software adapter, spinning takes the GPU's CPU time.
                         // The wait is capped: a device that never settles used to loop forever.
                         noteDeferred(value, "drain");
+                        if (diagnosticTickMs)
+                            diagnosticTickMs.push(performance.now() - tickStart);
                         if (value.presentDeferred && !value.composed)
                             await presentSettled();
                         else if (value.pending)
