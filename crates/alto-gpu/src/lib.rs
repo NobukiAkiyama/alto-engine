@@ -3,6 +3,7 @@ pub use error::RenderError;
 
 mod error;
 pub mod glyph_atlas;
+pub mod raster_q8;
 pub mod renderer;
 mod sample;
 

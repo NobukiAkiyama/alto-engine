@@ -131,7 +131,7 @@ fn layer_q14(dst: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
   let sa = mul_q(src.a, op);
   return blend_q(dst, s, vec3i(mul_q(s.r, sa), mul_q(s.g, sa), mul_q(s.b, sa)), sa, mode);
 }
-// Modes 21 to 23. Settings are `grid[0]`.
+// Modes 21 to 23 and 26. Settings are `grid[0]`.
 fn mask_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];var out=vec4i(0);
  if c.info.x==21u{
@@ -161,7 +161,45 @@ fn mask_stage(ix: vec2i) -> vec4i {
   }
   for(var i=0u;i<4u;i++){out[i]=div28(wide_add(wide_mul_u32(u32(o[i]),(1u<<28u)-w),wide_mul_u32(u32(g[i]),w)));}
  }
+ else if c.info.x==26u{
+  // A vector mask (or the product of vector mask and clipping path) is a
+  // premultiplied white Q14 coverage target. Combine before masking source.
+  let v=texel_a(ix);let k=texel_b(ix).a;
+  for(var i=0u;i<4u;i++){out[i]=div_q(v[i]*k,Q14_ONE);}
+ }
  return out;
+}
+fn blur_weight(k: u32) -> u32 {
+ let j=k/2u;
+ let word=bitcast<u32>(c.grid[1u+j/4u][j%4u]);
+ return (word>>(16u*(k%2u)))&0xffffu;
+}
+fn sample_q14(q: vec2i) -> vec4u {
+ if any(q<vec2i(0))||any(q>=vec2i(c.sizes.xy)){return vec4u(0u);}
+ return textureLoad(a,q,0);
+}
+fn blur_stage(ix: vec2i) -> vec4i {
+ let settings=c.grid[0];let center=ix+settings.yz;let r=settings.x;
+ var accum=vec4u(0u);
+ for(var i=-r;i<=r;i=i+1){
+  let delta=select(vec2i(i,0),vec2i(0,i),c.info.w==1u);
+  accum=accum+sample_q14(center+delta)*blur_weight(u32(abs(i)));
+ }
+ return vec4i((accum+vec4u(32768u))>>vec4u(16u));
+}
+fn resample_stage(ix: vec2i) -> vec4i {
+ let settings=c.grid[0];let m=u32(settings.z);
+ let shift=i32(1u<<m);
+ let u=2*(ix+settings.xy)+vec2i(1)-vec2i(shift);
+ let j=u>>vec2u(m+1u);
+ let mask=i32((1u<<(m+1u))-1u);
+ let f=(u&vec2i(mask))<<vec2u(7u-m);
+ let a0=sample_q14(j);let b0=sample_q14(j+vec2i(1,0));
+ let d0=sample_q14(j+vec2i(0,1));let e0=sample_q14(j+vec2i(1,1));
+ let fx=u32(f.x);let fy=u32(f.y);
+ let ab=a0*(256u-fx)+b0*fx;
+ let de=d0*(256u-fx)+e0*fx;
+ return vec4i((ab*(256u-fy)+de*fy+vec4u(32768u))>>vec4u(16u));
 }
 // Every mode works on the integer pixel index; settings are `grid[0]`.
 @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id:vec3u){
@@ -180,6 +218,8 @@ fn mask_stage(ix: vec2i) -> vec4i {
   let o=texel_a(ix);let f=texel_b(ix);let w=settings.x;
   for(var i=0u;i<4u;i++){out[i]=div_q(o[i]*(Q14_ONE-w)+f[i]*w,Q14_ONE);}
  }
- else if c.info.x>=21u&&c.info.x<=23u{out=mask_stage(ix);}
+ else if (c.info.x>=21u&&c.info.x<=23u)||c.info.x==26u{out=mask_stage(ix);}
+ else if c.info.x==24u{out=blur_stage(ix);}
+ else if c.info.x==25u{out=resample_stage(ix);}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

@@ -35,6 +35,97 @@ const SCRATCH_BYTES: u64 = 512 * 512 * 4;
 const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
 /// Jobs that need at most this many inputs decode them inline even with a pool.
 const INLINE_DECODE_MAX: usize = 8;
+
+/// Nonnegative Q16 half-kernel for version 3 Gaussian blur. Its symmetric
+/// sum is exactly 65536, so a constant premultiplied input stays constant.
+pub(crate) fn blur_kernel_q16(radius: u32, rho8: u32) -> Option<Vec<u32>> {
+    if radius == 0 || radius > 64 || rho8 > 16384 {
+        return None;
+    }
+    let rho = u128::from(rho8.max(256));
+    let one = 1u128 << 32;
+    let round = |n: u128, d: u128| (n + d / 2) / d;
+    let mut g = Vec::with_capacity(radius as usize + 1);
+    for i in 0..=radius {
+        let y = round(4608 * u128::from(i) * u128::from(i) * one, rho * rho);
+        let mut h = one;
+        for k in (1..=6u128).rev() {
+            h = one.checked_sub(round(y * h, k * one))?;
+        }
+        for _ in 0..6 {
+            h = round(h * h, one);
+        }
+        g.push(h);
+    }
+    let mut tails = vec![0u128; g.len() + 1];
+    for k in (1..g.len()).rev() {
+        tails[k] = tails[k + 1] + g[k];
+    }
+    let total = g[0] + 2 * tails[1];
+    let mut p = vec![0u128; g.len() + 1];
+    for k in 1..g.len() {
+        p[k] = round(65536 * tails[k], total);
+    }
+    let mut weights = vec![u32::try_from(65536 - 2 * p[1]).ok()?];
+    for k in 1..g.len() {
+        weights.push(u32::try_from(p[k].checked_sub(p[k + 1])?).ok()?);
+    }
+    Some(weights)
+}
+
+#[cfg(test)]
+mod blur_kernel_tests {
+    use super::blur_kernel_q16;
+
+    #[test]
+    fn blur_kernel_q16_matches_locked_vectors() {
+        assert_eq!(blur_kernel_q16(1, 256), Some(vec![64112, 712]));
+        assert_eq!(blur_kernel_q16(2, 256), Some(vec![64112, 712, 0]));
+        assert_eq!(
+            blur_kernel_q16(8, 2048),
+            Some(vec![9818, 9151, 7411, 5214, 3187, 1693, 781, 313, 109])
+        );
+        assert_eq!(
+            blur_kernel_q16(12, 3072),
+            Some(vec![
+                6548, 6346, 5778, 4943, 3971, 2998, 2125, 1416, 886, 521, 288, 149, 73
+            ])
+        );
+        let w = blur_kernel_q16(64, 16384).unwrap();
+        assert_eq!(&w[..4], &[1228, 1228, 1223, 1216]);
+        assert_eq!(&w[61..], &[21, 18, 15, 14]);
+        assert_eq!(w[0] + 2 * w[1..].iter().sum::<u32>(), 65536);
+    }
+
+    /// Every `(r, rho8)` some real radius `rho` in `(0, 64]` reaches, with
+    /// `ceil(rho) = r` and `floor(256 rho + 1/2) = rho8`.
+    #[test]
+    fn blur_kernel_q16_is_exact() {
+        let mut pairs = 0;
+        for r in 1..=64u32 {
+            for rho8 in 0..=16384u32 {
+                // [(2 rho8 - 1) / 512, (2 rho8 + 1) / 512) meets (r - 1, r].
+                if 2 * rho8 > 512 * r + 1 || 2 * rho8 < 512 * (r - 1) {
+                    continue;
+                }
+                pairs += 1;
+                let w = blur_kernel_q16(r, rho8).unwrap();
+                assert_eq!(w.len(), r as usize + 1);
+                assert_eq!(
+                    w[0] + 2 * w[1..].iter().sum::<u32>(),
+                    65536,
+                    "({r}, {rho8})"
+                );
+                assert!(w.iter().all(|&v| v < 65536), "({r}, {rho8})");
+                assert!(w.windows(2).all(|p| p[0] >= p[1]), "({r}, {rho8}) {w:?}");
+            }
+        }
+        assert_eq!(pairs, 16448);
+        assert_eq!(blur_kernel_q16(0, 256), None);
+        assert_eq!(blur_kernel_q16(65, 16384), None);
+        assert_eq!(blur_kernel_q16(64, 16385), None);
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Command {
@@ -903,38 +994,53 @@ pub(crate) fn mask_grid(
 
 /// The feature that render version 3 has no integer definition for, or `None`.
 /// Version 3 draws plain scenes with the integer tile compositor, and with the
-/// integer M5 stages: color-adjust (layer effects and adjustment layers, any
-/// opacity), pixel masks on layers and adjustment layers, selection-limited
-/// color-adjust, and blends of masked adjustment layers (v2 mode 7: screen, or
-/// multiply for every other non-normal mode). Everything else is refused before any command is
+/// integer M5 stages: color-adjust and Gaussian blur (layer effects, with or
+/// without a selection), color-adjust adjustment layers (any opacity), pixel
+/// masks on layers and adjustment layers, filled vectors (`raster_q8`), vector
+/// masks and clip paths (feathered through the integer blur), and blends of
+/// masked adjustment layers (v2 mode 7: screen, or multiply for every other
+/// non-normal mode). Visible strokes keep the v2 tessellator and are refused, and so
+/// are vector masks and clip paths on adjustment layers. Everything
+/// else is refused before any command is
 /// built, so no v3 tile is ever written through a float or unorm target. Every
 /// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
 /// mirrors this.
 pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
-    let color_adjust =
-        |e: &crate::REffect| matches!(e.kind, crate::REffectKind::ColorAdjust { .. });
+    let integer_effect = |e: &crate::REffect| {
+        matches!(
+            e.kind,
+            crate::REffectKind::ColorAdjust { .. } | crate::REffectKind::GaussianBlur { .. }
+        )
+    };
     for n in &scene.nodes {
         let f = &n.features;
-        if f.vector_mask.is_some() {
-            return Some("vector mask");
-        }
-        if f.clip_path.is_some() {
-            return Some("clip path");
-        }
         if f.clip {
             return Some("clip");
         }
-        if !f.effects.iter().all(color_adjust) {
+        if !f.effects.iter().all(integer_effect) {
             return Some("effects");
         }
         match &n.content {
-            RContent::Mesh(_) => return Some("vector"),
+            RContent::Mesh(paths)
+                if paths.iter().any(|path| {
+                    path.stroke
+                        .as_ref()
+                        .is_some_and(crate::raster_q8::stroke_visible)
+                }) =>
+            {
+                return Some("vector stroke");
+            }
             RContent::Text(_) => return Some("text"),
             // Without a pixel mask, a non-normal blend stays refused (#37, Linus
             // 21:46). Its stages are integer since the float purge; drawing it
-            // through mode 23 is a scope change that needs its own review.
+            // through mode 23 is a scope change that needs its own review. An
+            // adjustment layer's vector mask or clip path mixes backdrop and
+            // adjusted copy by coverage (v2 mode 12); v3 defines no such mix.
             RContent::Adjustment(e)
-                if !color_adjust(e) || (f.mask.is_none() && n.blend != RenderBlend::Normal) =>
+                if !integer_effect(e)
+                    || (f.mask.is_none() && n.blend != RenderBlend::Normal)
+                    || f.vector_mask.is_some()
+                    || f.clip_path.is_some() =>
             {
                 return Some("adjustment");
             }

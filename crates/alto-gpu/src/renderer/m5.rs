@@ -19,6 +19,177 @@ struct Roi {
     w: u32,
     h: u32,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RoiQ {
+    level: i32,
+    ox: i64,
+    oy: i64,
+    w: u32,
+    h: u32,
+}
+impl RoiQ {
+    fn from_roi(roi: Roi) -> Result<Self> {
+        let [ox, oy, level] =
+            crate::raster_q8::roi_grid(roi.x, roi.y, roi.scale).ok_or_else(|| {
+                RenderError::GpuUnsupported("v3 ROI is not on the integer grid".into())
+            })?;
+        let level = i32::try_from(level)
+            .map_err(|_| RenderError::InvalidArgument("v3 ROI level".into()))?;
+        if !(-6..=12).contains(&level) {
+            return Err(RenderError::InvalidArgument(
+                "v3 ROI level out of range".into(),
+            ));
+        }
+        Ok(Self {
+            level,
+            ox,
+            oy,
+            w: roi.w,
+            h: roi.h,
+        })
+    }
+    fn to_roi(self) -> Result<Roi> {
+        fn coordinate(value: i64, level: i32) -> Option<f32> {
+            if value == 0 {
+                return Some(0.0);
+            }
+            let magnitude = value.unsigned_abs();
+            let bit = 63 - magnitude.leading_zeros();
+            let exponent = i32::try_from(bit).ok()? + level + 127;
+            if !(1..255).contains(&exponent) {
+                return None;
+            }
+            let significant = if bit > 23 {
+                let shift = bit - 23;
+                if magnitude & ((1u64 << shift) - 1) != 0 {
+                    return None;
+                }
+                magnitude >> shift
+            } else {
+                magnitude << (23 - bit)
+            };
+            Some(f32::from_bits(
+                (u32::from(value < 0) << 31)
+                    | ((u32::try_from(exponent).ok()?) << 23)
+                    | (u32::try_from(significant).ok()? & 0x7f_ffff),
+            ))
+        }
+        Ok(Roi {
+            x: coordinate(self.ox, self.level)
+                .ok_or_else(|| RenderError::GpuUnsupported("v3 ROI x is not f32-exact".into()))?,
+            y: coordinate(self.oy, self.level)
+                .ok_or_else(|| RenderError::GpuUnsupported("v3 ROI y is not f32-exact".into()))?,
+            scale: f32::from_bits(((self.level + 127) as u32) << 23),
+            w: self.w,
+            h: self.h,
+        })
+    }
+    fn expand(self, x: u32, y: u32) -> Result<Self> {
+        Ok(Self {
+            ox: self
+                .ox
+                .checked_sub(i64::from(x))
+                .ok_or_else(|| RenderError::InvalidArgument("v3 ROI x overflow".into()))?,
+            oy: self
+                .oy
+                .checked_sub(i64::from(y))
+                .ok_or_else(|| RenderError::InvalidArgument("v3 ROI y overflow".into()))?,
+            w: self
+                .w
+                .checked_add(2 * x)
+                .ok_or_else(|| RenderError::InvalidArgument("v3 ROI width overflow".into()))?,
+            h: self
+                .h
+                .checked_add(2 * y)
+                .ok_or_else(|| RenderError::InvalidArgument("v3 ROI height overflow".into()))?,
+            ..self
+        })
+    }
+    /// v3 blur works at levels -6..=12 only; checked before any shift.
+    fn check_level(level: i32) -> Result<()> {
+        if (-6..=12).contains(&level) {
+            Ok(())
+        } else {
+            Err(RenderError::InvalidArgument(
+                "v3 blur level out of range".into(),
+            ))
+        }
+    }
+    fn coarsen(self, target_level: i32) -> Result<Self> {
+        Self::check_level(self.level)?;
+        let shift = target_level
+            .checked_sub(self.level)
+            .and_then(|m| u32::try_from(m).ok())
+            .ok_or_else(|| RenderError::InvalidArgument("v3 coarsen level".into()))?;
+        if shift > 7 {
+            return Err(RenderError::InvalidArgument(
+                "v3 coarsen ratio exceeds 128".into(),
+            ));
+        }
+        if shift == 0 {
+            return Ok(self);
+        }
+        let factor = 1i64 << shift;
+        let axis = |origin: i64, span: u32| -> Result<(i64, u32)> {
+            let next = origin
+                .div_euclid(factor)
+                .checked_sub(1)
+                .ok_or_else(|| RenderError::InvalidArgument("v3 coarsen origin".into()))?;
+            let end = origin
+                .checked_add(i64::from(span))
+                .ok_or_else(|| RenderError::InvalidArgument("v3 coarsen end".into()))?;
+            let width = end
+                .checked_sub(
+                    next.checked_mul(factor)
+                        .ok_or_else(|| RenderError::InvalidArgument("v3 coarsen product".into()))?,
+                )
+                .ok_or_else(|| RenderError::InvalidArgument("v3 coarsen width".into()))?
+                .div_euclid(factor)
+                + i64::from(end.rem_euclid(factor) != 0)
+                + 1;
+            Ok((
+                next,
+                u32::try_from(width)
+                    .map_err(|_| RenderError::InvalidArgument("v3 coarsen span".into()))?,
+            ))
+        };
+        let (ox, w) = axis(self.ox, self.w)?;
+        let (oy, h) = axis(self.oy, self.h)?;
+        Ok(Self {
+            level: target_level,
+            ox,
+            oy,
+            w,
+            h,
+        })
+    }
+    fn taps(self, radius_q8: u32) -> Result<(u32, u32)> {
+        Self::check_level(self.level)?;
+        if radius_q8 > 16384 {
+            return Err(RenderError::InvalidArgument(
+                "v3 blur radius out of range".into(),
+            ));
+        }
+        let (radius, rho8) = if self.level >= 0 {
+            let factor = 1u32 << self.level;
+            let divisor = 256u32 << self.level;
+            (
+                radius_q8.div_ceil(divisor),
+                (radius_q8 + factor / 2) / factor,
+            )
+        } else {
+            let shift = -self.level;
+            let scaled = radius_q8 << shift;
+            (scaled.div_ceil(256), scaled)
+        };
+        if radius > 64 || rho8 > 16384 {
+            return Err(RenderError::InvalidArgument(
+                "v3 blur exceeds 64 taps".into(),
+            ));
+        }
+        Ok((radius, rho8))
+    }
+}
 impl Roi {
     fn coarsen(self, minimum: f32) -> Self {
         let scale = self
@@ -93,22 +264,41 @@ struct IntegerResolve {
     span: [u32; 4],
     info: [u32; 4],
 }
-/// The integer origin of a version 3 display tile ROI. Version 3 composes M5
-/// only at level 0 (higher levels are the integer pyramid), and its ROIs are the
-/// display tile's (`v3_gap` refuses blurs, the only stage that grows one). `Roi`
-/// carries the origin in f32, so this recomputes it from the key in i64 and
-/// refuses the tile unless the f32 is that integer and fits i32.
-fn integer_origin(key: CacheKey, roi: Roi) -> Result<[i32; 2]> {
-    let exact = |k: i32, v: f32| {
-        let o = i64::from(k).checked_mul(256)?;
-        (key.0 == 0 && v as f64 == o as f64).then_some(i32::try_from(o).ok()?)
-    };
-    match (exact(key.1, roi.x), exact(key.2, roi.y)) {
-        (Some(x), Some(y)) if roi.scale == 1.0 => Ok([x, y]),
-        _ => Err(RenderError::GpuUnsupported(
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct VectorQ14Params {
+    color: [u32; 4],
+    size: [u32; 4],
+}
+/// Verify the stored f32 ROI against the tile key before any version 3 stage.
+fn integer_origin(key: CacheKey, roi: Roi) -> Result<RoiQ> {
+    let grid = RoiQ::from_roi(roi)?;
+    if grid.level != key.0 || grid.ox != i64::from(key.1) * 256 || grid.oy != i64::from(key.2) * 256
+    {
+        return Err(RenderError::GpuUnsupported(
             "v3 M5 tile has no integer origin".into(),
-        )),
+        ));
     }
+    Ok(grid)
+}
+fn resolve_span_q(grid: RoiQ, canvas: [i32; 2]) -> [u32; 4] {
+    if grid.level >= 0 {
+        let scale = 1i64 << grid.level;
+        return super::resolve_span(
+            [grid.ox * scale, grid.oy * scale],
+            scale,
+            canvas.map(i64::from),
+        );
+    }
+    let factor = 1i128 << -grid.level;
+    let axis = |origin: i64, end: i32| {
+        let start = (-i128::from(origin)).clamp(0, 256) as u32;
+        let stop = (i128::from(end) * factor - i128::from(origin)).clamp(0, 256) as u32;
+        [start.min(stop), stop]
+    };
+    let x = axis(grid.ox, canvas[0]);
+    let y = axis(grid.oy, canvas[1]);
+    [x[0], y[0], x[1], y[1]]
 }
 #[derive(Clone)]
 struct Target {
@@ -128,6 +318,7 @@ pub(super) struct Resources {
     exact: bool,
     pipeline: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
+    vector_q14: Option<wgpu::ComputePipeline>,
     pool: Vec<Pooled>,
     pub(super) allocations: u64,
     pub(super) reuses: u64,
@@ -167,6 +358,17 @@ impl Resources {
             reuses: 0,
             pipeline,
             resolve,
+            vector_q14: exact.then(|| {
+                compute(
+                    device,
+                    "M5 integer vector paint",
+                    &format!(
+                        "{}\n{}",
+                        include_str!("../../shaders/q14.wgsl"),
+                        include_str!("../../shaders/vector-q14.wgsl")
+                    ),
+                )
+            }),
             pool: vec![Pooled {
                 texture: memory::create_texture(
                     device,
@@ -278,11 +480,39 @@ impl Context<'_> {
             return Ok(input);
         }
         let out = self.alloc(roi)?;
-        let p = if self.resources.exact {
-            Self::q14_params(8, roi, [Some(input.roi), None], [0; 4], None)?
-        } else {
-            Self::params(8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-        };
+        let p =
+            if self.resources.exact {
+                let destination = RoiQ::from_roi(roi)?;
+                let source = RoiQ::from_roi(input.roi)?;
+                let m = source.level - destination.level;
+                if !(0..=7).contains(&m) {
+                    return Err(RenderError::InvalidArgument(
+                        "v3 resample level ratio".into(),
+                    ));
+                }
+                let factor = 1i64 << m;
+                let dx = destination
+                    .ox
+                    .checked_sub(source.ox.checked_mul(factor).ok_or_else(|| {
+                        RenderError::InvalidArgument("v3 resample x product".into())
+                    })?)
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| RenderError::InvalidArgument("v3 resample x offset".into()))?;
+                let dy = destination
+                    .oy
+                    .checked_sub(source.oy.checked_mul(factor).ok_or_else(|| {
+                        RenderError::InvalidArgument("v3 resample y product".into())
+                    })?)
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| RenderError::InvalidArgument("v3 resample y offset".into()))?;
+                Params {
+                    curve: super::mask_grid([dx, dy, m, 0], [0; 4], [0; 4], None),
+                    info: [25, 0, 0, 0],
+                    ..Params::zeroed()
+                }
+            } else {
+                Self::params(8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+            };
         self.dispatch(&out, &input, &input, &input, p, &[])?;
         Ok(out)
     }
@@ -618,6 +848,42 @@ impl Context<'_> {
             .transpose()?;
         Self::q14_params(mode, out, [Some(a), Some(b)], settings, sampler.as_ref())
     }
+    fn blur_params(
+        out: Roi,
+        input: Roi,
+        radius: u32,
+        weights: &[u32],
+        axis: u32,
+    ) -> Result<Params> {
+        let output = RoiQ::from_roi(out)?;
+        let source = RoiQ::from_roi(input)?;
+        if output.level != source.level {
+            return Err(RenderError::InvalidArgument(
+                "v3 blur input level mismatch".into(),
+            ));
+        }
+        let dx = i32::try_from(output.ox - source.ox)
+            .map_err(|_| RenderError::InvalidArgument("v3 blur x offset".into()))?;
+        let dy = i32::try_from(output.oy - source.oy)
+            .map_err(|_| RenderError::InvalidArgument("v3 blur y offset".into()))?;
+        let mut params = Params {
+            curve: super::mask_grid(
+                [i32::try_from(radius).unwrap(), dx, dy, 0],
+                [0; 4],
+                [0; 4],
+                None,
+            ),
+            info: [24, 0, 0, axis],
+            ..Params::zeroed()
+        };
+        let words: &mut [u32] = bytemuck::cast_slice_mut(&mut params.curve);
+        words[4..37].fill(0);
+        for (index, &weight) in weights.iter().enumerate() {
+            let word = 4 + index / 2;
+            words[word] |= weight << ((index % 2) * 16);
+        }
+        Ok(params)
+    }
     fn integer_roi(roi: Roi) -> Result<[i32; 3]> {
         let invalid =
             || RenderError::GpuUnsupported("v3 ROI has no integer origin or scale".into());
@@ -697,6 +963,162 @@ impl Context<'_> {
         let (entries, _) = self.lookup_entries(&mask.tiles, transform, roi, layer, "mask")?;
         Ok((entries, transform))
     }
+    fn vector_q14(
+        &mut self,
+        paths: &[StyledPath],
+        world: alto_core::FixedAffine,
+        roi: Roi,
+    ) -> Result<Target> {
+        let [ox, oy, level] = crate::raster_q8::roi_grid(roi.x, roi.y, roi.scale)
+            .ok_or_else(|| RenderError::GpuUnsupported("v3 vector ROI is not integer".into()))?;
+        let level = i32::try_from(level)
+            .ok()
+            .filter(|l| (-6..=12).contains(l))
+            .ok_or_else(|| RenderError::InvalidArgument("v3 vector level out of range".into()))?;
+        // VECTOR_TRANSFORM_RANGE: a world that puts a point of the node outside
+        // the Q8 grid's integer range makes the whole node transparent (not the
+        // tile refused), like TEXT_TRANSFORM_RANGE. It depends on the node and
+        // level only, so every tile agrees.
+        let mut mapped = Vec::with_capacity(paths.len());
+        for path in paths {
+            match crate::raster_q8::map_path(&path.data, world, level) {
+                Some(commands) => mapped.push(commands),
+                None => return self.zero(roi),
+            }
+        }
+        let mut current = self.zero(roi)?;
+        for (path, commands) in paths.iter().zip(mapped) {
+            let Some(fill) = path.fill else { continue };
+            let color = crate::raster_q8::color_q14(fill).ok_or_else(|| {
+                RenderError::GpuUnsupported("v3 vector color out of range".into())
+            })?;
+            if color[3] == 0 {
+                continue;
+            }
+            let rule = match path.fill_rule {
+                FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
+                FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
+            };
+            // VECTOR_CURVE_RANGE: a curve the subdivision limit cannot flatten
+            // skips its path at this level on every tile; the others are drawn.
+            let coverage = match crate::raster_q8::rasterize(
+                &commands,
+                rule,
+                [ox, oy, i64::from(roi.w), i64::from(roi.h)],
+                crate::raster_q8::CURVE_LIMIT,
+            ) {
+                Ok(coverage) => coverage,
+                Err(crate::raster_q8::RasterError::CurveRange) => continue,
+                Err(crate::raster_q8::RasterError::Range) => {
+                    return Err(RenderError::GpuUnsupported(
+                        "v3 vector window out of range".into(),
+                    ));
+                }
+            };
+            if coverage.iter().all(|&v| v == 0) {
+                continue;
+            }
+            let need = u64::from(roi.w) * u64::from(roi.h) + 64;
+            if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
+                return Err(RenderError::Budget(
+                    "v3 vector coverage exceeds GPU budget".into(),
+                ));
+            }
+            let texture = memory::create_texture(
+                &self.r.device,
+                &wgpu::TextureDescriptor {
+                    label: Some("v3 vector coverage"),
+                    size: wgpu::Extent3d {
+                        width: roi.w,
+                        height: roi.h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                Class::Effects,
+            )?;
+            self.r.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &coverage,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(roi.w),
+                    rows_per_image: Some(roi.h),
+                },
+                wgpu::Extent3d {
+                    width: roi.w,
+                    height: roi.h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let output = self.alloc(roi)?;
+            let pipeline = self.resources.vector_q14.as_ref().ok_or_else(|| {
+                RenderError::Internal("v3 vector pipeline was not created".into())
+            })?;
+            let params = buffer(
+                &self.r.device,
+                &self.r.queue,
+                "v3 vector paint params",
+                &[VectorQ14Params {
+                    color: color.map(u32::from),
+                    size: [roi.w, roi.h, 0, 0],
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?;
+            let input = self.resources.pool[current.index]
+                .texture
+                .create_view(&Default::default());
+            let mask = texture.create_view(&Default::default());
+            let target = self.resources.pool[output.index]
+                .texture
+                .create_view(&Default::default());
+            let group = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("v3 vector paint"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mask),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&target),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: params.as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut pass = self.encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &group, &[]);
+                pass.dispatch_workgroups(roi.w.div_ceil(16), roi.h.div_ceil(16), 1);
+            }
+            self.r.retired.effect_texture(texture);
+            self.r
+                .retired
+                .classified_buffer(&params, MemoryClass::Effects);
+            current = output;
+        }
+        Ok(current)
+    }
+
     fn vector(
         &mut self,
         content: VectorContent,
@@ -777,7 +1199,11 @@ impl Context<'_> {
     ) -> Result<Target> {
         let sample = roi.coarsen(feather / 64.0);
         let effect = REffect {
-            kind: REffectKind::GaussianBlur { radius: feather },
+            kind: REffectKind::GaussianBlur {
+                radius: feather,
+                radius_q8: alto_core::blur::blur_radius_q8_f32(feather)
+                    .expect("validated vector feather"),
+            },
             selection: None,
         };
         let input = Self::input_roi(std::slice::from_ref(&effect), sample);
@@ -795,6 +1221,52 @@ impl Context<'_> {
         let output = self.effects(coverage, &[effect], sample, WorldTransform::Legacy(world))?;
         self.crop(output, roi)
     }
+    fn path_coverage_q14(
+        &mut self,
+        path: &alto_vector::PathData,
+        rule: FillRule,
+        world: alto_core::FixedAffine,
+        roi: Roi,
+        feather: f32,
+    ) -> Result<Target> {
+        let radius_q8 = alto_core::blur::blur_radius_q8_f32(feather)
+            .ok_or_else(|| RenderError::InvalidArgument("v3 vector feather radius".into()))?;
+        let sample = if radius_q8 == 0 {
+            roi
+        } else {
+            let grid = RoiQ::from_roi(roi)?;
+            let k = alto_core::blur::blur_coarsen_k(feather)
+                .ok_or_else(|| RenderError::InvalidArgument("v3 vector feather coarsen".into()))?;
+            grid.coarsen(k.max(grid.level))?.to_roi()?
+        };
+        let effect = REffect {
+            kind: REffectKind::GaussianBlur {
+                radius: feather,
+                radius_q8,
+            },
+            selection: None,
+        };
+        let input = if radius_q8 == 0 {
+            sample
+        } else {
+            Self::input_roi_v3(std::slice::from_ref(&effect), sample)?
+        };
+        let coverage = self.vector_q14(
+            &[StyledPath {
+                data: path.clone(),
+                fill: Some([1.0; 4]),
+                stroke: None,
+                fill_rule: rule,
+            }],
+            world,
+            input,
+        )?;
+        if radius_q8 == 0 {
+            return Ok(coverage);
+        }
+        let blurred = self.stage(coverage, &effect, sample, WorldTransform::V3(world))?;
+        self.crop(blurred, roi)
+    }
     fn vector_coverage(
         &mut self,
         node: &RNode,
@@ -802,12 +1274,49 @@ impl Context<'_> {
         roi: Roi,
     ) -> Result<Option<Target>> {
         if self.resources.exact {
-            if node.features.vector_mask.is_none() && node.features.clip_path.is_none() {
-                return Ok(None);
+            let mut result = None;
+            if let Some(mask) = &node.features.vector_mask {
+                let local =
+                    alto_core::FixedAffine::from_affine(mask.transform).ok_or_else(|| {
+                        RenderError::GpuUnsupported("v3 vector mask transform out of range".into())
+                    })?;
+                let transform = world.fixed()?.concat(local).ok_or_else(|| {
+                    RenderError::GpuUnsupported("v3 vector mask world out of range".into())
+                })?;
+                result = Some(self.path_coverage_q14(
+                    &mask.path,
+                    mask.fill_rule,
+                    transform,
+                    roi,
+                    mask.feather,
+                )?);
             }
-            return Err(RenderError::Internal(
-                "v3 vector coverage reached M5".into(),
-            ));
+            if let Some(path) = &node.features.clip_path {
+                let local =
+                    alto_core::FixedAffine::from_affine(path.transform).ok_or_else(|| {
+                        RenderError::GpuUnsupported("v3 clip path transform out of range".into())
+                    })?;
+                let transform = world.fixed()?.concat(local).ok_or_else(|| {
+                    RenderError::GpuUnsupported("v3 clip path world out of range".into())
+                })?;
+                let coverage =
+                    self.path_coverage_q14(&path.path, path.fill_rule, transform, roi, 0.0)?;
+                result = Some(if let Some(mask) = result {
+                    let out = self.alloc(roi)?;
+                    let params = Self::q14_params(
+                        26,
+                        roi,
+                        [Some(mask.roi), Some(coverage.roi)],
+                        [0; 4],
+                        None,
+                    )?;
+                    self.dispatch(&out, &mask, &coverage, &mask, params, &[])?;
+                    out
+                } else {
+                    coverage
+                });
+            }
+            return Ok(result);
         }
         let world = world.legacy()?;
         let mut result = None;
@@ -844,33 +1353,56 @@ impl Context<'_> {
         node: &RNode,
         world: WorldTransform,
     ) -> Result<Target> {
-        // Version 3 has no vector masks or clip paths (`v3_gap`). Without a pixel
-        // mask, `blend` applies the opacity. With one, mode 21 applies the mask and
-        // the opacity once, as one Q28 factor, and `blend` uses opacity 1.
+        // Pixel-mask/opacity is applied first, then one vector coverage product.
         if self.resources.exact {
-            let Some(mask) = &node.features.mask else {
+            if node.features.mask.is_none()
+                && node.features.vector_mask.is_none()
+                && node.features.clip_path.is_none()
+            {
                 return Ok(source);
-            };
+            }
             let out = self.alloc(source.roi)?;
-            let (entries, transform) = self.mask_entries(
-                mask,
-                world,
-                source.roi,
-                if self.mask_preview {
-                    Some(node.key)
-                } else {
-                    None
-                },
-            )?;
+            let (entries, transform) = if let Some(mask) = &node.features.mask {
+                let (entries, transform) = self.mask_entries(
+                    mask,
+                    world,
+                    source.roi,
+                    if self.mask_preview {
+                        Some(node.key)
+                    } else {
+                        None
+                    },
+                )?;
+                (entries, Some(transform))
+            } else {
+                (vec![], None)
+            };
             let p = Self::mask_params(
                 21,
-                Some(transform),
+                transform,
                 source.roi,
                 source.roi,
                 source.roi,
-                [crate::composite_opacity_q14(node.opacity), 1, 0, 0],
+                [
+                    crate::composite_opacity_q14(node.opacity),
+                    i32::from(node.features.mask.is_some()),
+                    0,
+                    0,
+                ],
             )?;
             self.dispatch(&out, &source, &source, &source, p, &entries)?;
+            if let Some(coverage) = self.vector_coverage(node, world, source.roi)? {
+                let masked = self.alloc(source.roi)?;
+                let p = Self::q14_params(
+                    26,
+                    source.roi,
+                    [Some(out.roi), Some(coverage.roi)],
+                    [0; 4],
+                    None,
+                )?;
+                self.dispatch(&masked, &out, &coverage, &out, p, &[])?;
+                return Ok(masked);
+            }
             return Ok(out);
         }
         if node.features.mask.is_none()
@@ -928,7 +1460,10 @@ impl Context<'_> {
             // Version 3 mode 19: the Q14 layer composite with the host-quantized
             // opacity. Clipping is refused. A masked node's opacity was consumed
             // by `apply_props` (mode 21), so it composites at opacity 1.
-            let opacity = if node.features.mask.is_some() {
+            let opacity = if node.features.mask.is_some()
+                || node.features.vector_mask.is_some()
+                || node.features.clip_path.is_some()
+            {
                 1.0
             } else {
                 node.opacity
@@ -966,26 +1501,51 @@ impl Context<'_> {
         roi: Roi,
         world: WorldTransform,
     ) -> Result<Target> {
-        // A selection on a color-adjust is mode 22 below.
-        if self.resources.exact && !matches!(effect.kind, REffectKind::ColorAdjust { .. }) {
+        // A selection on either integer stage is mode 22 below.
+        if self.resources.exact
+            && !matches!(
+                effect.kind,
+                REffectKind::ColorAdjust { .. } | REffectKind::GaussianBlur { .. }
+            )
+        {
             return Err(RenderError::Internal(
                 "v3 effect without an integer stage reached the M5 renderer".into(),
             ));
         }
         let filtered = match effect.kind {
-            REffectKind::GaussianBlur { radius } => {
-                let r = (radius / roi.scale).ceil() as u32;
-                if r == 0 {
-                    input.clone()
+            REffectKind::GaussianBlur { radius, radius_q8 } => {
+                if self.resources.exact {
+                    let grid = RoiQ::from_roi(roi)?;
+                    let (r, rho8) = grid.taps(radius_q8)?;
+                    if r == 0 {
+                        input.clone()
+                    } else {
+                        let weights = super::blur_kernel_q16(r, rho8).ok_or_else(|| {
+                            RenderError::InvalidArgument("v3 blur kernel out of range".into())
+                        })?;
+                        let middle_roi = grid.expand(0, r)?.to_roi()?;
+                        let middle = self.alloc(middle_roi)?;
+                        let horizontal = Self::blur_params(middle_roi, input.roi, r, &weights, 0)?;
+                        self.dispatch(&middle, &input, &input, &input, horizontal, &[])?;
+                        let out = self.alloc(roi)?;
+                        let vertical = Self::blur_params(roi, middle_roi, r, &weights, 1)?;
+                        self.dispatch(&out, &middle, &middle, &middle, vertical, &[])?;
+                        out
+                    }
                 } else {
-                    let middle = self.alloc(roi.expand(0, r))?;
-                    let mut p = Self::params(2, world.legacy()?);
-                    p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
-                    self.dispatch(&middle, &input, &input, &input, p, &[])?;
-                    let out = self.alloc(roi)?;
-                    p.info[3] = 1;
-                    self.dispatch(&out, &middle, &middle, &middle, p, &[])?;
-                    out
+                    let r = (radius / roi.scale).ceil() as u32;
+                    if r == 0 {
+                        input.clone()
+                    } else {
+                        let middle = self.alloc(roi.expand(0, r))?;
+                        let mut p = Self::params(2, world.legacy()?);
+                        p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
+                        self.dispatch(&middle, &input, &input, &input, p, &[])?;
+                        let out = self.alloc(roi)?;
+                        p.info[3] = 1;
+                        self.dispatch(&out, &middle, &middle, &middle, p, &[])?;
+                        out
+                    }
                 }
             }
             REffectKind::ColorAdjust {
@@ -1085,9 +1645,15 @@ impl Context<'_> {
         let mut roi = desired;
         for (i, e) in effects.iter().enumerate().rev() {
             outputs[i] = roi;
-            if let REffectKind::GaussianBlur { radius } = e.kind {
-                let r = (radius / roi.scale).ceil() as u32;
-                roi = roi.expand(r, r);
+            if let REffectKind::GaussianBlur { radius, radius_q8 } = e.kind {
+                if self.resources.exact {
+                    let grid = RoiQ::from_roi(roi)?;
+                    let (r, _) = grid.taps(radius_q8)?;
+                    roi = grid.expand(r, r)?.to_roi()?;
+                } else {
+                    let r = (radius / roi.scale).ceil() as u32;
+                    roi = roi.expand(r, r);
+                }
             }
         }
         let mut source = input;
@@ -1120,12 +1686,24 @@ impl Context<'_> {
                 }
             };
         };
-        if let REffectKind::GaussianBlur { radius } = effect.kind {
-            let sample = desired.coarsen(radius / 64.0);
+        if let REffectKind::GaussianBlur { radius, .. } = effect.kind {
+            let sample = if self.resources.exact {
+                let grid = RoiQ::from_roi(desired)?;
+                let target = alto_core::blur::blur_coarsen_k(radius)
+                    .map(|k| k.max(grid.level))
+                    .unwrap_or(grid.level);
+                grid.coarsen(target)?.to_roi()?
+            } else {
+                desired.coarsen(radius / 64.0)
+            };
             let source = self.stack(
                 input,
                 previous,
-                Self::input_roi(std::slice::from_ref(effect), sample),
+                if self.resources.exact {
+                    Self::input_roi_v3(std::slice::from_ref(effect), sample)?
+                } else {
+                    Self::input_roi(std::slice::from_ref(effect), sample)
+                },
                 world,
             )?;
             let mut plain = effect.clone();
@@ -1136,14 +1714,19 @@ impl Context<'_> {
                 let original = self.stack(input, previous, desired, world)?;
                 let out = self.alloc(desired)?;
                 let (entries, transform) = self.mask_entries(mask, world, desired, None)?;
-                self.dispatch(
-                    &out,
-                    &original,
-                    &filtered,
-                    &original,
-                    Self::params(5, transform.legacy()?),
-                    &entries,
-                )?;
+                let p = if self.resources.exact {
+                    Self::mask_params(
+                        22,
+                        Some(transform),
+                        desired,
+                        original.roi,
+                        filtered.roi,
+                        [0; 4],
+                    )?
+                } else {
+                    Self::params(5, transform.legacy()?)
+                };
+                self.dispatch(&out, &original, &filtered, &original, p, &entries)?;
                 Ok(out)
             } else {
                 Ok(filtered)
@@ -1155,12 +1738,22 @@ impl Context<'_> {
     }
     fn input_roi(effects: &[REffect], mut roi: Roi) -> Roi {
         for e in effects.iter().rev() {
-            if let REffectKind::GaussianBlur { radius } = e.kind {
+            if let REffectKind::GaussianBlur { radius, .. } = e.kind {
                 let r = (radius / roi.scale).ceil() as u32;
                 roi = roi.expand(r, r);
             }
         }
         roi
+    }
+    fn input_roi_v3(effects: &[REffect], roi: Roi) -> Result<Roi> {
+        let mut grid = RoiQ::from_roi(roi)?;
+        for effect in effects.iter().rev() {
+            if let REffectKind::GaussianBlur { radius_q8, .. } = effect.kind {
+                let (r, _) = grid.taps(radius_q8)?;
+                grid = grid.expand(r, r)?;
+            }
+        }
+        grid.to_roi()
     }
     fn children(
         &mut self,
@@ -1198,10 +1791,13 @@ impl Context<'_> {
                     accum
                 };
                 let desired = input.roi;
-                let filtered = if stack
-                    .iter()
-                    .any(|e| matches!(e.kind,REffectKind::GaussianBlur {radius} if radius>0.0))
-                {
+                let filtered = if stack.iter().any(|e| {
+                    if self.resources.exact {
+                        matches!(e.kind,REffectKind::GaussianBlur {radius_q8, ..} if radius_q8>0)
+                    } else {
+                        matches!(e.kind,REffectKind::GaussianBlur {radius, ..} if radius>0.0)
+                    }
+                }) {
                     let prefix = if node.features.clip {
                         &children[base_position..position]
                     } else {
@@ -1455,7 +2051,11 @@ impl Context<'_> {
                 out
             }
             RContent::Mesh(paths) => {
-                self.vector(VectorContent::Paths(paths), world.legacy()?, roi, true)?
+                if self.resources.exact {
+                    self.vector_q14(paths, world.fixed()?, roi)?
+                } else {
+                    self.vector(VectorContent::Paths(paths), world.legacy()?, roi, true)?
+                }
             }
             RContent::Text(runs) => {
                 self.vector(VectorContent::Text(runs), world.legacy()?, roi, false)?
@@ -1549,17 +2149,13 @@ impl Renderer {
             let view = cx.resources.pool[source.index]
                 .texture
                 .create_view(&Default::default());
-            let uniform = if let Some([x, y]) = origin {
+            let uniform = if let Some(grid) = origin {
                 buffer(
                     &cx.r.device,
                     &cx.r.queue,
                     "M5 integer resolve config",
                     &[IntegerResolve {
-                        span: super::resolve_span(
-                            [i64::from(x), i64::from(y)],
-                            1,
-                            [i64::from(scene.canvas.x1), i64::from(scene.canvas.y1)],
-                        ),
+                        span: resolve_span_q(grid, [scene.canvas.x1, scene.canvas.y1]),
                         info: [slot, 0, 0, 0],
                     }],
                     wgpu::BufferUsages::UNIFORM,
@@ -2050,5 +2646,85 @@ mod pool_tests {
         // f32 would round the canvas edge 16777217 to 16777216 and drop pixel 0.
         assert_eq!(span([16_777_216, 0], 1, [16_777_217, 1]), [0, 0, 1, 1]);
         assert_eq!(16_777_217f32, 16_777_216f32);
+    }
+    fn grid(level: i32, tx: i64, ty: i64) -> RoiQ {
+        RoiQ {
+            level,
+            ox: tx * 256,
+            oy: ty * 256,
+            w: 256,
+            h: 256,
+        }
+    }
+    fn same(a: Roi, b: Roi) -> bool {
+        a.x.to_bits() == b.x.to_bits()
+            && a.y.to_bits() == b.y.to_bits()
+            && a.scale.to_bits() == b.scale.to_bits()
+            && (a.w, a.h) == (b.w, b.h)
+    }
+    #[test]
+    fn blur_roi_q_matches_f32_roi() {
+        let tiles = [-(1i64 << 15), -3, -1, 0, 1, 7, 1 << 15];
+        let radii = [1u32, 2, 255, 256, 257, 4096, 8191, 8192, 8193, 16383, 16384];
+        for level in -6..=12 {
+            for &tx in &tiles {
+                for &ty in &tiles {
+                    let q = grid(level, tx, ty);
+                    let f = q.to_roi().unwrap();
+                    assert_eq!(RoiQ::from_roi(f).unwrap(), q);
+                    for &r8 in &radii {
+                        // R / 256 is exact in f32, so v2 and v3 read one radius.
+                        let rf = r8 as f32 / 256.0;
+                        let k = alto_core::blur::blur_coarsen_k(rf).unwrap();
+                        let sample = q.coarsen(k.max(level)).unwrap();
+                        let sample_f = f.coarsen(rf / 64.0);
+                        assert!(
+                            same(sample.to_roi().unwrap(), sample_f),
+                            "coarsen level {level} tile ({tx}, {ty}) R {r8}"
+                        );
+                        let (taps, _) = sample.taps(r8).unwrap();
+                        assert_eq!(taps, (rf / sample_f.scale).ceil() as u32);
+                        let input = sample.expand(taps, taps).unwrap();
+                        assert!(
+                            same(input.to_roi().unwrap(), sample_f.expand(taps, taps)),
+                            "expand level {level} tile ({tx}, {ty}) R {r8}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn blur_rejects_out_of_range_levels() {
+        for level in [-7, -40, 13, i32::MIN, i32::MAX] {
+            let q = RoiQ {
+                level,
+                ox: 0,
+                oy: 0,
+                w: 256,
+                h: 256,
+            };
+            assert!(matches!(
+                q.taps(16384),
+                Err(RenderError::InvalidArgument(_))
+            ));
+            assert!(matches!(q.coarsen(0), Err(RenderError::InvalidArgument(_))));
+            assert!(matches!(
+                q.coarsen(i32::MAX),
+                Err(RenderError::InvalidArgument(_))
+            ));
+            let f = Roi {
+                x: 0.0,
+                y: 0.0,
+                scale: 2f32.powi(level.clamp(-126, 127)),
+                w: 256,
+                h: 256,
+            };
+            assert!(RoiQ::from_roi(f).is_err());
+        }
+        // In range, a ratio over 128 and a finer target are refused too.
+        assert!(grid(-6, 0, 0).coarsen(2).is_err());
+        assert!(grid(0, 0, 0).coarsen(-1).is_err());
+        assert!(grid(0, 0, 0).taps(16385).is_err());
     }
 }

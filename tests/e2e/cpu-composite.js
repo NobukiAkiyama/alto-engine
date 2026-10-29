@@ -1033,26 +1033,36 @@ export function fnv64(bytes) {
 
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
-// Selection-limited color-adjust is v3 mode 22.
+// Selection-limited color-adjust and Gaussian blur are v3 mode 22.
 const isColorAdjust = (effect) => effect?.type === "color_adjust";
+const isIntegerEffect = (effect) => isColorAdjust(effect) || effect?.type === "gaussian_blur";
+// Rust `raster_q8::stroke_visible`: a nonzero width (the default is 1) and an
+// alpha whose half-away Q14 is nonzero, i.e. at least 2^-15.
+const strokeVisible = (stroke) => Boolean(stroke) && (stroke.width ?? 1) !== 0 &&
+  !(Math.abs(stroke.color?.[3] ?? 1) < 2 ** -15);
 
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
  * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
- * effects, with or without a selection, color-adjust adjustment layers (any
- * blend with an enabled pixel mask, normal blend without), and enabled pixel masks) and "v3-unsupported" (the host refuses the
- * scene; no tile is drawn).
+ * and Gaussian blur effects, with or without a selection, color-adjust adjustment
+ * layers (any blend with an enabled pixel mask, normal blend without), enabled
+ * pixel masks, filled vectors, and enabled vector masks and clip paths) and
+ * "v3-unsupported" (the host refuses the scene; no tile is drawn). A visibly
+ * stroked vector keeps the v2 tessellator and is refused, and so are vector masks and
+ * clip paths on adjustment layers.
  */
 export function sceneGap(snapshot) {
   const found = new Set();
   let unsupported = false;
-  let pixelMask = false;
+  let integer = false;
   for (const node of snapshot.nodes.values()) {
     const props = node.props || {};
     if (props.mask) found.add("mask");
     const enabledMask = Boolean(props.mask && props.mask_enabled !== false);
-    if (enabledMask) pixelMask = true;
+    const enabledVectorMask = Boolean(props.vector_mask && props.vector_mask.enabled !== false);
+    const enabledClipPath = Boolean(props.clip_path && props.clip_path.enabled !== false);
+    if (enabledMask || enabledVectorMask || enabledClipPath) integer = true;
     if (props.vector_mask) found.add("vector mask");
     if (props.clip_path) found.add("clip path");
     if (props.clip_to_below) found.add("clip");
@@ -1061,18 +1071,20 @@ export function sceneGap(snapshot) {
     if (node.type === "text") found.add("text");
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
-    if (props.vector_mask || props.clip_path || props.clip_to_below ||
-        node.type === "vector" || node.type === "text" ||
-        (props.effects || []).some((effect) => !isColorAdjust(effect)) ||
-        (node.type === "adjustment" && (!isColorAdjust(node.adjustment) ||
+    if (props.clip_to_below || node.type === "text" ||
+        (node.type === "vector" && (node.paths || []).some((path) => strokeVisible(path?.stroke))) ||
+        (props.effects || []).some((effect) => !isIntegerEffect(effect)) ||
+        (node.type === "adjustment" && (!isIntegerEffect(node.adjustment) ||
           // Unmasked non-normal blends reach f32 stages upstream of mode 23.
-          (!enabledMask && (props.blend ?? "normal") !== "normal")))) {
+          (!enabledMask && (props.blend ?? "normal") !== "normal") ||
+          // No integer coverage mix of backdrop and adjusted copy is defined.
+          enabledVectorMask || enabledClipPath))) {
       unsupported = true;
     }
   }
   if (snapshot.meta?.render_version === 3) {
     if (unsupported) return "v3-unsupported";
-    if (found.has("effects") || found.has("adjustment") || pixelMask) return "v3-m5-integer";
+    if (found.has("effects") || found.has("adjustment") || found.has("vector") || integer) return "v3-m5-integer";
     return null;
   }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;

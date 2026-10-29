@@ -27,9 +27,11 @@ pub fn render_mask(map: &TileMap, linked: bool) -> RMask {
 pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
     let f = |n: f64| n as f32;
     let kind = match effect {
-        alto_doc::Effect::GaussianBlur { radius, .. } => {
-            REffectKind::GaussianBlur { radius: f(*radius) }
-        }
+        alto_doc::Effect::GaussianBlur { radius, .. } => REffectKind::GaussianBlur {
+            radius: f(*radius),
+            radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
+                .expect("validated Gaussian blur radius"),
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,
@@ -784,6 +786,29 @@ mod tests {
     }
     fn selected(e: &Engine, d: DocHandle) -> Decoded {
         decode(e.document(d).unwrap().selection.as_ref().unwrap(), e).unwrap()
+    }
+
+    #[test]
+    fn blur_radius_q8_refines_scene_equality() {
+        // Both radii narrow to the same f32 (so v2 draws them alike), but the
+        // v3 radius is decoded from the f64 bits and they are different Q8.
+        let blur = |radius: f64| {
+            render_effect(&alto_doc::Effect::GaussianBlur {
+                radius,
+                selection: None,
+                extra: Default::default(),
+            })
+        };
+        let (low, high) = (1.0 / 512.0 - 2f64.powi(-40), 1.0 / 512.0 + 2f64.powi(-40));
+        assert_eq!(low as f32, high as f32);
+        let (a, b) = (blur(low), blur(high));
+        assert_ne!(a, b);
+        let radius_q8 = |e: &REffect| match e.kind {
+            REffectKind::GaussianBlur { radius_q8, .. } => radius_q8,
+            _ => unreachable!(),
+        };
+        assert_eq!((radius_q8(&a), radius_q8(&b)), (0, 1));
+        assert_eq!(radius_q8(&blur(64.0)), 16384);
     }
 
     #[test]
