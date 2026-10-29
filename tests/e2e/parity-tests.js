@@ -784,8 +784,8 @@ export async function runParityTests(engine, log) {
       });
     }
     // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
-    // hierarchy in many steps over several ticks, and still equals the warm pyramid.
-    await test("v3 cold pyramid is built incrementally across ticks", async () => {
+    // hierarchy in bounded steps, yielding if needed, and equals the warm pyramid.
+    await test("v3 cold pyramid builds in bounded steps", async () => {
       const fixture = await fetch("../../tests/fixtures/render-v3-empty-4096x256.alto");
       assert(fixture.ok, `v3 fixture status ${fixture.status}`);
       const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
@@ -814,7 +814,13 @@ export async function runParityTests(engine, log) {
       const steps = frame.profile?.steps ?? 0;
       log(`v3 cold pyramid: ${steps} steps over ${frame.ticks} ticks, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
       assert(steps >= 31, `cold level 4 built in ${steps} steps; expected one per leaf or downsample`);
-      assert(frame.ticks >= 2, `cold level 4 finished in ${frame.ticks} tick(s); the Worker was not handed back`);
+      // Fast adapters can finish all steps in one Worker tick. In that case,
+      // require the measured composition time to stay within the 8 ms frame
+      // budget, allowing the final step to cross the deadline.
+      const composeMs = frame.profile?.composeMs;
+      const maxStepMs = frame.profile?.maxStepMs;
+      assert(frame.ticks >= 1 && (frame.ticks >= 2 || (Number.isFinite(composeMs) && Number.isFinite(maxStepMs) && composeMs <= 8 + maxStepMs)),
+        `cold level 4 took ${composeMs} ms over ${frame.ticks} tick(s), max step ${maxStepMs} ms`);
       const shown = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0 }));
       const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0, fresh: true }));
       const cpu = renderPyramidCase({ w: 4096, h: 256, level: 4, tx: 0, ty: 0,
