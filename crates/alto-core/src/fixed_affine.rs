@@ -255,4 +255,18 @@ mod tests {
         };
         assert_eq!(singular.inverse_q16(), Some(None));
     }
+
+    #[test]
+    fn q32_entry_precedes_q16_inverse_rounding() {
+        // The old Q16 path leaves this just below a tie. Version 3 rounds each
+        // stored local matrix to Q32 first, making the shear an exact Q16 tie.
+        let below = 2f64.powi(-17) - 2f64.powi(-70);
+        let world = FixedAffine::from_affine(Affine2([1.0, 0.0, -below, 1.0, 0.0, 0.0]))
+            .expect("Q32 shear");
+        assert_eq!(world.m[2], -(1 << 15));
+        assert_eq!(
+            world.inverse_q16(),
+            Some(Some([1 << 16, 0, 1, 1 << 16, 0, 0]))
+        );
+    }
 }
