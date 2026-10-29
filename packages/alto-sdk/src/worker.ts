@@ -69,7 +69,8 @@ self.addEventListener("error", (e) => {
   });
 });
 let diagnosticProfiles: Record<string, number>[] | null = null;
-// Synchronous Worker time for profiled ticks, including automatic drain ticks.
+let profilingEnabled = false;
+// Synchronous Worker time for every tick after a profiled cache reset.
 let diagnosticTickMs: number[] | null = null;
 let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
 const readableAfterFailure = new Set<string>([
@@ -960,6 +961,8 @@ async function execute(m: Queued): Promise<unknown> {
       return true;
     case "setProfiling":
       runtime.setProfiling(!!m.enabled);
+      profilingEnabled = !!m.enabled;
+      if (!profilingEnabled) diagnosticTickMs = null;
       return true;
     case "waitFrame": {
       let frame;
@@ -977,7 +980,7 @@ async function execute(m: Queued): Promise<unknown> {
           pumpDecodes();
           if (frame.profile) profiles.push(frame.profile);
           noteDeferred(frame, "wait");
-          if (frame.profile) tickMs.push(performance.now() - tickStart);
+          tickMs.push(performance.now() - tickStart);
           if (frame.pending) await yieldTask();
           else if (frame.presentDeferred) await presentSettled();
         } while (frame.pending || frame.presentDeferred);
@@ -1013,7 +1016,7 @@ function resetRenderCache(cpu: boolean) {
   prefetchDisabled = true;
   runtime.resetRenderCache(cpu);
   diagnosticProfiles = [];
-  diagnosticTickMs = [];
+  diagnosticTickMs = profilingEnabled ? [] : null;
 }
 function applyPendingView() {
   if (runtime && pendingResize) {
@@ -1066,7 +1069,7 @@ async function drain() {
             // spinning: on a software adapter, spinning takes the GPU's CPU time.
             // The wait is capped: a device that never settles used to loop forever.
             noteDeferred(value, "drain");
-            if (value.profile && diagnosticTickMs) diagnosticTickMs.push(performance.now() - tickStart);
+            if (diagnosticTickMs) diagnosticTickMs.push(performance.now() - tickStart);
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {

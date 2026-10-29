@@ -36,7 +36,8 @@ self.addEventListener("error", (e) => {
     });
 });
 let diagnosticProfiles = null;
-// Synchronous Worker time for profiled ticks, including automatic drain ticks.
+let profilingEnabled = false;
+// Synchronous Worker time for every tick after a profiled cache reset.
 let diagnosticTickMs = null;
 let injectedStorageFault = null;
 const readableAfterFailure = new Set([
@@ -929,6 +930,9 @@ async function execute(m) {
             return true;
         case "setProfiling":
             runtime.setProfiling(!!m.enabled);
+            profilingEnabled = !!m.enabled;
+            if (!profilingEnabled)
+                diagnosticTickMs = null;
             return true;
         case "waitFrame": {
             let frame;
@@ -947,8 +951,7 @@ async function execute(m) {
                     if (frame.profile)
                         profiles.push(frame.profile);
                     noteDeferred(frame, "wait");
-                    if (frame.profile)
-                        tickMs.push(performance.now() - tickStart);
+                    tickMs.push(performance.now() - tickStart);
                     if (frame.pending)
                         await yieldTask();
                     else if (frame.presentDeferred)
@@ -987,7 +990,7 @@ function resetRenderCache(cpu) {
     prefetchDisabled = true;
     runtime.resetRenderCache(cpu);
     diagnosticProfiles = [];
-    diagnosticTickMs = [];
+    diagnosticTickMs = profilingEnabled ? [] : null;
 }
 function applyPendingView() {
     if (runtime && pendingResize) {
@@ -1045,7 +1048,7 @@ async function drain() {
                         // spinning: on a software adapter, spinning takes the GPU's CPU time.
                         // The wait is capped: a device that never settles used to loop forever.
                         noteDeferred(value, "drain");
-                        if (value.profile && diagnosticTickMs)
+                        if (diagnosticTickMs)
                             diagnosticTickMs.push(performance.now() - tickStart);
                         if (value.presentDeferred && !value.composed)
                             await presentSettled();
