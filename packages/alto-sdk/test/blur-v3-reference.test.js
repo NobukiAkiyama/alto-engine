@@ -92,3 +92,16 @@ test("v3 blur passes are horizontal first and keep a constant plane constant", (
   assert.deepEqual(Array.from(tile.subarray((128 * 256 + 128) * 4, (128 * 256 + 128) * 4 + 4)), [255, 255, 255, 255]);
   assert.ok(tile[3] < 255, "the corner fades into the transparent outside");
 });
+
+test("v3 blur reference refuses what Rust refuses and clips at the canvas origin", () => {
+  for (const radius of [-1, 65, NaN, Infinity]) assert.throws(() => blurRadiusQ8(radius), RangeError, String(radius));
+  assert.throws(() => blurRadiusQ8F32(-1), RangeError);
+  for (const rf of [-1, NaN, Infinity]) assert.equal(blurCoarsenK(rf), null, String(rf));
+  assert.equal(blurCoarsenK(-0), null);
+  for (const [r, rho8] of [[0, 256], [65, 16384], [64, 16385], [1.5, 256]]) {
+    assert.throws(() => blurKernelQ16(r, rho8), RangeError, `(${r}, ${rho8})`);
+  }
+  const image = { w: 256, h: 256, pixels: new Uint8Array(256 * 256 * 4).fill(255) };
+  assert.ok(renderBlurV3(image, [8], [-1, 0]).every((v) => v === 0));
+  assert.ok(renderBlurV3(image, [8], [0, -1]).every((v) => v === 0));
+});

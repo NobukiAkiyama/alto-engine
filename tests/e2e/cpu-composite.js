@@ -1018,6 +1018,8 @@ const f32Bits = (x) => {
 
 /** `floor(radius * 256 + 1/2)` of the stored f64, from its bits (Rust `blur_radius_q8_f64`). */
 export function blurRadiusQ8(radius) {
+  // The document validates 0..=64; outside it Rust refuses rather than decodes.
+  if (!(radius >= 0 && radius <= 64)) throw new RangeError(`v3 blur radius out of range: ${radius}`);
   const bits = f64Bits(radius);
   const e = Number((bits >> 52n) & 0x7ffn);
   if (e === 0) return 0;
@@ -1030,6 +1032,7 @@ export function blurRadiusQ8(radius) {
 
 /** The same for an f32 feather (Rust `blur_radius_q8_f32`). */
 export function blurRadiusQ8F32(feather) {
+  if (!(feather >= 0 && Math.fround(feather) <= 64)) throw new RangeError(`v3 feather out of range: ${feather}`);
   const bits = f32Bits(feather);
   const e = (bits >>> 23) & 0xff;
   if (e === 0) return 0;
@@ -1042,6 +1045,8 @@ export function blurRadiusQ8F32(feather) {
 
 /** The least k with `64 * 2^k >= rf`, from the f32 bits; null for 0 (Rust `blur_coarsen_k`). */
 export function blurCoarsenK(rf) {
+  // Defined on non-negative finite f32 bits (Rust returns None otherwise).
+  if (!(rf >= 0 && Number.isFinite(rf))) return null;
   const bits = f32Bits(rf);
   const e = (bits >>> 23) & 0xff;
   const frac = bits & 0x7fffff;
@@ -1053,6 +1058,9 @@ export function blurCoarsenK(rf) {
 
 /** Half kernel `w[0..=r]` in Q16, `w[0] + 2 * sum(w[1..])` exactly 65536 (memo "重みの生成"). */
 export function blurKernelQ16(r, rho8) {
+  if (!Number.isInteger(r) || r < 1 || r > 64 || !Number.isInteger(rho8) || rho8 < 0 || rho8 > 16384) {
+    throw new RangeError(`v3 blur kernel out of range: (${r}, ${rho8})`);
+  }
   const ONE = 1n << 32n;
   const divR = (n, d) => (n + d / 2n) / d;
   const rho = BigInt(Math.max(rho8, 256));
@@ -1119,7 +1127,8 @@ export function renderBlurV3(image, radii, tile = [0, 0], canvas = [256, 256]) {
   const out = new Uint8Array(256 * 256 * 4);
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
     const dx = tile[0] * 256 + x, dy = tile[1] * 256 + y;
-    if (dx >= canvas[0] || dy >= canvas[1]) continue;
+    // Outside the canvas `[0, w) x [0, h)` the resolve writes transparent.
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1]) continue;
     const px = dx + pad, py = dy + pad;
     if (px >= w || py >= h) continue;
     out.set(resolveQ14(plane[py * w + px]), (y * 256 + x) * 4);
@@ -1325,7 +1334,10 @@ function vectorMaskQ14(path, world, tile) {
  * `canvas`. Their coverages are multiplied once and applied once (mode 26).
  */
 export function renderVectorV3({ paths, image, transform = IDENT, vectorMask, clipPath }, tile = [0, 0], canvas = [256, 256]) {
+  // Rust refuses a world outside the FixedAffine range (GpuUnsupported); only a
+  // point the Q8 grid cannot hold makes the node transparent (`map_path`).
   const world = fixedAffine(transform);
+  if (!world) throw new Error("v3 refuses a transform outside the fixed affine range");
   const origin = [tile[0] * 256, tile[1] * 256];
   let q;
   if (paths) {
@@ -1339,14 +1351,17 @@ export function renderVectorV3({ paths, image, transform = IDENT, vectorMask, cl
       for (let i = 0; i < 65536; i++) q[i] = vectorPaintQ14(q[i], color, bytes[i]);
     }
   } else {
-    q = Array.from({ length: 65536 }, (_, i) => {
-      const x = origin[0] + (i % 256), y = origin[1] + Math.floor(i / 256);
-      if (x >= image.w || y >= image.h) return [0, 0, 0, 0];
-      const k = (y * image.w + x) * 4;
-      return ingressQ14(Array.from(image.pixels.subarray(k, k + 4)));
-    });
+    // A raster reads its texel through the v3 Q16 nearest lookup of `transform`.
+    const texelAt = (tx, ty) => {
+      if (tx < 0 || ty < 0 || tx >= image.w || ty >= image.h) return [0, 0, 0, 0];
+      const k = (ty * image.w + tx) * 4;
+      return Array.from(image.pixels.subarray(k, k + 4));
+    };
+    q = Array.from({ length: 65536 }, (_, i) =>
+      ingressQ14(lookupV3(texelAt, transform, i % 256, Math.floor(i / 256), origin, 1) ?? [0, 0, 0, 0]));
   }
-  const masks = [vectorMask, clipPath].filter(Boolean).map((m) => vectorMaskQ14(m.path, fixedConcat(world, fixedAffine(m.transform ?? IDENT)), origin));
+  // A disabled mask or clip path is none (Rust filters on `enabled`).
+  const masks = [vectorMask, clipPath].filter((m) => m && m.enabled !== false).map((m) => vectorMaskQ14(m.path, fixedConcat(world, fixedAffine(m.transform ?? IDENT)), origin));
   if (masks.length) {
     const k = masks.length === 2 ? masks[0].map((a, i) => Number(divQBig(BigInt(a * masks[1][i]), 16384n))) : masks[0];
     q = q.map((v, i) => v.map((c) => Number(divQBig(BigInt(c * k[i]), 16384n))));
@@ -1354,7 +1369,7 @@ export function renderVectorV3({ paths, image, transform = IDENT, vectorMask, cl
   const out = new Uint8Array(65536 * 4);
   for (let i = 0; i < 65536; i++) {
     const x = origin[0] + (i % 256), y = origin[1] + Math.floor(i / 256);
-    if (x < canvas[0] && y < canvas[1]) out.set(resolveQ14(q[i]), i * 4);
+    if (x >= 0 && y >= 0 && x < canvas[0] && y < canvas[1]) out.set(resolveQ14(q[i]), i * 4);
   }
   return out;
 }

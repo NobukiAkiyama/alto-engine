@@ -62,3 +62,23 @@ test("v3 vector reference: half-pixel edges and premultiplied paint", () => {
   assert.deepEqual(at(32, 50), [64, 0, 0, 64]);
   assert.deepEqual(at(97, 50), [0, 0, 0, 0]);
 });
+
+test("v3 vector reference: raster transform, disabled masks and the canvas origin", () => {
+  const image = { w: 256, h: 256, pixels: new Uint8Array(256 * 256 * 4) };
+  for (let i = 0; i < 256; i++) image.pixels.set([255, 0, 0, 255], (i * 256 + 20) * 4);
+  // A raster moved 10 px right reads its column 20 at pixel 30 (Q16 nearest lookup).
+  const moved = renderVectorV3({ image, transform: [1, 0, 0, 1, 10, 0] });
+  assert.equal(alpha(moved, 30, 5), 255);
+  assert.equal(alpha(moved, 20, 5), 0);
+  // A disabled vector mask or clip path is no mask: the raster is untouched.
+  const off = { path: { commands: rect(0, 0, 1, 1) }, enabled: false };
+  assert.deepEqual(renderVectorV3({ image, vectorMask: off, clipPath: off }), renderVectorV3({ image }));
+  // An enabled one does cut it.
+  const on = { path: { commands: rect(0, 0, 1, 1) }, enabled: true };
+  assert.equal(alpha(renderVectorV3({ image, vectorMask: on }), 20, 5), 0);
+  // Left of and above the canvas origin is transparent, as the resolve clips.
+  const left = renderVectorV3({ paths: white(rect(-200, 10, -10, 100)) }, [-1, 0]);
+  assert.ok(left.every((v) => v === 0));
+  // A transform outside the fixed affine range is refused, as Rust refuses it.
+  assert.throws(() => renderVectorV3({ paths: white(rect(0, 0, 1, 1)), transform: [1e20, 0, 0, 1, 0, 0] }), /fixed affine/);
+});
