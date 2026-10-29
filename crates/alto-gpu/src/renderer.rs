@@ -244,6 +244,9 @@ pub struct GpuStroke {
     pub mask: bool,
     /// Layer to document transform, so damage is tracked in display coordinates.
     pub world: [f64; 6],
+    /// The same transform composed from the document's local matrices for v3
+    /// cache reach. It cannot be reconstructed from the rounded f64 world.
+    pub fixed_world: Option<alto_core::FixedAffine>,
     /// Document pixels this stroke has shown so far.
     pub damage: Option<Rect>,
 }
@@ -1011,14 +1014,14 @@ pub(crate) fn point(m: [f64; 6], p: [f64; 2]) -> [f64; 2] {
 }
 /// The world transform and the key box of every source tile a stroke has
 /// touched, for the version 3 integer invalidation (`invalidate_reach`).
-fn stroke_reach(stroke: &GpuStroke) -> Option<([f64; 6], [i32; 4])> {
+fn stroke_reach(stroke: &GpuStroke) -> Option<(Option<alto_core::FixedAffine>, [i32; 4])> {
     let keys = stroke.tiles.keys().fold(None, |b: Option<[i32; 4]>, k| {
         Some(match b {
             None => [k.tx, k.ty, k.tx, k.ty],
             Some([x0, y0, x1, y1]) => [x0.min(k.tx), y0.min(k.ty), x1.max(k.tx), y1.max(k.ty)],
         })
     })?;
-    Some((stroke.world, keys))
+    Some((stroke.fixed_world, keys))
 }
 /// The canvas end `[x1, y1]` of the version 3 resolve tests (they start at 0).
 fn canvas_end(scene: &RenderScene) -> [i32; 2] {
@@ -3462,6 +3465,7 @@ impl Renderer {
         erase: bool,
         mask: bool,
         world: [f64; 6],
+        fixed_world: Option<alto_core::FixedAffine>,
     ) -> Result<()> {
         if self.stroke.is_some() {
             return Err(RenderError::Conflict("stroke already active".into()));
@@ -3477,6 +3481,7 @@ impl Renderer {
             epoch: 0,
             mask,
             world,
+            fixed_world,
             damage: None,
         });
         Ok(())
@@ -3782,9 +3787,13 @@ impl Renderer {
         self.stroke = Some(stroke);
         self.invalidate(Some(damage));
         if self.integer_cache
-            && let Some((world, keys)) = reach
+            && let Some((fixed_world, keys)) = reach
         {
-            self.invalidate_reach(world, keys);
+            if let Some(fixed) = fixed_world {
+                self.invalidate_reach_fixed(fixed, keys);
+            } else {
+                self.invalidate(None);
+            }
         }
         Ok(Some(damage))
     }
@@ -3809,9 +3818,13 @@ impl Renderer {
             self.invalidate(Some(damage));
         }
         if self.integer_cache
-            && let Some((world, keys)) = reach
+            && let Some((fixed_world, keys)) = reach
         {
-            self.invalidate_reach(world, keys);
+            if let Some(fixed) = fixed_world {
+                self.invalidate_reach_fixed(fixed, keys);
+            } else {
+                self.invalidate(None);
+            }
         }
     }
     /// Discards the display tiles an edit can change. Jobs always restart: they index
