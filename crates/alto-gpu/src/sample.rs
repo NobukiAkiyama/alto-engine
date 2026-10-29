@@ -77,6 +77,7 @@ const F64_EXACT_INT: f64 = (1u64 << 53) as f64;
 
 /// Round half away from zero, exactly: `f64::round` decides on the value itself.
 /// Render version 3 (`integer_inverse`).
+#[cfg(test)]
 fn round_half_away(scaled: f64) -> f64 {
     scaled.round()
 }
@@ -116,12 +117,14 @@ fn coeff(v: f64, round: fn(f64) -> f64) -> Option<i32> {
 
 /// Q16 translation as `i64`. `None` when the rounded value is not exact in `f64`.
 /// `|q| < 2^53` implies the Q24 shift (`<< 8`) fits in `i64`.
+#[cfg(test)]
 pub fn quantize_translation(v: f64) -> Option<i64> {
     Some(quantize_q16(v, round_half_away)? as i64)
 }
 
 /// Q16 coefficient, rounded exactly half away from zero (render version 3).
 /// `None` when it does not fit in `i32::MIN + 1 ..= i32::MAX`.
+#[cfg(test)]
 pub fn quantize_coeff(v: f64) -> Option<i32> {
     coeff(v, round_half_away)
 }
@@ -134,8 +137,29 @@ pub struct IntegerInverse {
     pub ty: i64,
 }
 
+/// The v3 Q16 inverse of an integer world transform. The outer `None` means
+/// an unrepresentable inverse; the inner `None` means an exactly singular one.
+pub fn fixed_inverse(world: &alto_core::FixedAffine) -> Option<Option<IntegerInverse>> {
+    let Some(values) = world.inverse_q16()? else {
+        return Some(None);
+    };
+    let coefficient = |value: i64| i32::try_from(value).ok().filter(|v| *v != i32::MIN);
+    let translation = |value: i64| (value.unsigned_abs() < (1u64 << 53)).then_some(value);
+    Some(Some(IntegerInverse {
+        m: [
+            coefficient(values[0])?,
+            coefficient(values[1])?,
+            coefficient(values[2])?,
+            coefficient(values[3])?,
+        ],
+        tx: translation(values[4])?,
+        ty: translation(values[5])?,
+    }))
+}
+
 /// The Q16 inverse of render version 3, every value rounded exactly half away
 /// from zero.
+#[cfg(test)]
 pub fn integer_inverse(inv: [f64; 6]) -> Option<IntegerInverse> {
     Some(IntegerInverse {
         m: [
@@ -277,7 +301,26 @@ pub fn bilinear_byte(a: u8, b: u8, d: u8, e: u8, fx: i32, fy: i32) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::source_axis;
+    use super::{fixed_inverse, source_axis};
+
+    #[test]
+    fn fixed_inverse_distinguishes_singular_and_unrepresentable() {
+        let identity = fixed_inverse(&alto_core::FixedAffine::IDENTITY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.m, [65536, 0, 0, 65536]);
+        assert_eq!((identity.tx, identity.ty), (0, 0));
+        let singular = alto_core::FixedAffine {
+            m: [1i64 << 32, 0, 0, 0],
+            t: [0, 0],
+        };
+        assert_eq!(fixed_inverse(&singular), Some(None));
+        let too_small = alto_core::FixedAffine {
+            m: [1, 0, 0, 1i64 << 32],
+            t: [0, 0],
+        };
+        assert_eq!(fixed_inverse(&too_small), None);
+    }
 
     #[test]
     fn cancelling_q24_sum_is_exact_and_out_of_range_is_transparent() {

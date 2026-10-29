@@ -80,6 +80,7 @@ enum Op {
     },
     Draw {
         inv: [f64; 6],
+        q: Option<IntegerInverse>,
         opacity: f32,
         mode: u32,
         tiles: Vec<Tile>,
@@ -705,6 +706,76 @@ fn walk(node: &Node, parent: [f64; 6], ops: &mut Vec<Op>) {
             tiles.sort_by_key(|t| (t.tx, t.ty));
             ops.push(Op::Draw {
                 inv: inv.0,
+                q: None,
+                opacity,
+                mode: *mode,
+                tiles,
+            });
+        }
+    }
+}
+
+fn walk_v3(node: &Node, parent: alto_core::FixedAffine, ops: &mut Vec<Op>) {
+    let (visible, opacity, transform) = match node {
+        Node::Raster {
+            visible,
+            opacity,
+            transform,
+            ..
+        }
+        | Node::Group {
+            visible,
+            opacity,
+            transform,
+            ..
+        } => (*visible, *opacity, *transform),
+    };
+    if !visible || opacity <= 0.0 {
+        return;
+    }
+    let local =
+        alto_core::FixedAffine::from_affine(Affine2(transform)).expect("v3 transform out of range");
+    let world = parent
+        .concat(local)
+        .expect("v3 composed transform out of range");
+    match node {
+        Node::Group {
+            isolated,
+            mode,
+            children,
+            ..
+        } => {
+            let isolate = *isolated || opacity < 1.0 || *mode != 0;
+            if isolate {
+                ops.push(Op::Push);
+            }
+            for child in children {
+                walk_v3(child, world, ops);
+            }
+            if isolate {
+                ops.push(Op::Pop {
+                    opacity,
+                    mode: *mode,
+                });
+            }
+        }
+        Node::Raster {
+            image,
+            mode,
+            extra_tiles,
+            ..
+        } => {
+            let Some(q) =
+                crate::sample::fixed_inverse(&world).expect("v3 transform has no Q16 inverse")
+            else {
+                return;
+            };
+            let mut tiles = split_tiles(image);
+            tiles.extend(extra_tiles.iter().cloned());
+            tiles.sort_by_key(|t| (t.tx, t.ty));
+            ops.push(Op::Draw {
+                inv: [0.0; 6],
+                q: Some(q),
                 opacity,
                 mode: *mode,
                 tiles,
@@ -1268,9 +1339,20 @@ fn tiles_texel_cpu(
     x: i32,
     y: i32,
 ) -> Option<[u8; 4]> {
+    let fixed = alto_core::FixedAffine::from_affine(Affine2(transform))?;
+    tiles_texel_fixed_cpu(tiles, fixed, region, x, y)
+}
+
+fn tiles_texel_fixed_cpu(
+    tiles: &[([i32; 2], &[u8])],
+    fixed: alto_core::FixedAffine,
+    region: [i32; 3],
+    x: i32,
+    y: i32,
+) -> Option<[u8; 4]> {
     let [ox, oy, scale] = region;
-    crate::renderer::mask_sampler(transform, [ox as f32, oy as f32], scale as f32)?;
-    let inv = integer_inverse(crate::renderer::inverse(transform)?)?;
+    crate::renderer::fixed_mask_sampler(&fixed, [ox, oy, scale])?;
+    let inv = crate::sample::fixed_inverse(&fixed)??;
     let (Some(px), Some(py)) = (pixel_q8(ox, x, scale), pixel_q8(oy, y, scale)) else {
         return Some([0; 4]);
     };
@@ -2213,11 +2295,12 @@ struct RendererCaseMask {
 impl RendererCaseMask {
     /// The mask's document transform under node world `world`, as
     /// `Context::mask_entries` links it.
-    fn document(&self, world: [f64; 6]) -> [f64; 6] {
+    fn document_fixed(&self, world: [f64; 6]) -> Option<alto_core::FixedAffine> {
+        let local = alto_core::FixedAffine::from_affine(Affine2(self.transform))?;
         if self.linked {
-            crate::renderer::multiply(world, self.transform)
+            alto_core::FixedAffine::from_affine(Affine2(world))?.concat(local)
         } else {
-            self.transform
+            Some(local)
         }
     }
     /// The tiles as the atlas holds them.
@@ -2768,7 +2851,7 @@ fn renderer_cases() -> Vec<RendererCase> {
 }
 
 /// A mask's atlas tiles and its document transform, for the CPU reference.
-type PreparedMask = (Vec<([i32; 2], Vec<u8>)>, [f64; 6]);
+type PreparedMask = (Vec<([i32; 2], Vec<u8>)>, alto_core::FixedAffine);
 
 /// CPU reference for a level-0 tile `key` of a [`RendererCase`], evaluated per
 /// pixel as `renderer/m5.rs` chains the stages, with the checked Q14 functions
@@ -2800,14 +2883,18 @@ fn renderer_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
                 ..
             } => Prepared {
                 raster: tiles.iter().map(|(k, spec)| (*k, spec.bytes())).collect(),
-                mask: mask.as_ref().map(|m| (m.rgba(), m.document(*transform))),
+                mask: mask
+                    .as_ref()
+                    .map(|m| (m.rgba(), m.document_fixed(*transform).unwrap())),
                 selection: selection
                     .as_ref()
-                    .map(|m| (m.rgba(), m.document(*transform))),
+                    .map(|m| (m.rgba(), m.document_fixed(*transform).unwrap())),
             },
             RendererLayer::Adjust { mask, .. } => Prepared {
                 raster: vec![],
-                mask: mask.as_ref().map(|m| (m.rgba(), m.document(ident()))),
+                mask: mask
+                    .as_ref()
+                    .map(|m| (m.rgba(), m.document_fixed(ident()).unwrap())),
                 selection: None,
             },
         })
@@ -2815,7 +2902,7 @@ fn renderer_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
     let coverage = |m: &PreparedMask, x: i32, y: i32| {
         let tiles: Vec<([i32; 2], &[u8])> = m.0.iter().map(|(k, b)| (*k, &b[..])).collect();
         i64::from(byte_q14(u32::from(
-            mask_tiles_byte_cpu(&tiles, m.1, region, x, y).expect("v3 refuses the mask"),
+            tiles_texel_fixed_cpu(&tiles, m.1, region, x, y).expect("v3 refuses the mask")[0],
         )))
     };
     let adjust = |v: [i64; 4], (contrast, saturation, brightness): (f32, f32, f32)| {
@@ -3001,8 +3088,11 @@ fn plain_tile_cpu(case: &RendererCase, key: [i32; 2]) -> Vec<u8> {
                 })
                 .collect();
             tiles.sort_by_key(|t| (t.tx, t.ty));
+            let fixed = alto_core::FixedAffine::from_affine(Affine2(*transform))?;
+            let q = crate::sample::fixed_inverse(&fixed)??;
             Some(Op::Draw {
-                inv: crate::renderer::inverse(*transform)?,
+                inv: [0.0; 6],
+                q: Some(q),
                 opacity: *opacity,
                 mode: *blend as u32,
                 tiles,
@@ -3502,13 +3592,13 @@ fn composite_integer(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec
                             );
                         }
                         Op::Draw {
-                            inv,
+                            q,
                             opacity,
                             mode,
                             tiles,
+                            ..
                         } => {
-                            let q = integer_inverse(*inv)
-                                .expect("v3 refuses a draw without a Q16 inverse");
+                            let q = q.expect("v3 refuses a draw without a Q16 inverse");
                             let bytes = if crate::sample::axis_unit_q16(q.m) {
                                 fetch_nearest_bytes(tiles, &q, frame.origin_px, frame.scale_i, x, y)
                             } else {
@@ -3562,6 +3652,7 @@ fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Ve
                             opacity,
                             mode,
                             tiles,
+                            ..
                         } => {
                             let s = fetch(tiles, *inv, p, x as i32, y as i32, frame);
                             accum = blend(accum, [s[0], s[1], s[2], s[3] * opacity], *mode);
@@ -3581,7 +3672,11 @@ fn composite(ops: &[Op], width: u32, height: u32, frame: &Frame) -> (Vec<u8>, Ve
 fn render_pair(case: &Case, version: u32) -> (Vec<u8>, Vec<f32>) {
     let mut ops = Vec::new();
     for node in &case.nodes {
-        walk(node, ident(), &mut ops);
+        if version == 3 {
+            walk_v3(node, alto_core::FixedAffine::IDENTITY, &mut ops);
+        } else {
+            walk(node, ident(), &mut ops);
+        }
     }
     let scale = 2f32.powi(case.level);
     let scale_i = 2i32.pow(case.level as u32);
@@ -4968,7 +5063,11 @@ impl Gpu {
         let integer = version == 3;
         let mut ops = Vec::new();
         for node in &case.nodes {
-            walk(node, ident(), &mut ops);
+            if integer {
+                walk_v3(node, alto_core::FixedAffine::IDENTITY, &mut ops);
+            } else {
+                walk(node, ident(), &mut ops);
+            }
         }
         if integer && has_unspecified_v3_mode(&ops) {
             return Err("v3 unspecified blend mode".into());
@@ -4992,6 +5091,7 @@ impl Gpu {
                 }),
                 Op::Draw {
                     inv,
+                    q,
                     opacity,
                     mode,
                     tiles,
@@ -5009,7 +5109,7 @@ impl Gpu {
                     // Version 3 takes its draw from the host (`plain_draw_v3`).
                     if integer {
                         let d = crate::renderer::plain_draw_v3(
-                            *inv,
+                            q.expect("v3 draw inverse"),
                             (case.level, case.tx, case.ty),
                             [case.w as i32, case.h as i32],
                             tiles
@@ -5420,10 +5520,11 @@ impl Gpu {
                 let sampler = stage
                     .lookup_transform(program.region(stage.out))
                     .map(|t| {
-                        crate::renderer::mask_sampler(
-                            t,
-                            [out_region[0], out_region[1]],
-                            out_region[2],
+                        crate::renderer::fixed_mask_sampler(
+                            &alto_core::FixedAffine::from_affine(Affine2(t)).ok_or_else(|| {
+                                format!("{}: v3 transform out of range", program.name)
+                            })?,
+                            program.region(stage.out),
                         )
                         .ok_or_else(|| format!("{}: v3 refuses the lookup", program.name))
                     })
@@ -5797,6 +5898,163 @@ fn q16_rounding_is_exact_half_away() {
             -want,
             "{v:e}"
         );
+    }
+}
+
+/// Fixed-seed chains cover the v3 host's Q32 composition and exact Q16 inverse
+/// against the independent JavaScript BigInt reference, including half ties.
+#[test]
+fn fixed_affine_rust_and_js_agree_on_ten_thousand_chains() {
+    use std::io::Write;
+    let mut seed = 0x56d3_9b2a_a93f_7251u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut input = String::from("[");
+    let mut expected = String::new();
+    for case in 0..10_000 {
+        if case != 0 {
+            input.push(',');
+        }
+        input.push('[');
+        let depth = 1 + (next() % 8) as usize;
+        let mut world = alto_core::FixedAffine::IDENTITY;
+        let mut valid = true;
+        for step in 0..depth {
+            if step != 0 {
+                input.push(',');
+            }
+            let near = |v: u64| (i64::try_from(v % 1001).unwrap() - 500) as f64 / 100_000.0;
+            let translate = |v: u64| (i64::try_from(v % 200_001).unwrap() - 100_000) as f64 / 16.0;
+            let local = [
+                1.0 + near(next()),
+                near(next()) / 2.0,
+                if case % 127 == 0 {
+                    -(2f64.powi(-17) - 2f64.powi(-70))
+                } else {
+                    near(next()) / 2.0
+                },
+                1.0 + near(next()),
+                translate(next()),
+                translate(next()),
+            ];
+            input.push_str(&format!("[{}]", local.map(|v| format!("{v:?}")).join(",")));
+            let fixed = alto_core::FixedAffine::from_affine(Affine2(local));
+            world = match fixed.and_then(|local| world.concat(local)) {
+                Some(value) => value,
+                None => {
+                    valid = false;
+                    world
+                }
+            };
+        }
+        input.push(']');
+        let line = if valid {
+            match crate::sample::fixed_inverse(&world) {
+                Some(Some(q)) => format!(
+                    "{},{},{},{},{},{}",
+                    q.m[0], q.m[1], q.m[2], q.m[3], q.tx, q.ty
+                ),
+                Some(None) => "S".into(),
+                None => "X".into(),
+            }
+        } else {
+            "X".into()
+        };
+        expected.push_str(&line);
+        expected.push('\n');
+    }
+    input.push(']');
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut child = std::process::Command::new("node")
+        .arg(root.join("tests/e2e/fixed-affine-reference.mjs"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("node is required for the v3 transform reference");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).unwrap();
+    if actual != expected {
+        let index = actual
+            .lines()
+            .zip(expected.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or(10_000);
+        panic!(
+            "v3 Rust and JS inverse differ at chain {index}: Rust {:?}, JS {:?}",
+            expected.lines().nth(index),
+            actual.lines().nth(index)
+        );
+    }
+}
+
+/// The v3 host functions after the stored-value boundary must contain only
+/// integer operations. The ROI's f32-to-i32 validation occurs before the
+/// fixed mask sampler; the shader's bit transport is outside these functions.
+#[test]
+fn v3_host_transform_functions_have_no_float_arithmetic() {
+    let core = include_str!("../../alto-core/src/fixed_affine.rs");
+    let sample = include_str!("sample.rs");
+    let renderer = include_str!("renderer.rs");
+    fn body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("fn {name}("))
+            .expect("named v3 host function");
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 0i32;
+        let end = source[open..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                if c == '{' {
+                    depth += 1;
+                }
+                if c == '}' {
+                    depth -= 1;
+                }
+                (depth == 0).then_some(open + i + 1)
+            })
+            .unwrap();
+        &source[open..end]
+    }
+    for (source, name) in [
+        (core, "q_from_f64_bits"),
+        (core, "round_div"),
+        (core, "round_div_signed"),
+        (core, "concat"),
+        (core, "determinant"),
+        (core, "inverse_q16"),
+        (sample, "fixed_inverse"),
+        (renderer, "plain_draw_v3"),
+        (renderer, "v3_reach"),
+        (renderer, "fixed_mask_sampler"),
+    ] {
+        let source = body(source, name);
+        for banned in [
+            "f32",
+            "f64",
+            ".round(",
+            ".floor(",
+            ".ceil(",
+            "integer_inverse(",
+            "multiply(",
+        ] {
+            assert!(!source.contains(banned), "{name} contains {banned}");
+        }
     }
 }
 
@@ -6492,8 +6750,13 @@ fn renderer_case_json(case: &RendererCase) -> String {
     let mask = |m: &Option<RendererCaseMask>, world: [f64; 6]| match m {
         None => "null".to_string(),
         Some(m) => format!(
-            "{{\"transform\":[{}],\"tiles\":[{}]}}",
-            floats(&m.document(world)),
+            "{{\"transform\":[{}],\"parent\":{},\"tiles\":[{}]}}",
+            floats(&m.transform),
+            if m.linked {
+                format!("[{}]", floats(&world))
+            } else {
+                "null".into()
+            },
             tiles(&m.tiles)
         ),
     };
