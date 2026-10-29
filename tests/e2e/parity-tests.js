@@ -812,22 +812,24 @@ export async function runParityTests(engine, log) {
         await testing(engine).request("enablePrefetch");
       }
       const steps = frame.profile?.steps ?? 0;
-      log(`v3 cold pyramid: ${steps} steps over ${frame.ticks} ticks, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
+      log(`v3 cold pyramid: ${steps} steps over ${frame.diagnosticTicks} diagnostic ticks (${frame.ticks} wait ticks), max Worker tick ${frame.maxWorkerTickMs?.toFixed?.(1)} ms, max step ${frame.profile?.maxStepMs?.toFixed?.(1)} ms`);
       assert(steps >= 31, `cold level 4 built in ${steps} steps; expected one per leaf or downsample`);
-      // Fast adapters can finish all steps in one Worker tick. In that case,
-      // require the measured composition time to stay within the 8 ms frame
-      // budget, allowing the final step to cross the deadline.
-      const composeMs = frame.profile?.composeMs;
+      // Every synchronous Worker tick since resetRenderCache is measured,
+      // including automatic drain ticks. Allow the 8 ms renderer budget,
+      // one final step past its deadline, and 8 ms for scene/Worker overhead.
       const maxStepMs = frame.profile?.maxStepMs;
-      assert(frame.ticks >= 1 && (frame.ticks >= 2 || (Number.isFinite(composeMs) && Number.isFinite(maxStepMs) && composeMs <= 8 + maxStepMs)),
-        `cold level 4 took ${composeMs} ms over ${frame.ticks} tick(s), max step ${maxStepMs} ms`);
+      const maxTickMs = frame.maxWorkerTickMs;
+      assert(frame.diagnosticTicks >= frame.ticks && frame.ticks >= 1 && Number.isFinite(maxTickMs) && Number.isFinite(maxStepMs),
+        `missing cold pyramid tick timing: ${frame.diagnosticTicks} diagnostic ticks, ${frame.ticks} wait ticks, max ${maxTickMs} ms`);
+      assert(maxTickMs <= 16 + maxStepMs,
+        `cold level 4 blocked the Worker for ${maxTickMs} ms in one tick; max step ${maxStepMs} ms`);
       const shown = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0 }));
       const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 4, x: 0, y: 0, fresh: true }));
       const cpu = renderPyramidCase({ w: 4096, h: 256, level: 4, tx: 0, ty: 0,
         nodes: [{ type: "raster", image, mode: 0, opacity: 1, visible: true, transform: [1, 0, 0, 1, 0, 0] }] });
       assert(same(cpu, shown), `displayed level 4: ${diff(cpu, shown)}`);
       assert(same(cpu, cold), `cold readback level 4: ${diff(cpu, cold)}`);
-      return `${steps} steps, ${frame.ticks} ticks`;
+      return `${steps} steps, ${frame.diagnosticTicks} diagnostic ticks`;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });
