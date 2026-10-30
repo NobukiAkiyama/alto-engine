@@ -225,21 +225,29 @@ export async function runParityTests(engine, log) {
   // Every enforced v3 tile is locked. The composite catalog uses the FNV-1a column
   // Rust's CPU reference writes to cpu-reference.txt; every other tile is locked in
   // v3-browser.txt as "<fnv> <name>". Regenerate that file with
-  // ALTO_WRITE_PARITY=1 node scripts/verify-browser.mjs --suite=parity.
-  const writeParity = globalThis.__altoWriteParity === true;
+  // ALTO_WRITE_V3_BROWSER=1 node scripts/verify-browser.mjs --suite=parity.
+  const writeParity = globalThis.__altoWriteV3Browser === true;
   const rustV3 = new Map((await (await fetch("../../tests/parity/cpu-reference.txt")).text()).split("\n")
     .filter((line) => line.startsWith("v3-"))
     .map((line) => { const [name, , fnv] = line.split(" "); return [name, fnv]; }));
   const browserResponse = await fetch("../../tests/parity/v3-browser.txt");
-  const browserV3 = new Map(browserResponse.ok ? (await browserResponse.text()).split("\n")
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => [line.slice(17), line.slice(0, 16)]) : []);
+  const browserV3 = new Map();
+  for (const line of browserResponse.ok ? (await browserResponse.text()).split("\n") : []) {
+    if (!line || line.startsWith("#")) continue;
+    const name = line.slice(17);
+    if (browserV3.has(name)) throw Error(`v3-browser.txt locks ${name} twice`);
+    browserV3.set(name, line.slice(0, 16));
+  }
+  // The tiles checked against each file, so an unused lock fails too.
   const v3Browser = new Map();
+  const v3Rust = new Set();
   const assertV3Locked = (name, cpu, gpu, locks = browserV3) => {
     const hash = fnv64(gpu);
     if (locks === browserV3) {
       assert(!v3Browser.has(name), `${name} is locked twice`);
       v3Browser.set(name, hash);
+    } else {
+      v3Rust.add(name);
     }
     if (writeParity && locks === browserV3) return;
     const locked = locks.get(name);
@@ -1258,7 +1266,11 @@ export async function runParityTests(engine, log) {
       const tile = await unstable(engine).readTile(0, 0);
       assert(tile.length === 262144, "readTile after recovery");
     });
-    await test("v3-browser.txt locks exactly the enforced v3 tiles", async () => {
+    await test("v3 locked hashes are exactly the enforced v3 tiles", async () => {
+      // A Rust v3- line that no enforced composite tile checked is unused, for
+      // example when a case leaves the integer path.
+      const unchecked = [...rustV3.keys()].filter((name) => !v3Rust.has(name));
+      assert(unchecked.length === 0, `cpu-reference.txt v3 lines no tile checked: ${unchecked.join(", ")}`);
       if (writeParity) return `${v3Browser.size} hashes recorded for writing`;
       const missing = [...v3Browser.keys()].filter((name) => !browserV3.has(name));
       const stale = [...browserV3.keys()].filter((name) => !v3Browser.has(name));

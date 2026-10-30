@@ -1,5 +1,5 @@
 # FNV-1a 64 of every enforced v3 browser tile outside the Rust composite catalog, then its test name.
-# Regenerate with ALTO_WRITE_PARITY=1 node scripts/verify-browser.mjs --suite=parity.
+# Regenerate with ALTO_WRITE_V3_BROWSER=1 node scripts/verify-browser.mjs --suite=parity.
 334c9ecc55b234e4 v3-mask-up-to-2^23-draws (1, 0)
 426e4e110a8bc6f0 v3-plain-tile-32767-draws (32767, 0)
 9c735bed0a722325 v3-plain-tile-32768-no-contribution (32768, 0)
