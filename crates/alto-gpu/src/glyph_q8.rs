@@ -183,6 +183,18 @@ fn map_commands(
         .collect()
 }
 
+/// The v3 atlas key of an atlas-band glyph: `raster = 1`, the outline record's
+/// blake3, and the placement's bands and phase.
+pub fn atlas_key(p: &PlacementQ, outline: &BakeOutline) -> crate::glyph_atlas::GlyphKey {
+    crate::glyph_atlas::GlyphKey {
+        raster: 1,
+        outline_hash: alto_core::ContentHash::of(&alto_core::text_bake::outline_record(outline)).0,
+        outline: 0,
+        matrix: p.band.map(|v| v as i32),
+        phase: p.phase.map(|v| v as u8),
+    }
+}
+
 /// An atlas-band glyph's Q8 points in its bitmap (top-left at the origin).
 pub fn atlas_commands(p: &PlacementQ, outline: &BakeOutline) -> Option<Vec<Command>> {
     map_commands(&outline.commands, |x, y| {
@@ -366,6 +378,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn glyph_key_separates_raster_versions() {
+        let o = rect(0, 0, 1000, 1000, 1000);
+        let p = place_q(&map([0.012, 0.0, 0.0, -0.012, 2.25, 14.5]), &o).unwrap();
+        let v3 = atlas_key(&p, &o);
+        // A v2 key with the same matrix and phase is a different entry.
+        let v2 = crate::glyph_atlas::GlyphKey {
+            raster: 0,
+            outline_hash: [0; 32],
+            outline: 0,
+            ..v3
+        };
+        assert_eq!((v3.raster, v3.outline), (1, 0));
+        assert_ne!(v3, v2);
+        let mut atlas = crate::glyph_atlas::GlyphAtlas::new(256, 256);
+        atlas.begin(1);
+        let a = atlas.insert(v3, p.w, p.h).unwrap();
+        let b = atlas.insert(v2, p.w, p.h).unwrap();
+        assert_ne!((a.x, a.y), (b.x, b.y), "two entries");
+        // Equal shapes share an entry whatever their font and glyph id; another
+        // shape, or the same shape at another upem, does not.
+        let same = BakeOutline {
+            font: 7,
+            glyph: 99,
+            ..o.clone()
+        };
+        assert_eq!(atlas_key(&p, &same), v3);
+        let other = rect(0, 0, 1000, 999, 1000);
+        assert_ne!(atlas_key(&p, &other).outline_hash, v3.outline_hash);
+        let upem = BakeOutline {
+            upem: 2048,
+            ..o.clone()
+        };
+        assert_ne!(atlas_key(&p, &upem).outline_hash, v3.outline_hash);
     }
 
     #[test]

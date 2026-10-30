@@ -4129,16 +4129,26 @@ fn main(@builtin(global_invocation_id) id: vec3u) {{
     )
 }
 
-/// Result of reading all 256 bytes from an `Rgba8Unorm` texture with
-/// `textureLoad` + `unorm_byte`. Enforced.
+/// Result of reading all 256 bytes from an `Rgba8Unorm` (all 4 channels) or an
+/// `R8Unorm` (the v3 glyph atlas and scratch, `.r`) texture with `textureLoad` +
+/// `unorm_byte`. Enforced.
 struct AtlasRead {
+    format: &'static str,
     mismatches: Vec<(usize, usize, u8, u32)>,
 }
 
 impl AtlasRead {
     fn line(&self) -> String {
+        let channels = if self.format == "R8Unorm" {
+            "the r channel"
+        } else {
+            "all 4 channels"
+        };
         if self.mismatches.is_empty() {
-            "atlas-read (enforced): 256/256 byte values round-trip exactly on all 4 channels".into()
+            format!(
+                "atlas-read {} (enforced): 256/256 byte values round-trip exactly on {channels}",
+                self.format
+            )
         } else {
             let shown: Vec<String> = self
                 .mismatches
@@ -4147,7 +4157,8 @@ impl AtlasRead {
                 .map(|(t, c, want, got)| format!("texel {t} ch {c} byte {want} read {got}"))
                 .collect();
             format!(
-                "atlas-read (enforced): {} channel mismatches: {}",
+                "atlas-read {} (enforced): {} channel mismatches: {}",
+                self.format,
                 self.mismatches.len(),
                 shown.join("; ")
             )
@@ -4155,12 +4166,8 @@ impl AtlasRead {
     }
 }
 
-fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
-    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
-        return;
-    };
-    let dir = PathBuf::from(dir);
-    std::fs::create_dir_all(&dir).expect("create alpha measure directory");
+/// The JSON fields of one atlas read.
+fn atlas_read_fields(result: &Result<AtlasRead, String>) -> String {
     let (status, count, error) = match result {
         Ok(r) if r.mismatches.is_empty() => ("exact", 0, String::new()),
         Ok(r) => ("mismatch", r.mismatches.len(), String::new()),
@@ -4177,19 +4184,40 @@ fn write_atlas_read(adapter: &str, result: &Result<AtlasRead, String>) {
             ));
         }
     }
-    let json = format!(
-        "{{\n  \"label\": \"enforced\",\n  \"backend\": \"{}\",\n  \"format\": \"Rgba8Unorm\",\n  \"read\": \"textureLoad + unorm_byte\",\n  \"values\": 256,\n  \"status\": \"{status}\",\n  \"mismatchedChannels\": {count},\n  \"error\": \"{}\",\n  \"mismatches\": [{list}]\n}}\n",
-        json_escape(adapter),
+    format!(
+        "\"read\": \"textureLoad + unorm_byte\", \"values\": 256, \"status\": \"{status}\", \"mismatchedChannels\": {count}, \"error\": \"{}\", \"mismatches\": [{list}]",
         json_escape(&error)
+    )
+}
+
+/// `atlas-read.json`: the `Rgba8Unorm` read at the top level (as before) and the
+/// `R8Unorm` read under `r8Unorm`.
+fn write_atlas_read(
+    adapter: &str,
+    rgba: &Result<AtlasRead, String>,
+    r8: &Result<AtlasRead, String>,
+) {
+    let Some(dir) = std::env::var_os("ALTO_ALPHA_MEASURE_OUT") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create alpha measure directory");
+    let json = format!(
+        "{{\"label\": \"enforced\", \"backend\": \"{}\", \"format\": \"Rgba8Unorm\", {}, \"r8Unorm\": {{\"format\": \"R8Unorm\", {}}}}}\n",
+        json_escape(adapter),
+        atlas_read_fields(rgba),
+        atlas_read_fields(r8)
     );
     std::fs::write(dir.join("atlas-read.json"), json).expect("write atlas read json");
-    let line = match result {
+    let line = |result: &Result<AtlasRead, String>, format: &str| match result {
         Ok(r) => r.line(),
-        Err(e) => format!("atlas-read (enforced): GPU error: {e}"),
+        Err(e) => format!("atlas-read {format} (enforced): GPU error: {e}"),
     };
     let markdown = format!(
-        "### Atlas read (`Rgba8Unorm` + `textureLoad` + `unorm_byte`)\n\nBackend: `{}`\n\n{line}\n",
-        adapter
+        "### Atlas read (`textureLoad` + `unorm_byte`)\n\nBackend: `{}`\n\n- {}\n- {}\n",
+        adapter,
+        line(rgba, "Rgba8Unorm"),
+        line(r8, "R8Unorm")
     );
     std::fs::write(dir.join("atlas-read.md"), markdown).expect("write atlas read markdown");
 }
@@ -4794,10 +4822,16 @@ impl Gpu {
         })
     }
 
-    /// Upload all 256 byte values to an `Rgba8Unorm` texture and read them back
-    /// with `textureLoad` + `unorm_byte`. Returns every channel that does not
-    /// round-trip. Enforced: the caller records it and fails on any mismatch.
-    fn atlas_read(&self) -> Result<AtlasRead, String> {
+    /// Upload all 256 byte values to an `Rgba8Unorm` or `R8Unorm` texture and read
+    /// them back with `textureLoad` + `unorm_byte`. Returns every channel that does
+    /// not round-trip (`R8Unorm`: the r channel only). Enforced: the caller
+    /// records it and fails on any mismatch.
+    fn atlas_read(&self, r8: bool) -> Result<AtlasRead, String> {
+        let (format, label, texel_bytes) = if r8 {
+            (wgpu::TextureFormat::R8Unorm, "R8Unorm", 1)
+        } else {
+            (wgpu::TextureFormat::Rgba8Unorm, "Rgba8Unorm", 4)
+        };
         let device = &self.device;
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4822,11 +4856,13 @@ impl Gpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let data: Vec<u8> = (0..256).flat_map(atlas_read_texel).collect();
+        let data: Vec<u8> = (0..256)
+            .flat_map(|i| atlas_read_texel(i)[..texel_bytes].to_vec())
+            .collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -4837,7 +4873,7 @@ impl Gpu {
             &data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(1024),
+                bytes_per_row: Some(256 * texel_bytes as u32),
                 rows_per_image: Some(1),
             },
             wgpu::Extent3d {
@@ -4896,14 +4932,17 @@ impl Gpu {
         let mut mismatches = Vec::new();
         for texel in 0..256 {
             let want = atlas_read_texel(texel);
-            for ch in 0..4 {
+            for ch in 0..texel_bytes {
                 let value = got[texel * 4 + ch];
                 if value != u32::from(want[ch]) {
                     mismatches.push((texel, ch, want[ch], value));
                 }
             }
         }
-        Ok(AtlasRead { mismatches })
+        Ok(AtlasRead {
+            format: label,
+            mismatches,
+        })
     }
 
     fn render(&self, case: &Case) -> Result<(Vec<u8>, Vec<f32>), String> {
@@ -8055,21 +8094,25 @@ fn gpu_shader_matches_cpu_reference() {
     }
     write_v3_measure(&gpu.adapter_name, &measured_v3, &v3_errors);
 
-    // Enforced: every byte on every channel must round-trip. Stored first, then failed.
-    let atlas = gpu.atlas_read();
-    match &atlas {
-        Ok(r) => {
-            println!("{}", r.line());
-            if !r.mismatches.is_empty() {
-                failed.push(r.line());
+    // Enforced: every byte on every channel must round-trip, in the Rgba8Unorm
+    // raster read and the R8Unorm glyph atlas read. Stored first, then failed.
+    let atlas = gpu.atlas_read(false);
+    let atlas_r8 = gpu.atlas_read(true);
+    for (format, result) in [("Rgba8Unorm", &atlas), ("R8Unorm", &atlas_r8)] {
+        match result {
+            Ok(r) => {
+                println!("{}", r.line());
+                if !r.mismatches.is_empty() {
+                    failed.push(r.line());
+                }
+            }
+            Err(e) => {
+                println!("atlas-read {format} (enforced): GPU error: {e}");
+                failed.push(format!("atlas-read {format}: {e}"));
             }
         }
-        Err(e) => {
-            println!("atlas-read (enforced): GPU error: {e}");
-            failed.push(format!("atlas-read: {e}"));
-        }
     }
-    write_atlas_read(&gpu.adapter_name, &atlas);
+    write_atlas_read(&gpu.adapter_name, &atlas, &atlas_r8);
     // Enforced: the v3 M5 color-adjust chain and opacity 0.5, integer-exact.
     let src = color_adjust_gradient();
     let adjust: Vec<_> = color_adjust_grid()
