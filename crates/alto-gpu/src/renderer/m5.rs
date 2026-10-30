@@ -1383,6 +1383,7 @@ impl Context<'_> {
         let out = self.alloc(roi)?;
         let target = self.resources.pool[out.index].texture.clone();
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
+            self.r.pipelines_built = true;
             super::vector::VectorResources::new(&self.r.device, wgpu::TextureFormat::Rgba16Float)
         });
         let usage = self.r.gpu_bytes();
@@ -2345,6 +2346,7 @@ impl Renderer {
                 if let Some(old) = other {
                     old.retire(&mut self.retired);
                 }
+                self.pipelines_built = true;
                 Resources::new(&self.device, exact)?
             }
         };
