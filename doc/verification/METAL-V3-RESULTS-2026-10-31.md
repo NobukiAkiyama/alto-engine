@@ -1,6 +1,6 @@
 # 実機 Metal での v3 一致確認
 
-2026-10-31 JST。対象は main の `f5fa623`(#55 まで)。実機は Apple M5(Metal 4)、macOS 27.2。CI の macOS ランナーは仮想 GPU(Apple Paravirtual device)なので、実機の Metal で v3 の GPU 結果が CPU 参照実装と全バイト一致するかを、リリース前に一度確かめた。
+2026-10-31 JST。対象は main の `f5fa623`(#55 まで)。実機は Apple M5(`system_profiler` の表記は Metal 4、Chrome の WebGPU アダプタの `architecture` は `metal-3`)、macOS 27.2。CI の macOS ランナーは仮想 GPU(Apple Paravirtual device)なので、実機の Metal で v3 の GPU 結果が CPU 参照実装と全バイト一致するかを、リリース前に一度確かめた。
 
 生の結果はこのディレクトリに置かない。
 
@@ -9,7 +9,7 @@
 CI の `gpu-parity` ジョブ(lavapipe)と同じテストを、`ALTO_REQUIRE_GPU_PARITY=1` で実行した。アダプタは `Apple M5 (Metal)`。
 
 - `cpu_composite::gpu_shader_matches_cpu_reference`: 通過。
-  - v3 の合成 22 ケース(合成モード全 17 種、不透明度 1/2 と 0、非表示レイヤー、isolated / pass-through グループ)で、不一致の画素は 0。
+  - v3 の合成 74 ケース(`composite-v3`、すべて強制)で、不一致の画素は 0(`integerExactCount` 74、`v3UnsupportedCount` 0)。合成モード全 17 種、不透明度、非表示レイヤー、isolated / pass-through / 入れ子のグループ、平行移動・拡大縮小・回転・大きな平行移動を含み、うち 37 ケースはレベル 1(縮小ピラミッド)。
   - アトラスの読み取り(`textureLoad` + `unorm_byte`)は、Rgba8Unorm の 4 チャンネルと R8Unorm で、256 通りすべてが正確に往復した。
 - v3 のベクター塗り、ベクターマスク、ぼかし(raster / backdrop)、テキスト 13 件(`cpu_composite::v3_vector_` / `v3_blur_` / `v3_raster_blur_` / `v3_backdrop_blur_` / `v3_feathered_vector_mask_` / `v3_adjustment_vector_mask_` / `v3_text_`): すべて Rust の整数参照とバイト一致した。
 
