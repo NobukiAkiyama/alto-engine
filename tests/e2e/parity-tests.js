@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, parityCases, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, parityCases, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -219,6 +219,7 @@ export async function runParityTests(engine, log) {
     }
   };
   const alphaMeasure = [];
+  const textMeasure = [];
   const compositeV3 = [];
   let atlasRead = null;
   try {
@@ -814,6 +815,11 @@ export async function runParityTests(engine, log) {
     {
       const fontBlob = async (name) => (await fetch(`../../tests/fonts/${name}`)).blob();
       const hexBytes = (hex) => Uint8Array.from(hex.match(/../g) ?? [], (b) => parseInt(b, 16));
+      const hashResponse = await fetch("../../tests/parity/cpu-reference.txt");
+      assert(hashResponse.ok, `cpu-reference status ${hashResponse.status}`);
+      const textHashes = new Map((await hashResponse.text()).split("\n")
+        .filter((line) => line.startsWith("text-v3-"))
+        .map((line) => { const [name, , fnv] = line.split(" "); return [name, fnv]; }));
       // `content(latin, jp)` from the document's font ids. The fonts are imported
       // for each document: opening another one drops pending import pins.
       const addText = async (doc, content, transform = [1, 0, 0, 1, 0, 0]) => {
@@ -844,6 +850,7 @@ export async function runParityTests(engine, log) {
         { name: "text-v3-placeholder", at: [30, 50], content: () => ({ text: "A B", style: style([], 24) }) },
         ...[[0, 0], [1, 0], [0, 1], [1, 1]].map((tile) => ({
           name: `text-v3-seam (${tile[0]}, ${tile[1]})`, fixture: "render-v3-empty-512x512.alto", canvas: [512, 512], tile,
+          hashName: `text-v3-seam-${tile[0]}-${tile[1]}`,
           at: [180.5, 200.25], content: (l, j) => ({ text: "Seam 継ぎ目\nWWW", style: style([l, j], 48, [0.4, 0.1, 0.6, 0.9]) }),
         })),
       ];
@@ -859,6 +866,10 @@ export async function runParityTests(engine, log) {
           const [tx, ty] = testCase.tile ?? [0, 0];
           const cpu = renderTextV3(hexBytes(bake.hex), transform, [tx, ty], testCase.canvas ?? [256, 256]);
           const gpu = await gpuTile(engine, { level: 0, tx, ty });
+          const locked = textHashes.get(testCase.hashName ?? testCase.name);
+          assert(locked, `${testCase.name} has no locked hash`);
+          assert(fnv64(cpu) === locked, `${testCase.name} JS reference hash differs from Rust: ${fnv64(cpu)} vs ${locked}`);
+          assert(fnv64(gpu) === locked, `${testCase.name} GPU hash differs from Rust: ${fnv64(gpu)} vs ${locked}`);
           const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
           assert(same(cold, gpu), `${testCase.name} cold differs: ${diff(gpu, cold)}`);
           const row = { ...measureRow({ name: testCase.name, nodes: [], level: 0, tx, ty }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
@@ -867,6 +878,33 @@ export async function runParityTests(engine, log) {
           assert(same(cpu, gpu), formatMeasure(row));
           assert(gpu.some((v, i) => i % 4 === 3 && v > 0), `${testCase.name} drew nothing`);
           return formatMeasure(row);
+        });
+      }
+      // Diagnostic v2 output against the fixed v3 reference. These rows show
+      // the atlas and small-glyph differences without making old pixels a gate.
+      for (const [name, size, atlas] of [
+        ["text-v2-Ag-72", 72, true],
+        ["text-v2-Ag-72-no-atlas", 72, false],
+        ["text-v2-Ag-12", 12, true],
+      ]) {
+        await test(name, async () => {
+          const transform = [1, 0, 0, 1, 24, 80];
+          const content = (l) => ({ text: "Ag", style: style([l], size) });
+          const v3 = await open("render-v3-empty.alto");
+          const id = await addText(v3, content, transform);
+          const bake = await testing(engine).request("textBake", { node: id });
+          assert(bake.hex, `${name} has no v3 reference bake`);
+          const cpu = renderTextV3(hexBytes(bake.hex), transform, [0, 0], [256, 256]);
+          const v2 = await engine.createDocument({ width: 256, height: 256 });
+          await addText(v2, content, transform);
+          await unstable(engine).setGlyphAtlas(atlas);
+          let gpu;
+          try { gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 }); }
+          finally { await unstable(engine).setGlyphAtlas(true); }
+          const row = { ...measureRow({ name, nodes: [], level: 0, tx: 0, ty: 0 }, cpu, gpu), measure: true, enforced: false, baseline: "v3-text-reference" };
+          textMeasure.push(row);
+          log(`MEASURED-NOT-ENFORCED ${name}: ${formatMeasure(row)}`);
+          return { detail: formatMeasure(row), measure: true, enforced: false, count: row.count, maxAbs: row.maxAbs };
         });
       }
       // The browser (wasm) bakes the native fixture's texts to the same bytes.
@@ -1178,6 +1216,7 @@ export async function runParityTests(engine, log) {
       userAgent: navigator.userAgent,
       alphaMeasureLabel: "measured-not-enforced",
       alphaMeasure,
+      textMeasure,
       compositeV3Label: "enforced",
       compositeV3: compositeV3.filter(isV3IntegerCase),
       v3Unsupported: compositeV3.filter((row) => !isV3IntegerCase(row)),
