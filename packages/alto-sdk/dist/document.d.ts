@@ -43,11 +43,6 @@ export declare class DocumentHandle {
     get activeTool(): ToolSession | null;
     /** The folder this document was opened from or last saved to. */
     get folder(): ObjectStorageProvider | null;
-    /**
-     * A render version 3 document serializes as format 4. Saving that package
-     * needs the explicit opt-in, and this build does not have it.
-     */
-    private refuseUnstableFormatFour;
     private closed;
     /** Requests go through here, so a replaced handle cannot touch the new document. */
     private request;
@@ -63,11 +58,8 @@ export declare class DocumentHandle {
     /** Redoes the last undone edit. */
     redo(): Promise<void>;
     /**
-     * Switches a version-1 document to render version 2 as one undoable edit.
-     * Bilinear and rotated samples change. Opening or saving a document does not
-     * do this. A document that is already version 2 is rejected.
-     * `{ unstableRenderV3: true }` asks for render version 3. This build rejects
-     * that request: version 3 stays off until integer compositing lands.
+     * Switches a version-1 or version-2 document to render version 3 as one
+     * undoable edit. Opening or saving a document does not upgrade it.
      */
     upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void>;
     /**

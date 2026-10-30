@@ -119,8 +119,8 @@ export interface Engine {
     parseSvg(svg: string): Promise<PathData>;
     toSvg(data: PathData): Promise<string>;
   };
-  /** A new empty document of this size in pixels. Refused while a recovery journal waits. */
-  createDocument(meta: { width: number; height: number }): Promise<DocumentHandle>;
+  /** A new empty document. Version 3 is the default; version 2 is available for compatibility. */
+  createDocument(meta: { width: number; height: number; renderVersion?: 2 | 3 }): Promise<DocumentHandle>;
   /** Opens a `.alto` archive. Refused while a recovery journal waits. */
   open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
   /** Opens the folder form, reading only objects reachable from the document and its history. */
@@ -681,7 +681,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     await this.document?.endTool();
     return this.requestCore(t, args, transfer, false, 0, { nextDocumentEpoch: epoch }) as Promise<Result<K>>;
   }
-  async createDocument(meta: { width: number; height: number }): Promise<DocumentHandle> {
+  async createDocument(meta: { width: number; height: number; renderVersion?: 2 | 3 }): Promise<DocumentHandle> {
     return this.replaceDocument((epoch) => this.requestReplacement("createDocument", meta, epoch));
   }
   async open(source: Blob | ArchiveSource): Promise<DocumentHandle> {

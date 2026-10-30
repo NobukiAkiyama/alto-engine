@@ -18,11 +18,11 @@ pub const MAX_TREE_DEPTH: u32 = 128;
 /// stay on that path.
 pub const RENDER_VERSION_F32: u32 = 1;
 /// Integer 4-tap bilinear. Inverse coefficients are Q16, source positions are Q8,
-/// and the filter accumulates bytes with round-half-up. New documents use this.
+/// and the filter accumulates bytes with round-half-up. Existing version-2
+/// documents keep this path.
 pub const RENDER_VERSION: u32 = 2;
-/// Integer color-adjust (Q14). Not the default: new documents stay on
-/// [`RENDER_VERSION`]. A document selects this explicitly. Version 1 and 2
-/// keep the float mode-3 formula.
+/// Integer compositor and effects (Q14). New documents use this version;
+/// version 1 and 2 documents retain their original rendering paths.
 pub const RENDER_VERSION_EXACT: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

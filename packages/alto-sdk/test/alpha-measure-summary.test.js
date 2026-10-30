@@ -41,7 +41,7 @@ test("alpha summary enforces v3 exactly and preserves mismatch and error reports
 });
 
 
-test("v3 classification is closed: color-adjust, blur and filled vectors are integer M5, unspecified features are refused", () => {
+test("v3 classification covers every document effect, vector and mask", () => {
   const snapshot = {
     meta: { render_version: 3 },
     nodes: new Map([
@@ -72,6 +72,16 @@ test("v3 classification is closed: color-adjust, blur and filled vectors are int
       { data: { commands: [] }, fill: [1, 0, 0, 1], stroke: { color: [0, 0, 0, 1], width: 0 } },
       { data: { commands: [] }, fill: [1, 0, 0, 1], stroke: { color: [0, 0, 0, 2 ** -16], width: 2 } }], props: {} }],
     ["clip-path", { type: "raster", props: { clip_path: { path: { commands: [] }, enabled: true } } }],
+    ["invert", { type: "raster", props: { effects: [{ type: "invert" }] } }],
+    ["levels-layer", { type: "adjustment", adjustment: { type: "levels" }, props: { blend: "normal" } }],
+    ["curves", { type: "raster", props: { effects: [{ type: "curves" }] } }],
+    ["hue-saturation", { type: "raster", props: { effects: [{ type: "hue_saturation" }] } }],
+    ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust" }, props: { blend: "multiply" } }],
+    ["screen-adjust-disabled-mask", { type: "adjustment", adjustment: { type: "color_adjust" }, props: { blend: "screen", mask: {}, mask_enabled: false } }],
+    ["vector-masked-adjust", { type: "adjustment", adjustment: { type: "color_adjust" }, props: { vector_mask: { path: { commands: [] }, enabled: true } } }],
+    ["clip-path-adjust", { type: "adjustment", adjustment: { type: "gaussian_blur" }, props: { clip_path: { path: { commands: [] }, enabled: true } } }],
+    ["stroked-vector", { type: "vector", paths: [{ data: { commands: [] }, fill: null, stroke: { color: [0, 0, 0, 1], width: 2 } }], props: {} }],
+    ["clip", { type: "raster", props: { clip_to_below: true } }],
   ]) {
     const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
     assert.equal(sceneGap(scene), "v3-m5-integer", name);
@@ -85,15 +95,7 @@ test("v3 classification is closed: color-adjust, blur and filled vectors are int
     vector_mask: { path: { commands: [] }, enabled: false }, clip_path: { path: { commands: [] }, enabled: false } } }]]) };
   assert.equal(sceneGap(offPath), null);
   for (const [name, node] of [
-    ["invert", { type: "raster", props: { effects: [{ type: "invert" }] } }],
-    ["levels-layer", { type: "adjustment", adjustment: { type: "invert" }, props: { blend: "normal" } }],
-    // Unmasked non-normal adjustment blends stay refused (#37); a disabled mask is no mask.
-    ["multiply-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "multiply" } }],
-    ["screen-adjust-disabled-mask", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { blend: "screen", mask: {}, mask_enabled: false } }],
-    ["vector-masked-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { vector_mask: { path: { commands: [] }, enabled: true } } }],
-    ["clip-path-adjust", { type: "adjustment", adjustment: { type: "gaussian_blur", radius: 4 }, props: { clip_path: { path: { commands: [] }, enabled: true } } }],
-    ["stroked-vector", { type: "vector", paths: [{ data: { commands: [] }, fill: null, stroke: { color: [0, 0, 0, 1], width: 2 } }], props: {} }],
-    ["clip", { type: "raster", props: { clip_to_below: true } }],
+    ["unknown-effect", { type: "raster", props: { effects: [{ type: "future_effect" }] } }],
   ]) {
     const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };
     assert.equal(sceneGap(scene), "v3-unsupported", name);
@@ -114,9 +116,8 @@ test("v3 classification is closed: color-adjust, blur and filled vectors are int
     assert.deepEqual(report.v3Unsupported, [row]);
     assert.ok(readFileSync(join(dir, "alpha-measure.md"), "utf8").includes("v3-unsupported"));
     // Classification must scan the entire scene and preserve pre-v3 gap names.
-    // A mask alone is integer M5; combined with an effect that has no integer
-    // stage it is still refused, never float-drawn.
-    snapshot.nodes.set("first-mask", { type: "raster", props: { mask: {}, effects: [{ type: "invert" }] } });
+    // An unknown future effect is refused even when another feature uses M5.
+    snapshot.nodes.set("first-mask", { type: "raster", props: { mask: {}, effects: [{ type: "future_effect" }] } });
     assert.equal(sceneGap(snapshot), "v3-unsupported");
     snapshot.meta.render_version = 2;
     assert.equal(sceneGap(snapshot), "mask");

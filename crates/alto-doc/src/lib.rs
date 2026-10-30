@@ -41,8 +41,20 @@ impl DocumentMeta {
             height,
             color: ColorSpace::Srgb,
             depth: BitDepth::U8,
-            // Render version 2 is file format 3. The live value matches the
+            // Render version 3 is file format 4. The live value matches the
             // snapshot so a journal digest survives save and replay.
+            format_version: 4,
+            render_version: alto_core::RENDER_VERSION_EXACT,
+        }
+    }
+    /// Explicit version-2 constructor for legacy fixtures and compatibility
+    /// checks. New documents use [`Self::srgb_u8`].
+    pub fn srgb_u8_v2(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            color: ColorSpace::Srgb,
+            depth: BitDepth::U8,
             format_version: 3,
             render_version: alto_core::RENDER_VERSION,
         }
@@ -2677,7 +2689,7 @@ mod compatibility_tests {
 
     #[test]
     fn render_version_two_is_format_three_and_version_one_bytes_do_not_change() {
-        let fresh = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let fresh = Document::new(DocumentMeta::srgb_u8_v2(8, 8)).unwrap();
         let bytes = fresh.snapshot_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["meta"]["format_version"], 3);
@@ -2729,10 +2741,7 @@ mod compatibility_tests {
 
     #[test]
     fn render_version_three_saves_format_four_and_reloads() {
-        let mut meta = DocumentMeta::srgb_u8(8, 8);
-        meta.render_version = alto_core::RENDER_VERSION_EXACT;
-        meta.format_version = 4;
-        let doc = Document::new(meta).unwrap();
+        let doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
         let bytes = doc.snapshot_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["meta"]["format_version"], 4);

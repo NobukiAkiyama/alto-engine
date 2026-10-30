@@ -613,7 +613,7 @@ async function execute(m) {
             recoveryPending = false;
             return true;
         case "createDocument": {
-            const state = JSON.parse(runtime.createDocument(m.width, m.height));
+            const state = JSON.parse(runtime.createDocument(m.width, m.height, m.renderVersion));
             adoptDocument(m.nextDocumentEpoch);
             queueCheckpoint();
             return state;

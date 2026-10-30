@@ -1,9 +1,6 @@
 //! Canvas geometry, fills, and 1:1 reads. New hashes are stored before the transaction.
 use super::*;
-use alto_core::{
-    Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, RENDER_VERSION, RENDER_VERSION_EXACT,
-    RENDER_VERSION_F32, TileKey,
-};
+use alto_core::{Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, RENDER_VERSION_EXACT, TileKey};
 use alto_doc::{Document, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_raster::{TileData, TileMap};
 use alto_text::TextFrame;
@@ -1321,52 +1318,18 @@ impl Engine {
         Ok(())
     }
 
-    /// One undoable edit from render version 1 to version 2. Bilinear and rotated
-    /// pixels change, so this is never applied by load or save. The live
-    /// `format_version` becomes 3, which is what a snapshot of version 2 writes,
-    /// so the journal digest matches a document opened from that snapshot.
-    /// A document already on version 2 or 3 is rejected and the history is unchanged.
-    /// This method does not move a document onto render version 3.
+    /// One undoable edit from render version 1 or 2 to version 3. This is never
+    /// applied by load or save, because rendered pixels can change. Text bakes
+    /// are regenerated as part of the same transaction.
     pub fn upgrade_render_version(&mut self, handle: DocHandle) -> Result<ChangeSet, EngineError> {
         let ops = self.render_upgrade_ops(handle)?;
         let revision = self.document(handle)?.revision;
         self.transact(handle, "render.upgrade", ops, revision)
     }
 
-    /// The single `SetMeta` of [`Self::upgrade_render_version`]. The WASM command
-    /// applies this through the same journal path as other edits. It never
-    /// selects render version 3.
+    /// The metadata and text edits for [`Self::upgrade_render_version`].
+    /// The WASM command applies them through the normal journal path.
     pub fn render_upgrade_ops(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
-        let doc = self.document(handle)?;
-        if doc.meta.render_version != RENDER_VERSION_F32 {
-            return Err(bad("Render version is already current"));
-        }
-        let mut meta = doc.meta.clone();
-        meta.render_version = RENDER_VERSION;
-        meta.format_version = 3;
-        Ok(vec![Op::SetMeta { meta }])
-    }
-
-    /// One undoable edit onto render version 3. Refused unless
-    /// [`crate::unstable_render::set_unstable_render_v3`] accepted the request.
-    /// Release builds never accept it. A document already on version 3 is rejected
-    /// and the history is unchanged.
-    pub fn upgrade_render_version_unstable(
-        &mut self,
-        handle: DocHandle,
-    ) -> Result<ChangeSet, EngineError> {
-        let ops = self.render_upgrade_ops_unstable(handle)?;
-        let revision = self.document(handle)?.revision;
-        self.transact(handle, "render.upgrade", ops, revision)
-    }
-
-    /// The `SetMeta` of [`Self::upgrade_render_version_unstable`], then one `SetText`
-    /// per text node with its content unchanged and no bake: `transact` bakes
-    /// them (version 3 text draws from its bake only).
-    pub fn render_upgrade_ops_unstable(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
-        if !crate::unstable_render::unstable_render_v3_enabled() {
-            return Err(bad(crate::unstable_render::UNSTABLE_RENDER_V3_OFF));
-        }
         let doc = self.document(handle)?;
         if doc.meta.render_version >= RENDER_VERSION_EXACT {
             return Err(bad("Render version is already current"));
@@ -1385,6 +1348,19 @@ impl Engine {
             }
         }
         Ok(ops)
+    }
+
+    /// Compatibility alias for [`Self::upgrade_render_version`].
+    pub fn upgrade_render_version_unstable(
+        &mut self,
+        handle: DocHandle,
+    ) -> Result<ChangeSet, EngineError> {
+        self.upgrade_render_version(handle)
+    }
+
+    /// Compatibility alias for [`Self::render_upgrade_ops`].
+    pub fn render_upgrade_ops_unstable(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
+        self.render_upgrade_ops(handle)
     }
 }
 
@@ -1460,7 +1436,7 @@ mod tests {
     fn overlay_reaches_the_renderer_and_levels_bump_the_format() {
         let mut engine = Engine::new();
         let handle = engine
-            .create_document(DocumentMeta::srgb_u8(32, 32))
+            .create_document(DocumentMeta::srgb_u8_v2(32, 32))
             .unwrap();
         let id = layer(&mut engine, handle);
         let mut node = engine.document(handle).unwrap().node(id).unwrap().clone();
@@ -1595,13 +1571,13 @@ mod tests {
         assert_eq!(engine.history_state(handle).unwrap(), (1, 0));
         assert_eq!(
             engine.document(handle).unwrap().meta.render_version,
-            alto_core::RENDER_VERSION
+            alto_core::RENDER_VERSION_EXACT
         );
-        assert_eq!(engine.document(handle).unwrap().meta.format_version, 3);
+        assert_eq!(engine.document(handle).unwrap().meta.format_version, 4);
         let upgraded = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&upgraded).unwrap();
-        assert_eq!(value["meta"]["render_version"], 2);
-        assert_eq!(value["meta"]["format_version"], 3);
+        assert_eq!(value["meta"]["render_version"], 3);
+        assert_eq!(value["meta"]["format_version"], 4);
         let reopened = engine.open_snapshot(&upgraded).unwrap();
         assert_eq!(
             engine.document(reopened).unwrap().snapshot_bytes().unwrap(),

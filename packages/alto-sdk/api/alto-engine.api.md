@@ -408,6 +408,7 @@ export interface Engine {
     createDocument(meta: {
         width: number;
         height: number;
+        renderVersion?: 2 | 3;
     }): Promise<DocumentHandle>;
     dispose(): Promise<void>;
     readonly document: DocumentHandle | null;
@@ -854,7 +855,7 @@ export interface Rect {
     y1: number;
 }
 
-// @public
+// @public @deprecated (undocumented)
 export function renderVersionUpgrade(options?: UnstableRenderV3Options, buildEnabled?: boolean): "stable" | "unstable" | "rejected";
 
 // @public
@@ -1062,10 +1063,10 @@ export class Transaction {
     setVectorMask(id: NodeId, mask: VectorMask | null): void;
 }
 
-// @public
-export const UNSTABLE_RENDER_V3 = false;
+// @public @deprecated (undocumented)
+export const UNSTABLE_RENDER_V3 = true;
 
-// @public
+// @public @deprecated (undocumented)
 export interface UnstableRenderV3Options {
     unstableRenderV3?: boolean;
 }

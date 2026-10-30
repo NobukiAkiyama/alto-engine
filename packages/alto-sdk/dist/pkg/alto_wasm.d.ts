@@ -29,7 +29,7 @@ export class Runtime {
     checkpointParts(): Uint8Array;
     commit(message: string, created_at: number, author: string, allow_empty: boolean): string;
     cpuBrushReference(config: string, color: Float32Array, samples: Float32Array): Uint8Array;
-    createDocument(w: number, h: number): string;
+    createDocument(w: number, h: number, render_version?: number | null): string;
     static create(canvas: OffscreenCanvas, budget: number): Promise<Runtime>;
     destroyGpu(): void;
     endBrush(): Promise<string>;
@@ -147,8 +147,8 @@ export class Runtime {
     transact(request: string): string;
     undo(): string;
     /**
-     * One undoable edit from render version 1 to version 2. Load and save do not
-     * call this. A document already on version 2 is rejected.
+     * One undoable edit from render version 1 or 2 to version 3. Load and save
+     * do not call this. A document already on version 3 is rejected.
      */
     upgradeRenderVersion(): string;
     /**
@@ -195,7 +195,7 @@ export interface InitOutput {
     readonly runtime_commit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_cpuBrushReference: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_create: (a: any, b: number) => any;
-    readonly runtime_createDocument: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_createDocument: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_destroyGpu: (a: number) => void;
     readonly runtime_endBrush: (a: number) => any;
     readonly runtime_finishAbortHandle: (a: number) => number;

@@ -357,6 +357,7 @@ fn flatten(
     limit: Curves,
     window: Window,
     skip: bool,
+    close_open: bool,
     sink: &mut impl Sink,
 ) -> Result<(), RasterError> {
     use RasterError::{CurveRange, Range};
@@ -391,7 +392,7 @@ fn flatten(
     for command in commands {
         match *command {
             Command::Move(p) => {
-                if let (Some(a), Some(b)) = (current, start) {
+                if close_open && let (Some(a), Some(b)) = (current, start) {
                     emit(a, b)?;
                 }
                 start = Some(p);
@@ -473,10 +474,57 @@ fn flatten(
             }
         }
     }
-    if let (Some(a), Some(b)) = (current, start) {
+    if close_open && let (Some(a), Some(b)) = (current, start) {
         emit(a, b)?;
     }
     Ok(())
+}
+
+/// One flattened line segment, start then end, in Q8 pixels.
+pub(crate) type Segment = ([i64; 2], [i64; 2]);
+
+/// Flatten one stroke subpath without implicitly closing its last segment.
+/// Curve subdivision is the same integer rule as fill coverage. The bounded
+/// output prevents a pathological path from allocating unbounded stroke
+/// geometry; `CurveRange` skips that path on every tile.
+pub(crate) fn flatten_stroke(commands: &[Command]) -> Result<Vec<Segment>, RasterError> {
+    struct Segments(Vec<Segment>);
+    impl Sink for Segments {
+        fn segment(&mut self, a: [i64; 2], b: [i64; 2]) -> Option<()> {
+            if self.0.len() >= 1 << 18 {
+                return None;
+            }
+            self.0.push((a, b));
+            Some(())
+        }
+    }
+    let mut sink = Segments(Vec::new());
+    let empty = Window {
+        lx: 0,
+        ly: 0,
+        width: 0,
+        height: 0,
+        xl: 0,
+        xr: 0,
+        yt: 0,
+        yb: 0,
+    };
+    flatten(
+        commands,
+        Curves::Reject(CURVE_LIMIT),
+        empty,
+        false,
+        false,
+        &mut sink,
+    )
+    .map_err(|e| {
+        if e == RasterError::Range {
+            RasterError::CurveRange
+        } else {
+            e
+        }
+    })?;
+    Ok(sink.0)
 }
 
 /// Rasterize a path into the level-pixel window. An error means a defined range
@@ -572,7 +620,7 @@ fn rasterize_with(
                 cover: vec![0; len],
                 area: vec![0; len],
             };
-            flatten(&commands, curve_limit, window, skip, &mut sink)?;
+            flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
             for row in 0..height {
                 let mut sum = 0i128;
                 for col in 0..width {
@@ -591,7 +639,7 @@ fn rasterize_with(
                 window,
                 crossings: vec![vec![]; height * 16],
             };
-            flatten(&commands, curve_limit, window, skip, &mut sink)?;
+            flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
             let mut tally = vec![0u32; len];
             for (index, xs) in sink.crossings.iter_mut().enumerate() {
                 let row = index / 16;

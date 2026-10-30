@@ -5631,6 +5631,10 @@ impl Gpu {
                             resource: wgpu::BindingResource::TextureView(&views[stage.b]),
                         },
                         wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&views[stage.a]),
+                        },
+                        wgpu::BindGroupEntry {
                             binding: 3,
                             resource: wgpu::BindingResource::TextureView(&atlas_v),
                         },
@@ -7470,7 +7474,7 @@ fn pre_bump_documents_match_the_recorded_main_hashes() {
         text.contains("\"format_version\": 1"),
         "a version 1 document keeps format 1"
     );
-    let fresh = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+    let fresh = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8_v2(8, 8)).unwrap();
     assert_eq!(fresh.meta.render_version, RENDER_VERSION);
     let fresh_text = String::from_utf8(fresh.snapshot_bytes().unwrap()).unwrap();
     assert!(fresh_text.contains("\"render_version\": 2"));
@@ -7519,9 +7523,9 @@ fn pre_bump_documents_match_the_recorded_main_hashes() {
     );
 }
 
-/// Version 2 changes pixels, so moving a document onto it is one undoable edit.
-/// Opening and saving a version 1 snapshot leaves the version, and therefore the
-/// locked hashes, where they were.
+/// The upgrade moves a version 1 document straight to version 3, which changes
+/// pixels, so it is one undoable edit. Opening and saving a version 1 snapshot
+/// leaves the version, and therefore the locked hashes, where they were.
 #[test]
 fn upgrading_a_version_one_document_switches_the_locked_hashes_and_undo_restores_them() {
     use alto_engine::Engine;
@@ -7581,16 +7585,16 @@ fn upgrading_a_version_one_document_switches_the_locked_hashes_and_undo_restores
     engine.upgrade_render_version(handle).unwrap();
     assert_eq!(engine.history_state(handle).unwrap(), (1, 0));
     let version = engine.document(handle).unwrap().meta.render_version;
-    assert_eq!(version, RENDER_VERSION);
-    assert_eq!(hashes(bilinear, version), v2["scale-bilinear"]);
-    assert_eq!(hashes(rotation, version), v2["rotation"]);
+    assert_eq!(version, alto_core::RENDER_VERSION_EXACT);
+    assert_ne!(hashes(bilinear, version), v1["scale-bilinear"]);
+    assert_ne!(hashes(rotation, version), rotation_v1);
     assert_eq!(
         engine.render_scene(handle).unwrap().render_version,
-        RENDER_VERSION
+        alto_core::RENDER_VERSION_EXACT
     );
     let upgraded = String::from_utf8(engine.snapshot(handle).unwrap()).unwrap();
-    assert!(upgraded.contains("\"render_version\": 2"));
-    assert!(upgraded.contains("\"format_version\": 3"));
+    assert!(upgraded.contains("\"render_version\": 3"));
+    assert!(upgraded.contains("\"format_version\": 4"));
 
     engine.undo(handle).unwrap();
     let version = engine.document(handle).unwrap().meta.render_version;
@@ -7662,7 +7666,7 @@ fn plain_scene_gaps_are_explicit() {
             ..RFeatures::default()
         },
     );
-    // Invert has no integer stage; Gaussian blur does (checked below).
+    // The plain compositor cannot draw effects; v3 sends them to integer M5.
     let effects = scene(
         RContent::Tiles(Vec::new()),
         RFeatures {
@@ -7707,11 +7711,11 @@ fn plain_scene_gaps_are_explicit() {
         assert_eq!(gap(scene), Some(reason));
         let mut v3 = scene.clone();
         v3.render_version = 3;
-        // Pixel masks, clipping, color-adjust adjustment layers, filled vectors,
-        // vector masks and clip paths have integer stages.
+        // All document effects, masks, clipping, adjustments and vectors have
+        // integer stages. Direct layout text remains a refused internal input.
         let integer = matches!(
             reason,
-            "adjustment" | "mask" | "vector" | "vector mask" | "clip path" | "clip"
+            "effects" | "adjustment" | "mask" | "vector" | "vector mask" | "clip path" | "clip"
         );
         let expected = if integer {
             "v3-m5-integer"
@@ -7728,11 +7732,7 @@ fn plain_scene_gaps_are_explicit() {
     v3.render_version = 3;
     assert_eq!(gap(&v3), None);
 
-    // Color-adjust and Gaussian blur layer effects are integer M5, selection-limited
-    // ones too (mode 22). Any other effect has no integer stage yet, with or
-    // without a selection.
-    // Blends of masked adjustment layers are mode 23. Without a mask a non-normal
-    // blend is refused until the stages upstream of mode 23 are integer.
+    // Layer effects and selection-limited effects use integer M5 stages.
     let color_adjust = REffect {
         kind: REffectKind::ColorAdjust {
             brightness: 0.2,
@@ -7765,7 +7765,7 @@ fn plain_scene_gaps_are_explicit() {
     };
     assert_eq!(crate::renderer::v3_gap(&blur), None);
     assert_eq!(gap(&blur), Some("v3-m5-integer"));
-    // A stroked path keeps the v2 tessellator, so it is refused.
+    // A visible stroke now takes the integer outline and coverage path.
     let mut stroked = vector.clone();
     stroked.render_version = 3;
     stroked.nodes[0].content = RContent::Mesh(std::sync::Arc::new(vec![alto_vector::StyledPath {
@@ -7780,9 +7780,8 @@ fn plain_scene_gaps_are_explicit() {
         }),
         fill_rule: FillRule::NonZero,
     }]));
-    assert_eq!(crate::renderer::v3_gap(&stroked), Some("vector stroke"));
-    // A stroke that cannot change a pixel does not refuse the node: width
-    // +/-0, or an alpha below 2^-15 (its Q14 is 0). 2^-15 itself is visible.
+    assert_eq!(crate::renderer::v3_gap(&stroked), None);
+    // Visibility still follows Q14 alpha and a nonzero stored width.
     for (width, alpha, visible) in [
         (0.0f32, 1.0f32, false),
         (-0.0, 1.0, false),
@@ -7798,14 +7797,14 @@ fn plain_scene_gaps_are_explicit() {
         let stroke = std::sync::Arc::make_mut(paths)[0].stroke.as_mut().unwrap();
         stroke.width = width;
         stroke.color[3] = alpha;
-        let want = visible.then_some("vector stroke");
-        assert_eq!(crate::renderer::v3_gap(&s), want, "{width} {alpha:e}");
+        assert_eq!(crate::raster_q8::stroke_visible(stroke), visible);
+        assert_eq!(crate::renderer::v3_gap(&s), None, "{width} {alpha:e}");
     }
     let mut multiply = adjustment.clone();
     multiply.render_version = 3;
     multiply.nodes[0].blend = RenderBlend::Multiply;
-    assert_eq!(crate::renderer::v3_gap(&multiply), Some("adjustment"));
-    assert_eq!(gap(&multiply), Some("v3-unsupported"));
+    assert_eq!(crate::renderer::v3_gap(&multiply), None);
+    assert_eq!(gap(&multiply), Some("v3-m5-integer"));
     multiply.nodes[0].features.mask = mask.nodes[0].features.mask.clone();
     assert_eq!(crate::renderer::v3_gap(&multiply), None);
     assert_eq!(gap(&multiply), Some("v3-m5-integer"));
@@ -7814,9 +7813,8 @@ fn plain_scene_gaps_are_explicit() {
         kind: REffectKind::Invert,
         selection: None,
     });
-    assert_eq!(crate::renderer::v3_gap(&invert), Some("adjustment"));
-    // Integer vector coverage composes with pixel masks; unsupported stages
-    // remain refused when a pixel mask is present.
+    assert_eq!(crate::renderer::v3_gap(&invert), None);
+    // Integer vector coverage and effects compose with pixel masks.
     let mut masked = mask.clone();
     masked.render_version = 3;
     for (reason, add) in [
@@ -7832,12 +7830,7 @@ fn plain_scene_gaps_are_explicit() {
         n.clip_path = f.clip_path.clone();
         n.clip = f.clip;
         n.effects = f.effects.clone();
-        let expected = if matches!(reason, "vector mask" | "clip path" | "clip") {
-            None
-        } else {
-            Some(reason)
-        };
-        assert_eq!(crate::renderer::v3_gap(&v3), expected, "mask + {reason}");
+        assert_eq!(crate::renderer::v3_gap(&v3), None, "mask + {reason}");
     }
 }
 
@@ -8368,6 +8361,153 @@ fn test_rectangle(x0: f64, y0: f64, x1: f64, y1: f64, fill: [f32; 4]) -> alto_ve
     }
 }
 
+fn test_stroke(cap: alto_vector::LineCap) -> alto_vector::StyledPath {
+    alto_vector::StyledPath {
+        data: PathData {
+            commands: vec![
+                alto_vector::PathCommand::Move { x: 40.0, y: 64.0 },
+                alto_vector::PathCommand::Line { x: 120.0, y: 64.0 },
+            ],
+        },
+        fill: None,
+        stroke: Some(alto_vector::Stroke {
+            color: [1.0, 0.0, 0.0, 1.0],
+            width: 8.0,
+            cap,
+            join: alto_vector::LineJoin::Miter,
+            miter_limit: 4.0,
+        }),
+        fill_rule: FillRule::NonZero,
+    }
+}
+
+#[test]
+fn v3_stroke_caps_and_nonuniform_transform_reach_metal() {
+    for (cap, end_inside) in [
+        (alto_vector::LineCap::Butt, false),
+        (alto_vector::LineCap::Round, true),
+        (alto_vector::LineCap::Square, true),
+    ] {
+        let mut document = scene(
+            RContent::Mesh(std::sync::Arc::new(vec![test_stroke(cap)])),
+            RFeatures::default(),
+        );
+        document.render_version = alto_core::RENDER_VERSION_EXACT;
+        document.nodes[0].transform = [1.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        assert_eq!(crate::renderer::v3_gap(&document), None);
+        let Some(image) = v3_vector_test_render(&document) else {
+            return;
+        };
+        let pixel =
+            |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+        assert_eq!(pixel(80, 128), [255, 0, 0, 255], "{cap:?}");
+        assert_eq!(pixel(80, 122), [255, 0, 0, 255], "{cap:?}");
+        assert_eq!(pixel(80, 119), [0, 0, 0, 0], "{cap:?}");
+        assert_eq!(pixel(38, 128)[3] != 0, end_inside, "{cap:?}");
+        assert_eq!(pixel(35, 128), [0, 0, 0, 0], "{cap:?}");
+    }
+}
+
+#[test]
+fn v3_stroke_join_styles_reach_metal() {
+    for (join, round_pixel, miter_pixel) in [
+        (alto_vector::LineJoin::Bevel, false, false),
+        (alto_vector::LineJoin::Round, true, false),
+        (alto_vector::LineJoin::Miter, true, true),
+    ] {
+        let mut path = test_stroke(alto_vector::LineCap::Butt);
+        path.data.commands = vec![
+            alto_vector::PathCommand::Move { x: 40.0, y: 80.0 },
+            alto_vector::PathCommand::Line { x: 80.0, y: 80.0 },
+            alto_vector::PathCommand::Line { x: 80.0, y: 40.0 },
+        ];
+        let stroke = path.stroke.as_mut().unwrap();
+        stroke.width = 16.0;
+        stroke.join = join;
+        let mut document = scene(
+            RContent::Mesh(std::sync::Arc::new(vec![path])),
+            RFeatures::default(),
+        );
+        document.render_version = alto_core::RENDER_VERSION_EXACT;
+        let Some(image) = v3_vector_test_render(&document) else {
+            return;
+        };
+        let alpha = |x: usize, y: usize| image[(y * 256 + x) * 4 + 3];
+        assert_eq!(alpha(84, 84) == 255, round_pixel, "{join:?}");
+        assert_eq!(alpha(86, 86) == 255, miter_pixel, "{join:?}");
+    }
+}
+
+#[test]
+fn v3_stroke_paints_after_the_fill() {
+    let mut path = test_rectangle(80.0, 80.0, 160.0, 160.0, [0.0, 0.0, 1.0, 1.0]);
+    path.stroke = Some(alto_vector::Stroke {
+        color: [1.0, 0.0, 0.0, 1.0],
+        width: 8.0,
+        cap: alto_vector::LineCap::Butt,
+        join: alto_vector::LineJoin::Miter,
+        miter_limit: 4.0,
+    });
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![path])),
+        RFeatures::default(),
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    let Some(image) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let pixel =
+        |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+    assert_eq!(pixel(120, 120), [0, 0, 255, 255]);
+    assert_eq!(pixel(80, 120), [255, 0, 0, 255]);
+    assert_eq!(pixel(70, 120), [0, 0, 0, 0]);
+}
+
+#[test]
+fn v3_curved_stroke_matches_the_integer_reference() {
+    let mut path = test_stroke(alto_vector::LineCap::Round);
+    path.data.commands = vec![
+        alto_vector::PathCommand::Move { x: 48.0, y: 128.0 },
+        alto_vector::PathCommand::Cubic {
+            c1x: 80.0,
+            c1y: 16.0,
+            c2x: 176.0,
+            c2y: 240.0,
+            x: 208.0,
+            y: 128.0,
+        },
+    ];
+    let stroke = path.stroke.as_mut().unwrap();
+    stroke.color = [0.25, 0.5, 1.0, 0.5];
+    stroke.width = 12.0;
+    stroke.join = alto_vector::LineJoin::Round;
+    let coverage = crate::stroke_q8::rasterize_stroke(
+        &path.data,
+        stroke,
+        alto_core::FixedAffine::IDENTITY,
+        0,
+        [0, 0, 256, 256],
+    )
+    .unwrap();
+    let color = crate::raster_q8::color_q14(stroke.color).unwrap();
+    let expected: Vec<u8> = coverage
+        .into_iter()
+        .flat_map(|k| {
+            crate::raster_q8::source_over_q14([0; 4], color, k)
+                .map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8)
+        })
+        .collect();
+    let mut document = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![path])),
+        RFeatures::default(),
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    let Some(image) = v3_vector_test_render(&document) else {
+        return;
+    };
+    assert_eq!(image, expected);
+}
+
 #[test]
 fn v3_vector_fill_reaches_metal_and_matches_q14_reference() {
     let rectangle = test_rectangle(32.5, 40.0, 96.5, 100.0, [1.0, 0.0, 0.0, 0.5]);
@@ -8689,11 +8829,15 @@ fn v3_raster_blur_square_matches_integer_reference() {
 
 /// A v3 group of the opaque red square 80..180 (raster) and `top` above it.
 fn v3_square_under(top: RNode) -> (RenderScene, alto_raster::ObjectStore) {
+    v3_colored_square_under(top, [255, 0, 0, 255])
+}
+
+fn v3_colored_square_under(top: RNode, color: [u8; 4]) -> (RenderScene, alto_raster::ObjectStore) {
     use alto_core::{PixelFormat, TileKey};
     let mut bytes = vec![0u8; 256 * 256 * 4];
     for y in 80..180 {
         for x in 80..180 {
-            bytes[(y * 256 + x) * 4..][..4].copy_from_slice(&[255, 0, 0, 255]);
+            bytes[(y * 256 + x) * 4..][..4].copy_from_slice(&color);
         }
     }
     let mut store = alto_raster::ObjectStore::default();
@@ -8857,7 +9001,7 @@ fn v3_backdrop_blur_matches_the_layer_blur() {
 }
 
 #[test]
-fn v3_adjustment_vector_mask_and_clip_path_are_refused() {
+fn v3_adjustment_vector_mask_and_clip_path_mix_integers() {
     let adjust = REffectKind::ColorAdjust {
         brightness: 0.2,
         contrast: 1.0,
@@ -8886,17 +9030,162 @@ fn v3_adjustment_vector_mask_and_clip_path_are_refused() {
         },
     ] {
         let (document, store) = v3_square_under(v3_adjustment(adjust.clone(), features));
-        // No integer mix of backdrop, adjusted copy and coverage is defined.
-        assert_eq!(crate::renderer::v3_gap(&document), Some("adjustment"));
-        assert_eq!(gap(&document), Some("v3-unsupported"));
-        let Some(result) = v3_test_try_render(&document, &store, (0, 0, 0)) else {
+        assert_eq!(crate::renderer::v3_gap(&document), None);
+        assert_eq!(gap(&document), Some("v3-m5-integer"));
+        let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
             return;
         };
-        assert!(
-            matches!(result, Err(crate::RenderError::GpuUnsupported(_))),
-            "{result:?}"
-        );
+        let pixel =
+            |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+        assert_eq!(pixel(85, 90), [255, 51, 51, 255]);
+        assert_eq!(pixel(120, 120), [255, 0, 0, 255]);
+        assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
     }
+}
+
+#[test]
+fn v3_unmasked_adjustment_blend_reaches_metal() {
+    let mut top = v3_adjustment(
+        REffectKind::ColorAdjust {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        },
+        RFeatures::default(),
+    );
+    top.blend = RenderBlend::Screen;
+    top.opacity = 0.5;
+    let (document, store) = v3_square_under(top);
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+        return;
+    };
+    let pixel =
+        |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+    assert_eq!(pixel(100, 100), [255, 26, 26, 255]);
+    assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
+}
+
+#[test]
+fn v3_remaining_adjustment_effects_render_on_metal() {
+    let cases = [
+        (REffectKind::Invert, [255, 0, 0, 255], [0, 255, 255, 255], 0),
+        (
+            REffectKind::Curves {
+                points: vec![(0.0, 1.0), (1.0, 0.0)],
+            },
+            [255, 0, 0, 255],
+            [0, 255, 255, 255],
+            0,
+        ),
+        (
+            REffectKind::Levels {
+                in_black: 0.0,
+                in_white: 1.0,
+                gamma: 2.0,
+                out_black: 0.0,
+                out_white: 1.0,
+            },
+            [128, 128, 128, 255],
+            [181, 181, 181, 255],
+            2,
+        ),
+        // Above 4, where the color-adjust clamp would have drawn gamma 4 (215).
+        (
+            REffectKind::Levels {
+                in_black: 0.0,
+                in_white: 1.0,
+                gamma: 10.0,
+                out_black: 0.0,
+                out_white: 1.0,
+            },
+            [128, 128, 128, 255],
+            [238, 238, 238, 255],
+            2,
+        ),
+        (
+            REffectKind::HueSaturation {
+                hue: 90.0,
+                saturation: 1.0,
+                lightness: 0.0,
+            },
+            [255, 0, 0, 255],
+            [108, 0, 255, 255],
+            2,
+        ),
+    ];
+    for (kind, color, expected, tolerance) in cases {
+        for adjustment in [true, false] {
+            let top = if adjustment {
+                v3_adjustment(kind.clone(), RFeatures::default())
+            } else {
+                scene(RContent::Tiles(Vec::new()), RFeatures::default())
+                    .nodes
+                    .remove(0)
+            };
+            let (mut document, store) = v3_colored_square_under(top, color);
+            if !adjustment {
+                document.nodes[1].features.effects.push(REffect {
+                    kind: kind.clone(),
+                    selection: None,
+                });
+            }
+            assert_eq!(crate::renderer::v3_gap(&document), None, "{kind:?}");
+            let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+                return;
+            };
+            let pixel: [u8; 4] = image[(100 * 256 + 100) * 4..][..4].try_into().unwrap();
+            for i in 0..4 {
+                assert!(
+                    pixel[i].abs_diff(expected[i]) <= tolerance,
+                    "{kind:?} adjustment={adjustment} pixel={pixel:?} expected={expected:?}"
+                );
+            }
+            assert_eq!(&image[(50 * 256 + 50) * 4..][..4], &[0, 0, 0, 0]);
+        }
+    }
+}
+
+#[test]
+fn v3_subpixel_level_reads_raster_and_adjustment_on_metal() {
+    assert_eq!(
+        crate::renderer::input_map([288.0, 248.0, 1.0 / 64.0], [256, 256], [288.0, 248.0, 1.0]),
+        Some([1, 1, 2, 128])
+    );
+    let (document, store) = v3_square_under(v3_adjustment(
+        REffectKind::ColorAdjust {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        },
+        RFeatures::default(),
+    ));
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_test_render_with(&document, &store, (-6, 25, 25)) else {
+        return;
+    };
+    assert_eq!(&image[..4], &[255, 51, 51, 255]);
+    assert_eq!(&image[(255 * 256 + 255) * 4..][..4], &[255, 51, 51, 255]);
+
+    let path = test_rectangle(100.0, 100.0, 102.0, 104.0, [1.0; 4]).data;
+    let (masked, store) = v3_square_under(v3_adjustment(
+        REffectKind::Invert,
+        RFeatures {
+            vector_mask: Some(VectorMask {
+                path,
+                fill_rule: FillRule::NonZero,
+                feather: 0.0,
+                enabled: true,
+                transform: Affine2::default(),
+            }),
+            ..RFeatures::default()
+        },
+    ));
+    let Some(image) = v3_test_render_with(&masked, &store, (-6, 25, 25)) else {
+        return;
+    };
+    assert_eq!(&image[..4], &[0, 255, 255, 255]);
+    assert_eq!(&image[(255 * 256 + 255) * 4..][..4], &[255, 0, 0, 255]);
 }
 
 #[test]
@@ -9647,9 +9936,8 @@ fn integer_effects_shader_has_no_float_targets_and_validates() {
     for gone in ["f16", "Q14", "info.x==17u", "info.x==18u", "info.x==19u"] {
         assert!(!v2.contains(gone), "v1/v2 effects.wgsl still has {gone}");
     }
-    // The host binds 0, 1 and 3..=6 only; an unused declared binding would leave
-    // the derived layout without it and fail the bind group.
-    assert!(!shader.contains("@binding(2)"));
+    // The third input is the v3 vector coverage used by mode 29.
+    assert!(shader.contains("@binding(2)"));
     for text in [shader, resolve.to_string()] {
         let module = naga::front::wgsl::parse_str(&text)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));

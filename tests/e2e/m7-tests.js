@@ -32,8 +32,8 @@ export async function runM7Tests(engine, log) {
   const results = [], metrics = {};
   const test = async (name, fn) => { const s = performance.now(); await fn(); results.push({ name, pass: true, ms: performance.now() - s }); log("PASS " + name); };
   let doc, id, jp, latin;
-  const setup = async (w = 512, h = 512) => {
-    doc = await engine.createDocument({ width: w, height: h });
+  const setup = async (w = 512, h = 512, renderVersion) => {
+    doc = await engine.createDocument({ width: w, height: h, renderVersion });
     [jp, latin] = await fonts(engine);
     await doc.transact("fonts", (tx) => { tx.addFont(jp); tx.addFont(latin); });
   };
@@ -159,7 +159,7 @@ export async function runM7Tests(engine, log) {
       assert(failed, "invalid span accepted");
     });
     await test("small text: size-banded glyph atlas matches vector coverage, zoom switches back to vector, GPU loss rebuilds", async () => {
-      await setup();
+      await setup(512, 512, 2);
       const both = [latin.id, jp.id];
       const small = (text, size, extra = {}) => ({ text, style: { fonts: both, size, color: [0, 0, 0, 1], line_height: 1.5 }, writing_mode: "horizontal_tb", frame: { kind: "point" }, ...extra });
       const ids = {};

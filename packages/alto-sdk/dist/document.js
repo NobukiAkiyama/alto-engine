@@ -1,5 +1,4 @@
 import { AltoError } from "./errors.js";
-import { renderVersionUpgrade, } from "./render-version.js";
 import { intentRecord } from "./intents.js";
 import { SnapshotStore } from "./snapshot.js";
 import { immutable, sha256Hex, unframeEntries, } from "./storage.js";
@@ -66,17 +65,6 @@ export class DocumentHandle {
     flushTool() {
         return this.tool?.flush();
     }
-    /**
-     * A render version 3 document serializes as format 4. Saving that package
-     * needs the explicit opt-in, and this build does not have it.
-     */
-    refuseUnstableFormatFour(options) {
-        if ((this.getSnapshot().meta.render_version ?? 0) < 3)
-            return;
-        if (renderVersionUpgrade(options) !== "unstable") {
-            throw new AltoError("INVALID_ARGUMENT", "render version 3 is unstable and is off in this build");
-        }
-    }
     closed = false;
     /** Requests go through here, so a replaced handle cannot touch the new document. */
     request = ((...args) => this.closed
@@ -131,18 +119,11 @@ export class DocumentHandle {
         return this.command("redo", {});
     }
     /**
-     * Switches a version-1 document to render version 2 as one undoable edit.
-     * Bilinear and rotated samples change. Opening or saving a document does not
-     * do this. A document that is already version 2 is rejected.
-     * `{ unstableRenderV3: true }` asks for render version 3. This build rejects
-     * that request: version 3 stays off until integer compositing lands.
+     * Switches a version-1 or version-2 document to render version 3 as one
+     * undoable edit. Opening or saving a document does not upgrade it.
      */
     upgradeRenderVersion(options) {
-        // The shipped constant never selects "unstable". This package has no
-        // wasm export that upgrades to version 3, so only the version 2 edit runs.
-        if (renderVersionUpgrade(options) !== "stable") {
-            throw new AltoError("INVALID_ARGUMENT", "render version 3 is unstable and is off in this build");
-        }
+        void options;
         return this.command("upgradeRenderVersion", {});
     }
     /**
@@ -286,7 +267,7 @@ export class DocumentHandle {
     }
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
     async save(target, options) {
-        this.refuseUnstableFormatFour(options);
+        void options;
         await this.endTool();
         this.core.emit("saveState", "saving");
         let token;
@@ -309,7 +290,6 @@ export class DocumentHandle {
      * last. A folder holding another document is refused unless `overwrite`.
      */
     async saveFolder(provider, options = {}) {
-        this.refuseUnstableFormatFour(options);
         await this.endTool();
         this.core.emit("saveState", "saving");
         let token;

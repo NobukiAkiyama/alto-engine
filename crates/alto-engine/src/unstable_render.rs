@@ -1,8 +1,6 @@
-//! Render version 3 stays unstable until integer compositing lands.
-//! Upgrading onto it and saving a format 4 package both require an explicit
-//! opt-in. The opt-in is off by default. A release build ignores the request
-//! even when this crate was compiled with `unstable-render-v3`. Opening a
-//! version 3 document does not ask for the opt-in.
+//! Legacy render-version-3 opt-in API, retained for compatibility. Version 3
+//! is now the default and this thread-local flag no longer controls upgrades
+//! or format-4 saves.
 
 use std::cell::Cell;
 
@@ -19,8 +17,7 @@ pub fn allow_unstable_render_v3(debug_build: bool, compiled_in: bool, requested:
     debug_build && compiled_in && requested
 }
 
-/// Records `enabled` on this thread. Returns whether version 3 writes are
-/// actually allowed. A release build returns false and leaves the gate closed.
+/// Records the legacy opt-in on this thread. It does not gate v3 writes.
 pub fn set_unstable_render_v3(enabled: bool) -> bool {
     let on = allow_unstable_render_v3(
         cfg!(debug_assertions),
