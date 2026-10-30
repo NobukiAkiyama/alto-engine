@@ -8898,6 +8898,241 @@ fn v3_feathered_vector_mask_blurs_integer_coverage() {
     );
 }
 
+/// Render version 3 text reference (doc/design/2026-10-28-v3-integer-text.md
+/// "着色と重ね", implementation order 3): a text node's premultiplied Q14 over
+/// the level-pixel ROI `[ox, oy, w, h]`, from its bake only. Each glyph in bake
+/// order: `C` from the world and the placement (a glyph whose `C` is out of
+/// range is not drawn), the atlas band (`place_q`, the whole bitmap, cut to the
+/// ROI) or the direct band (the ROI as the window), then the normal over its
+/// straight Q14 colour (`source_over_q14`, the memo's `F = k * c_a`). A bake
+/// that does not decode draws nothing (`TEXT_BAKE_INVALID`). There is no atlas
+/// here: the cache state never changes a pixel.
+fn text_q14(
+    bake: &[u8],
+    world: alto_core::FixedAffine,
+    level: i32,
+    roi: [i64; 4],
+) -> Vec<[u16; 4]> {
+    use crate::glyph_q8::{atlas_band, glyph_map_q, place_q, rasterize_atlas, rasterize_direct};
+    let [ox, oy, w, h] = roi;
+    let mut acc = vec![[0u16; 4]; (w * h) as usize];
+    let Ok(bake) = alto_core::text_bake::TextBake::decode(bake) else {
+        return acc;
+    };
+    for g in &bake.glyphs {
+        let outline = &bake.outlines[g.outline as usize];
+        let Some(c) = glyph_map_q(world, level, g.m, g.t) else {
+            continue;
+        };
+        let mut paint = |x: i64, y: i64, b: u8| {
+            if b > 0 && (ox..ox + w).contains(&x) && (oy..oy + h).contains(&y) {
+                let i = ((y - oy) * w + (x - ox)) as usize;
+                acc[i] = crate::raster_q8::source_over_q14(acc[i], g.color, b);
+            }
+        };
+        match atlas_band(&c, outline.upem)
+            .then(|| place_q(&c, outline))
+            .flatten()
+        {
+            Some(p) => {
+                let Ok(bytes) = rasterize_atlas(&p, outline) else {
+                    continue;
+                };
+                let [dx, dy] = p.dst();
+                for (i, &b) in bytes.iter().enumerate() {
+                    let (bx, by) = ((i % p.w as usize) as i64, (i / p.w as usize) as i64);
+                    paint(dx + bx, dy + by, b);
+                }
+            }
+            None => {
+                let Ok(bytes) = rasterize_direct(&c, outline, roi) else {
+                    continue;
+                };
+                for (i, &b) in bytes.iter().enumerate() {
+                    paint(ox + (i as i64 % w), oy + (i as i64 / w), b);
+                }
+            }
+        }
+    }
+    acc
+}
+
+/// A v3 document with the parity fonts and the bake of `text` at `size`.
+fn bake_parity_text(text: &str, size: f32, color: [f32; 4]) -> Vec<u8> {
+    use alto_doc::Op;
+    let mut e = alto_engine::Engine::new();
+    let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
+    meta.render_version = alto_core::RENDER_VERSION_EXACT;
+    meta.format_version = 4;
+    let d = e.create_document(meta).unwrap();
+    let mut fonts = vec![];
+    let mut ops = vec![];
+    for bytes in [
+        &include_bytes!("../../../tests/fonts/AltoTestLatin.ttf")[..],
+        &include_bytes!("../../../tests/fonts/AltoTestJP.otf")[..],
+    ] {
+        let font = e.import_font(bytes.to_vec(), 0).unwrap();
+        fonts.push(font.record.id);
+        ops.push(Op::SetAsset {
+            id: font.record.id,
+            record: Some(font.record),
+        });
+    }
+    e.transact(d, "fonts", ops, 0).unwrap();
+    let content = alto_text::TextContent {
+        text: text.into(),
+        style: alto_text::TextStyle {
+            fonts,
+            size,
+            color,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    e.bake_text(&e.document(d).unwrap().assets, &content)
+        .encode()
+}
+
+/// The parity texts' bakes: small (atlas band) and large (direct band) Latin,
+/// and Japanese, at a document position with fractional placement.
+fn text_reference_bakes() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "latin 13.5 px",
+            bake_parity_text("Alto 0.25 px/em", 13.5, [0.1, 0.2, 0.9, 1.0]),
+        ),
+        (
+            "latin 61 px",
+            bake_parity_text("Ag&", 61.0, [0.9, 0.1, 0.1, 0.5]),
+        ),
+        (
+            "japanese 30 px",
+            bake_parity_text("吾輩は猫", 30.0, [0.0, 0.0, 0.0, 0.75]),
+        ),
+    ]
+}
+
+fn moved(x: f64, y: f64) -> alto_core::FixedAffine {
+    alto_core::FixedAffine::from_affine(Affine2([1.0, 0.0, 0.0, 1.0, x, y])).unwrap()
+}
+
+#[test]
+fn glyph_q14_does_not_overflow() {
+    // Every coverage byte with the memo's E values for colour and accumulator,
+    // rgb <= a in the accumulator: the result keeps a <= 16384 and rgb <= a.
+    let e = [0u16, 1, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384];
+    for b in 0..=255u8 {
+        for &ca in &e {
+            for &crgb in &[0u16, 1, 8192, 16383, 16384] {
+                for &aa in &e {
+                    for &argb in e.iter().filter(|&&v| v <= aa) {
+                        let out = crate::raster_q8::source_over_q14(
+                            [argb, argb, argb, aa],
+                            [crgb, crgb, crgb, ca],
+                            b,
+                        );
+                        assert!(out[3] <= 16384, "a {out:?}");
+                        assert!(
+                            out[..3].iter().all(|&v| v <= out[3]),
+                            "rgb {out:?} ({b}, {ca}, {crgb}, {aa}, {argb})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // An opaque full-coverage glyph replaces the accumulator exactly.
+    let full =
+        crate::raster_q8::source_over_q14([100, 200, 300, 400], [16384, 0, 8192, 16384], 255);
+    assert_eq!(full, [16384, 0, 8192, 16384]);
+}
+
+#[test]
+fn text_q14_draws_baked_text_in_both_bands() {
+    for (name, bake) in text_reference_bakes() {
+        let world = moved(20.25, 60.625);
+        let q = text_q14(&bake, world, 0, [0, 0, 256, 256]);
+        let ink = q.iter().filter(|p| p[3] > 0).count();
+        assert!(ink > 50, "{name}: ink {ink}");
+        assert!(
+            q.iter()
+                .all(|p| p[3] <= 16384 && p[..3].iter().all(|&v| v <= p[3])),
+            "{name}"
+        );
+        // Nothing above or left of the text's origin.
+        assert!(q[..256 * 10].iter().all(|p| p[3] == 0), "{name} drew above");
+        assert!(
+            (0..256).all(|y| q[y * 256..y * 256 + 15].iter().all(|p| p[3] == 0)),
+            "{name} drew left"
+        );
+    }
+    // The bands are what the sizes say: 13.5 px atlas, 61 px direct.
+    let bake = alto_core::text_bake::TextBake::decode(&text_reference_bakes()[0].1).unwrap();
+    let glyph = &bake.glyphs[0];
+    let c = crate::glyph_q8::glyph_map_q(moved(0.0, 0.0), 0, glyph.m, glyph.t).unwrap();
+    assert!(crate::glyph_q8::atlas_band(
+        &c,
+        bake.outlines[glyph.outline as usize].upem
+    ));
+    let bake = alto_core::text_bake::TextBake::decode(&text_reference_bakes()[1].1).unwrap();
+    let glyph = &bake.glyphs[0];
+    let c = crate::glyph_q8::glyph_map_q(moved(0.0, 0.0), 0, glyph.m, glyph.t).unwrap();
+    assert!(!crate::glyph_q8::atlas_band(
+        &c,
+        bake.outlines[glyph.outline as usize].upem
+    ));
+}
+
+#[test]
+fn text_q14_window_crop_and_tile_seams() {
+    // One large ROI and its four quarters agree on every pixel, in both bands,
+    // with the text across the seam and at a negative origin.
+    for (name, bake) in text_reference_bakes() {
+        let world = moved(-31.375, 70.5);
+        let full = text_q14(&bake, world, 0, [-64, 0, 256, 256]);
+        for (qx, qy) in [(-64, 0), (64, 0), (-64, 128), (64, 128)] {
+            let part = text_q14(&bake, world, 0, [qx, qy, 128, 128]);
+            for y in 0..128 {
+                let row = (y + qy as usize) * 256 + (qx + 64) as usize;
+                assert_eq!(
+                    &part[y * 128..y * 128 + 128],
+                    &full[row..row + 128],
+                    "{name} ({qx}, {qy}) row {y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn text_q14_invalid_bake_and_levels() {
+    let (_, bake) = text_reference_bakes().remove(0);
+    let world = moved(20.0, 60.0);
+    // A bake that does not decode draws nothing.
+    for broken in [&bake[..bake.len() - 1], &[0u8; 8][..], &[][..]] {
+        assert!(
+            text_q14(broken, world, 0, [0, 0, 64, 64])
+                .iter()
+                .all(|p| *p == [0; 4])
+        );
+    }
+    // Level -1 doubles the text; level 1 halves it. Ink scales accordingly.
+    let ink = |level: i32| {
+        text_q14(&bake, world, level, [0, 0, 512, 512])
+            .iter()
+            .map(|p| u64::from(p[3]))
+            .sum::<u64>()
+    };
+    let (half, one, two) = (ink(1), ink(0), ink(-1));
+    assert!(two > 3 * one && one > 3 * half, "ink {half} {one} {two}");
+    // Outside -16..=12 the world does not map and nothing is drawn.
+    assert!(
+        text_q14(&bake, world, 13, [0, 0, 8, 8])
+            .iter()
+            .all(|p| *p == [0; 4])
+    );
+}
+
 #[test]
 fn v3_hosts_refuse_blend_modes_17_and_up() {
     // RenderBlend has variants 0..=16 only, so a v3 RenderScene cannot carry 17.

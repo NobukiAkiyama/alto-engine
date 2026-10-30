@@ -269,4 +269,42 @@ mod tests {
             Some(Some([1 << 16, 0, 1, 1 << 16, 0, 0]))
         );
     }
+
+    /// The memo's fixed vectors (doc/design/2026-10-28-v3-integer-text.md
+    /// "浮動小数のビットの整数分解"): bit patterns, never re-parsed decimals.
+    #[test]
+    fn q_from_float_bits_rounds_half_away() {
+        let q16 = |hex: u64| q_from_f64_bits(hex, 16);
+        // Just below, at and just above Q16's 0.5 (2^-17), and negated.
+        for (bits, want) in [
+            (0x3edf_ffff_ffff_ffff, 0),
+            (0x3ee0_0000_0000_0000, 1),
+            (0x3ee0_0000_0000_0001, 1),
+            (0xbedf_ffff_ffff_ffff, 0),
+            (0xbee0_0000_0000_0000, -1),
+            (0xbee0_0000_0000_0001, -1),
+            // Around Q16's 1.5 (1.5 * 2^-16).
+            (0x3ef7_ffff_ffff_ffff, 1),
+            (0x3ef8_0000_0000_0000, 2),
+            (0x3ef8_0000_0000_0001, 2),
+            (0xbef7_ffff_ffff_ffff, -1),
+            (0xbef8_0000_0000_0000, -2),
+            (0xbef8_0000_0000_0001, -2),
+        ] {
+            assert_eq!(q16(bits), Some(want), "{bits:016x}");
+        }
+        assert_eq!(f64::from_bits(0x3edf_ffff_ffff_ffff), 7.629394531249999e-06);
+        // Subnormals, signed zeros, infinities and NaN.
+        assert_eq!(q16(1), Some(0));
+        assert_eq!(q16(0.0f64.to_bits()), Some(0));
+        assert_eq!(q16((-0.0f64).to_bits()), Some(0));
+        assert_eq!(q16(f64::INFINITY.to_bits()), None);
+        assert_eq!(q16(f64::NEG_INFINITY.to_bits()), None);
+        assert_eq!(q16(f64::NAN.to_bits()), None);
+        // The memo's k = 9 / k = 10 boundary: 2^45 is the largest power of two
+        // whose Q16 fits below 2^62; the text transform limits stop well before.
+        assert_eq!(q16(2f64.powi(45).to_bits()), Some(1 << 61));
+        assert_eq!(q16(2f64.powi(46).to_bits()), Some(1 << 62));
+        assert_eq!(q16(2f64.powi(47).to_bits()), None);
+    }
 }
