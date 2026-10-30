@@ -229,14 +229,28 @@ fn difference_squared(p: [i64; 2], c: [i64; 2], q: [i64; 2]) -> Option<u128> {
         .checked_add(y.unsigned_abs().checked_mul(y.unsigned_abs())?)
 }
 
-fn divisions(d: u128, k: u128, limit: u32) -> Option<u32> {
-    let required = k.checked_mul(k)?.checked_mul(d)?;
+/// How many segments a curve needs past the limit: none (`Reject`, vector
+/// fill's `VECTOR_CURVE_RANGE`) or the limit itself (`Clamp`, glyphs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Curves {
+    Reject(u32),
+    Clamp(u32),
+}
+
+fn divisions(d: u128, k: u128, curves: Curves) -> Option<u32> {
+    let (limit, clamp) = match curves {
+        Curves::Reject(n) => (n, false),
+        Curves::Clamp(n) => (n, true),
+    };
+    let Some(required) = k.checked_mul(k).and_then(|v| v.checked_mul(d)) else {
+        return clamp.then_some(limit);
+    };
     let fits = |n: u32| {
         let n = u128::from(n);
         65536u128 * n * n * n * n >= required
     };
     if !fits(limit) {
-        return None;
+        return clamp.then_some(limit);
     }
     let (mut lo, mut hi) = (1, limit);
     while lo < hi {
@@ -340,7 +354,7 @@ trait Sink {
 /// "結果を変えない省略"); `raster_q8_skips_are_exact` checks that.
 fn flatten(
     commands: &[Command],
-    limit: u32,
+    limit: Curves,
     window: Window,
     skip: bool,
     sink: &mut impl Sink,
@@ -393,8 +407,9 @@ fn flatten(
             }
             Command::Quad(c, p) => {
                 let a = current.ok_or(Range)?;
-                let n = divisions(difference_squared(a, c, p).ok_or(CurveRange)?, 10, limit)
-                    .ok_or(CurveRange)?;
+                // A second difference past u128 needs more than any limit.
+                let d = difference_squared(a, c, p).unwrap_or(u128::MAX);
+                let n = divisions(d, 10, limit).ok_or(CurveRange)?;
                 if let Some(chord) = skipped(&[a, c, p]) {
                     if chord {
                         emit(a, p)?;
@@ -422,8 +437,8 @@ fn flatten(
             Command::Cubic(c1, c2, p) => {
                 let a = current.ok_or(Range)?;
                 let d = difference_squared(a, c1, c2)
-                    .ok_or(CurveRange)?
-                    .max(difference_squared(c1, c2, p).ok_or(CurveRange)?);
+                    .unwrap_or(u128::MAX)
+                    .max(difference_squared(c1, c2, p).unwrap_or(u128::MAX));
                 let n = divisions(d, 30, limit).ok_or(CurveRange)?;
                 if let Some(chord) = skipped(&[a, c1, c2, p]) {
                     if chord {
@@ -472,14 +487,49 @@ pub fn rasterize(
     window: [i64; 4],
     curve_limit: u32,
 ) -> Result<Vec<u8>, RasterError> {
-    rasterize_with(commands, rule, window, curve_limit, true)
+    rasterize_with(commands, rule, window, Curves::Reject(curve_limit), true)
+}
+
+/// The most segments one glyph curve is flattened into (v2's 1..=64).
+pub const GLYPH_CURVE_LIMIT: u32 = 64;
+/// Glyph coordinates, from the glyph's own pixel origin, are at most this
+/// (about 65536 pixels); a larger glyph is not drawn (memo "前提の検査").
+pub const GLYPH_EXTENT: i64 = 1 << 24;
+
+/// A glyph's nonzero coverage (doc/design/2026-10-28-v3-integer-text.md
+/// "カバレッジ"): the shared core with curves capped at 64 segments instead of
+/// refused. `Range` when the glyph is wider than `GLYPH_EXTENT`, which depends
+/// on the glyph only, never on the window.
+pub fn rasterize_glyph(commands: &[Command], window: [i64; 4]) -> Result<Vec<u8>, RasterError> {
+    let (shifted, _) = normalized(commands).ok_or(RasterError::Range)?;
+    let too_wide = shifted.iter().any(|c| {
+        let points: &[[i64; 2]] = match c {
+            Command::Move(p) | Command::Line(p) => std::slice::from_ref(p),
+            Command::Quad(a, b) => &[*a, *b],
+            Command::Cubic(a, b, p) => &[*a, *b, *p],
+            Command::Close => &[],
+        };
+        points
+            .iter()
+            .any(|p| p[0] > GLYPH_EXTENT || p[1] > GLYPH_EXTENT)
+    });
+    if too_wide {
+        return Err(RasterError::Range);
+    }
+    rasterize_with(
+        commands,
+        FillRule::NonZero,
+        window,
+        Curves::Clamp(GLYPH_CURVE_LIMIT),
+        true,
+    )
 }
 
 fn rasterize_with(
     commands: &[Command],
     rule: FillRule,
     window: [i64; 4],
-    curve_limit: u32,
+    curve_limit: Curves,
     skip: bool,
 ) -> Result<Vec<u8>, RasterError> {
     use RasterError::Range;
@@ -1033,8 +1083,8 @@ mod tests {
                     [-30, -30, 70, 70],
                 ] {
                     assert_eq!(
-                        rasterize_with(path, rule, window, CURVE_LIMIT, true),
-                        rasterize_with(path, rule, window, CURVE_LIMIT, false),
+                        rasterize_with(path, rule, window, Curves::Reject(CURVE_LIMIT), true),
+                        rasterize_with(path, rule, window, Curves::Reject(CURVE_LIMIT), false),
                         "{rule:?} {window:?}"
                     );
                 }
@@ -1047,12 +1097,15 @@ mod tests {
         // 65536 n^4 >= K^2 D at n = 4096 is D <= 2^64 / K^2.
         for k in [10u128, 30] {
             let limit = (1u128 << 64) / (k * k);
-            assert_eq!(divisions(limit, k, CURVE_LIMIT), Some(4096));
-            assert_eq!(divisions(limit + 1, k, CURVE_LIMIT), None);
+            assert_eq!(divisions(limit, k, Curves::Reject(CURVE_LIMIT)), Some(4096));
+            assert_eq!(divisions(limit + 1, k, Curves::Reject(CURVE_LIMIT)), None);
             // The v3 first-draft limit n = 256 (about 6554 / 2185 pixels).
             let small = (1u128 << 48) / (k * k);
-            assert_eq!(divisions(small, k, CURVE_LIMIT), Some(256));
-            assert_eq!(divisions(small + 1, k, CURVE_LIMIT), Some(257));
+            assert_eq!(divisions(small, k, Curves::Reject(CURVE_LIMIT)), Some(256));
+            assert_eq!(
+                divisions(small + 1, k, Curves::Reject(CURVE_LIMIT)),
+                Some(257)
+            );
         }
         // A cubic whose second difference is far past 559_241 level pixels.
         let far = 600_000i64 * 256 * 4;
