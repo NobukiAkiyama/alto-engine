@@ -564,21 +564,7 @@ impl Engine {
             Ok(self.blobs.get(&h).map(|b| alto_store::encode_object(0, b)))
         }
     }
-    /// Format 4 is what a render version 3 document serializes as. Writing that
-    /// package is refused until integer compositing lands, unless this thread
-    /// opted in. A snapshot used by view, hash, or a recovery checkpoint is not
-    /// this path and still succeeds for a document that is already version 3.
-    fn require_stable_package(&self, h: DocHandle) -> Result<(), EngineError> {
-        let doc = self.document(h)?;
-        if doc.meta.render_version >= alto_core::RENDER_VERSION_EXACT
-            && !unstable_render::unstable_render_v3_enabled()
-        {
-            return Err(DocError::Invalid(unstable_render::UNSTABLE_RENDER_V3_OFF.into()).into());
-        }
-        Ok(())
-    }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
-        self.require_stable_package(h)?;
         let bytes = alto_store::encode_parts(&self.package_parts(h)?)?;
         self.backed = true;
         self.maintain();
@@ -1493,8 +1479,7 @@ mod package_tests {
 mod render_v3_fixture {
     use super::*;
     use crate::unstable_render::{
-        UnstableRenderV3Guard, allow_unstable_render_v3, set_unstable_render_v3,
-        unstable_render_v3_enabled,
+        allow_unstable_render_v3, set_unstable_render_v3, unstable_render_v3_enabled,
     };
     use alto_core::{RENDER_VERSION, RENDER_VERSION_EXACT, RENDER_VERSION_F32};
 
@@ -1509,17 +1494,11 @@ mod render_v3_fixture {
         assert_eq!(loaded.meta.format_version, 4);
         assert_eq!((loaded.meta.width, loaded.meta.height), (256, 256));
         assert_eq!(loaded.nodes.len(), 1);
-        let err = engine.save_package(opened).unwrap_err();
-        assert!(err.to_string().contains("unstable and is off"), "{err}");
-        if cfg!(debug_assertions) {
-            let _guard = UnstableRenderV3Guard::enable();
-            assert!(unstable_render_v3_enabled());
-            assert_eq!(engine.save_package(opened).unwrap(), bytes);
-        }
+        assert_eq!(engine.save_package(opened).unwrap(), bytes);
     }
 
     #[test]
-    fn default_path_cannot_upgrade_to_render_version_three_or_write_format_four() {
+    fn default_path_creates_saves_and_upgrades_to_version_three() {
         assert!(
             !allow_unstable_render_v3(false, true, true),
             "a release build ignores the opt-in"
@@ -1541,28 +1520,45 @@ mod render_v3_fixture {
         }
 
         let mut engine = Engine::new();
-        let mut meta = DocumentMeta::srgb_u8(32, 32);
+        let fresh = engine
+            .create_document(DocumentMeta::srgb_u8(32, 32))
+            .unwrap();
+        assert_eq!(
+            engine.document(fresh).unwrap().meta.render_version,
+            RENDER_VERSION_EXACT
+        );
+        assert_eq!(engine.document(fresh).unwrap().meta.format_version, 4);
+        assert!(!engine.save_package(fresh).unwrap().is_empty());
+        assert!(!engine.folder_entries(fresh).unwrap().is_empty());
+
+        let mut meta = DocumentMeta::srgb_u8_v2(32, 32);
         meta.render_version = RENDER_VERSION_F32;
         meta.format_version = 1;
         let handle = engine.create_document(meta).unwrap();
         engine.upgrade_render_version(handle).unwrap();
         let upgraded = engine.document(handle).unwrap();
-        assert_eq!(upgraded.meta.render_version, RENDER_VERSION);
-        assert_eq!(upgraded.meta.format_version, 3);
+        assert_eq!(upgraded.meta.render_version, RENDER_VERSION_EXACT);
+        assert_eq!(upgraded.meta.format_version, 4);
         let saved = engine.save_package(handle).unwrap();
         let (reopened, warnings) = engine.open_package(&saved).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         let resaved = &engine.document(reopened).unwrap().meta;
-        assert_eq!(resaved.render_version, RENDER_VERSION);
-        assert_eq!(resaved.format_version, 3);
+        assert_eq!(resaved.render_version, RENDER_VERSION_EXACT);
+        assert_eq!(resaved.format_version, 4);
 
         let err = engine.upgrade_render_version(handle).unwrap_err();
         assert!(err.to_string().contains("already current"), "{err}");
         let err = engine.upgrade_render_version_unstable(handle).unwrap_err();
-        assert!(err.to_string().contains("unstable and is off"), "{err}");
-        let stayed = engine.document(handle).unwrap();
-        assert_eq!(stayed.meta.render_version, RENDER_VERSION);
-        assert_eq!(stayed.meta.format_version, 3);
+        assert!(err.to_string().contains("already current"), "{err}");
+
+        let legacy = engine
+            .create_document(DocumentMeta::srgb_u8_v2(32, 32))
+            .unwrap();
+        engine.upgrade_render_version(legacy).unwrap();
+        assert_eq!(
+            engine.document(legacy).unwrap().meta.render_version,
+            RENDER_VERSION_EXACT
+        );
 
         let bytes = include_bytes!("../../../tests/fixtures/render-v3-empty.alto");
         let (opened, warnings) = engine.open_package(bytes).unwrap();
@@ -1571,12 +1567,9 @@ mod render_v3_fixture {
         assert_eq!(loaded.meta.render_version, RENDER_VERSION_EXACT);
         assert_eq!(loaded.meta.format_version, 4);
         assert_eq!(loaded.nodes.len(), 1);
-        let err = engine.save_package(opened).unwrap_err();
-        assert!(err.to_string().contains("unstable and is off"), "{err}");
-        let err = engine.save_package_trimmed(opened, 0).unwrap_err();
-        assert!(err.to_string().contains("unstable and is off"), "{err}");
-        let err = engine.folder_entries(opened).unwrap_err();
-        assert!(err.to_string().contains("unstable and is off"), "{err}");
+        assert_eq!(engine.save_package(opened).unwrap(), bytes);
+        assert!(!engine.save_package_trimmed(opened, 0).unwrap().is_empty());
+        assert!(!engine.folder_entries(opened).unwrap().is_empty());
         assert_eq!(
             engine.document(opened).unwrap().meta.render_version,
             RENDER_VERSION_EXACT
@@ -1587,7 +1580,7 @@ mod render_v3_fixture {
     }
 
     /// The empty v3 fixtures are the engine's own save of an empty document:
-    /// render version 3 (format 4) at each size, through the debug-only opt-in.
+    /// render version 3 (format 4) at each size, through an explicit upgrade.
     /// `render-v3-empty-8389120x256.alto` is 8388864 + 256 px wide, past 2^23
     /// px, for the browser's plain-path 2^23 checks (Linus 08:10); it opens
     /// through `open_package` (`engine.open`), which has no canvas limit
@@ -1595,10 +1588,6 @@ mod render_v3_fixture {
     /// `ALTO_WRITE_FIXTURES=1` writes missing or changed fixtures.
     #[test]
     fn empty_v3_fixtures_are_the_engine_save() {
-        if !cfg!(debug_assertions) {
-            return;
-        }
-        let _guard = UnstableRenderV3Guard::enable();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         for (w, h) in [
             (256, 256),
@@ -1609,8 +1598,10 @@ mod render_v3_fixture {
             (8_389_120, 256),
         ] {
             let mut engine = Engine::new();
-            let created = engine.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
-            engine.upgrade_render_version_unstable(created).unwrap();
+            let created = engine
+                .create_document(DocumentMeta::srgb_u8_v2(w, h))
+                .unwrap();
+            engine.upgrade_render_version(created).unwrap();
             // The fixtures name the root node with a fixed id, so the bytes do not
             // depend on the clock; the package (snapshot hash, manifest) is then
             // the engine's save of that snapshot.
@@ -1645,17 +1636,10 @@ mod render_v3_fixture {
     }
 
     #[test]
-    fn unstable_opt_in_can_upgrade_to_render_version_three_and_write_format_four() {
-        if !cfg!(debug_assertions) {
-            assert!(!set_unstable_render_v3(true));
-            assert!(!unstable_render_v3_enabled());
-            return;
-        }
-        let _guard = UnstableRenderV3Guard::enable();
-        assert!(unstable_render_v3_enabled());
+    fn legacy_upgrade_alias_reaches_version_three_and_writes_format_four() {
         let mut engine = Engine::new();
         let handle = engine
-            .create_document(DocumentMeta::srgb_u8(32, 32))
+            .create_document(DocumentMeta::srgb_u8_v2(32, 32))
             .unwrap();
         assert_eq!(
             engine.document(handle).unwrap().meta.render_version,

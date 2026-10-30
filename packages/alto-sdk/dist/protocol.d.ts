@@ -89,6 +89,7 @@ export interface Requests {
     createDocument: Q<{
         width: number;
         height: number;
+        renderVersion?: 2 | 3;
     }, WireState>;
     transact: Q<{
         intent: string;

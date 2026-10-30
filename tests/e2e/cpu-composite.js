@@ -1607,25 +1607,14 @@ export function fnv64(bytes) {
 
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
-// Selection-limited color-adjust and Gaussian blur are v3 mode 22.
-const isColorAdjust = (effect) => effect?.type === "color_adjust";
-const isIntegerEffect = (effect) => isColorAdjust(effect) || effect?.type === "gaussian_blur";
-// Rust `raster_q8::stroke_visible`: a nonzero width (the default is 1) and an
-// alpha whose half-away Q14 is nonzero, i.e. at least 2^-15.
-const strokeVisible = (stroke) => Boolean(stroke) && (stroke.width ?? 1) !== 0 &&
-  !(Math.abs(stroke.color?.[3] ?? 1) < 2 ** -15);
-
+// Every document effect has an integer v3 stage; selections use mode 22.
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
- * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
- * and Gaussian blur effects, with or without a selection, color-adjust adjustment
- * layers (any blend with an enabled pixel mask, normal blend without), enabled
- * pixel masks, filled vectors, enabled vector masks and clip paths, and text
- * drawn from its bake) and
- * "v3-unsupported" (the host refuses the scene; no tile is drawn). A visibly
- * stroked vector keeps the v2 tessellator and is refused, and so are vector masks and
- * clip paths on adjustment layers.
+ * null (integer tile compositor), "v3-m5-integer" (integer M5 effects,
+ * adjustments, masks, filled and stroked vectors, clipping, and baked text),
+ * or "v3-unsupported" (the host refuses the scene; no tile is drawn).
  */
 export function sceneGap(snapshot) {
   const found = new Set();
@@ -1640,20 +1629,14 @@ export function sceneGap(snapshot) {
     if (enabledMask || enabledVectorMask || enabledClipPath) integer = true;
     if (props.vector_mask) found.add("vector mask");
     if (props.clip_path) found.add("clip path");
-    if (props.clip_to_below) found.add("clip");
+    if (props.clip_to_below) { found.add("clip"); integer = true; }
     if (props.effects?.length) found.add("effects");
     if (node.type === "vector") found.add("vector");
     if (node.type === "text") found.add("text");
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
-    if (props.clip_to_below ||
-        (node.type === "vector" && (node.paths || []).some((path) => strokeVisible(path?.stroke))) ||
-        (props.effects || []).some((effect) => !isIntegerEffect(effect)) ||
-        (node.type === "adjustment" && (!isIntegerEffect(node.adjustment) ||
-          // Unmasked non-normal blends reach f32 stages upstream of mode 23.
-          (!enabledMask && (props.blend ?? "normal") !== "normal") ||
-          // No integer coverage mix of backdrop and adjusted copy is defined.
-          enabledVectorMask || enabledClipPath))) {
+    if ((props.effects || []).some((effect) => !isIntegerEffect(effect)) ||
+        (node.type === "adjustment" && !isIntegerEffect(node.adjustment))) {
       unsupported = true;
     }
   }

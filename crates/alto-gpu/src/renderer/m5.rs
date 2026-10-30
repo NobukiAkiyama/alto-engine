@@ -732,14 +732,10 @@ impl Context<'_> {
                 resource: uniform.as_entire_binding(),
             },
         ];
-        // The integer stages never read the clip base (clipping is refused in
-        // version 3), so the derived layout has no binding 2.
-        if !self.resources.exact {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&cv),
-            });
-        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::TextureView(&cv),
+        });
         let bg = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("M5 stage"),
             layout: &self.resources.pipeline.get_bind_group_layout(0),
@@ -916,15 +912,29 @@ impl Context<'_> {
         Ok(params)
     }
     fn integer_roi(roi: Roi) -> Result<[i32; 3]> {
-        let invalid =
-            || RenderError::GpuUnsupported("v3 ROI has no integer origin or scale".into());
-        Ok([
-            super::exact_i32(roi.x).ok_or_else(invalid)?,
-            super::exact_i32(roi.y).ok_or_else(invalid)?,
-            super::exact_i32(roi.scale)
-                .filter(|s| *s >= 1)
-                .ok_or_else(invalid)?,
-        ])
+        let invalid = || {
+            RenderError::GpuUnsupported(format!(
+                "v3 ROI has no integer origin or scale: ({}, {}, {})",
+                roi.x, roi.y, roi.scale
+            ))
+        };
+        let grid = RoiQ::from_roi(roi)?;
+        if grid.level >= 0 {
+            Ok([
+                super::exact_i32(roi.x).ok_or_else(invalid)?,
+                super::exact_i32(roi.y).ok_or_else(invalid)?,
+                super::exact_i32(roi.scale).ok_or_else(invalid)?,
+            ])
+        } else {
+            let denominator = 1_i32
+                .checked_shl(u32::try_from(-grid.level).map_err(|_| invalid())?)
+                .ok_or_else(invalid)?;
+            Ok([
+                i32::try_from(grid.ox).map_err(|_| invalid())?,
+                i32::try_from(grid.oy).map_err(|_| invalid())?,
+                -denominator,
+            ])
+        }
     }
     /// Version 3: the sampler of `tiles` drawn with document-to-pixel `transform`
     /// at `roi`, and the tiles it can read, uploaded. The tiles are selected with
@@ -954,14 +964,20 @@ impl Context<'_> {
         );
         let [x, y, scale] = sampler.origin.map(i64::from);
         let span = [0, 0, i64::from(roi.w), i64::from(roi.h)];
-        let reach = super::v3_reach(
-            &super::sampler_inverse(&sampler),
-            [x, y],
-            scale,
-            span,
-            0,
-            keys,
-        )
+        let inverse = super::sampler_inverse(&sampler);
+        let reach = if scale > 0 {
+            super::v3_reach(&inverse, [x, y], scale, span, 0, keys)
+        } else {
+            let step = i128::from(256 / -scale);
+            super::v3_reach_q8(
+                &inverse,
+                [i128::from(x) * step, i128::from(y) * step],
+                step,
+                span,
+                0,
+                keys,
+            )
+        }
         .map_err(|()| unsupported())?;
         // Nothing reached: no tile is read (every pixel is transparent or byte 0).
         let Some(range) = reach else {
@@ -1019,145 +1035,171 @@ impl Context<'_> {
         }
         let mut current = self.zero(roi)?;
         for (path, commands) in paths.iter().zip(mapped) {
-            let Some(fill) = path.fill else { continue };
-            let color = crate::raster_q8::color_q14(fill).ok_or_else(|| {
-                RenderError::GpuUnsupported("v3 vector color out of range".into())
-            })?;
-            if color[3] == 0 {
-                continue;
-            }
-            let rule = match path.fill_rule {
-                FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
-                FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
-            };
-            // VECTOR_CURVE_RANGE: a curve the subdivision limit cannot flatten
-            // skips its path at this level on every tile; the others are drawn.
-            let coverage = match crate::raster_q8::rasterize(
-                &commands,
-                rule,
-                [ox, oy, i64::from(roi.w), i64::from(roi.h)],
-                crate::raster_q8::CURVE_LIMIT,
-            ) {
-                Ok(coverage) => coverage,
-                Err(crate::raster_q8::RasterError::CurveRange) => continue,
-                Err(crate::raster_q8::RasterError::Range) => {
-                    return Err(RenderError::GpuUnsupported(
-                        "v3 vector window out of range".into(),
+            // Fill precedes stroke for every styled path, including when one
+            // paint has no visible alpha or exceeds the curve range.
+            for paint in 0..2 {
+                let paint_color = if paint == 0 {
+                    path.fill
+                } else {
+                    path.stroke
+                        .as_ref()
+                        .filter(|stroke| crate::raster_q8::stroke_visible(stroke))
+                        .map(|stroke| stroke.color)
+                };
+                let Some(paint_color) = paint_color else {
+                    continue;
+                };
+                let color = crate::raster_q8::color_q14(paint_color).ok_or_else(|| {
+                    RenderError::GpuUnsupported("v3 vector color out of range".into())
+                })?;
+                if color[3] == 0 {
+                    continue;
+                }
+                let window = [ox, oy, i64::from(roi.w), i64::from(roi.h)];
+                let coverage = if paint == 0 {
+                    let rule = match path.fill_rule {
+                        FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
+                        FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
+                    };
+                    crate::raster_q8::rasterize(
+                        &commands,
+                        rule,
+                        window,
+                        crate::raster_q8::CURVE_LIMIT,
+                    )
+                } else {
+                    crate::stroke_q8::rasterize_stroke(
+                        &path.data,
+                        path.stroke.as_ref().expect("visible stroke"),
+                        world,
+                        level,
+                        window,
+                    )
+                };
+                // A path whose integer subdivision budget is exceeded is
+                // skipped identically on every tile.
+                let coverage = match coverage {
+                    Ok(coverage) => coverage,
+                    Err(crate::raster_q8::RasterError::CurveRange) => continue,
+                    Err(crate::raster_q8::RasterError::Range) => {
+                        return Err(RenderError::GpuUnsupported(
+                            "v3 vector window out of range".into(),
+                        ));
+                    }
+                };
+                if coverage.iter().all(|&v| v == 0) {
+                    continue;
+                }
+                let need = u64::from(roi.w) * u64::from(roi.h) + 64;
+                if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
+                    return Err(RenderError::Budget(
+                        "v3 vector coverage exceeds GPU budget".into(),
                     ));
                 }
-            };
-            if coverage.iter().all(|&v| v == 0) {
-                continue;
-            }
-            let need = u64::from(roi.w) * u64::from(roi.h) + 64;
-            if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
-                return Err(RenderError::Budget(
-                    "v3 vector coverage exceeds GPU budget".into(),
-                ));
-            }
-            // Every fallible step comes before the coverage texture, so an
-            // error never drops a registered texture without destroying it.
-            let output = self.alloc(roi)?;
-            if self.resources.vector_q14.is_none() {
-                return Err(RenderError::Internal(
-                    "v3 vector pipeline was not created".into(),
-                ));
-            }
-            let params = buffer(
-                &self.r.device,
-                &self.r.queue,
-                "v3 vector paint params",
-                &[VectorQ14Params {
-                    color: color.map(u32::from),
-                    size: [roi.w, roi.h, 0, 0],
-                }],
-                wgpu::BufferUsages::UNIFORM,
-            )?;
-            let created = memory::create_texture(
-                &self.r.device,
-                &wgpu::TextureDescriptor {
-                    label: Some("v3 vector coverage"),
-                    size: wgpu::Extent3d {
+                // Every fallible step comes before the coverage texture, so an
+                // error never drops a registered texture without destroying it.
+                let output = self.alloc(roi)?;
+                if self.resources.vector_q14.is_none() {
+                    return Err(RenderError::Internal(
+                        "v3 vector pipeline was not created".into(),
+                    ));
+                }
+                let params = buffer(
+                    &self.r.device,
+                    &self.r.queue,
+                    "v3 vector paint params",
+                    &[VectorQ14Params {
+                        color: color.map(u32::from),
+                        size: [roi.w, roi.h, 0, 0],
+                    }],
+                    wgpu::BufferUsages::UNIFORM,
+                )?;
+                let created = memory::create_texture(
+                    &self.r.device,
+                    &wgpu::TextureDescriptor {
+                        label: Some("v3 vector coverage"),
+                        size: wgpu::Extent3d {
+                            width: roi.w,
+                            height: roi.h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R8Unorm,
+                        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    Class::Effects,
+                );
+                let texture = match created {
+                    Ok(texture) => texture,
+                    Err(error) => {
+                        memory::destroy_buffer(&params, true);
+                        return Err(error);
+                    }
+                };
+                self.r.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &coverage,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(roi.w),
+                        rows_per_image: Some(roi.h),
+                    },
+                    wgpu::Extent3d {
                         width: roi.w,
                         height: roi.h,
                         depth_or_array_layers: 1,
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R8Unorm,
-                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                Class::Effects,
-            );
-            let texture = match created {
-                Ok(texture) => texture,
-                Err(error) => {
-                    memory::destroy_buffer(&params, true);
-                    return Err(error);
+                );
+                let pipeline = self.resources.vector_q14.as_ref().expect("checked above");
+                let input = self.resources.pool[current.index]
+                    .texture
+                    .create_view(&Default::default());
+                let mask = texture.create_view(&Default::default());
+                let target = self.resources.pool[output.index]
+                    .texture
+                    .create_view(&Default::default());
+                let group = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("v3 vector paint"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&input),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&mask),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&target),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params.as_entire_binding(),
+                        },
+                    ],
+                });
+                {
+                    let mut pass = self.encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.dispatch_workgroups(roi.w.div_ceil(16), roi.h.div_ceil(16), 1);
                 }
-            };
-            self.r.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &coverage,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(roi.w),
-                    rows_per_image: Some(roi.h),
-                },
-                wgpu::Extent3d {
-                    width: roi.w,
-                    height: roi.h,
-                    depth_or_array_layers: 1,
-                },
-            );
-            let pipeline = self.resources.vector_q14.as_ref().expect("checked above");
-            let input = self.resources.pool[current.index]
-                .texture
-                .create_view(&Default::default());
-            let mask = texture.create_view(&Default::default());
-            let target = self.resources.pool[output.index]
-                .texture
-                .create_view(&Default::default());
-            let group = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("v3 vector paint"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mask),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&target),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: params.as_entire_binding(),
-                    },
-                ],
-            });
-            {
-                let mut pass = self.encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &group, &[]);
-                pass.dispatch_workgroups(roi.w.div_ceil(16), roi.h.div_ceil(16), 1);
+                self.r.retired.effect_texture(texture);
+                self.r
+                    .retired
+                    .classified_buffer(&params, MemoryClass::Effects);
+                current = output;
             }
-            self.r.retired.effect_texture(texture);
-            self.r
-                .retired
-                .classified_buffer(&params, MemoryClass::Effects);
-            current = output;
         }
         Ok(current)
     }
@@ -1739,8 +1781,32 @@ impl Context<'_> {
     }
     fn clip_blend(&mut self, base: Target, source: Target, node: &RNode) -> Result<Target> {
         let out = self.alloc(base.roi)?;
-        let mut p = Self::params(9, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        p.settings[1] = mode(node.blend);
+        let p = if self.resources.exact {
+            let opacity = if node.features.mask.is_some()
+                || node.features.vector_mask.is_some()
+                || node.features.clip_path.is_some()
+            {
+                1.0
+            } else {
+                node.opacity
+            };
+            Self::q14_params(
+                27,
+                base.roi,
+                [Some(base.roi), Some(source.roi)],
+                [
+                    crate::composite_opacity_q14(opacity),
+                    node.blend as i32,
+                    0,
+                    0,
+                ],
+                None,
+            )?
+        } else {
+            let mut p = Self::params(9, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            p.settings[1] = mode(node.blend);
+            p
+        };
         self.dispatch(&out, &base, &source, &base, p, &[])?;
         Ok(out)
     }
@@ -1755,7 +1821,12 @@ impl Context<'_> {
         if self.resources.exact
             && !matches!(
                 effect.kind,
-                REffectKind::ColorAdjust { .. } | REffectKind::GaussianBlur { .. }
+                REffectKind::ColorAdjust { .. }
+                    | REffectKind::GaussianBlur { .. }
+                    | REffectKind::Invert
+                    | REffectKind::Curves { .. }
+                    | REffectKind::Levels { .. }
+                    | REffectKind::HueSaturation { .. }
             )
         {
             return Err(RenderError::Internal(
@@ -1835,9 +1906,31 @@ impl Context<'_> {
                 out_white,
             } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(13, world.legacy()?);
-                p.settings = [in_black, in_white, gamma, out_black];
-                p.extra[0] = out_white;
+                let p = if self.resources.exact {
+                    let gamma_q = super::levels_gamma_q14(gamma);
+                    let inverse_gamma_q = ((i64::from(1_i32 << 14).pow(2) + i64::from(gamma_q / 2))
+                        / i64::from(gamma_q)) as i32;
+                    let mut p = Self::q14_params(
+                        32,
+                        roi,
+                        [Some(input.roi), None],
+                        [
+                            super::color_adjust_q14(in_black),
+                            super::color_adjust_q14(in_white),
+                            inverse_gamma_q,
+                            super::color_adjust_q14(out_black),
+                        ],
+                        None,
+                    )?;
+                    let words: &mut [u32] = bytemuck::cast_slice_mut(&mut p.curve);
+                    words[24] = super::color_adjust_q14(out_white) as u32;
+                    p
+                } else {
+                    let mut p = Self::params(13, world.legacy()?);
+                    p.settings = [in_black, in_white, gamma, out_black];
+                    p.extra[0] = out_white;
+                    p
+                };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
@@ -1847,25 +1940,67 @@ impl Context<'_> {
                 lightness,
             } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(15, world.legacy()?);
-                p.settings = [hue, saturation, lightness, 0.0];
+                let p = if self.resources.exact {
+                    let hue_q16 = crate::raster_q8::q_from_f32_bits(hue.to_bits(), 16)
+                        .and_then(|q| i32::try_from(q).ok())
+                        .ok_or_else(|| {
+                            RenderError::InvalidArgument("v3 hue out of range".into())
+                        })?;
+                    Self::q14_params(
+                        33,
+                        roi,
+                        [Some(input.roi), None],
+                        [
+                            hue_q16,
+                            super::color_adjust_q14(saturation),
+                            super::color_adjust_q14(lightness),
+                            0,
+                        ],
+                        None,
+                    )?
+                } else {
+                    let mut p = Self::params(15, world.legacy()?);
+                    p.settings = [hue, saturation, lightness, 0.0];
+                    p
+                };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Invert => {
                 let out = self.alloc(roi)?;
-                let p = Self::params(14, world.legacy()?);
+                let p = if self.resources.exact {
+                    Self::q14_params(30, roi, [Some(input.roi), None], [0; 4], None)?
+                } else {
+                    Self::params(14, world.legacy()?)
+                };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
             REffectKind::Curves { ref points } => {
                 let out = self.alloc(roi)?;
-                let mut p = Self::params(16, world.legacy()?);
-                for (i, (x, y)) in points.iter().take(16).enumerate() {
-                    p.curve[i * 4] = *x;
-                    p.curve[i * 4 + 1] = *y;
-                }
-                p.extra[0] = points.len().min(16) as f32;
+                let p = if self.resources.exact {
+                    let mut p = Self::q14_params(
+                        31,
+                        roi,
+                        [Some(input.roi), None],
+                        [points.len().min(16) as i32, 0, 0, 0],
+                        None,
+                    )?;
+                    let words: &mut [u32] = bytemuck::cast_slice_mut(&mut p.curve);
+                    for (i, (x, y)) in points.iter().take(16).enumerate() {
+                        words[24 + i * 2] = super::color_adjust_q14(*x) as u32;
+                        words[25 + i * 2] = super::color_adjust_q14(*y) as u32;
+                    }
+                    p
+                } else {
+                    let mut p = Self::params(16, world.legacy()?);
+                    for (i, (x, y)) in points.iter().take(16).enumerate() {
+                        p.curve[i * 4] = *x;
+                        p.curve[i * 4 + 1] = *y;
+                    }
+                    p.extra[0] = points.len().min(16) as f32;
+                    p
+                };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
@@ -2026,9 +2161,6 @@ impl Context<'_> {
             }
             let transform = world.concat(node.transform)?;
             if let RContent::Adjustment(effect) = &node.content {
-                if self.resources.exact {
-                    v3_adjustment_blend(node.features.mask.is_some(), node.blend)?;
-                }
                 let mut stack = vec![effect.clone()];
                 stack.extend(node.features.effects.clone());
                 // A backdrop blur needs extra input from the same siblings. The caller renders that halo below.
@@ -2068,10 +2200,9 @@ impl Context<'_> {
                 };
                 let mut mixed = filtered.clone();
                 if self.resources.exact {
-                    // Version 3 adjustment layers are unclipped (`v3_gap`). A pixel
-                    // mask takes mode 23 (mask, opacity and blend in one Q28 mix).
+                    // Mode 23 combines opacity, blend, and an optional mask.
                     // Otherwise only the opacity mixes, in Q14 (mode 20).
-                    if node.features.mask.is_some() {
+                    if node.features.mask.is_some() || node.blend != RenderBlend::Normal {
                         let out = self.alloc(desired)?;
                         let (entries, mask_transform, has_mask) = match &node.features.mask {
                             Some(mask) => {
@@ -2147,26 +2278,34 @@ impl Context<'_> {
                 }
                 if let Some(mask) = self.vector_coverage(&node, transform, desired)? {
                     let out = self.alloc(desired)?;
-                    self.dispatch(
-                        &out,
-                        &input,
-                        &mixed,
-                        &mask,
-                        Self::params(12, transform.legacy()?),
-                        &[],
-                    )?;
+                    let p = if self.resources.exact {
+                        Self::q14_params(
+                            29,
+                            desired,
+                            [Some(input.roi), Some(mixed.roi)],
+                            [0; 4],
+                            None,
+                        )?
+                    } else {
+                        Self::params(12, transform.legacy()?)
+                    };
+                    self.dispatch(&out, &input, &mixed, &mask, p, &[])?;
                     mixed = out;
                 }
                 if node.features.clip {
                     let out = self.alloc(desired)?;
-                    self.dispatch(
-                        &out,
-                        &input,
-                        &mixed,
-                        &input,
-                        Self::params(10, transform.legacy()?),
-                        &[],
-                    )?;
+                    let p = if self.resources.exact {
+                        Self::q14_params(
+                            28,
+                            desired,
+                            [Some(input.roi), Some(mixed.roi)],
+                            [0; 4],
+                            None,
+                        )?
+                    } else {
+                        Self::params(10, transform.legacy()?)
+                    };
+                    self.dispatch(&out, &input, &mixed, &input, p, &[])?;
                     base = Some(out.clone());
                     accum = self.blend(
                         base_background
@@ -2477,17 +2616,6 @@ impl Renderer {
     }
 }
 
-/// Version 3 refuses a non-normal adjustment-layer blend without a pixel mask
-/// (`v3_gap`) before any stage runs (#37, Linus 21:46). Its stages are integer
-/// since the float purge; drawing it is a scope change left for its own review.
-fn v3_adjustment_blend(masked: bool, blend: RenderBlend) -> Result<()> {
-    if masked || blend == RenderBlend::Normal {
-        return Ok(());
-    }
-    Err(RenderError::GpuUnsupported(
-        "v3 adjustment layer blend needs a pixel mask".into(),
-    ))
-}
 #[cfg(test)]
 mod pool_tests {
     use super::*;
@@ -2522,22 +2650,6 @@ mod pool_tests {
             h: 256,
         }
     }
-    #[test]
-    fn v3_unmasked_adjustment_blends_are_refused() {
-        for blend in [
-            RenderBlend::Multiply,
-            RenderBlend::Screen,
-            RenderBlend::Overlay,
-        ] {
-            assert!(matches!(
-                v3_adjustment_blend(false, blend),
-                Err(RenderError::GpuUnsupported(_))
-            ));
-            assert!(v3_adjustment_blend(true, blend).is_ok());
-        }
-        assert!(v3_adjustment_blend(false, RenderBlend::Normal).is_ok());
-        assert!(v3_adjustment_blend(true, RenderBlend::Normal).is_ok());
-    }
     /// Every input region and mask a v3 mask stage cannot place in integers is
     /// refused with `GpuUnsupported` (DQ3-4); equal regions need no integers.
     #[test]
@@ -2555,13 +2667,21 @@ mod pool_tests {
         );
         assert_eq!(
             map([-256.0, -512.0, 2.0], [256, 256], [-260.0, -520.0, 4.0]),
-            Some([10, 18, 4, 8])
+            Some([5, 9, 2, 4])
+        );
+        // Levels below 0 share the finer grid: texel floor((2i + 1) / 4), then 2i + 1.
+        assert_eq!(
+            map([0.0, 0.0, 0.5], [256, 256], [0.0, 0.0, 1.0]),
+            Some([1, 1, 2, 4])
+        );
+        assert_eq!(
+            map([0.0, 0.0, 1.0], [256, 256], [0.0, 0.0, 0.5]),
+            Some([2, 2, 4, 2])
         );
         for (out, input) in [
             ([0.5, 0.0, 1.0], [0.0, 0.0, 1.0]),
             ([0.0, 0.0, 1.0], [0.0, -0.25, 1.0]),
-            ([0.0, 0.0, 0.5], [0.0, 0.0, 1.0]),
-            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.5]),
+            ([0.25, 0.0, 0.5], [0.0, 0.0, 1.0]),
             // A numerator past i32.
             ([1_073_741_824.0, 0.0, 1.0], [-1_073_741_824.0, 0.0, 1.0]),
             // The step times the last pixel past i32.
@@ -2586,11 +2706,11 @@ mod pool_tests {
                 None,
                 out,
                 out,
-                roi(-300.0, 37.0, 0.5),
+                roi(-300.25, 37.0, 0.5),
                 [16384, 0, 0, 0]
             )));
-            // A mask at a level below 1 or a fractional origin.
-            for at in [roi(0.0, 0.0, 0.5), roi(0.5, 0.0, 1.0)] {
+            // A mask origin off its level's grid, below or at level 0.
+            for at in [roi(0.25, 0.0, 0.5), roi(0.5, 0.0, 1.0)] {
                 assert!(unsupported(Context::mask_params(
                     mode,
                     Some(WorldTransform::V3(alto_core::FixedAffine::IDENTITY)),

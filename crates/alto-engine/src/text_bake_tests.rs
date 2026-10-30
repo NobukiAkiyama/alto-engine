@@ -1,6 +1,6 @@
 //! Render version 3 text bakes (doc/design/2026-10-28-v3-integer-text.md,
-//! implementation order 0). Baking never changes pixels: v1 / v2 never bake,
-//! and no renderer reads a bake yet.
+//! implementation order 0). Version 3 renders from its bake; version 1 and 2
+//! retain their layout-run path.
 use super::*;
 use crate::text::BAKER_VERSION;
 use crate::unstable_render::UnstableRenderV3Guard;
@@ -17,11 +17,11 @@ const JP_BLAKE3: &str = "5e2213b3dfdcc9736b3bd951f51ec58935a3bde47bc4f9521838f04
 
 fn document(version: u32) -> (Engine, DocHandle, AssetId, AssetId) {
     let mut e = Engine::new();
-    let mut meta = DocumentMeta::srgb_u8(1024, 768);
-    if version == RENDER_VERSION_EXACT {
-        meta.render_version = RENDER_VERSION_EXACT;
-        meta.format_version = 4;
-    }
+    let meta = if version == RENDER_VERSION_EXACT {
+        DocumentMeta::srgb_u8(1024, 768)
+    } else {
+        DocumentMeta::srgb_u8_v2(1024, 768)
+    };
     let d = e.create_document(meta).unwrap();
     let jp = e.import_font(JP.to_vec(), 0).unwrap();
     let latin = e.import_font(LATIN.to_vec(), 0).unwrap();

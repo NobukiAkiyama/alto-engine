@@ -221,15 +221,23 @@ impl Runtime {
         })
     }
     #[wasm_bindgen(js_name=createDocument)]
-    pub fn create_document(&mut self, w: u32, h: u32) -> Result<String, JsValue> {
+    pub fn create_document(
+        &mut self,
+        w: u32,
+        h: u32,
+        render_version: Option<u32>,
+    ) -> Result<String, JsValue> {
         if w == 0 || h == 0 || w > 65536 || h > 65536 {
             return Err(error("INVALID_ARGUMENT: canvas must be 1..65536 pixels"));
         }
         self.renderer.cancel_stroke();
         let mut engine = Engine::new();
-        let doc = engine
-            .create_document(DocumentMeta::srgb_u8(w, h))
-            .map_err(error)?;
+        let meta = match render_version {
+            None | Some(3) => DocumentMeta::srgb_u8(w, h),
+            Some(2) => DocumentMeta::srgb_u8_v2(w, h),
+            _ => return Err(error("INVALID_ARGUMENT: render version must be 2 or 3")),
+        };
+        let doc = engine.create_document(meta).map_err(error)?;
         self.engine = engine;
         self.doc = doc;
         self.sampler = None;
@@ -1002,8 +1010,8 @@ impl Runtime {
             .map_err(error)?;
         self.command("effects.set", ops)
     }
-    /// One undoable edit from render version 1 to version 2. Load and save do not
-    /// call this. A document already on version 2 is rejected.
+    /// One undoable edit from render version 1 or 2 to version 3. Load and save
+    /// do not call this. A document already on version 3 is rejected.
     #[wasm_bindgen(js_name=upgradeRenderVersion)]
     pub fn upgrade_render_version(&mut self) -> Result<String, JsValue> {
         if self.sampler.is_some() {

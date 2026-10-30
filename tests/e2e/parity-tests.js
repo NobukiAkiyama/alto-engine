@@ -225,7 +225,7 @@ export async function runParityTests(engine, log) {
   try {
     for (const testCase of parityCases()) {
       await test(testCase.name, async () => {
-        const doc = await engine.createDocument({ width: testCase.w, height: testCase.h });
+        const doc = await engine.createDocument({ width: testCase.w, height: testCase.h, renderVersion: 2 });
         for (const node of testCase.nodes) await addNode(doc, engine, node);
         const cpu = renderCase(testCase);
         const gpu = await gpuTile(engine, testCase);
@@ -250,7 +250,7 @@ export async function runParityTests(engine, log) {
     for (const testCase of alphaMeasureCases()) {
       const start = performance.now();
       try {
-        const doc = await engine.createDocument({ width: testCase.w, height: testCase.h });
+        const doc = await engine.createDocument({ width: testCase.w, height: testCase.h, renderVersion: 2 });
         for (const node of testCase.nodes) await addNode(doc, engine, node);
         const cpu = renderCase(testCase);
         const gpu = await gpuTile(engine, testCase);
@@ -526,7 +526,7 @@ export async function runParityTests(engine, log) {
     }
     await xfail("mask", "mask: rgba coverage, not the plain composite", async () => {
       const image = solid(256, 256, [255, 0, 0, 255]);
-      const doc = await engine.createDocument({ width: 256, height: 256 });
+      const doc = await engine.createDocument({ width: 256, height: 256, renderVersion: 2 });
       const asset = await imported(engine, image);
       let layer;
       await doc.transact("raster", (tx) => {
@@ -542,7 +542,7 @@ export async function runParityTests(engine, log) {
     });
     await xfail("gaussian-blur", "effects: rgba16float and a Gaussian, not composite.wgsl", async () => {
       const image = square();
-      const doc = await engine.createDocument({ width: 256, height: 256 });
+      const doc = await engine.createDocument({ width: 256, height: 256, renderVersion: 2 });
       const asset = await imported(engine, image);
       let layer;
       await doc.transact("raster", (tx) => {
@@ -563,8 +563,7 @@ export async function runParityTests(engine, log) {
       const failures = [];
       for (const settings of colorAdjustGrid()) {
         const name = `color-adjust c=${settings.contrastLabel} s=${settings.saturationLabel} b=${settings.brightnessLabel}`;
-        // createDocument is render version 2. Color-adjust's integer formula
-        // runs only when the opened document is render version 3.
+        // This case opens an explicit v3 fixture for integer color adjustment.
         const doc = await engine.open(new Blob([packageBytes]));
         const opened = doc.getSnapshot().meta;
         if (opened.render_version !== 3 || opened.format_version !== 4) {
@@ -591,6 +590,29 @@ export async function runParityTests(engine, log) {
       assert(failures.length === 0, failures.join("\n"));
       return `${colorAdjustGrid().length} settings, 0 pixels differ`;
     });
+    for (const [name, effect, color, expected, tolerance] of [
+      ["invert", { type: "invert" }, [255, 0, 0, 255], [0, 255, 255, 255], 0],
+      ["curves", { type: "curves", points: [{ x: 0, y: 1 }, { x: 1, y: 0 }] }, [255, 0, 0, 255], [0, 255, 255, 255], 0],
+      ["levels", { type: "levels", in_black: 0, in_white: 1, gamma: 2, out_black: 0, out_white: 1 }, [128, 128, 128, 255], [181, 181, 181, 255], 2],
+      ["levels-gamma-10", { type: "levels", in_black: 0, in_white: 1, gamma: 10, out_black: 0, out_white: 1 }, [128, 128, 128, 255], [238, 238, 238, 255], 2],
+      ["hue-saturation", { type: "hue_saturation", hue: 90, saturation: 1, lightness: 0 }, [255, 0, 0, 255], [108, 0, 255, 255], 2],
+    ]) {
+      for (const adjustment of [false, true]) {
+        await test(`v3-${name}-${adjustment ? "adjustment" : "effect"}`, async () => {
+          const doc = await engine.createDocument({ width: 256, height: 256 });
+          assert(doc.getSnapshot().meta.render_version === 3, "new document did not default to v3");
+          const asset = await imported(engine, solid(256, 256, color));
+          let layer;
+          await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+          if (adjustment) await doc.transact("adjust", (tx) => tx.addAdjustment(effect));
+          else await doc.effects.set(layer, [effect]);
+          assert(sceneGap(doc.getSnapshot()) === "v3-m5-integer", `scene gap ${sceneGap(doc.getSnapshot())}`);
+          const image = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+          const pixel = image.slice((100 * 256 + 100) * 4, (100 * 256 + 100) * 4 + 4);
+          assert(pixel.every((value, i) => Math.abs(value - expected[i]) <= tolerance), `${name} ${adjustment}: ${pixel} expected ${expected}`);
+        });
+      }
+    }
     // v3 M5 at opacity 0.5, integer-exact: a color-adjusted layer and an adjustment
     // layer, each at half opacity over opaque blue, plus their cold level 1.
     for (const [name, build] of [
@@ -895,7 +917,7 @@ export async function runParityTests(engine, log) {
           const bake = await testing(engine).request("textBake", { node: id });
           assert(bake.hex, `${name} has no v3 reference bake`);
           const cpu = renderTextV3(hexBytes(bake.hex), transform, [0, 0], [256, 256]);
-          const v2 = await engine.createDocument({ width: 256, height: 256 });
+          const v2 = await engine.createDocument({ width: 256, height: 256, renderVersion: 2 });
           await addText(v2, content, transform);
           await unstable(engine).setGlyphAtlas(atlas);
           let gpu;
@@ -1006,6 +1028,15 @@ export async function runParityTests(engine, log) {
           await masked(doc, id, feathered);
           return { layers: [{ image }, { adjust: vivid, opacity, mode, mask: featheredMask }] };
         }]),
+        ["v3-adjustment-screen-unmasked", async (doc) => {
+          const image = opaque();
+          await raster(doc, image);
+          await doc.transact("adjust", (tx) => {
+            const id = tx.addAdjustment({ type: "color_adjust", ...vivid });
+            tx.setProps(id, { opacity: 0.5, blend: "screen" });
+          });
+          return { layers: [{ image }, { adjust: vivid, opacity: 0.5, mode: 2 }] };
+        }],
         // An unlinked mask turned 0.3 rad: the Q16 lookup (`SAMPLE_INTEGER`).
         ["v3-mask-rotated", async (doc) => {
           const image = colorAdjustGradient();
@@ -1053,33 +1084,6 @@ export async function runParityTests(engine, log) {
           return formatMeasure(row);
         });
       }
-      // An unmasked non-normal adjustment blend stays refused in v3 (#37, Linus
-      // 21:46): GpuUnsupported from `v3_gap`, and no tile is drawn (DQ3-4).
-      await test("v3-adjustment-screen-unmasked is refused", async () => {
-        const fixture = await fetch("../../tests/fixtures/render-v3-empty.alto");
-        assert(fixture.ok, `render-v3 fixture status ${fixture.status}`);
-        const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
-        await raster(doc, opaque());
-        await doc.transact("adjust", (tx) => {
-          const id = tx.addAdjustment({ type: "color_adjust", ...vivid });
-          tx.setProps(id, { opacity: 0.5, blend: "screen" });
-        });
-        const renderPath = sceneGap(doc.getSnapshot());
-        assert(renderPath === "v3-unsupported", `scene gap ${renderPath}`);
-        let refusal = null;
-        try {
-          await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
-        } catch (error) {
-          refusal = error;
-        }
-        assert(refusal, "unmasked screen adjustment layer was drawn");
-        assert(refusal.code === "GPU_UNSUPPORTED", `refused with ${refusal.code}: ${refusal.message}`);
-        assert(
-          String(refusal.message).includes("v3 adjustment has no integer definition yet"),
-          `refused for another reason: ${refusal.message}`,
-        );
-        return renderPath;
-      });
     }
     // DQ3-1 without blocking the Worker: a cold v3 overview is built through the
     // hierarchy in bounded steps, yielding if needed, and equals the warm pyramid.
@@ -1130,7 +1134,7 @@ export async function runParityTests(engine, log) {
       return `${steps} steps, ${frame.diagnosticTicks} diagnostic ticks`;
     });
     await xfail("vector-fill", "vector: 4x MSAA mesh, not composite.wgsl", async () => {
-      const doc = await engine.createDocument({ width: 256, height: 256 });
+      const doc = await engine.createDocument({ width: 256, height: 256, renderVersion: 2 });
       const data = await engine.vectors.parseSvg("M32 32 H200 V200 H32 Z");
       await doc.transact("vector", (tx) => tx.addVector([{ data, fill: [1, 0, 0, 1], stroke: null, fill_rule: "non_zero" }]));
       const gpu = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
@@ -1140,7 +1144,7 @@ export async function runParityTests(engine, log) {
       assert(!same(empty, gpu), "vector matched an empty composite bit-exactly; remove the xfail");
     });
     await xfail("text", "text: glyph atlas or vector outlines, no separate CPU pixel reference", async () => {
-      const doc = await engine.createDocument({ width: 256, height: 256 });
+      const doc = await engine.createDocument({ width: 256, height: 256, renderVersion: 2 });
       const font = await engine.assets.importFont(await (await fetch("../../tests/fonts/AltoTestLatin.ttf")).blob());
       await doc.transact("text", (tx) => {
         const id = tx.addFont(font);
@@ -1151,6 +1155,15 @@ export async function runParityTests(engine, log) {
       assert(gpu.length === 262144 && gpu.some((v, i) => i % 4 === 3 && v > 0), "text produced no ink");
       assert(sceneGap(doc.getSnapshot()) === "text", sceneGap(doc.getSnapshot()));
       assert(!same(new Uint8Array(262144), gpu), "text matched an empty composite bit-exactly; remove the xfail");
+    });
+    await test("new documents default to render version 3 and save format 4", async () => {
+      const doc = await engine.createDocument({ width: 256, height: 256 });
+      const fresh = doc.getSnapshot().meta;
+      assert(fresh.render_version === 3 && fresh.format_version === 4, `new document ${fresh.render_version}/${fresh.format_version}`);
+      const saved = await testing(engine).saveBytes();
+      const reopened = await engine.open(new Blob([saved]));
+      const meta = reopened.getSnapshot().meta;
+      assert(meta.render_version === 3 && meta.format_version === 4, `saved document ${meta.render_version}/${meta.format_version}`);
     });
     await test("render upgrade is one undoable edit and load or save keeps version 1", async () => {
       const response = await fetch("../../tests/fixtures/render-v1-bilinear.alto");
@@ -1168,13 +1181,13 @@ export async function runParityTests(engine, log) {
       assert(same(version1, await gpuTile(engine, { level: 0, tx: 0, ty: 0 })), "reopened version 1 pixels changed");
       await doc.upgradeRenderVersion();
       const upgraded = doc.getSnapshot().meta;
-      assert(upgraded.render_version === 2 && upgraded.format_version === 3, `upgrade meta ${upgraded.render_version} format ${upgraded.format_version}`);
-      const version2 = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
-      const cpu = renderCase(parityCases().find((item) => item.name === "scale-bilinear"));
-      const gap = diff(cpu, version2);
+      assert(upgraded.render_version === 3 && upgraded.format_version === 4, `upgrade meta ${upgraded.render_version} format ${upgraded.format_version}`);
+      const version3 = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
+      const cpu = renderCase(parityCases().find((item) => item.name === "scale-bilinear"), 3);
+      const gap = diff(cpu, version3);
       log(`render-upgrade: ${gap}`);
-      assert(same(cpu, version2), gap);
-      assert(!same(version1, version2), "upgrade left the version 1 pixels");
+      assert(same(cpu, version3), gap);
+      assert(!same(version1, version3), "upgrade left the version 1 pixels");
       let rejected = false;
       try {
         await doc.upgradeRenderVersion();

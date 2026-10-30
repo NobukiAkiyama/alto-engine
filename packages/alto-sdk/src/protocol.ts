@@ -88,7 +88,7 @@ export interface Requests {
     { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean },
     { protocol: number; recovery: RecoveryInfo }
   >;
-  createDocument: Q<{ width: number; height: number }, WireState>;
+  createDocument: Q<{ width: number; height: number; renderVersion?: 2 | 3 }, WireState>;
   transact: Q<{ intent: string; label?: string; ops: WireOp[]; baseRevision: number }, WireState>;
   undo: Q<None, WireState>;
   redo: Q<None, WireState>;

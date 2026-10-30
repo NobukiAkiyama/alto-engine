@@ -6,8 +6,8 @@
 // Q16 inverse and Q8 pixel centers (renderer.rs `mask_sampler`). The only float
 // value is the Rgba8Unorm atlas texel, which `atlas_bytes` turns back into its
 // bytes with `unorm_byte`. See doc/design/2026-10-28-v3-integer-mask.md.
-// Bindings match effects.wgsl except that binding 2 (the clip base) is unused, so
-// the derived layout omits it and the host does not bind it. The host
+// Bindings match effects.wgsl. Binding 2 carries vector coverage when an
+// adjustment layer mixes its filtered copy with the backdrop. The host
 // rejects every v3 scene that needs a stage not listed here (renderer.rs
 // `v3_gap`), so unknown modes are never dispatched and write zero.
 // Modes 21, 22 and 23 are the pixel-mask stages; v2 modes 4, 5 and 7 in
@@ -19,6 +19,7 @@ struct Tile { xy: vec2i, slot: u32, pad: u32 };
 struct Config { unused: array<vec4u, 6>, info: vec4u, extra: vec4u, grid: array<vec4i, 16>, sizes: vec4u, output_clip: vec4u };
 @group(0) @binding(0) var a: texture_2d<u32>;
 @group(0) @binding(1) var b: texture_2d<u32>;
+@group(0) @binding(2) var clip: texture_2d<u32>;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
 @group(0) @binding(4) var output: texture_storage_2d<rgba16uint,write>;
 @group(0) @binding(5) var<storage,read> tiles: array<Tile>;
@@ -43,6 +44,7 @@ fn input_texel(ix: vec2i, m: vec4i) -> vec2i {
 }
 fn texel_a(ix: vec2i)->vec4i { let q=input_texel(ix,c.grid[1]);if any(q<vec2i(0))||any(q>=vec2i(c.sizes.xy)){return vec4i(0);}return vec4i(textureLoad(a,q,0)); }
 fn texel_b(ix: vec2i)->vec4i { let q=input_texel(ix,c.grid[2]);if any(q<vec2i(0))||any(q>=vec2i(c.sizes.zw)){return vec4i(0);}return vec4i(textureLoad(b,q,0)); }
+fn texel_clip(ix: vec2i)->vec4i {return vec4i(textureLoad(clip,ix,0));}
 // The bytes of atlas texel `local` in layer `slot`. This is the one float read
 // of a v3 stage: the atlas is the Rgba8Unorm one of versions 1 and 2, and
 // `unorm_byte` returns each channel to its exact byte (`Gpu::atlas_read`).
@@ -60,15 +62,29 @@ fn tile_texel(x: i32, y: i32) -> vec4u {
  if t.slot==0xffffffffu{return vec4u(255u,0u,51u,255u);}
  return atlas_bytes(vec2i(x,y)-key*256,i32(t.slot));
 }
+// A negative scale encodes the reciprocal of a subpixel level: origin is then
+// in grid units, so level -6 is [origin * 64, -64]. Q8 centers remain exact.
+fn roi_pixel_q8(origin: i32, index: i32, scale: i32) -> Q8Fit {
+ if scale>0{return pixel_q8(origin,index,scale);}
+ let step=256/(-scale);
+ let term=index*step+step/2;
+ let sum=wide_add_checked(wide_mul_i32(origin,step),Wide(u32(term),0u));
+ if sum.ok==0u{return Q8Fit(0,0u);}
+ let negative=(sum.v.lo&0x80000000u)!=0u;
+ let fits=select(sum.v.hi==0u,sum.v.hi==0xffffffffu,negative);
+ return Q8Fit(bitcast<i32>(sum.v.lo),select(0u,1u,fits));
+}
 // The tile bytes under output pixel `ix`, nearest only (sample.rs
 // SAMPLE_INTEGER positions; doc/design/2026-10-28-v3-integer-mask.md). Mode 18
 // reads its raster and modes 21 to 23 their mask this way. `grid[3]` is the
 // output ROI origin and scale, `grid[4]` the Q16 inverse and `grid[5]` the i64
 // Q16 translation (lo, hi, lo, hi). The texel is the arithmetic `>> 8` of the
-// Q8 position; there are no weights. Out of range is transparent (byte 0).
+// Q8 position; there are no weights. A negative scale encodes a subpixel
+// power-of-two level as described by `roi_pixel_q8`. Out of range is
+// transparent (byte 0).
 fn lookup(ix: vec2i) -> vec4u {
  let o=c.grid[3];
- let px=pixel_q8(o.x,ix.x,o.z);let py=pixel_q8(o.y,ix.y,o.z);
+ let px=roi_pixel_q8(o.x,ix.x,o.z);let py=roi_pixel_q8(o.y,ix.y,o.z);
  if px.ok==0u||py.ok==0u{return vec4u(0u);}
  let m=c.grid[4];let t=bitcast<vec4u>(c.grid[5]);
  let qx=coord_q8(m.x,m.z,Wide(t.x,t.y),px.v,py.v);let qy=coord_q8(m.y,m.w,Wide(t.z,t.w),px.v,py.v);
@@ -130,6 +146,117 @@ fn layer_q14(dst: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
   if op == Q14_ONE { return blend_q(dst, s, src.rgb, src.a, mode); }
   let sa = mul_q(src.a, op);
   return blend_q(dst, s, vec3i(mul_q(s.r, sa), mul_q(s.g, sa), mul_q(s.b, sa)), sa, mode);
+}
+// A clipped layer changes base color while retaining base coverage.
+fn clip_layer_q14(base: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
+  let sa=mul_q(src.a,op);
+  if sa==0 || base.a==0 {return base;}
+  let d=straight_q(base);let s=straight_q(src);let mixed=mix_q(d,s,mode);
+  var out=base;
+  for(var i=0u;i<3u;i++){
+    let color=div_q(d[i]*(Q14_ONE-sa)+mixed[i]*sa,Q14_ONE);
+    out[i]=mul_q(color,base.a);
+  }
+  return out;
+}
+// A clipped adjustment transfers its color to the base coverage.
+fn clip_adjust_q14(base: vec4i, adjusted: vec4i) -> vec4i {
+  let color=straight_q(adjusted);var out=base;
+  for(var i=0u;i<3u;i++){out[i]=mul_q(color[i],base.a);}
+  return out;
+}
+fn invert_q14(v: vec4i) -> vec4i {
+  let s=straight_q(v);var out=v;
+  for(var i=0u;i<3u;i++){out[i]=mul_q(Q14_ONE-s[i],v.a);}
+  return out;
+}
+fn curve_point_q14(i: u32) -> vec2i {
+  let pair=c.grid[6u+i/2u];
+  return select(pair.xy,pair.zw,(i&1u)==1u);
+}
+fn curves_q14(v: vec4i, count: u32) -> vec4i {
+  let s=straight_q(v);var out=v;
+  for(var channel=0u;channel<3u;channel++){
+    let x=s[channel];var y=x;
+    for(var i=0u;i+1u<count;i++){
+      let a=curve_point_q14(i);let b=curve_point_q14(i+1u);
+      if b.x>a.x && x>=a.x && x<=b.x {
+        y=a.y+div_q((x-a.x)*(b.y-a.y),b.x-a.x);
+      }
+    }
+    out[channel]=mul_q(clamp(y,0,Q14_ONE),v.a);
+  }
+  return out;
+}
+const EXP2_ROOT_Q14: array<i32,14> = array<i32,14>(23170,19484,17867,17109,16743,16562,16473,16428,16406,16395,16390,16387,16385,16385);
+fn log2_q16(x: i32) -> i32 {
+  var v=x;var whole=0;var frac=0;
+  loop {if v>=Q14_ONE {break;}v=v*2;whole=whole-65536;}
+  for(var i=0u;i<16u;i++){
+    v=div_q(v*v,Q14_ONE);
+    if v>=2*Q14_ONE {v=div_q(v,2);frac=frac | (1 << (15u-i));}
+  }
+  return whole+frac;
+}
+fn exp2_q16(x: i32) -> i32 {
+  if x>=0 {return Q14_ONE;}
+  let whole=(x-65535)/65536;
+  let frac=x-whole*65536;
+  var v=Q14_ONE;
+  for(var i=0u;i<14u;i++){
+    if (frac & (1 << (15u-i)))!=0 {v=div_q(v*EXP2_ROOT_Q14[i],Q14_ONE);}
+  }
+  let shift=-whole;
+  if shift>=16 {return 0;}
+  return div_q(v,1 << u32(shift));
+}
+fn pow_q14(x: i32, exponent: i32) -> i32 {
+  if x<=0 {return 0;}
+  if x>=Q14_ONE {return Q14_ONE;}
+  let scaled=wide_div_q14(wide_mul_i32(log2_q16(x),exponent));
+  return clamp(exp2_q16(scaled),0,Q14_ONE);
+}
+fn levels_q14(v: vec4i) -> vec4i {
+  let settings=c.grid[0];let s=straight_q(v);var out=v;
+  let span=max(settings.y-settings.x,1);
+  for(var i=0u;i<3u;i++){
+    let x=clamp(div_q((s[i]-settings.x)*Q14_ONE,span),0,Q14_ONE);
+    let y=pow_q14(x,settings.z);
+    let mapped=clamp(settings.w+div_q((c.grid[6].x-settings.w)*y,Q14_ONE),0,Q14_ONE);
+    out[i]=mul_q(mapped,v.a);
+  }
+  return out;
+}
+const CORDIC_ATAN_DEG_Q16: array<i32,16> = array<i32,16>(2949120,1740967,919879,466945,234379,117304,58666,29335,14668,7334,3667,1833,917,458,229,115);
+fn hue_sincos_q14(angle: i32) -> vec2i {
+  if angle==0 {return vec2i(Q14_ONE,0);}
+  if angle==5898240 {return vec2i(0,Q14_ONE);}
+  if angle== -5898240 {return vec2i(0,-Q14_ONE);}
+  if angle==11796480 || angle== -11796480 {return vec2i(-Q14_ONE,0);}
+  var z=angle;var x=9949;var y=0;
+  if z>5898240 {z=z-11796480;x= -x;y= -y;}
+  if z< -5898240 {z=z+11796480;x= -x;y= -y;}
+  for(var i=0u;i<16u;i++){
+    let step_x=y>>i;let step_y=x>>i;
+    if z>=0 {x=x-step_x;y=y+step_y;z=z-CORDIC_ATAN_DEG_Q16[i];}
+    else {x=x+step_x;y=y-step_y;z=z+CORDIC_ATAN_DEG_Q16[i];}
+  }
+  return vec2i(clamp(x,-Q14_ONE,Q14_ONE),clamp(y,-Q14_ONE,Q14_ONE));
+}
+fn hue_saturation_q14(v: vec4i) -> vec4i {
+  let settings=c.grid[0];let s=straight_q(v);
+  let lum=div_q(s.r*3483+s.g*11718+s.b*1183,Q14_ONE);
+  let cs=hue_sincos_q14(settings.x);let u=s.r-lum;let w=s.b-lum;
+  let ru=div_q(u*cs.x-w*cs.y,Q14_ONE);
+  let rw=div_q(u*cs.y+w*cs.x,Q14_ONE);
+  var rgb=vec3i(lum+ru,lum-div_q(6466*ru+9513*rw,Q14_ONE),lum+rw);
+  let rotated_lum=div_q(rgb.r*3483+rgb.g*11718+rgb.b*1183,Q14_ONE);
+  let gap=Q14_ONE-settings.y;
+  for(var i=0u;i<3u;i++){
+    let mixed=wide_div_q14(wide_add(wide_mul_i32(rotated_lum,gap),wide_mul_i32(rgb[i],settings.y)));
+    rgb[i]=clamp(mixed+settings.z,0,Q14_ONE);
+  }
+  return vec4i(mul_q(rgb.r,v.a),mul_q(rgb.g,v.a),mul_q(rgb.b,v.a),v.a);
 }
 // Modes 21 to 23 and 26. Settings are `grid[0]`.
 fn mask_stage(ix: vec2i) -> vec4i {
@@ -221,5 +348,15 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if (c.info.x>=21u&&c.info.x<=23u)||c.info.x==26u{out=mask_stage(ix);}
  else if c.info.x==24u{out=blur_stage(ix);}
  else if c.info.x==25u{out=resample_stage(ix);}
+ else if c.info.x==27u{out=clip_layer_q14(texel_a(ix),texel_b(ix),settings.x,u32(settings.y));}
+ else if c.info.x==28u{out=clip_adjust_q14(texel_a(ix),texel_b(ix));}
+ else if c.info.x==29u{
+  let before=texel_a(ix);let after=texel_b(ix);let k=clamp(texel_clip(ix).r,0,Q14_ONE);
+  for(var i=0u;i<4u;i++){out[i]=div_q(before[i]*(Q14_ONE-k)+after[i]*k,Q14_ONE);}
+ }
+ else if c.info.x==30u{out=invert_q14(texel_a(ix));}
+ else if c.info.x==31u{out=curves_q14(texel_a(ix),u32(settings.x));}
+ else if c.info.x==32u{out=levels_q14(texel_a(ix));}
+ else if c.info.x==33u{out=hue_saturation_q14(texel_a(ix));}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

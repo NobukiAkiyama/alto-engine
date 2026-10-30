@@ -638,8 +638,18 @@ pub(crate) fn color_adjust_q14(value: f32) -> i32 {
     crate::q14_round(value.clamp(-1.0, 4.0))
 }
 
+/// Q14 quantize of a levels gamma, clamped to the document range [0.1, 10]
+/// rather than the [-1, 4] of [`color_adjust_q14`]. A value that is not finite is 1.
+pub(crate) fn levels_gamma_q14(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 1 << 14;
+    }
+    crate::q14_round(value.clamp(0.1, 10.0))
+}
+
 /// Where a v3 stage reads the atlas: the mask of modes 21 to 23, or the raster
-/// tiles of mode 18. The integer output ROI (`x`, `y`, level scale), the Q16
+/// tiles of mode 18. The output ROI uses integer document pixels for scale >= 1,
+/// or grid units with a negative reciprocal scale for levels -6..-1. The Q16
 /// inverse and its i64 Q16 translation bits (`effects-q14.wgsl` `Config.grid`
 /// rows 3 to 5). The positions are always `SAMPLE_INTEGER` (`sample.rs`), and the
 /// texel is the nearest one (`effects-q14.wgsl` `lookup`).
@@ -682,7 +692,9 @@ pub(crate) fn fixed_mask_sampler(
     transform: &alto_core::FixedAffine,
     origin: [i32; 3],
 ) -> Option<MaskSampler> {
-    if origin[2] < 1 {
+    if origin[2] == 0
+        || (origin[2] < 0 && !matches!(origin[2].checked_neg()?, 2 | 4 | 8 | 16 | 32 | 64))
+    {
         return None;
     }
     let q = crate::sample::fixed_inverse(transform)??;
@@ -739,12 +751,25 @@ pub(crate) fn exact_reach(
     span: [i64; 4],
     reach: i32,
 ) -> Option<ExactReach> {
-    let center = |o: i64, i: i64| {
-        let step = i128::from(i)
-            .checked_mul(256)?
-            .checked_add(128)?
-            .checked_mul(i128::from(scale))?;
-        i128::from(o).checked_mul(256)?.checked_add(step)
+    exact_reach_q8(
+        inv,
+        origin.map(|o| i128::from(o) * 256),
+        i128::from(scale) * 256,
+        span,
+        reach,
+    )
+}
+
+fn exact_reach_q8(
+    inv: &crate::sample::IntegerInverse,
+    origin: [i128; 2],
+    step: i128,
+    span: [i64; 4],
+    reach: i32,
+) -> Option<ExactReach> {
+    let center = |o: i128, i: i64| {
+        o.checked_add(i128::from(i).checked_mul(step)?)?
+            .checked_add(step / 2)
     };
     let source = |m0: i32, px: i128, m1: i32, py: i128, t: i64| {
         let sum = i128::from(m0)
@@ -802,10 +827,28 @@ pub(crate) fn v3_reach(
     reach: i32,
     keys: impl Iterator<Item = TileKey>,
 ) -> std::result::Result<Option<[i32; 4]>, ()> {
+    v3_reach_q8(
+        inv,
+        origin.map(|o| i128::from(o) * 256),
+        i128::from(scale) * 256,
+        span,
+        reach,
+        keys,
+    )
+}
+
+pub(crate) fn v3_reach_q8(
+    inv: &crate::sample::IntegerInverse,
+    origin: [i128; 2],
+    step: i128,
+    span: [i64; 4],
+    reach: i32,
+    keys: impl Iterator<Item = TileKey>,
+) -> std::result::Result<Option<[i32; 4]>, ()> {
     if span[0] >= span[2] || span[1] >= span[3] {
         return Ok(None);
     }
-    let r = exact_reach(inv, origin, scale, span, reach).ok_or(())?;
+    let r = exact_reach_q8(inv, origin, step, span, reach).ok_or(())?;
     let mut present = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
     for k in keys {
         let (x, y) = (i128::from(k.tx), i128::from(k.ty));
@@ -843,37 +886,35 @@ pub(crate) fn v3_reach(
 /// `input_texel`). `out` and `input` are ROIs as `[x, y, scale]`, and `size` is
 /// the output size in pixels. Equal ROIs map pixel `i` to texel `i`: `[0; 4]`.
 /// Otherwise the texel of output pixel `i` is `floor((p - in_x) / in_scale)` at
-/// the center `p = out_x + (i + 1/2) * out_scale`. Doubled, every term is an
-/// integer: `floor((2 (out_x - in_x) + out_scale + i * 2 out_scale) / (2 in_scale))`,
-/// returned as `[numerator x, numerator y, step, divisor]`. `None` when an origin
-/// or a scale is not an exact integer, a scale is below 1, or the numerator of
-/// some pixel leaves `i32`: the host refuses the render (DQ3-4).
+/// the center `p = out_x + (i + 1/2) * out_scale`. Both ROIs are converted to
+/// the finer common power-of-two grid, so this also covers levels -6..-1.
+/// The doubled numerator, step and divisor must fit the shader's i32 words.
 pub(crate) fn input_map(out: [f32; 3], size: [u32; 2], input: [f32; 3]) -> Option<[i32; 4]> {
     if out == input {
         return Some([0; 4]);
     }
-    let [ox, oy, os] = [exact_i32(out[0])?, exact_i32(out[1])?, exact_i32(out[2])?];
-    let [ix, iy, is] = [
-        exact_i32(input[0])?,
-        exact_i32(input[1])?,
-        exact_i32(input[2])?,
-    ];
-    if os < 1 || is < 1 {
-        return None;
-    }
-    let step = 2 * i64::from(os);
-    let numerator = |o: i32, i: i32, len: u32| -> Option<i32> {
-        let n = 2 * (i64::from(o) - i64::from(i)) + i64::from(os);
-        let last = i64::from(len.max(1) - 1) * step;
+    let [ox, oy, out_level] = crate::raster_q8::roi_grid(out[0], out[1], out[2])?;
+    let [ix, iy, in_level] = crate::raster_q8::roi_grid(input[0], input[1], input[2])?;
+    let common = out_level.min(in_level);
+    let out_step = 1_i128.checked_shl(u32::try_from(out_level - common).ok()?)?;
+    let in_step = 1_i128.checked_shl(u32::try_from(in_level - common).ok()?)?;
+    let step = 2_i128.checked_mul(out_step)?;
+    let denominator = 2_i128.checked_mul(in_step)?;
+    let numerator = |o: i64, i: i64, len: u32| -> Option<i32> {
+        let base = (i128::from(o).checked_mul(out_step)?)
+            .checked_sub(i128::from(i).checked_mul(in_step)?)?
+            .checked_mul(2)?
+            .checked_add(out_step)?;
+        let last = i128::from(len.max(1) - 1).checked_mul(step)?;
         i32::try_from(last).ok()?;
-        i32::try_from(n + last).ok()?;
-        i32::try_from(n).ok()
+        i32::try_from(base.checked_add(last)?).ok()?;
+        i32::try_from(base).ok()
     };
     Some([
         numerator(ox, ix, size[0])?,
         numerator(oy, iy, size[1])?,
         i32::try_from(step).ok()?,
-        i32::try_from(2 * i64::from(is)).ok()?,
+        i32::try_from(denominator).ok()?,
     ])
 }
 
@@ -997,58 +1038,33 @@ pub(crate) fn mask_grid(
 }
 
 /// The feature that render version 3 has no integer definition for, or `None`.
-/// Version 3 draws plain scenes with the integer tile compositor, and with the
-/// integer M5 stages: color-adjust and Gaussian blur (layer effects, with or
-/// without a selection), color-adjust adjustment layers (any opacity), pixel
-/// masks on layers and adjustment layers, filled vectors (`raster_q8`), vector
-/// masks and clip paths (feathered through the integer blur), and blends of
-/// masked adjustment layers (v2 mode 7: screen, or multiply for every other
-/// non-normal mode), and text drawn from its bake. Visible strokes keep the v2
-/// tessellator and are refused, and so
-/// are vector masks and clip paths on adjustment layers. Everything
-/// else is refused before any command is
-/// built, so no v3 tile is ever written through a float or unorm target. Every
-/// node is checked, visible or not. `tests/e2e/cpu-composite.js` `sceneGap`
-/// mirrors this.
+/// Version 3 draws plain scenes with the integer tile compositor and M5 stages
+/// for all document effects, adjustments, masks, filled and stroked vectors,
+/// clipping and baked text. Direct layout runs are an invalid v3 scene input.
+/// Every node is checked, visible or not, before any tile is written.
+/// `tests/e2e/cpu-composite.js` `sceneGap` mirrors this.
 pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
     let integer_effect = |e: &crate::REffect| {
         matches!(
             e.kind,
-            crate::REffectKind::ColorAdjust { .. } | crate::REffectKind::GaussianBlur { .. }
+            crate::REffectKind::ColorAdjust { .. }
+                | crate::REffectKind::GaussianBlur { .. }
+                | crate::REffectKind::Invert
+                | crate::REffectKind::Curves { .. }
+                | crate::REffectKind::Levels { .. }
+                | crate::REffectKind::HueSaturation { .. }
         )
     };
     for n in &scene.nodes {
         let f = &n.features;
-        if f.clip {
-            return Some("clip");
-        }
         if !f.effects.iter().all(integer_effect) {
             return Some("effects");
         }
         match &n.content {
-            RContent::Mesh(paths)
-                if paths.iter().any(|path| {
-                    path.stroke
-                        .as_ref()
-                        .is_some_and(crate::raster_q8::stroke_visible)
-                }) =>
-            {
-                return Some("vector stroke");
-            }
             // Version 3 text draws from its bake (`TextBake`); layout runs are
             // never a v3 input.
             RContent::Text(_) => return Some("text"),
-            // Without a pixel mask, a non-normal blend stays refused (#37, Linus
-            // 21:46). Its stages are integer since the float purge; drawing it
-            // through mode 23 is a scope change that needs its own review. An
-            // adjustment layer's vector mask or clip path mixes backdrop and
-            // adjusted copy by coverage (v2 mode 12); v3 defines no such mix.
-            RContent::Adjustment(e)
-                if !integer_effect(e)
-                    || (f.mask.is_none() && n.blend != RenderBlend::Normal)
-                    || f.vector_mask.is_some()
-                    || f.clip_path.is_some() =>
-            {
+            RContent::Adjustment(e) if !integer_effect(e) => {
                 return Some("adjustment");
             }
             _ => {}

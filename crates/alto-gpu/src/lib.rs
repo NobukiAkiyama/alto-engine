@@ -7,6 +7,7 @@ pub mod glyph_q8;
 pub mod raster_q8;
 pub mod renderer;
 mod sample;
+mod stroke_q8;
 
 #[cfg(test)]
 mod blend_ref;
@@ -114,12 +115,12 @@ pub fn integer_effects_shader() -> String {
     )
 }
 
-/// `v * 16384` rounded half away from zero, for a finite `v` with `|v| <= 4`.
-/// Exact: it is evaluated on the bits of `v`, not in float. The f32 product is
+/// `v * 16384` rounded half away from zero, for a finite `v` with `|v| <= 16`
+/// (levels gamma reaches 10). Exact: it is evaluated on the bits of `v`, not in float. The f32 product is
 /// exact, but the f32 sum with one half is not (`0.5 - 2^-25` plus `0.5` rounds
 /// to 1, so the largest f32 below `2^-15` would quantize to 1, not 0).
 pub(crate) fn q14_round(v: f32) -> i32 {
-    debug_assert!(v.is_finite() && v.abs() <= 4.0);
+    debug_assert!(v.is_finite() && v.abs() <= 16.0);
     let bits = v.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32;
     let fraction = u64::from(bits & 0x7f_ffff);

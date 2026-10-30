@@ -8,7 +8,9 @@ const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
 
 fn setup() -> (Engine, DocHandle, AssetId, AssetId) {
     let mut e = Engine::new();
-    let d = e.create_document(DocumentMeta::srgb_u8(1024, 768)).unwrap();
+    let d = e
+        .create_document(DocumentMeta::srgb_u8_v2(1024, 768))
+        .unwrap();
     let jp = e.import_font(JP.to_vec(), 0).unwrap();
     let latin = e.import_font(LATIN.to_vec(), 0).unwrap();
     assert!(jp.warnings.is_empty());
