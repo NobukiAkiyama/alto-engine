@@ -613,6 +613,12 @@ impl Runtime {
     pub fn frame_fields(&self) -> Vec<String> {
         FRAME_FIELDS.iter().map(|f| f.to_string()).collect()
     }
+    /// True once after the renderer created pipelines; the Worker then waits for the
+    /// queue before it counts a held-back present as idle.
+    #[wasm_bindgen(js_name=takePipelinesBuilt)]
+    pub fn take_pipelines_built(&mut self) -> bool {
+        self.renderer.take_pipelines_built()
+    }
     #[wasm_bindgen(js_name=adapterName)]
     pub fn adapter_name(&self) -> String {
         self.renderer.adapter_name.clone()

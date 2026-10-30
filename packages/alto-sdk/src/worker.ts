@@ -21,6 +21,15 @@ const presentSettled = () => Promise.race([
   runtime.submittedWorkDone(),
   new Promise<void>((resolve) => setTimeout(resolve, 50)),
 ]);
+/**
+ * After a tick that created pipelines, waits for the queue without the timer. A
+ * software adapter compiles them before later queue work, so the present they hold
+ * back can take seconds on a slow host; the deferred-present cap is for presents,
+ * not compilation. A lost device still resolves the wait.
+ */
+const pipelinesSettled = async () => {
+  if (runtime.takePipelinesBuilt()) await runtime.submittedWorkDone();
+};
 declare const self: DedicatedWorkerGlobalScope & { altoPanic?: string };
 type Timer = ReturnType<typeof setTimeout>;
 interface Decoder {
@@ -983,6 +992,7 @@ async function execute(m: Queued): Promise<unknown> {
           if (frame.profile) profiles.push(frame.profile);
           noteDeferred(frame, "wait");
           tickMs.push(performance.now() - tickStart);
+          await pipelinesSettled();
           if (frame.pending) await yieldTask();
           else if (frame.presentDeferred) await presentSettled();
         } while (frame.pending || frame.presentDeferred);
@@ -1072,6 +1082,7 @@ async function drain() {
             // The wait is capped: a device that never settles used to loop forever.
             noteDeferred(value, "drain");
             if (diagnosticTickMs) diagnosticTickMs.push(performance.now() - tickStart);
+            await pipelinesSettled();
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {

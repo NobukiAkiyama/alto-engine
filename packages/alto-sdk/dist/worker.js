@@ -22,6 +22,16 @@ const presentSettled = () => Promise.race([
     runtime.submittedWorkDone(),
     new Promise((resolve) => setTimeout(resolve, 50)),
 ]);
+/**
+ * After a tick that created pipelines, waits for the queue without the timer. A
+ * software adapter compiles them before later queue work, so the present they hold
+ * back can take seconds on a slow host; the deferred-present cap is for presents,
+ * not compilation. A lost device still resolves the wait.
+ */
+const pipelinesSettled = async () => {
+    if (runtime.takePipelinesBuilt())
+        await runtime.submittedWorkDone();
+};
 self.addEventListener("error", (e) => {
     postMessage({
         t: "diagnostic",
@@ -954,6 +964,7 @@ async function execute(m) {
                         profiles.push(frame.profile);
                     noteDeferred(frame, "wait");
                     tickMs.push(performance.now() - tickStart);
+                    await pipelinesSettled();
                     if (frame.pending)
                         await yieldTask();
                     else if (frame.presentDeferred)
@@ -1052,6 +1063,7 @@ async function drain() {
                         noteDeferred(value, "drain");
                         if (diagnosticTickMs)
                             diagnosticTickMs.push(performance.now() - tickStart);
+                        await pipelinesSettled();
                         if (value.presentDeferred && !value.composed)
                             await presentSettled();
                         else if (value.pending)
