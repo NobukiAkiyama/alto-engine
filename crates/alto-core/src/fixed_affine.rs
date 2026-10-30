@@ -301,8 +301,10 @@ mod tests {
         assert_eq!(q16(f64::INFINITY.to_bits()), None);
         assert_eq!(q16(f64::NEG_INFINITY.to_bits()), None);
         assert_eq!(q16(f64::NAN.to_bits()), None);
-        // The memo's k = 9 / k = 10 boundary: 2^45 is the largest power of two
-        // whose Q16 fits below 2^62; the text transform limits stop well before.
+        // The memo's k = 9 / k = 10 boundary. The memo's text_q16_from_bits
+        // refuses k = 10 (2^46); this decoder returns it, and v3 text never
+        // sees it: FixedAffine refuses translations of 2^47 Q16 and more, and
+        // linear terms of 2^46 Q32 and more.
         assert_eq!(q16(2f64.powi(45).to_bits()), Some(1 << 61));
         assert_eq!(q16(2f64.powi(46).to_bits()), Some(1 << 62));
         assert_eq!(q16(2f64.powi(47).to_bits()), None);

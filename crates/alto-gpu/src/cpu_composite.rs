@@ -8913,7 +8913,9 @@ fn text_q14(
     level: i32,
     roi: [i64; 4],
 ) -> Vec<[u16; 4]> {
-    use crate::glyph_q8::{atlas_band, glyph_map_q, place_q, rasterize_atlas, rasterize_direct};
+    use crate::glyph_q8::{
+        atlas_band, direct_window, glyph_map_q, place_q, rasterize_atlas, rasterize_direct,
+    };
     let [ox, oy, w, h] = roi;
     let mut acc = vec![[0u16; 4]; (w * h) as usize];
     let Ok(bake) = alto_core::text_bake::TextBake::decode(bake) else {
@@ -8945,11 +8947,17 @@ fn text_q14(
                 }
             }
             None => {
-                let Ok(bytes) = rasterize_direct(&c, outline, roi) else {
+                // The window is the glyph's box within the ROI (the bytes are
+                // the same as any larger window's, cut).
+                let Some(window) = direct_window(&c, outline, roi) else {
                     continue;
                 };
+                let Ok(bytes) = rasterize_direct(&c, outline, window) else {
+                    continue;
+                };
+                let [wx, wy, ww, _] = window;
                 for (i, &b) in bytes.iter().enumerate() {
-                    paint(ox + (i as i64 % w), oy + (i as i64 / w), b);
+                    paint(wx + (i as i64 % ww), wy + (i as i64 / ww), b);
                 }
             }
         }
@@ -9066,6 +9074,42 @@ fn text_q14_draws_baked_text_in_both_bands() {
             "{name} drew left"
         );
     }
+    // A fully covered pixel of the opaque 13.5 px text is exactly its colour.
+    let (_, latin) = &text_reference_bakes()[0];
+    let q = text_q14(latin, moved(20.25, 60.625), 0, [0, 0, 256, 256]);
+    let colour = [0.1f32, 0.2, 0.9, 1.0].map(alto_engine::text::text_color_q14);
+    assert!(q.contains(&colour), "no fully covered pixel has {colour:?}");
+    // Glyphs paint in bake order: two overlapping squares, the later on top.
+    let square = alto_core::text_bake::BakeOutline {
+        font: alto_core::text_bake::PLACEHOLDER_FONT,
+        glyph: 0,
+        upem: 1000,
+        commands: vec![
+            alto_core::text_bake::BakeCommand::Move([0, 0]),
+            alto_core::text_bake::BakeCommand::Line([64_000, 0]),
+            alto_core::text_bake::BakeCommand::Line([64_000, 64_000]),
+            alto_core::text_bake::BakeCommand::Line([0, 64_000]),
+            alto_core::text_bake::BakeCommand::Close,
+        ],
+    };
+    // 40 px squares (direct band), the second 10 px right of the first.
+    let glyph = |x: i64, color: [u16; 4]| alto_core::text_bake::BakeGlyph {
+        outline: 0,
+        m: [671_089, 0, 0, 671_089],
+        t: [x << 30, 0],
+        color,
+    };
+    let (red, blue) = ([16384, 0, 0, 16384], [0, 0, 16384, 16384]);
+    let two = alto_core::text_bake::TextBake {
+        baker: 1,
+        fonts: vec![],
+        outlines: vec![square],
+        glyphs: vec![glyph(0, red), glyph(10, blue)],
+    }
+    .encode();
+    let q = text_q14(&two, moved(0.0, 0.0), 0, [0, 0, 64, 64]);
+    assert_eq!(q[20 * 64 + 5], red);
+    assert_eq!(q[20 * 64 + 20], blue, "the later glyph is on top");
     // The bands are what the sizes say: 13.5 px atlas, 61 px direct.
     let bake = alto_core::text_bake::TextBake::decode(&text_reference_bakes()[0].1).unwrap();
     let glyph = &bake.glyphs[0];
@@ -9090,6 +9134,15 @@ fn text_q14_window_crop_and_tile_seams() {
     for (name, bake) in text_reference_bakes() {
         let world = moved(-31.375, 70.5);
         let full = text_q14(&bake, world, 0, [-64, 0, 256, 256]);
+        assert!(
+            full.iter().any(|p| p[3] > 0),
+            "{name}: the seam test needs ink"
+        );
+        // Columns 0..64 of this ROI are x = -64..0: the text crosses the origin.
+        let left_of_zero = full
+            .chunks(256)
+            .any(|row| row[..64].iter().any(|p| p[3] > 0));
+        assert!(left_of_zero, "{name}: no ink left of 0");
         for (qx, qy) in [(-64, 0), (64, 0), (-64, 128), (64, 128)] {
             let part = text_q14(&bake, world, 0, [qx, qy, 128, 128]);
             for y in 0..128 {
@@ -9101,6 +9154,25 @@ fn text_q14_window_crop_and_tile_seams() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn text_q14_direct_glyphs_draw_in_large_rois() {
+    // A direct-band glyph in a 2048 x 2048 ROI (4 Mi pixels, past one window's
+    // limit) draws through its own box, and matches a small ROI around it.
+    let (_, bake) = &text_reference_bakes()[1];
+    let world = moved(1500.0, 1600.0);
+    let large = text_q14(bake, world, 0, [0, 0, 2048, 2048]);
+    let small = text_q14(bake, world, 0, [1400, 1500, 256, 256]);
+    assert!(small.iter().any(|p| p[3] > 0));
+    for y in 0..256usize {
+        let row = (1500 + y) * 2048 + 1400;
+        assert_eq!(
+            &small[y * 256..y * 256 + 256],
+            &large[row..row + 256],
+            "row {y}"
+        );
     }
 }
 
