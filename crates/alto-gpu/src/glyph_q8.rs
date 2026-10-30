@@ -369,6 +369,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_outlines_are_transparent() {
+        // A space or a missing outline: no atlas placement, and no ink.
+        let empty = BakeOutline {
+            font: 0,
+            glyph: 4,
+            upem: 1000,
+            commands: vec![],
+        };
+        let c = map([0.012, 0.0, 0.0, -0.012, 2.25, 14.5]);
+        assert!(place_q(&c, &empty).is_none());
+        assert_eq!(rasterize_direct(&c, &empty, [0, 0, 4, 4]), Ok(vec![0; 16]));
+    }
+
+    #[test]
     fn text_q8_raster_does_not_overflow() {
         // Extremes of the bake and the transform neither panic nor wrap.
         let max = alto_core::text_bake::MAX_OUTLINE_COORD;
@@ -385,6 +399,7 @@ mod tests {
         };
         let world =
             FixedAffine::from_affine(Affine2([16000.0, 0.0, 0.0, 16000.0, 1e9, -1e9])).unwrap();
+        let (mut mapped, mut drawn) = (0, 0);
         for level in [-16, -6, 0, 12] {
             for m in [
                 [i32::MAX, i32::MIN, i32::MIN, i32::MAX],
@@ -393,16 +408,37 @@ mod tests {
             ] {
                 for t in [[0, 0], [1 << 60, -(1 << 60)]] {
                     let Some(c) = glyph_map_q(world, level, m, t) else {
+                        // Only an out-of-range C is refused, never by a panic.
                         continue;
                     };
+                    mapped += 1;
+                    assert!(c.m.iter().all(|v| v.unsigned_abs() < 1 << 31));
+                    assert!(c.t.iter().all(|v| v.unsigned_abs() < 1 << 60));
                     let _ = atlas_band(&c, o.upem);
                     if let Some(p) = place_q(&c, &o) {
-                        let _ = rasterize_atlas(&p, &o);
+                        let bytes = rasterize_atlas(&p, &o).unwrap();
+                        assert_eq!(bytes.len(), p.w as usize * p.h as usize);
                     }
-                    let _ = rasterize_direct(&c, &o, [0, 0, 8, 8]);
+                    // Glyph curves are capped, never refused: Ok, or the
+                    // glyph's own extent refused (Range) whatever the window.
+                    match rasterize_direct(&c, &o, [0, 0, 8, 8]) {
+                        Ok(bytes) => {
+                            assert_eq!(bytes.len(), 64);
+                            drawn += 1;
+                        }
+                        Err(e) => {
+                            assert_eq!(e, RasterError::Range);
+                            let other = rasterize_direct(&c, &o, [-1000, 7, 3, 3]);
+                            assert_eq!(other, Err(RasterError::Range));
+                        }
+                    }
                 }
             }
         }
+        assert!(mapped > 0 && drawn > 0, "mapped {mapped} drawn {drawn}");
+        // An identity world and a 1:1 placement compose to the placement.
+        let unit = glyph_map_q(FixedAffine::IDENTITY, 0, [1 << 24, 0, 0, 1 << 24], [0, 0]);
+        assert_eq!(unit.unwrap().m, [1 << 24, 0, 0, 1 << 24]);
         assert!(glyph_map_q(FixedAffine::IDENTITY, 13, [1, 0, 0, 1], [0, 0]).is_none());
         assert!(glyph_map_q(FixedAffine::IDENTITY, -17, [1, 0, 0, 1], [0, 0]).is_none());
         // A glyph wider than 2^24 Q8 is refused whatever the window.
