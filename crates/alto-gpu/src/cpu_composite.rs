@@ -3772,6 +3772,25 @@ fn reference_text() -> String {
             fnv64(&bytes)
         ));
     }
+    lines.push("# Render version 3 text: the ten enforced browser scenes at level 0.".to_string());
+    for (name, bake, transform, tile) in text_v3_hash_cases() {
+        let world = alto_core::FixedAffine::from_affine(Affine2(transform)).unwrap();
+        let q = text_q14(
+            &bake,
+            world,
+            0,
+            [i64::from(tile.0) * 256, i64::from(tile.1) * 256, 256, 256],
+        );
+        let bytes: Vec<u8> = q
+            .iter()
+            .flat_map(|p| p.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8))
+            .collect();
+        lines.push(format!(
+            "{name} {} {:016x}",
+            ContentHash::of(&bytes).hex(),
+            fnv64(&bytes)
+        ));
+    }
     lines.join("\n") + "\n"
 }
 
@@ -7968,8 +7987,8 @@ fn existing_v1_and_v2_hashes_are_unchanged() {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
     {
         assert!(
-            line.contains("-alpha-measure "),
-            "new hash line is not an alpha-measure case: {line}"
+            line.contains("-alpha-measure ") || line.starts_with("text-v3-"),
+            "new hash line is not an alpha-measure or text-v3 case: {line}"
         );
     }
     let v1 = std::fs::read_to_string(render_v1_path()).unwrap();
@@ -8967,6 +8986,21 @@ fn text_q14(
 
 /// A v3 document with the parity fonts and the bake of `text` at `size`.
 fn bake_parity_text(text: &str, size: f32, color: [f32; 4]) -> Vec<u8> {
+    bake_parity_content(
+        alto_text::TextContent {
+            text: text.into(),
+            style: alto_text::TextStyle {
+                size,
+                color,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        2,
+    )
+}
+
+fn bake_parity_content(mut content: alto_text::TextContent, font_count: usize) -> Vec<u8> {
     use alto_doc::Op;
     let mut e = alto_engine::Engine::new();
     let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
@@ -8987,18 +9021,84 @@ fn bake_parity_text(text: &str, size: f32, color: [f32; 4]) -> Vec<u8> {
         });
     }
     e.transact(d, "fonts", ops, 0).unwrap();
-    let content = alto_text::TextContent {
+    content.style.fonts = fonts[..font_count].to_vec();
+    e.bake_text(&e.document(d).unwrap().assets, &content)
+        .encode()
+}
+
+/// The same ten level-0 scenes as the browser's enforced text-v3 cases.
+type TextHashCase = (String, Vec<u8>, [f64; 6], (i32, i32));
+fn text_v3_hash_cases() -> Vec<TextHashCase> {
+    let content = |text: &str, size: f32, color: [f32; 4]| alto_text::TextContent {
         text: text.into(),
         style: alto_text::TextStyle {
-            fonts,
             size,
             color,
             ..Default::default()
         },
         ..Default::default()
     };
-    e.bake_text(&e.document(d).unwrap().assets, &content)
-        .encode()
+    let mut vertical = content("吾輩は猫である。\n第12回", 40.0, [0.0, 0.0, 0.0, 1.0]);
+    vertical.writing_mode = alto_text::WritingMode::VerticalRl;
+    vertical.frame = alto_text::TextFrame::Area {
+        width: 300.0,
+        height: 400.0,
+    };
+    let seam = bake_parity_content(content("Seam 継ぎ目\nWWW", 48.0, [0.4, 0.1, 0.6, 0.9]), 2);
+    let mut cases = vec![
+        (
+            "text-v3-latin-atlas".into(),
+            bake_parity_content(content("Alto 0.25 px/em", 13.5, [0.1, 0.2, 0.9, 1.0]), 1),
+            [1.0, 0.0, 0.0, 1.0, 20.25, 60.625],
+            (0, 0),
+        ),
+        (
+            "text-v3-latin-direct".into(),
+            bake_parity_content(content("Ag&", 61.0, [0.9, 0.1, 0.1, 0.5]), 1),
+            [1.0, 0.0, 0.0, 1.0, 12.5, 20.375],
+            (0, 0),
+        ),
+        (
+            "text-v3-japanese".into(),
+            bake_parity_content(content("吾輩は猫", 30.0, [0.0, 0.0, 0.0, 0.75]), 2),
+            [1.0, 0.0, 0.0, 1.0, 10.0, 40.5],
+            (0, 0),
+        ),
+        (
+            "text-v3-vertical".into(),
+            bake_parity_content(vertical, 2),
+            [1.0, 0.0, 0.0, 1.0, -40.25, 8.0],
+            (0, 0),
+        ),
+        (
+            "text-v3-rotated".into(),
+            bake_parity_content(content("Rotated 21", 26.0, [0.2, 0.6, 0.3, 1.0]), 1),
+            [
+                0.3f64.cos(),
+                0.3f64.sin(),
+                -0.3f64.sin(),
+                0.3f64.cos(),
+                40.0,
+                30.0,
+            ],
+            (0, 0),
+        ),
+        (
+            "text-v3-placeholder".into(),
+            bake_parity_content(content("A B", 24.0, [0.0, 0.0, 0.0, 1.0]), 0),
+            [1.0, 0.0, 0.0, 1.0, 30.0, 50.0],
+            (0, 0),
+        ),
+    ];
+    for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        cases.push((
+            format!("text-v3-seam-{}-{}", tx, ty),
+            seam.clone(),
+            [1.0, 0.0, 0.0, 1.0, 180.5, 200.25],
+            (tx, ty),
+        ));
+    }
+    cases
 }
 
 /// The parity texts' bakes: small (atlas band) and large (direct band) Latin,
@@ -9330,6 +9430,25 @@ fn v3_text_matches_the_integer_reference() {
             return;
         };
         assert!(gpu.iter().all(|&b| b == 0));
+    }
+}
+
+#[test]
+fn v3_text_matches_the_locked_hashes() {
+    let locked: std::collections::HashMap<_, _> =
+        parse_reference(&std::fs::read_to_string(reference_path()).unwrap())
+            .into_iter()
+            .map(|(name, blake3, fnv)| (name, (blake3, fnv)))
+            .collect();
+    for (name, bake, transform, (tx, ty)) in text_v3_hash_cases() {
+        let mut document = text_scene(Some(bake), 0.0, 0.0, [512, 512]);
+        document.nodes[0].transform = transform;
+        let Some(gpu) = v3_vector_test_render_at(&document, (0, tx, ty)) else {
+            return;
+        };
+        let (blake3, fnv) = &locked[&name];
+        assert_eq!(ContentHash::of(&gpu).hex(), *blake3, "{name}");
+        assert_eq!(format!("{:016x}", fnv64(&gpu)), *fnv, "{name}");
     }
 }
 

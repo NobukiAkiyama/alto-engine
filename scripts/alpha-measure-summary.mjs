@@ -69,6 +69,15 @@ if (integerRows.length) {
 }
 
 const atlas = report.atlasRead;
+if (report.textMeasure?.length) {
+  markdown += `### v2 text against the v3 reference (${backendLabel})\n\n`;
+  markdown += "Measured-not-enforced: old text rendering is compared with the fixed v3 text reference.\n\n";
+  markdown += "| case | mismatched pixels | max abs r,g,b,a | first mismatches |\n| --- | ---: | --- | --- |\n";
+  for (const row of report.textMeasure) {
+    markdown += `| ${row.name} | ${row.count} | ${(row.maxAbs || []).join(",")} | ${cell(row)} |\n`;
+  }
+  markdown += "\n";
+}
 if (atlas) {
   markdown += `### Atlas read (\`Rgba8Unorm\` + \`textureLoad\` + \`unorm_byte\`, ${backendLabel})\n\n`;
   markdown += "Enforced: a mismatch or error fails the parity run. All 256 byte values on all 4 channels.\n\n";
