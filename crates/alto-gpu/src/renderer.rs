@@ -374,6 +374,10 @@ pub struct Renderer {
     present_in_flight: Arc<AtomicBool>,
     /// A frame was held back by `present_in_flight` and is still owed.
     present_deferred: bool,
+    /// Pipelines were created since the host last asked. A software adapter compiles
+    /// them on the GPU process before later queue work, so the next present can stay
+    /// in flight for seconds without the device being lost.
+    pipelines_built: bool,
     prefetch_stats: PrefetchStatus,
     prefetch_job: Option<TileJob>,
     visible_job: Option<TileJob>,
@@ -1623,6 +1627,7 @@ impl Renderer {
             last_pending: 0,
             present_in_flight: Arc::new(AtomicBool::new(false)),
             present_deferred: false,
+            pipelines_built: true,
             prefetch_stats: PrefetchStatus::default(),
             prefetch_job: None,
             visible_job: None,
@@ -1818,6 +1823,11 @@ impl Renderer {
             .map(|d| d.clone())
             .unwrap_or_default()
     }
+    /// True once after pipelines were created: at device creation, on the switch
+    /// to the v3 integer cache, and when M5 or vector resources are first built.
+    pub fn take_pipelines_built(&mut self) -> bool {
+        std::mem::take(&mut self.pipelines_built)
+    }
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
     }
@@ -1889,6 +1899,26 @@ impl Renderer {
             .textures
             .push((old_scratch, MemoryClass::Fixed));
         self.integer_cache = integer;
+        if integer {
+            // Build the v3 pipelines together, so their compilation is one wait.
+            self.composite_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer tile compositor",
+                    &crate::integer_composite_shader(),
+                )
+            });
+            self.downsample_q14.get_or_init(|| {
+                compute(
+                    &self.device,
+                    "integer display pyramid",
+                    include_str!("../shaders/downsample-q14.wgsl"),
+                )
+            });
+            self.present_q14
+                .get_or_init(|| integer_present(&self.device, self.config.format));
+            self.pipelines_built = true;
+        }
         Ok(())
     }
     /// Diagnostic reset: keep the document, discard all GPU-derived tiles.
