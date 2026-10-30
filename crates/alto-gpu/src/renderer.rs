@@ -1840,7 +1840,8 @@ impl Renderer {
             .unwrap_or_default()
     }
     /// True once after pipelines were created: at device creation, on the switch
-    /// to the v3 integer cache, and when M5 or vector resources are first built.
+    /// to the v3 integer cache, when M5 or vector resources are first built, and
+    /// when the dense vector pipelines are built.
     pub fn take_pipelines_built(&mut self) -> bool {
         std::mem::take(&mut self.pipelines_built)
     }

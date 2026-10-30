@@ -140,6 +140,9 @@ fn dense_candidate(paths: usize, groups: usize) -> bool {
 pub struct VectorResources {
     format: wgpu::TextureFormat,
     dense: Option<dense::Dense>,
+    /// The dense pipelines were built (first use, or again after a budget retire)
+    /// since the renderer last asked.
+    pipelines_built: bool,
     geometry: wgpu::RenderPipeline,
     pooled_geometry: wgpu::RenderPipeline,
     pooled_paint: wgpu::RenderPipeline,
@@ -363,6 +366,7 @@ impl VectorResources {
         Self {
             format,
             dense: None,
+            pipelines_built: false,
             geometry: g,
             pooled_geometry,
             pooled_paint,
@@ -382,6 +386,10 @@ impl VectorResources {
             retired: super::Retired::default(),
             misses: 0,
         }
+    }
+    /// True once after the dense pipelines were built.
+    pub fn take_pipelines_built(&mut self) -> bool {
+        std::mem::take(&mut self.pipelines_built)
     }
     pub fn supports_dense(device: &wgpu::Device) -> bool {
         dense::Dense::supported(device)
@@ -1163,6 +1171,7 @@ impl VectorResources {
             || (self.mode == VectorMode::Batched
                 && dense_candidate(paths.len(), plan.groups.len()));
         if use_dense && !draws.is_empty() && dense::Dense::supported(device) {
+            self.pipelines_built |= self.dense.is_none();
             let dense = self
                 .dense
                 .get_or_insert_with(|| dense::Dense::new(device, self.format));
