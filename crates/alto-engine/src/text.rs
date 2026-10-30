@@ -464,6 +464,20 @@ impl Engine {
         set
     }
 
+    /// A text node's bake and its bytes (`None` when it has none or the blob is
+    /// missing). For tests and references: a v3 render reads only these bytes.
+    pub fn text_bake(
+        &self,
+        h: DocHandle,
+        id: NodeId,
+    ) -> Result<Option<(ContentHash, Vec<u8>)>, EngineError> {
+        let doc = self.document(h)?;
+        let NodeKind::Text { bake, .. } = &doc.node(id)?.kind else {
+            return Err(DocError::Invalid("text layer required".into()).into());
+        };
+        Ok(bake.and_then(|hash| Some((hash, self.blobs.get(&hash)?.clone()))))
+    }
+
     /// A stored bake's bytes for a render scene, or `None` when the blob is
     /// missing (the node then draws as unbaked).
     pub(crate) fn bake_bytes(&self, hash: ContentHash) -> Option<Arc<Vec<u8>>> {

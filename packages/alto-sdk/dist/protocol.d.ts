@@ -256,6 +256,13 @@ export interface Requests {
         enabled: boolean;
     }, boolean>;
     validateFrame: Q<None, true>;
+    /** A text node's render version 3 bake: blake3 and the ALTB bytes in hex, or nulls. */
+    textBake: Q<{
+        node: string;
+    }, {
+        hash: string | null;
+        hex: string | null;
+    }>;
     cpuReference: Q<{
         config: BrushConfig;
         color: number[];

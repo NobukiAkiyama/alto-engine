@@ -730,6 +730,8 @@ async function execute(m) {
             return JSON.parse(runtime.nodeTiles(m.node));
         case "textInfo":
             return JSON.parse(runtime.textInfo(m.node));
+        case "textBake":
+            return JSON.parse(runtime.textBakeForTesting(m.node));
         case "textHitTest":
             return runtime.textHitTest(m.node, m.x, m.y);
         case "textCaret":
