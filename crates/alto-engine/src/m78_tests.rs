@@ -112,6 +112,7 @@ fn text_layers_render_select_save_and_recover() {
     let ops = vec![Op::SetText {
         id,
         content: Box::new(edited),
+        bake: None,
     }];
     e.transact(d, "テキスト編集", ops.clone(), rev).unwrap();
     assert_eq!(e.text_info(d, id).unwrap().fonts_used, vec![jp, latin]);

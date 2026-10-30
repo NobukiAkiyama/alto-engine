@@ -4,6 +4,7 @@ use std::{fmt, str::FromStr};
 mod fixed_affine;
 pub use fixed_affine::{FixedAffine, q_from_f64_bits};
 pub mod blur;
+pub mod text_bake;
 
 pub const TILE: u32 = 256;
 /// Isolated groups the compositor can have open at once. The composite shader

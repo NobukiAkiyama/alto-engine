@@ -330,11 +330,13 @@ impl Runtime {
         if self.sampler.is_some() {
             return Err(error("CONFLICT: finish active tool first"));
         }
-        let r: Request = serde_json::from_str(request).map_err(error)?;
+        let mut r: Request = serde_json::from_str(request).map_err(error)?;
         let intent = alto_doc::Intent {
             id: r.intent,
             label: r.label,
         };
+        // The journal records the ops with their render version 3 text bakes.
+        r.ops = self.engine.bake_text_ops(self.doc, r.ops).map_err(error)?;
         let edited = self
             .engine
             .transact(self.doc, intent.clone(), r.ops.clone(), r.base_revision)
@@ -1255,6 +1257,8 @@ impl Runtime {
         ))
     }
     fn command(&mut self, intent: &str, ops: Vec<Op>) -> Result<String, JsValue> {
+        // The journal records the ops with their render version 3 text bakes.
+        let ops = self.engine.bake_text_ops(self.doc, ops).map_err(error)?;
         let revision = self.engine.document(self.doc).map_err(error)?.revision;
         let edited = self
             .engine

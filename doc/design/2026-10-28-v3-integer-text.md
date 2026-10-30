@@ -2,7 +2,7 @@
 
 作成日：2026-10-28（Asia/Tokyo）
 
-状態：設計のみ。この文書は実装しない。テキストの v3 は、[v3 整数合成](2026-10-28-v3-integer-compositing.md)（PR [#24](https://github.com/NobukiAkiyama/alto-engine/pull/24)、main の `5ce300e`）と [v3 整数マスク](2026-10-28-v3-integer-mask.md)（PR [#26](https://github.com/NobukiAkiyama/alto-engine/pull/26)、main の `7309b61`）と同じ不安定オプトインの向こうに置く。描画バージョン 1 と 2 のテキストの式（f32 のアトラス、4x MSAA、ハードウェアのブレンド）は凍結したままである。
+状態：実装順の 0（焼き込み）を実装した。v3 の文書のテキストノードと `SetText` は `bake` を持ち、`alto_core::text_bake` が `ALTB` の形式（書き出しと、上限を全部検査する読み込み）を、エンジンの `bake_text` が焼き方を持つ。焼くのはローカルの `transact`（新しいテキストノード、`SetText`、フォントの `SetAsset` の置き換え、`render.upgrade`）だけで、受け取った操作の焼き込みはそのまま使う。wasm は焼いた操作をジャーナルに書く。`tests/parity/text-bake.txt` は native の値で、wasm での一致は実装順の 5 で見る。描画はまだ焼き込みを読まない。テキストの v3 は、[v3 整数合成](2026-10-28-v3-integer-compositing.md)（PR [#24](https://github.com/NobukiAkiyama/alto-engine/pull/24)、main の `5ce300e`）と [v3 整数マスク](2026-10-28-v3-integer-mask.md)（PR [#26](https://github.com/NobukiAkiyama/alto-engine/pull/26)、main の `7309b61`）と同じ不安定オプトインの向こうに置く。描画バージョン 1 と 2 のテキストの式（f32 のアトラス、4x MSAA、ハードウェアのブレンド）は凍結したままである。
 
 関連：[v3 整数合成](2026-10-28-v3-integer-compositing.md)、[v3 整数マスク](2026-10-28-v3-integer-mask.md)、[正確な CPU 参照](2026-10-27-exact-cpu-references.md)、[画像編集](IMAGE-EDITING.md)、[半透明合成の計測](../verification/semi-transparent-composite-parity.md)。
 

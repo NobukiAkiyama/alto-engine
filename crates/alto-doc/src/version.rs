@@ -349,7 +349,7 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
                 commands: [cmds(x), cmds(y)],
             }
         }
-        (NodeKind::Text { content: x }, NodeKind::Text { content: y }) if x != y => {
+        (NodeKind::Text { content: x, .. }, NodeKind::Text { content: y, .. }) if x != y => {
             ContentDetail::Text {
                 text: (x.text != y.text).then(|| [excerpt(&x.text), excerpt(&y.text)]),
                 style: x.style != y.style || x.spans != y.spans,
@@ -757,10 +757,11 @@ mod tests {
             vec![Op::SetText {
                 id,
                 content: Box::new(edited),
+                bake: None,
             }],
         );
         e.undo().unwrap();
-        let NodeKind::Text { content: now } = &e.doc.node(id).unwrap().kind else {
+        let NodeKind::Text { content: now, .. } = &e.doc.node(id).unwrap().kind else {
             panic!()
         };
         assert_eq!(**now, content);
@@ -772,7 +773,8 @@ mod tests {
                 "bad",
                 vec![Op::SetText {
                     id,
-                    content: Box::new(bad)
+                    content: Box::new(bad),
+                    bake: None,
                 }],
                 rev
             )
@@ -952,6 +954,7 @@ mod tests {
                         writing_mode: alto_text::WritingMode::VerticalRl,
                         ..Default::default()
                     }),
+                    bake: None,
                 },
             ],
         );
@@ -1003,7 +1006,7 @@ mod tests {
         let mid = {
             let mut m = before.clone();
             let n = m.nodes.get_mut(&it).unwrap();
-            if let NodeKind::Text { content } = &mut n.kind {
+            if let NodeKind::Text { content, .. } = &mut n.kind {
                 content.text = "吾輩は犬である".into();
                 content.writing_mode = alto_text::WritingMode::VerticalRl;
             }

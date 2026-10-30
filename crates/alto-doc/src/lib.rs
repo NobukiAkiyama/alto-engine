@@ -539,6 +539,11 @@ pub enum NodeKind {
     },
     Text {
         content: Box<TextContent>,
+        /// Render version 3: the content's glyphs baked to integers (an `ALTB` blob,
+        /// doc/design/2026-10-28-v3-integer-text.md "焼き込み"), which is all a v3
+        /// render reads. Always `None` below version 3 and then not serialized, so
+        /// v1 / v2 JSON and content hashes are unchanged.
+        bake: Option<ContentHash>,
     },
     Adjustment {
         adjustment: Effect,
@@ -557,7 +562,14 @@ impl Serialize for NodeKind {
             } => serde_json::json!({"kind":"group","children":children,"isolation":isolation}),
             Self::Raster { tiles } => serde_json::json!({"kind":"raster","tiles":tiles}),
             Self::Vector { paths } => serde_json::json!({"kind":"vector","paths":paths}),
-            Self::Text { content } => serde_json::json!({"kind":"text","content":content}),
+            Self::Text {
+                content,
+                bake: None,
+            } => serde_json::json!({"kind":"text","content":content}),
+            Self::Text {
+                content,
+                bake: Some(bake),
+            } => serde_json::json!({"kind":"text","content":content,"bake":bake}),
             Self::Adjustment { adjustment } => {
                 serde_json::json!({"kind":"adjustment","adjustment":adjustment})
             }
@@ -585,7 +597,13 @@ impl<'de> Deserialize<'de> for NodeKind {
             }),
             Some("raster") => field(&v, "tiles").map(|tiles| Self::Raster { tiles }),
             Some("vector") => field(&v, "paths").map(|paths| Self::Vector { paths }),
-            Some("text") => field(&v, "content").map(|content| Self::Text { content }),
+            Some("text") => field(&v, "content").and_then(|content| {
+                let bake = match v.get("bake") {
+                    None => None,
+                    Some(_) => Some(field(&v, "bake")?),
+                };
+                Ok(Self::Text { content, bake })
+            }),
             Some("adjustment") => {
                 field(&v, "adjustment").map(|adjustment| Self::Adjustment { adjustment })
             }
@@ -637,6 +655,7 @@ impl Node {
         let mut node = Self::raster(name);
         node.kind = NodeKind::Text {
             content: Box::new(content),
+            bake: None,
         };
         node
     }
@@ -802,6 +821,9 @@ pub enum Op {
     SetText {
         id: NodeId,
         content: Box<TextContent>,
+        /// The content's bake, set in the same op (render version 3 only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bake: Option<ContentHash>,
     },
     SetSelection {
         selection: Option<TileMap>,
@@ -1322,17 +1344,22 @@ impl Document {
                     paths: std::mem::replace(old, paths),
                 }
             }
-            Op::SetText { id, content } => {
+            Op::SetText { id, content, bake } => {
                 content
                     .validate()
                     .map_err(|e| DocError::Invalid(e.to_string()))?;
-                let NodeKind::Text { content: old } = &mut self.node_mut(id)?.kind else {
+                let NodeKind::Text {
+                    content: old,
+                    bake: old_bake,
+                } = &mut self.node_mut(id)?.kind
+                else {
                     return Err(DocError::Invalid("Target must be text".into()));
                 };
                 change.nodes.insert(id);
                 Op::SetText {
                     id,
                     content: std::mem::replace(old, content),
+                    bake: std::mem::replace(old_bake, bake),
                 }
             }
             Op::SetSelection { selection } => {
@@ -1511,7 +1538,12 @@ impl Document {
             if let NodeKind::Adjustment { adjustment } = &node.kind {
                 validate_effect(adjustment)?;
             }
-            if let NodeKind::Text { content } = &node.kind {
+            if let NodeKind::Text { content, bake } = &node.kind {
+                if bake.is_some() && doc.meta.render_version < alto_core::RENDER_VERSION_EXACT {
+                    return Err(DocError::Invalid(
+                        "A text bake needs render version 3".into(),
+                    ));
+                }
                 content
                     .validate()
                     .map_err(|e| DocError::Invalid(e.to_string()))?;

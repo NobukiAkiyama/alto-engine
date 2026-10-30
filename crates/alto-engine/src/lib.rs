@@ -185,9 +185,11 @@ impl Engine {
         &mut self,
         handle: DocHandle,
         intent: impl Into<alto_doc::Intent>,
-        ops: Vec<Op>,
+        mut ops: Vec<Op>,
         base_revision: u64,
     ) -> Result<ChangeSet, EngineError> {
+        // Render version 3 text is drawn from its bake only; local edits bake here.
+        ops = self.bake_text_ops(handle, ops)?;
         let mut referenced = std::collections::BTreeSet::new();
         for op in &ops {
             op_hashes(op, &mut referenced);
@@ -216,6 +218,24 @@ impl Engine {
         self.maintain();
         self.unpin_referenced();
         Ok(changes)
+    }
+    /// `ops` with every render version 3 text op baked and the bake blobs stored
+    /// (`bake_ops`). `transact` calls this itself; a caller that journals the ops
+    /// calls it first, so the journal carries the bakes the transaction applies.
+    pub fn bake_text_ops(
+        &mut self,
+        handle: DocHandle,
+        mut ops: Vec<Op>,
+    ) -> Result<Vec<Op>, EngineError> {
+        let doc = &self
+            .documents
+            .get(&handle)
+            .ok_or(EngineError::NotFound(handle))?
+            .doc;
+        for bytes in self.bake_ops(doc, &mut ops) {
+            self.put_blob(bytes);
+        }
+        Ok(ops)
     }
     pub fn undo(&mut self, handle: DocHandle) -> Result<Option<ChangeSet>, EngineError> {
         let c = self
@@ -326,7 +346,7 @@ impl Engine {
                 }
                 // Text renders per size run: large glyphs through the vector path (glyph
                 // outlines -> lyon -> 4x MSAA), small ones through the glyph atlas.
-                NodeKind::Text { content } => {
+                NodeKind::Text { content, .. } => {
                     RContent::Text(engine.text_entry(doc, content).runs.clone())
                 }
                 NodeKind::Unsupported { .. } => RContent::Unsupported,
@@ -629,7 +649,8 @@ impl Engine {
             hashes.extend(selection.tiles.values().copied());
         }
         for h in hashes {
-            if !self.tiles.contains(&h) {
+            // Text bakes are blobs, not tiles.
+            if !self.tiles.contains(&h) && !self.blobs.contains_key(&h) {
                 warnings.push(Warning::new("MISSING_TILE").with("hash", h));
             }
         }
@@ -764,6 +785,12 @@ pub(crate) fn node_hashes(n: &alto_doc::Node, h: &mut std::collections::BTreeSet
     if let NodeKind::Adjustment { adjustment } = &n.kind {
         m5::effect_hashes(adjustment, h);
     }
+    if let NodeKind::Text {
+        bake: Some(bake), ..
+    } = &n.kind
+    {
+        h.insert(*bake);
+    }
     if let Some(mask) = &n.props.mask {
         h.extend(mask.tiles.values().copied());
     }
@@ -793,6 +820,11 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
             }
         }
         Op::SetAdjustment { adjustment, .. } => m5::effect_hashes(adjustment, h),
+        Op::SetText {
+            bake: Some(bake), ..
+        } => {
+            h.insert(*bake);
+        }
         Op::ReplaceNode { node, .. } => node_hashes(node, h),
         _ => {}
     }
@@ -1639,3 +1671,6 @@ mod m6_tests;
 
 #[cfg(test)]
 mod m78_tests;
+
+#[cfg(test)]
+mod text_bake_tests;

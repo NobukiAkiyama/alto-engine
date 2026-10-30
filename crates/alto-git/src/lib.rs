@@ -399,7 +399,7 @@ pub fn textconv(snapshot: &[u8]) -> Result<String> {
                     *s += &format!("{pad}  path {i}: {}\n", p.data.to_svg());
                 }
             }
-            NodeKind::Text { content } => {
+            NodeKind::Text { content, .. } => {
                 *s += &format!(
                     "{pad}  {:?} size={} fonts={}\n",
                     content.writing_mode,

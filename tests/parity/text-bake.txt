@@ -1,0 +1,4 @@
+# blake3 of the render version 3 text bakes of the parity texts (BAKER_VERSION 1). Regenerate with ALTO_WRITE_PARITY=1.
+text-v3-latin 29d446db2ff59621e6f770a9ddb14ee33b37d3558a676196eec0c318d48ca88d
+text-v3-vertical b927579196ae56b8b28a844519a9d59c05a48cccdd6c672198f86c088c445ed4
+text-v3-placeholder 4af6bce59a0e6c7a6da8616f5b77b535d4f404c0fd83f1a1395ad837bcc0dede

@@ -10,5 +10,5 @@ pub use layout::{ClusterBox, GlyphRef, LineBox, PlacedGlyph, TextLayout, layout}
 pub use model::*;
 pub mod outline;
 pub mod select;
-pub use outline::{OutlineCache, glyph_paths, glyph_runs};
+pub use outline::{OutlineCache, RawCommand, glyph_paths, glyph_runs, raw_outline};
 pub use select::{Caret, Motion, caret, hit_test, navigate, selection_rects};
