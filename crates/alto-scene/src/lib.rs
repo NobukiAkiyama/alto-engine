@@ -50,8 +50,24 @@ pub enum RContent {
     Mesh(std::sync::Arc<Vec<alto_vector::StyledPath>>),
     /// Text as size runs: vector paths for large em sizes, the glyph atlas for small ones.
     Text(std::sync::Arc<Vec<alto_vector::TextRun>>),
+    /// Render version 3 text: the node's bake, the only input of its render
+    /// (doc/design/2026-10-28-v3-integer-text.md). `None` is an unbaked node,
+    /// drawn transparent (`TEXT_UNBAKED`).
+    TextBake(Option<RTextBake>),
     Adjustment(REffect),
     Unsupported,
+}
+
+/// A text bake's `ALTB` bytes and their hash. Equal when the hashes are.
+#[derive(Clone, Debug)]
+pub struct RTextBake {
+    pub hash: ContentHash,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+impl PartialEq for RTextBake {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -226,7 +242,7 @@ impl RenderScene {
                 }
                 current
             }
-            RContent::Tiles(_) | RContent::Mesh(_) | RContent::Text(_) => {
+            RContent::Tiles(_) | RContent::Mesh(_) | RContent::Text(_) | RContent::TextBake(_) => {
                 plan.passes.push(Pass::Draw {
                     node: index,
                     region,

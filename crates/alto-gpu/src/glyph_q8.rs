@@ -261,6 +261,80 @@ pub fn rasterize_direct(
     rasterize_glyph(&commands, window)
 }
 
+/// One glyph's coverage cropped to a ROI, for the v3 text paint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlyphCrop {
+    /// Top-left in ROI pixels.
+    pub dst: [u32; 2],
+    pub w: u32,
+    pub h: u32,
+    /// `w * h` coverage bytes, row major.
+    pub bytes: Vec<u8>,
+    /// Straight Q14 RGBA.
+    pub color: [u16; 4],
+}
+
+/// The coverage of every glyph of a bake that reaches the level-pixel `roi`
+/// `[ox, oy, w, h]`, in drawing order, each cropped to the ROI (memo
+/// "アトラスとスクラッチ" 切り抜き). A bake that does not decode, a glyph whose
+/// `C` is out of range, and a glyph refused by the rasterizer draw nothing.
+/// Crops with no coverage are left out (painting them changes nothing).
+pub fn glyph_bitmaps(bake: &[u8], world: FixedAffine, level: i32, roi: [i64; 4]) -> Vec<GlyphCrop> {
+    let Ok(bake) = alto_core::text_bake::TextBake::decode(bake) else {
+        return vec![];
+    };
+    let [ox, oy, w, h] = roi;
+    let mut out = vec![];
+    for g in &bake.glyphs {
+        let outline = &bake.outlines[g.outline as usize];
+        let Some(c) = glyph_map_q(world, level, g.m, g.t) else {
+            continue;
+        };
+        // The bitmap and its level-pixel box.
+        let (bytes, [bx, by, bw, bh]) = if let Some(p) = atlas_band(&c, outline.upem)
+            .then(|| place_q(&c, outline))
+            .flatten()
+        {
+            let Ok(bytes) = rasterize_atlas(&p, outline) else {
+                continue;
+            };
+            let [dx, dy] = p.dst();
+            (bytes, [dx, dy, i64::from(p.w), i64::from(p.h)])
+        } else {
+            let Some(window) = direct_window(&c, outline, roi) else {
+                continue;
+            };
+            let Ok(bytes) = rasterize_direct(&c, outline, window) else {
+                continue;
+            };
+            (bytes, window)
+        };
+        let (left, top) = (bx.max(ox), by.max(oy));
+        let (right, bottom) = ((bx + bw).min(ox + w), (by + bh).min(oy + h));
+        if right <= left || bottom <= top {
+            continue;
+        }
+        let (cw, ch) = ((right - left) as usize, (bottom - top) as usize);
+        let mut crop = Vec::with_capacity(cw * ch);
+        for y in 0..ch {
+            let row = (top - by) as usize + y;
+            let start = row * bw as usize + (left - bx) as usize;
+            crop.extend_from_slice(&bytes[start..start + cw]);
+        }
+        if crop.iter().all(|&b| b == 0) {
+            continue;
+        }
+        out.push(GlyphCrop {
+            dst: [(left - ox) as u32, (top - oy) as u32],
+            w: cw as u32,
+            h: ch as u32,
+            bytes: crop,
+            color: g.color,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

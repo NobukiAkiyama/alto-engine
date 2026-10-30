@@ -346,6 +346,17 @@ impl Engine {
                 }
                 // Text renders per size run: large glyphs through the vector path (glyph
                 // outlines -> lyon -> 4x MSAA), small ones through the glyph atlas.
+                // Render version 3 draws text from its bake only.
+                NodeKind::Text { bake, .. }
+                    if doc.meta.render_version >= alto_core::RENDER_VERSION_EXACT =>
+                {
+                    RContent::TextBake(bake.and_then(|hash| {
+                        Some(alto_scene::RTextBake {
+                            hash,
+                            bytes: engine.bake_bytes(hash)?,
+                        })
+                    }))
+                }
                 NodeKind::Text { content, .. } => {
                     RContent::Text(engine.text_entry(doc, content).runs.clone())
                 }

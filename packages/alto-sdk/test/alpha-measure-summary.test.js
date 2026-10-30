@@ -67,6 +67,7 @@ test("v3 classification is closed: color-adjust, blur and filled vectors are int
     ["blur", { type: "raster", props: { effects: [{ type: "gaussian_blur", radius: 4 }] } }],
     ["vector", { type: "vector", paths: [{ data: { commands: [] }, fill: [1, 0, 0, 1], stroke: null }], props: {} }],
     ["vector-mask", { type: "raster", props: { vector_mask: { path: { commands: [] }, feather: 4, enabled: true } } }],
+    ["text", { type: "text", props: {} }],
     ["invisible-strokes", { type: "vector", paths: [
       { data: { commands: [] }, fill: [1, 0, 0, 1], stroke: { color: [0, 0, 0, 1], width: 0 } },
       { data: { commands: [] }, fill: [1, 0, 0, 1], stroke: { color: [0, 0, 0, 2 ** -16], width: 2 } }], props: {} }],
@@ -92,7 +93,6 @@ test("v3 classification is closed: color-adjust, blur and filled vectors are int
     ["vector-masked-adjust", { type: "adjustment", adjustment: { type: "color_adjust", brightness: 0, contrast: 1, saturation: 1 }, props: { vector_mask: { path: { commands: [] }, enabled: true } } }],
     ["clip-path-adjust", { type: "adjustment", adjustment: { type: "gaussian_blur", radius: 4 }, props: { clip_path: { path: { commands: [] }, enabled: true } } }],
     ["stroked-vector", { type: "vector", paths: [{ data: { commands: [] }, fill: null, stroke: { color: [0, 0, 0, 1], width: 2 } }], props: {} }],
-    ["text", { type: "text", props: {} }],
     ["clip", { type: "raster", props: { clip_to_below: true } }],
   ]) {
     const scene = { meta: { render_version: 3 }, nodes: new Map([[name, node]]) };

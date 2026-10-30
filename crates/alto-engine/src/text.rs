@@ -24,6 +24,8 @@ pub struct TextEntry {
 #[derive(Default)]
 pub struct TextCache {
     layouts: RefCell<HashMap<ContentHash, Arc<TextEntry>>>,
+    /// Render version 3 bakes shared with render scenes, by hash.
+    bakes: RefCell<HashMap<ContentHash, Arc<Vec<u8>>>>,
     fonts: RefCell<HashMap<(ContentHash, u32), Option<FontData>>>,
     outlines: OutlineCache,
 }
@@ -460,6 +462,21 @@ impl Engine {
             }
         }
         set
+    }
+
+    /// A stored bake's bytes for a render scene, or `None` when the blob is
+    /// missing (the node then draws as unbaked).
+    pub(crate) fn bake_bytes(&self, hash: ContentHash) -> Option<Arc<Vec<u8>>> {
+        if let Some(hit) = self.text.bakes.borrow().get(&hash) {
+            return Some(hit.clone());
+        }
+        let bytes = Arc::new(self.blobs.get(&hash)?.clone());
+        let mut cache = self.text.bakes.borrow_mut();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(hash, bytes.clone());
+        Some(bytes)
     }
 
     pub(crate) fn text_entry(&self, doc: &Document, content: &TextContent) -> Arc<TextEntry> {

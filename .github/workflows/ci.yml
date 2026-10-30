@@ -486,17 +486,17 @@ jobs:
             cat "$RUNNER_TEMP/alto-gpu-parity/atlas-read.md" >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$status"
-      # The v3 vector fill and blur renders through the headless Renderer, each
+      # The v3 vector fill, blur and text renders through the headless Renderer, each
       # compared byte for byte with its Rust integer reference. Required: a
       # missing adapter fails instead of skipping.
-      - name: v3 vector and blur parity on lavapipe
+      - name: v3 vector, blur and text parity on lavapipe
         env:
           ALTO_REQUIRE_GPU_PARITY: "1"
         run: |
           cargo test -p alto-gpu --locked --lib -- --test-threads=1 \
             cpu_composite::v3_vector_ cpu_composite::v3_blur_ cpu_composite::v3_raster_blur_ \
             cpu_composite::v3_backdrop_blur_ cpu_composite::v3_feathered_vector_mask_ \
-            cpu_composite::v3_adjustment_vector_mask_
+            cpu_composite::v3_adjustment_vector_mask_ cpu_composite::v3_text_
       - uses: actions/upload-artifact@v7
         if: always()
         with:

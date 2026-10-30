@@ -486,3 +486,24 @@ fn text_bake_on_any_move_onto_version_three_and_on_restore() {
     let hash = bake_of(&e, d, id).expect("restored text is baked");
     assert!(e.blobs.contains_key(&hash));
 }
+
+#[test]
+fn render_scenes_carry_the_bake_on_version_three_only() {
+    use alto_scene::RContent;
+    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
+    let hash = bake_of(&e, d, id).unwrap();
+    let scene = e.render_scene(d).unwrap();
+    let node = scene.nodes.iter().find(|n| n.key == id).unwrap();
+    let RContent::TextBake(Some(bake)) = &node.content else {
+        panic!("a v3 text node renders from its bake")
+    };
+    assert_eq!(bake.hash, hash);
+    assert_eq!(*bake.bytes, e.blobs[&hash]);
+    // Version 2 keeps the layout runs.
+    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
+    let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
+    let scene = e.render_scene(d).unwrap();
+    let node = scene.nodes.iter().find(|n| n.key == id).unwrap();
+    assert!(matches!(node.content, RContent::Text(_)));
+}
