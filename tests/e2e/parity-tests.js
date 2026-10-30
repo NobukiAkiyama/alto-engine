@@ -131,17 +131,20 @@ function square() {
 }
 
 
-// Enforced: all 256 bytes in an Rgba8Unorm texture, read with
+// Enforced: all 256 bytes in an Rgba8Unorm texture (every channel) or an
+// R8Unorm texture (the v3 glyph atlas and scratch, the r channel), read with
 // textureLoad + unorm_byte (the q14.wgsl text). Recorded, then asserted.
-async function measureAtlasRead() {
+async function measureAtlasRead(r8 = false) {
+  const format = r8 ? "R8Unorm" : "Rgba8Unorm";
+  const channels = r8 ? 1 : 4;
   try {
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter.requestDevice();
     const texel = (i) => [i, 255 - i, i ^ 0x55, (i + 128) & 255];
-    const data = new Uint8Array(1024);
-    for (let i = 0; i < 256; i++) data.set(texel(i), i * 4);
-    const texture = device.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    device.queue.writeTexture({ texture }, data, { bytesPerRow: 1024 }, [256, 1]);
+    const data = new Uint8Array(256 * channels);
+    for (let i = 0; i < 256; i++) data.set(texel(i).slice(0, channels), i * channels);
+    const texture = device.createTexture({ size: [256, 1], format: format.toLowerCase(), usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    device.queue.writeTexture({ texture }, data, { bytesPerRow: 256 * channels }, [256, 1]);
     const code = `@group(0) @binding(0) var atlas: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> out: array<u32, 1024>;
 fn unorm_byte(v: f32) -> u32 {
@@ -175,13 +178,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     const mismatches = [];
     for (let i = 0; i < 256; i++) {
       const want = texel(i);
-      for (let ch = 0; ch < 4; ch++) {
+      for (let ch = 0; ch < channels; ch++) {
         if (got[i * 4 + ch] !== want[ch]) mismatches.push({ texel: i, channel: ch, byte: want[ch], read: got[i * 4 + ch] });
       }
     }
-    return { label: "enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
+    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
   } catch (error) {
-    return { label: "enforced", format: "Rgba8Unorm", read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
+    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
   }
 }
 
@@ -232,11 +235,13 @@ export async function runParityTests(engine, log) {
       });
     }
     await test("atlas-read round-trips all 256 bytes", async () => {
-      atlasRead = await measureAtlasRead();
-      const gap = `${atlasRead.status} ${atlasRead.mismatchedChannels} channel mismatches${atlasRead.error ? ` ${atlasRead.error}` : ""}`;
-      log(`atlas-read (enforced): ${gap}`);
-      assert(atlasRead.status === "exact", `atlas-read ${gap}`);
-      return gap;
+      // The Rgba8Unorm read at the top level (as before), the R8Unorm read under r8Unorm.
+      atlasRead = { ...(await measureAtlasRead()), r8Unorm: await measureAtlasRead(true) };
+      const gap = (r) => `${r.format} ${r.status} ${r.mismatchedChannels} channel mismatches${r.error ? ` ${r.error}` : ""}`;
+      const detail = `${gap(atlasRead)}; ${gap(atlasRead.r8Unorm)}`;
+      log(`atlas-read (enforced): ${detail}`);
+      assert(atlasRead.status === "exact" && atlasRead.r8Unorm.status === "exact", `atlas-read ${detail}`);
+      return detail;
     });
     await test("alpha-measure layers are distinct", async () => {
       assertDistinctAlphaLayers();

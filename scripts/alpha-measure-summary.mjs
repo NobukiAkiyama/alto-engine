@@ -79,6 +79,16 @@ if (atlas) {
     markdown += `- texel ${m.texel} channel ${m.channel} byte ${m.byte} read ${m.read}\n`;
   }
   markdown += "\n";
+  const r8 = atlas.r8Unorm;
+  if (r8) {
+    markdown += `\`R8Unorm\` (the v3 glyph atlas and scratch, r channel): **${r8.status}**, mismatched channels: ${r8.mismatchedChannels}`;
+    if (r8.error) markdown += `, error: ${r8.error}`;
+    markdown += "\n\n";
+    for (const m of (r8.mismatches || []).slice(0, 16)) {
+      markdown += `- texel ${m.texel} byte ${m.byte} read ${m.read}\n`;
+    }
+    if (r8.mismatches?.length) markdown += "\n";
+  }
 }
 
 await mkdir(outDir, { recursive: true });

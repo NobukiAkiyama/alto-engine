@@ -26,6 +26,14 @@ pub const ATLAS_SIDE: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
+    /// Which rasterizer made the entry: 0 for v1 / v2 (`rasterize`, f64), 1 for
+    /// v3 (`glyph_q8`, integer). The atlas texture is shared, so the key keeps
+    /// the two apart (doc/design/2026-10-28-v3-integer-text.md "輪郭と鍵").
+    pub raster: u8,
+    /// v3: blake3 of the bake's outline record (`text_bake::outline_record`), so
+    /// equal shapes share an entry; zero for v1 / v2.
+    pub outline_hash: [u8; 32],
+    /// v1 / v2: the outline's `(font, glyph)` identity; zero for v3.
     pub outline: u64,
     /// Font units -> output pixels, in 1/STEPS pixels per em: [a, b, c, d].
     pub matrix: [i32; 4],
@@ -119,6 +127,8 @@ pub fn place(outline: &GlyphOutline, m: [f64; 6]) -> Option<Placement> {
     }
     Some(Placement {
         key: GlyphKey {
+            raster: 0,
+            outline_hash: [0; 32],
             outline: outline.key,
             matrix: q,
             phase,
@@ -442,6 +452,8 @@ mod tests {
 
     fn key(n: u64) -> GlyphKey {
         GlyphKey {
+            raster: 0,
+            outline_hash: [0; 32],
             outline: n,
             matrix: [48, 0, 0, -48],
             phase: [0, 0],
