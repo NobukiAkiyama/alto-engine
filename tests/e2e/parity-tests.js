@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, parityCases, renderBlurV3, renderCase, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, parityCases, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -806,6 +806,92 @@ export async function runParityTests(engine, log) {
           return formatMeasure(row);
         });
       }
+    }
+    // v3 text (doc/design/2026-10-28-v3-integer-text.md), integer-exact against
+    // `renderTextV3`, an independent JS reference that reads only the node's
+    // bake (fetched from wasm), and the bakes themselves against the native
+    // fixture tests/parity/text-bake.txt (the same text bakes the same bytes).
+    {
+      const fontBlob = async (name) => (await fetch(`../../tests/fonts/${name}`)).blob();
+      const hexBytes = (hex) => Uint8Array.from(hex.match(/../g) ?? [], (b) => parseInt(b, 16));
+      // `content(latin, jp)` from the document's font ids. The fonts are imported
+      // for each document: opening another one drops pending import pins.
+      const addText = async (doc, content, transform = [1, 0, 0, 1, 0, 0]) => {
+        const latinFont = await engine.assets.importFont(await fontBlob("AltoTestLatin.ttf"));
+        const jpFont = await engine.assets.importFont(await fontBlob("AltoTestJP.otf"));
+        let id;
+        await doc.transact("text", (tx) => {
+          const latin = tx.addFont(latinFont), jp = tx.addFont(jpFont);
+          id = tx.addText(content(latin, jp));
+          tx.setTransform(id, transform);
+        });
+        return id;
+      };
+      const open = async (name) => {
+        const fixture = await fetch(`../../tests/fixtures/${name}`);
+        assert(fixture.ok, `${name} status ${fixture.status}`);
+        const doc = await engine.open(new Blob([await fixture.arrayBuffer()]));
+        assert(doc.getSnapshot().meta.render_version === 3, `${name} is not v3`);
+        return doc;
+      };
+      const style = (fonts, size, color) => ({ fonts, size, ...(color ? { color } : {}) });
+      const textCases = [
+        { name: "text-v3-latin-atlas", at: [20.25, 60.625], content: (l) => ({ text: "Alto 0.25 px/em", style: style([l], 13.5, [0.1, 0.2, 0.9, 1]) }) },
+        { name: "text-v3-latin-direct", at: [12.5, 20.375], content: (l) => ({ text: "Ag&", style: style([l], 61, [0.9, 0.1, 0.1, 0.5]) }) },
+        { name: "text-v3-japanese", at: [10, 40.5], content: (l, j) => ({ text: "吾輩は猫", style: style([l, j], 30, [0, 0, 0, 0.75]) }) },
+        { name: "text-v3-vertical", at: [-40.25, 8], content: (l, j) => ({ text: "吾輩は猫である。\n第12回", style: style([l, j], 40), writing_mode: "vertical_rl", frame: { kind: "area", width: 300, height: 400 } }) },
+        { name: "text-v3-rotated", transform: [Math.cos(0.3), Math.sin(0.3), -Math.sin(0.3), Math.cos(0.3), 40, 30], content: (l) => ({ text: "Rotated 21", style: style([l], 26, [0.2, 0.6, 0.3, 1]) }) },
+        { name: "text-v3-placeholder", at: [30, 50], content: () => ({ text: "A B", style: style([], 24) }) },
+        ...[[0, 0], [1, 0], [0, 1], [1, 1]].map((tile) => ({
+          name: `text-v3-seam (${tile[0]}, ${tile[1]})`, fixture: "render-v3-empty-512x512.alto", canvas: [512, 512], tile,
+          at: [180.5, 200.25], content: (l, j) => ({ text: "Seam 継ぎ目\nWWW", style: style([l, j], 48, [0.4, 0.1, 0.6, 0.9]) }),
+        })),
+      ];
+      for (const testCase of textCases) {
+        await test(testCase.name, async () => {
+          const doc = await open(testCase.fixture ?? "render-v3-empty.alto");
+          const transform = testCase.transform ?? [1, 0, 0, 1, ...testCase.at];
+          const id = await addText(doc, testCase.content, transform);
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          const bake = await testing(engine).request("textBake", { node: id });
+          assert(bake.hash && bake.hex, `${testCase.name} has no bake`);
+          const [tx, ty] = testCase.tile ?? [0, 0];
+          const cpu = renderTextV3(hexBytes(bake.hex), transform, [tx, ty], testCase.canvas ?? [256, 256]);
+          const gpu = await gpuTile(engine, { level: 0, tx, ty });
+          const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
+          assert(same(cold, gpu), `${testCase.name} cold differs: ${diff(gpu, cold)}`);
+          const row = { ...measureRow({ name: testCase.name, nodes: [], level: 0, tx, ty }, cpu, gpu), renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch" };
+          compositeV3.push(row);
+          log(`${testCase.name} (enforced): ${formatMeasure(row)}`);
+          assert(same(cpu, gpu), formatMeasure(row));
+          assert(gpu.some((v, i) => i % 4 === 3 && v > 0), `${testCase.name} drew nothing`);
+          return formatMeasure(row);
+        });
+      }
+      // The browser (wasm) bakes the native fixture's texts to the same bytes.
+      await test("text-v3-bake matches the native fixture", async () => {
+        const fixture = await (await fetch("../../tests/parity/text-bake.txt")).text();
+        const want = new Map(fixture.split("\n").filter((line) => line && !line.startsWith("#")).map((line) => line.split(" ")));
+        const texts = {
+          "text-v3-latin": (l) => ({ text: "Alto 0.25 px/em", style: style([l], 37.5) }),
+          "text-v3-vertical": (l, j) => ({ text: "吾輩は猫である。\n第12回", style: style([l, j], 40), writing_mode: "vertical_rl", frame: { kind: "area", width: 300, height: 400 } }),
+          "text-v3-placeholder": () => ({ text: "A B", style: style([], 24) }),
+        };
+        assert(want.size === Object.keys(texts).length, `fixture has ${want.size} rows`);
+        const failures = [];
+        for (const [name, content] of Object.entries(texts)) {
+          const doc = await open("render-v3-empty.alto");
+          const id = await addText(doc, content);
+          const bake = await testing(engine).request("textBake", { node: id });
+          if (bake.hash !== want.get(name)) failures.push(`${name}: wasm ${bake.hash}, native ${want.get(name)}`);
+          // The bytes returned are a valid bake with glyphs (not only a hash).
+          const decoded = bake.hex && decodeTextBake(hexBytes(bake.hex));
+          if (!decoded?.glyphs.length) failures.push(`${name}: the returned bytes are not a bake with glyphs`);
+        }
+        assert(failures.length === 0, failures.join("; "));
+        return `${want.size} bakes equal the native fixture`;
+      });
     }
     // v3 pixel masks (doc/design/2026-10-28-v3-integer-mask.md), integer-exact:
     // layer masks (mode 21), selection-limited color-adjust (mode 22) and masked

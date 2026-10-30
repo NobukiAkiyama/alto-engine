@@ -1164,11 +1164,20 @@ function vectorQ8(commands, world) {
   });
 }
 
-/** Smallest n in 1..=4096 with 65536 n^4 >= K^2 D, or null (VECTOR_CURVE_RANGE). */
-function vectorDivisions(d, k) {
+/** Glyph curves cap at this many segments (v2's 1..=64). */
+const GLYPH_NMAX = 64n;
+/** A glyph's Q8 extent from its own pixel origin (Rust `GLYPH_EXTENT`). */
+const GLYPH_EXTENT = 1n << 24n;
+
+/**
+ * Smallest n in 1..=4096 with 65536 n^4 >= K^2 D, or null (VECTOR_CURVE_RANGE);
+ * for a glyph, the smallest in 1..=64, or 64 when none is enough.
+ */
+function vectorDivisions(d, k, glyph = false) {
   const need = k * k * d;
-  for (let n = 1n; n <= VECTOR_NMAX; n++) if (65536n * n ** 4n >= need) return n;
-  return null;
+  const limit = glyph ? GLYPH_NMAX : VECTOR_NMAX;
+  for (let n = 1n; n <= limit; n++) if (65536n * n ** 4n >= need) return n;
+  return glyph ? GLYPH_NMAX : null;
 }
 const secondDifference = (p, c, q) => {
   const x = p[0] - 2n * c[0] + q[0], y = p[1] - 2n * c[1] + q[1];
@@ -1176,7 +1185,7 @@ const secondDifference = (p, c, q) => {
 };
 
 /** Closed polygons (segments) of Q8 commands, or null when a curve is out of range. */
-function vectorSegments(commands) {
+function vectorSegments(commands, glyph = false) {
   const segments = [];
   let start = null, current = null;
   const edge = (a, b) => { if (a[0] !== b[0] || a[1] !== b[1]) segments.push([a, b]); };
@@ -1185,11 +1194,13 @@ function vectorSegments(commands) {
     if (op === "M") { close(); start = current = p[0]; continue; }
     if (op === "L") { if (current) edge(current, p[0]); else start = p[0]; current = p[0]; continue; }
     if (op === "Z") { close(); continue; }
+    // A curve with no current point is out of range, as in Rust (`Range`).
+    if (!current) return null;
     const a = current;
     const ctrl = op === "Q" ? [a, p[0], p[1]] : [a, p[0], p[1], p[2]];
     const d = op === "Q" ? secondDifference(a, p[0], p[1])
       : [secondDifference(a, p[0], p[1]), secondDifference(p[0], p[1], p[2])].reduce((x, y) => (x > y ? x : y));
-    const n = vectorDivisions(d, op === "Q" ? 10n : 30n);
+    const n = vectorDivisions(d, op === "Q" ? 10n : 30n, glyph);
     if (n === null) return null;
     const binomial = op === "Q" ? [1n, 2n, 1n] : [1n, 3n, 3n, 1n];
     const degree = BigInt(binomial.length - 1);
@@ -1208,29 +1219,34 @@ function vectorSegments(commands) {
 }
 
 /**
- * Coverage bytes of one path over the `[ox, oy, 256, 256]` window (level-0
- * pixels), or null when a curve is out of range (the path is skipped).
+ * Coverage bytes of one path over the `[ox, oy, w, h]` window (level pixels;
+ * `w` and `h` default to a tile), or null when a curve is out of range (the
+ * path is skipped). `glyph` selects the glyph rule (Rust `rasterize_glyph`):
+ * curves cap at 64 segments instead of being refused, and a glyph wider than
+ * 2^24 Q8 from its own pixel origin is refused (null) whatever the window.
  */
-function vectorCoverage(commands, rule, [ox, oy]) {
+function vectorCoverage(commands, rule, [ox, oy, w = 256, h = 256], glyph = false) {
+  const W = BigInt(w), H = BigInt(h);
   const points = commands.flatMap(([, ...p]) => p);
-  const bytes = new Uint8Array(65536);
+  const bytes = new Uint8Array(w * h);
   if (!points.length) return bytes;
   // Shift to non-negative Q8 (the origin A): the half-away rounding below is
   // not translation invariant across zero.
   const min = [0, 1].map((a) => points.reduce((m, p) => (p[a] < m ? p[a] : m), points[0][a]));
   const origin = min.map((v) => (v >= 0n ? v / 256n : -((-v + 255n) / 256n)));
   const shifted = commands.map(([op, ...p]) => [op, ...p.map((q) => [q[0] - origin[0] * 256n, q[1] - origin[1] * 256n])]);
-  const segments = vectorSegments(shifted);
+  if (glyph && shifted.some(([, ...p]) => p.some((q) => q[0] > GLYPH_EXTENT || q[1] > GLYPH_EXTENT))) return null;
+  const segments = vectorSegments(shifted, glyph);
   if (segments === null) return null;
   const lx = BigInt(ox) - origin[0], ly = BigInt(oy) - origin[1];
-  const XL = lx * 256n, XR = XL + 65536n, YT = ly * 256n, YB = YT + 65536n;
+  const XL = lx * 256n, XR = XL + 256n * W, YT = ly * 256n, YB = YT + 256n * H;
   const floorDiv = (v, d) => (v >= 0n ? v / d : -((-v + d - 1n) / d));
   const floor256 = (v) => floorDiv(v, 256n);
   const lerpY = (a, b, y) => vDiv(a[0] * (b[1] - a[1]) + (b[0] - a[0]) * (y - a[1]), b[1] - a[1]);
   const coverageByte = (e) => Number(((e > 131072n ? 131072n : e) * 255n + 65536n) >> 17n);
   if (rule === "even_odd") {
-    for (let row = 0n; row < 256n; row++) {
-      const tally = new Array(256).fill(0n);
+    for (let row = 0n; row < H; row++) {
+      const tally = new Array(w).fill(0n);
       for (let sub = 0n; sub < 16n; sub++) {
         const y = YT + row * 256n + sub * 16n + 8n;
         const xs = [];
@@ -1241,14 +1257,14 @@ function vectorCoverage(commands, rule, [ox, oy]) {
         xs.sort((u, v) => (u < v ? -1 : u > v ? 1 : 0));
         for (let k = 0; k + 1 < xs.length; k += 2) {
           const left = xs[k] > XL ? xs[k] : XL, right = xs[k + 1] < XR ? xs[k + 1] : XR;
-          for (let cx = 0n; cx < 256n; cx++) {
+          for (let cx = 0n; cx < W; cx++) {
             const c0 = XL + cx * 256n, c1 = c0 + 256n;
             const lo = left > c0 ? left : c0, hi = right < c1 ? right : c1;
             if (hi > lo) tally[cx] += hi - lo;
           }
         }
       }
-      for (let cx = 0; cx < 256; cx++) bytes[Number(row) * 256 + cx] = coverageByte(32n * tally[cx]);
+      for (let cx = 0; cx < w; cx++) bytes[Number(row) * w + cx] = coverageByte(32n * tally[cx]);
     }
     return bytes;
   }
@@ -1262,7 +1278,7 @@ function vectorCoverage(commands, rule, [ox, oy]) {
   for (const [p, q] of segments) {
     if (p[1] === q[1]) continue;
     const [a, b, dir] = p[1] < q[1] ? [p, q, 1n] : [q, p, -1n];
-    for (let row = floor256(a[1]) > ly ? floor256(a[1]) : ly; row <= floor256(b[1]) && row < ly + 256n; row++) {
+    for (let row = floor256(a[1]) > ly ? floor256(a[1]) : ly; row <= floor256(b[1]) && row < ly + H; row++) {
       let top = a[1] > row * 256n ? a[1] : row * 256n; if (top < YT) top = YT;
       let bottom = b[1] < row * 256n + 256n ? b[1] : row * 256n + 256n; if (bottom > YB) bottom = YB;
       if (bottom <= top) continue;
@@ -1273,7 +1289,7 @@ function vectorCoverage(commands, rule, [ox, oy]) {
       const lo = xa < xb ? xa : xb, hi = xa < xb ? xb : xa;
       const span = bottom - top, run = hi - lo;
       const cuts = [];
-      for (let col = floor256(lo) > lx ? floor256(lo) : lx; col <= floor256(hi) && col <= lx + 256n; col++) {
+      for (let col = floor256(lo) > lx ? floor256(lo) : lx; col <= floor256(hi) && col <= lx + W; col++) {
         const x = col * 256n;
         if (lo < x && x < hi) {
           const dist = x > xa ? x - xa : xa - x;
@@ -1289,20 +1305,20 @@ function vectorCoverage(commands, rule, [ox, oy]) {
         if (ux <= XL && vx <= XL) ux = vx = XL;
         const cx = floorDiv(ux + vx, 512n) - lx;
         const cy = floorDiv(va + vb, 512n) - ly;
-        if (cx < 0n || cy < 0n || cx >= 256n || cy >= 256n) continue;
+        if (cx < 0n || cy < 0n || cx >= W || cy >= H) continue;
         const c = cell(cx, cy);
         c.cover += dir * dy;
         c.area += dir * (ux + vx - 2n * (lx + cx) * 256n) * dy;
       }
     }
   }
-  for (let cy = 0n; cy < 256n; cy++) {
+  for (let cy = 0n; cy < H; cy++) {
     let sum = 0n;
-    for (let cx = 0n; cx < 256n; cx++) {
+    for (let cx = 0n; cx < W; cx++) {
       const c = cells.get(`${cx},${cy}`);
       if (c) sum += c.cover;
       const n = sum * 512n - (c ? c.area : 0n);
-      bytes[Number(cy * 256n + cx)] = coverageByte(n < 0n ? -n : n);
+      bytes[Number(cy * W + cx)] = coverageByte(n < 0n ? -n : n);
     }
   }
   return bytes;
@@ -1370,6 +1386,197 @@ export function renderVectorV3({ paths, image, transform = IDENT, vectorMask, cl
   for (let i = 0; i < 65536; i++) {
     const x = origin[0] + (i % 256), y = origin[1] + Math.floor(i / 256);
     if (x >= 0 && y >= 0 && x < canvas[0] && y < canvas[1]) out.set(resolveQ14(q[i]), i * 4);
+  }
+  return out;
+}
+
+// Render version 3 text (doc/design/2026-10-28-v3-integer-text.md), written
+// independently of `text_bake.rs`, `glyph_q8.rs` and the host: the ALTB bake is
+// the only input; the world is the v3 FixedAffine of the node transform.
+
+/** The ALTB bake (little endian) with every bound checked, or null (TEXT_BAKE_INVALID). */
+export function decodeTextBake(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let at = 0;
+  const need = (n) => { if (at + n > bytes.length) throw new Error("truncated"); };
+  const u16 = () => { need(2); const v = view.getUint16(at, true); at += 2; return v; };
+  const u32 = () => { need(4); const v = view.getUint32(at, true); at += 4; return v; };
+  const i32 = () => { need(4); const v = view.getInt32(at, true); at += 4; return BigInt(v); };
+  const i64 = () => { need(8); const v = view.getBigInt64(at, true); at += 8; return v; };
+  const MAX_COORD = 1n << 22n, MAX_T = 1n << 60n, ABS = (v) => (v < 0n ? -v : v);
+  try {
+    need(4);
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== "ALTB") return null;
+    at = 4;
+    if (u16() !== 1) return null;
+    u16(); // baker, diagnostic only
+    const fonts = [];
+    for (let n = u32(), i = 0; i < n; i++) { need(32); at += 32; fonts.push(u32()); }
+    const outlines = [];
+    for (let n = u32(), i = 0; i < n; i++) {
+      const font = u32();
+      if (font !== 0xffffffff && font >= fonts.length) return null;
+      u16(); // glyph id
+      const upem = u16();
+      if (upem < 1 || upem > 16384) return null;
+      const count = u32();
+      if (count > 4000) return null;
+      const commands = [];
+      const point = () => {
+        const p = [i32(), i32()];
+        if (ABS(p[0]) > MAX_COORD || ABS(p[1]) > MAX_COORD) throw new Error("coordinate");
+        return p;
+      };
+      for (let k = 0; k < count; k++) {
+        need(1);
+        const tag = bytes[at++];
+        if (tag === 0) commands.push(["M", point()]);
+        else if (tag === 1) commands.push(["L", point()]);
+        else if (tag === 2) commands.push(["Q", point(), point()]);
+        else if (tag === 3) commands.push(["C", point(), point(), point()]);
+        else if (tag === 4) commands.push(["Z"]);
+        else return null;
+      }
+      outlines.push({ upem: BigInt(upem), commands });
+    }
+    const glyphs = [];
+    for (let n = u32(), i = 0; i < n; i++) {
+      const outline = u32();
+      if (outline >= outlines.length) return null;
+      const m = [i32(), i32(), i32(), i32()];
+      const t = [i64(), i64()];
+      if (t.some((v) => ABS(v) > MAX_T)) return null;
+      const color = [u16(), u16(), u16(), u16()];
+      if (color.some((c) => c > 16384)) return null;
+      glyphs.push({ outline, m, t, color });
+    }
+    return at === bytes.length ? { outlines, glyphs } : null;
+  } catch {
+    return null;
+  }
+}
+
+const tAbs = (v) => (v < 0n ? -v : v);
+const tFloorDiv = (a, b) => (a >= 0n ? a / b : -((-a + b - 1n) / b));
+const tCeilDiv = (a, b) => -tFloorDiv(-a, b);
+
+/** C: font units to level pixels, Q24 linear and Q30 translation; null out of range. */
+export function glyphMapQ(world, level, m, t) {
+  if (level < -16 || level > 12) return null;
+  const d = 1n << BigInt(32 + level);
+  const [a, b, c, e] = world.m, wt = world.t.map((v) => v << 46n);
+  const C = {
+    m: [vDiv(a * m[0] + c * m[1], d), vDiv(b * m[0] + e * m[1], d), vDiv(a * m[2] + c * m[3], d), vDiv(b * m[2] + e * m[3], d)],
+    t: [vDiv(a * t[0] + c * t[1] + wt[0], d), vDiv(b * t[0] + e * t[1] + wt[1], d)],
+  };
+  return C.m.every((v) => tAbs(v) < 1n << 31n) && C.t.every((v) => tAbs(v) < 1n << 60n) ? C : null;
+}
+
+/** The atlas band: Frobenius / sqrt 2 under 24 px/em, strictly. */
+export function atlasBandQ(C, upem) {
+  const frob = C.m.reduce((sum, v) => sum + v * v, 0n);
+  return frob * upem * upem < 2n * 576n * (1n << 48n);
+}
+
+const outlineBounds = (commands) => {
+  const pts = commands.flatMap(([, ...p]) => p);
+  if (!pts.length) return null;
+  const min = (a) => pts.reduce((m, p) => (p[a] < m ? p[a] : m), pts[0][a]);
+  const max = (a) => pts.reduce((m, p) => (p[a] > m ? p[a] : m), pts[0][a]);
+  return [min(0), min(1), max(0), max(1)];
+};
+
+/** The memo's place_q: bands, origin and phase, and the bitmap box; null for the direct band. */
+export function placeQ(C, outline) {
+  const u = outline.upem;
+  const band = C.m.map((v) => vDiv(v * u * 4n, 1n << 24n));
+  if (band[0] * band[3] === band[1] * band[2]) return null;
+  const q = C.t.map((v) => vDiv(v, 1n << 28n));
+  const origin = q.map((v) => tFloorDiv(v, 4n));
+  const phase = q.map((v, k) => v - origin[k] * 4n);
+  const point = (x, y) => [
+    vDiv(band[0] * x + band[2] * y + 64n * phase[0] * u, u),
+    vDiv(band[1] * x + band[3] * y + 64n * phase[1] * u, u),
+  ];
+  const b = outlineBounds(outline.commands);
+  if (!b) return null;
+  const corners = [point(b[0], b[1]), point(b[2], b[1]), point(b[0], b[3]), point(b[2], b[3])];
+  const lo = (a) => corners.reduce((m, c) => (c[a] < m ? c[a] : m), corners[0][a]);
+  const hi = (a) => corners.reduce((m, c) => (c[a] > m ? c[a] : m), corners[0][a]);
+  const x0 = tFloorDiv(lo(0), 256n) - 1n, y0 = tFloorDiv(lo(1), 256n) - 1n;
+  const w = tCeilDiv(hi(0), 256n) + 1n - x0, h = tCeilDiv(hi(1), 256n) + 1n - y0;
+  if (w < 1n || h < 1n || w > 96n || h > 96n) return null;
+  return { band, origin, phase, x0, y0, w: Number(w), h: Number(h), point };
+}
+
+const mapGlyph = (commands, point) => commands.map(([op, ...p]) => [op, ...p.map(([x, y]) => point(x, y))]);
+const directPoint = (C) => (x, y) => [
+  vDiv(C.m[0] * x + C.m[2] * y + C.t[0], 1n << 22n),
+  vDiv(C.m[1] * x + C.m[3] * y + C.t[1], 1n << 22n),
+];
+
+/** A direct-band glyph's window: its mapped box in pixels within the ROI, or null. */
+function directWindowQ(C, outline, [ox, oy, w, h]) {
+  const b = outlineBounds(outline.commands);
+  if (!b) return null;
+  const p = directPoint(C);
+  const corners = [p(b[0], b[1]), p(b[2], b[1]), p(b[0], b[3]), p(b[2], b[3])];
+  const lo = (a) => tFloorDiv(corners.reduce((m, c) => (c[a] < m ? c[a] : m), corners[0][a]), 256n);
+  const hi = (a) => tCeilDiv(corners.reduce((m, c) => (c[a] > m ? c[a] : m), corners[0][a]), 256n);
+  const left = lo(0) > BigInt(ox) ? lo(0) : BigInt(ox), top = lo(1) > BigInt(oy) ? lo(1) : BigInt(oy);
+  const right = hi(0) < BigInt(ox + w) ? hi(0) : BigInt(ox + w), bottom = hi(1) < BigInt(oy + h) ? hi(1) : BigInt(oy + h);
+  return right > left && bottom > top ? [Number(left), Number(top), Number(right - left), Number(bottom - top)] : null;
+}
+
+/**
+ * A level-`level` tile of one v3 text node from its ALTB `bake` bytes, at node
+ * `transform` on a `canvas`: per glyph in bake order, C, the atlas band
+ * (place_q's bitmap) or the direct band (its window in the tile), and the Q14
+ * normal over the glyph's straight colour. An undecodable bake is transparent.
+ */
+export function renderTextV3(bake, transform = IDENT, tile = [0, 0], canvas = [256, 256], level = 0) {
+  // The renderer's ROI takes levels -6..=12 only (glyphMapQ itself goes to -16).
+  if (level < -6 || level > 12) throw new Error("v3 refuses a level outside -6..=12");
+  const world = fixedAffine(transform);
+  if (!world) throw new Error("v3 refuses a transform outside the fixed affine range");
+  const roi = [tile[0] * 256, tile[1] * 256, 256, 256];
+  const q = Array.from({ length: 65536 }, () => [0, 0, 0, 0]);
+  const decoded = bake && decodeTextBake(bake);
+  for (const g of decoded?.glyphs ?? []) {
+    const outline = decoded.outlines[g.outline];
+    const C = glyphMapQ(world, level, g.m, g.t);
+    if (!C) continue;
+    const paint = (bytes, [bx, by, bw]) => {
+      for (let i = 0; i < bytes.length; i++) {
+        const x = bx + (i % bw) - roi[0], y = by + Math.floor(i / bw) - roi[1];
+        if (bytes[i] && x >= 0 && y >= 0 && x < 256 && y < 256) q[y * 256 + x] = vectorPaintQ14(q[y * 256 + x], g.color, bytes[i]);
+      }
+    };
+    const placed = atlasBandQ(C, outline.upem) ? placeQ(C, outline) : null;
+    if (placed) {
+      const points = mapGlyph(outline.commands, (x, y) => {
+        const b = placed.point(x, y);
+        return [b[0] - 256n * placed.x0, b[1] - 256n * placed.y0];
+      });
+      const bytes = vectorCoverage(points, "non_zero", [0, 0, placed.w, placed.h], true);
+      if (bytes) paint(bytes, [Number(placed.origin[0] + placed.x0), Number(placed.origin[1] + placed.y0), placed.w]);
+    } else {
+      const window = directWindowQ(C, outline, roi);
+      if (!window) continue;
+      const bytes = vectorCoverage(mapGlyph(outline.commands, directPoint(C)), "non_zero", window, true);
+      if (bytes) paint(bytes, window);
+    }
+  }
+  // The resolve keeps a level pixel whose centre, in document pixels, lies in
+  // the canvas (Rust `resolve_span_q`): (2x + 1) 2^L in [0, 2 canvas) at
+  // L >= 0, and x in [0, canvas 2^-L) below.
+  const inCanvas = (x, end) => (level >= 0
+    ? x >= 0 && (2 * x + 1) * 2 ** level < 2 * end
+    : x >= 0 && x < end * 2 ** -level);
+  const out = new Uint8Array(65536 * 4);
+  for (let i = 0; i < 65536; i++) {
+    const x = roi[0] + (i % 256), y = roi[1] + Math.floor(i / 256);
+    if (inCanvas(x, canvas[0]) && inCanvas(y, canvas[1])) out.set(resolveQ14(q[i]), i * 4);
   }
   return out;
 }

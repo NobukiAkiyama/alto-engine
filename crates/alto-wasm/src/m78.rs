@@ -82,6 +82,20 @@ impl Runtime {
         serde_json::to_string(&self.engine.text_info(self.doc, node(id)?).map_err(error)?)
             .map_err(error)
     }
+    /// A text node's render version 3 bake for tests: `{ hash, hex }`, both null
+    /// when the node has none. The JS reference reads exactly these bytes.
+    #[wasm_bindgen(js_name=textBakeForTesting)]
+    pub fn text_bake_for_testing(&self, id: &str) -> Result<String, JsValue> {
+        let bake = self.engine.text_bake(self.doc, node(id)?).map_err(error)?;
+        let (hash, hex) = match bake {
+            Some((hash, bytes)) => (
+                serde_json::Value::String(hash.to_string()),
+                serde_json::Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()),
+            ),
+            None => (serde_json::Value::Null, serde_json::Value::Null),
+        };
+        serde_json::to_string(&serde_json::json!({ "hash": hash, "hex": hex })).map_err(error)
+    }
     #[wasm_bindgen(js_name=textHitTest)]
     pub fn text_hit_test(&self, id: &str, x: f64, y: f64) -> Result<u32, JsValue> {
         finite(&[x, y])?;
