@@ -86,6 +86,7 @@ dependencies = [
  "alto-engine",
  "alto-raster",
  "alto-scene",
+ "alto-text",
  "alto-vector",
  "bytemuck",
  "futures-channel",

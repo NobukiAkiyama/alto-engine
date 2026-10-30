@@ -301,6 +301,16 @@ pub fn bilinear_byte(a: u8, b: u8, d: u8, e: u8, fx: i32, fy: i32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    /// The frozen v2 rounding adds 0.5 in f64 first, so the value just below
+    /// Q16's 0.5 (7.629394531249999e-06) becomes 1; v3 never uses it and
+    /// decodes the bits instead (`q_from_float_bits_rounds_half_away`, 0).
+    #[test]
+    fn frozen_v2_quantize_rounds_just_below_a_tie_up() {
+        let v = f64::from_bits(0x3edf_ffff_ffff_ffff);
+        assert_eq!(super::quantize_q16(v, super::round_half_away_v2), Some(1.0));
+        assert_eq!(alto_core::q_from_f64_bits(v.to_bits(), 16), Some(0));
+    }
+
     use super::{fixed_inverse, source_axis};
 
     #[test]

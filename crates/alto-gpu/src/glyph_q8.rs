@@ -222,6 +222,34 @@ pub fn rasterize_atlas(p: &PlacementQ, outline: &BakeOutline) -> Result<Vec<u8>,
     rasterize_glyph(&commands, [0, 0, i64::from(p.w), i64::from(p.h)])
 }
 
+/// A direct-band glyph's window (memo "頂点の Q8" 窓): the outline's control-point
+/// box mapped by `C`, rounded outward to pixels, intersected with the level-pixel
+/// `roi` `[ox, oy, w, h]`. `None` when they do not meet (nothing to draw).
+pub fn direct_window(c: &GlyphMapQ, outline: &BakeOutline, roi: [i64; 4]) -> Option<[i64; 4]> {
+    let [x0, y0, x1, y1] = bounds(outline)?;
+    let m = c.m.map(i128::from);
+    let t = c.t.map(i128::from);
+    let corner = |x: i64, y: i64| -> Option<[i64; 2]> {
+        let (x, y) = (i128::from(x), i128::from(y));
+        Some([
+            div_q(m[0] * x + m[2] * y + t[0], 1 << 22)?,
+            div_q(m[1] * x + m[3] * y + t[1], 1 << 22)?,
+        ])
+    };
+    let corners = [
+        corner(x0, y0)?,
+        corner(x1, y0)?,
+        corner(x0, y1)?,
+        corner(x1, y1)?,
+    ];
+    let lo = |a: usize| floor_div(corners.iter().map(|c| c[a]).min().unwrap(), 256);
+    let hi = |a: usize| ceil_div(corners.iter().map(|c| c[a]).max().unwrap(), 256);
+    let [ox, oy, w, h] = roi;
+    let (left, top) = (lo(0).max(ox), lo(1).max(oy));
+    let (right, bottom) = (hi(0).min(ox + w), hi(1).min(oy + h));
+    (right > left && bottom > top).then_some([left, top, right - left, bottom - top])
+}
+
 /// A direct-band glyph's bytes over the level-pixel `window` `[ox, oy, w, h]`.
 /// The bytes are the same as a larger window's, cut (memo "窓の独立性").
 pub fn rasterize_direct(
