@@ -1477,6 +1477,7 @@ impl Context<'_> {
             ),
         };
         self.r.retired.take(&mut resources.retired);
+        self.r.pipelines_built |= resources.take_pipelines_built();
         self.r.vector = Some(resources);
         result?;
         Ok(out)
