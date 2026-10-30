@@ -96,3 +96,21 @@ test("v3 text reference: paint order and the direct band", () => {
   assert.equal(alpha(right, 143, 10), 255);
   assert.equal(alpha(right, 144, 10), 0);
 });
+
+test("v3 text reference: levels, the canvas edge, and curves with no current point", () => {
+  // A 100 px square at the origin; at level 1 a 256 px canvas is tile pixels 0..128.
+  const m = [q24(0.4), 0, 0, q24(0.4)];
+  const big = bake(square(0, 0, 1000, 1000), 1000, [[m, [0n, 0n], [16384, 16384, 16384, 16384]]]);
+  const half = renderTextV3(big, undefined, [0, 0], [100, 256], 1);
+  assert.equal(alpha(half, 49, 10), 255, "inside the canvas at level 1");
+  assert.equal(alpha(half, 50, 10), 0, "past canvas x = 100 (tile pixel 50)");
+  const zoom = renderTextV3(big, undefined, [0, 0], [100, 256], -1);
+  assert.equal(alpha(zoom, 199, 10), 255, "inside the canvas at level -1");
+  assert.equal(alpha(zoom, 200, 10), 0, "past canvas x = 100 (tile pixel 200)");
+  // The renderer takes levels -6..=12 only.
+  assert.throws(() => renderTextV3(big, undefined, [0, 0], [256, 256], -7), /level/);
+  assert.throws(() => renderTextV3(big, undefined, [0, 0], [256, 256], 13), /level/);
+  // An outline whose first command is a curve is skipped, not a crash.
+  const curve = bake([[2, [0, 0], [6400, 6400]], [1, [0, 6400]], [4]], 1000, [[m, [0n, 0n], [16384, 0, 0, 16384]]]);
+  assert.ok(renderTextV3(curve).every((v) => v === 0));
+});

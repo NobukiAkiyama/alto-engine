@@ -4,7 +4,7 @@
 // and a bit-exact match fails the xfail so it can be removed.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, parityCases, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, parityCases, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -885,6 +885,9 @@ export async function runParityTests(engine, log) {
           const id = await addText(doc, content);
           const bake = await testing(engine).request("textBake", { node: id });
           if (bake.hash !== want.get(name)) failures.push(`${name}: wasm ${bake.hash}, native ${want.get(name)}`);
+          // The bytes returned are a valid bake with glyphs (not only a hash).
+          const decoded = bake.hex && decodeTextBake(hexBytes(bake.hex));
+          if (!decoded?.glyphs.length) failures.push(`${name}: the returned bytes are not a bake with glyphs`);
         }
         assert(failures.length === 0, failures.join("; "));
         return `${want.size} bakes equal the native fixture`;

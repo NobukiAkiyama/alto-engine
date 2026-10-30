@@ -1194,6 +1194,8 @@ function vectorSegments(commands, glyph = false) {
     if (op === "M") { close(); start = current = p[0]; continue; }
     if (op === "L") { if (current) edge(current, p[0]); else start = p[0]; current = p[0]; continue; }
     if (op === "Z") { close(); continue; }
+    // A curve with no current point is out of range, as in Rust (`Range`).
+    if (!current) return null;
     const a = current;
     const ctrl = op === "Q" ? [a, p[0], p[1]] : [a, p[0], p[1], p[2]];
     const d = op === "Q" ? secondDifference(a, p[0], p[1])
@@ -1533,6 +1535,8 @@ function directWindowQ(C, outline, [ox, oy, w, h]) {
  * normal over the glyph's straight colour. An undecodable bake is transparent.
  */
 export function renderTextV3(bake, transform = IDENT, tile = [0, 0], canvas = [256, 256], level = 0) {
+  // The renderer's ROI takes levels -6..=12 only (glyphMapQ itself goes to -16).
+  if (level < -6 || level > 12) throw new Error("v3 refuses a level outside -6..=12");
   const world = fixedAffine(transform);
   if (!world) throw new Error("v3 refuses a transform outside the fixed affine range");
   const roi = [tile[0] * 256, tile[1] * 256, 256, 256];
@@ -1563,10 +1567,16 @@ export function renderTextV3(bake, transform = IDENT, tile = [0, 0], canvas = [2
       if (bytes) paint(bytes, window);
     }
   }
+  // The resolve keeps a level pixel whose centre, in document pixels, lies in
+  // the canvas (Rust `resolve_span_q`): (2x + 1) 2^L in [0, 2 canvas) at
+  // L >= 0, and x in [0, canvas 2^-L) below.
+  const inCanvas = (x, end) => (level >= 0
+    ? x >= 0 && (2 * x + 1) * 2 ** level < 2 * end
+    : x >= 0 && x < end * 2 ** -level);
   const out = new Uint8Array(65536 * 4);
   for (let i = 0; i < 65536; i++) {
     const x = roi[0] + (i % 256), y = roi[1] + Math.floor(i / 256);
-    if (x >= 0 && y >= 0 && x < canvas[0] && y < canvas[1]) out.set(resolveQ14(q[i]), i * 4);
+    if (inCanvas(x, canvas[0]) && inCanvas(y, canvas[1])) out.set(resolveQ14(q[i]), i * 4);
   }
   return out;
 }
