@@ -3791,6 +3791,36 @@ fn reference_text() -> String {
             fnv64(&bytes)
         ));
     }
+    lines.push(
+        "# Render version 3 composite: the measured catalog at level 0 and its level 1 pyramid."
+            .to_string(),
+    );
+    for case in cases().into_iter().filter(|c| c.measure) {
+        // As on the GPU, a case above level 0 is the integer pyramid.
+        let bytes = if case.level > 0 {
+            render_pyramid(&case)
+        } else {
+            render_at(&case, 3)
+        };
+        lines.push(format!(
+            "v3-{} {} {:016x}",
+            case.name,
+            ContentHash::of(&bytes).hex(),
+            fnv64(&bytes)
+        ));
+    }
+    for mut case in cases().into_iter().filter(|c| c.measure) {
+        case.level = 1;
+        case.tx = 0;
+        case.ty = 0;
+        let bytes = render_pyramid(&case);
+        lines.push(format!(
+            "v3-{}-level1 {} {:016x}",
+            case.name,
+            ContentHash::of(&bytes).hex(),
+            fnv64(&bytes)
+        ));
+    }
     lines.join("\n") + "\n"
 }
 
@@ -7898,8 +7928,13 @@ fn alpha_measure_cases_are_not_enforced() {
             && greens.iter().all(|hit| *hit)
             && blues.iter().all(|hit| *hit)
     );
+    // Version 2 never locks them; the v3 lines are the integer composite.
     let locked = std::fs::read_to_string(reference_path()).unwrap();
-    assert!(!locked.contains("-alpha-measure"));
+    assert!(
+        locked
+            .lines()
+            .all(|line| !line.contains("-alpha-measure") || line.starts_with("v3-"))
+    );
     assert_blend_layers_cover_alpha_pairs(&measured);
 }
 
@@ -7980,8 +8015,10 @@ fn existing_v1_and_v2_hashes_are_unchanged() {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
     {
         assert!(
-            line.contains("-alpha-measure ") || line.starts_with("text-v3-"),
-            "new hash line is not an alpha-measure or text-v3 case: {line}"
+            line.contains("-alpha-measure ")
+                || line.starts_with("text-v3-")
+                || line.starts_with("v3-"),
+            "new hash line is not an alpha-measure, text-v3 or v3 case: {line}"
         );
     }
     let v1 = std::fs::read_to_string(render_v1_path()).unwrap();

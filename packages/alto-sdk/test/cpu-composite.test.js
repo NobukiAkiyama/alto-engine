@@ -1,18 +1,33 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, maskByteV3, parityCases, renderCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14, quantizeQ16, quantizeQ16V2, roundHalfAway } from "../../../tests/e2e/cpu-composite.js";
+import { RENDER_VERSION_F32, alphaMeasureCases, colorAdjustGradient, colorAdjustGrid, fnv64, maskByteV3, parityCases, renderCase, renderPyramidCase, renderColorAdjust, renderColorAdjustV3, solid, sourceAxis, downsampleQ14, quantizeQ16, quantizeQ16V2, roundHalfAway } from "../../../tests/e2e/cpu-composite.js";
 
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
     .split("\n")
-    .filter((line) => line && !line.startsWith("#") && !line.startsWith("text-v3-"));
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith("text-v3-") && !line.startsWith("v3-"));
   const cases = new Map(parityCases().filter((item) => item.lock).map((item) => [item.name, item]));
   assert.equal(lines.length, cases.size);
   for (const line of lines) {
     const [name, , fnv] = line.split(" ");
     const tile = renderCase(cases.get(name));
     assert.equal(fnv64(tile), fnv, name);
+  }
+});
+
+test("render version 3 composite matches the locked Rust hashes", () => {
+  const locked = new Map(readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("v3-"))
+    .map((line) => { const [name, , fnv] = line.split(" "); return [name, fnv]; }));
+  const cases = alphaMeasureCases();
+  assert.equal(locked.size, cases.length * 2);
+  for (const testCase of cases) {
+    const tile = testCase.level ? renderPyramidCase(testCase) : renderCase(testCase, 3);
+    assert.equal(fnv64(tile), locked.get(`v3-${testCase.name}`), testCase.name);
+    const level1 = { ...testCase, level: 1, tx: 0, ty: 0 };
+    assert.equal(fnv64(renderPyramidCase(level1)), locked.get(`v3-${testCase.name}-level1`), `${testCase.name} level 1`);
   }
 });
 

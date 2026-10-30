@@ -1,6 +1,6 @@
 # Semi-transparent v2 composite parity
 
-Render version 2 composite parity (`composite.wgsl` against the CPU reference) locks 37 cases in `tests/parity/cpu-reference.txt`. Each locked case has an `-alpha-measure` twin. The twins stay **measured-not-enforced**: a mismatch is printed and stored, and it does not fail CI. They are not in `tests/parity/cpu-reference.txt`. No v2 formula and no recorded v1 or v2 hash changed.
+Render version 2 composite parity (`composite.wgsl` against the CPU reference) locks 37 cases in `tests/parity/cpu-reference.txt`. Each locked case has an `-alpha-measure` twin. The twins stay **measured-not-enforced**: a mismatch is printed and stored, and it does not fail CI. Their v2 output is not in `tests/parity/cpu-reference.txt`. Their render version 3 output is enforced and locked there as the `v3-` lines, at level 0 and level 1 (see [the v3 default memo](../design/2026-10-30-v3-default.md#locked-hashes)). No v2 formula and no recorded v1 or v2 hash changed.
 
 Each layer has its own straight image, in paint order. Layer 0 keeps R = `x & 255`, G = `y & 255`, B = `(3x+5y) & 255`. Layer `i` rotates those channels by `i % 3` and adds `17*i`. Alpha is one of 0, 1, 128, 254. Even layers step alpha with `x+y`, odd layers step with `x`, and both add the layer index. Layers 0 and 1 cover all 16 `(destination alpha, source alpha)` pairs, and source RGB differs from destination at every pixel. The Rust sweep and `tests/e2e/cpu-composite.js` use that formula.
 
