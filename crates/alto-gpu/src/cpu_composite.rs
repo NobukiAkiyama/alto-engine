@@ -7707,11 +7707,11 @@ fn plain_scene_gaps_are_explicit() {
         assert_eq!(gap(scene), Some(reason));
         let mut v3 = scene.clone();
         v3.render_version = 3;
-        // A pixel mask, a color-adjust adjustment layer, a filled vector and its
-        // vector mask or clip path are the ones of these with integer stages.
+        // Pixel masks, clipping, color-adjust adjustment layers, filled vectors,
+        // vector masks and clip paths have integer stages.
         let integer = matches!(
             reason,
-            "adjustment" | "mask" | "vector" | "vector mask" | "clip path"
+            "adjustment" | "mask" | "vector" | "vector mask" | "clip path" | "clip"
         );
         let expected = if integer {
             "v3-m5-integer"
@@ -7832,7 +7832,7 @@ fn plain_scene_gaps_are_explicit() {
         n.clip_path = f.clip_path.clone();
         n.clip = f.clip;
         n.effects = f.effects.clone();
-        let expected = if matches!(reason, "vector mask" | "clip path") {
+        let expected = if matches!(reason, "vector mask" | "clip path" | "clip") {
             None
         } else {
             Some(reason)
@@ -8729,6 +8729,99 @@ fn v3_adjustment(kind: REffectKind, features: RFeatures) -> RNode {
     .remove(0);
     node.key = NodeId::new();
     node
+}
+
+#[test]
+fn v3_clipped_layer_keeps_base_coverage_and_applies_opacity() {
+    let mut top = scene(
+        RContent::Mesh(std::sync::Arc::new(vec![test_rectangle(
+            0.0,
+            0.0,
+            256.0,
+            256.0,
+            [0.0, 1.0, 0.0, 0.5],
+        )])),
+        RFeatures {
+            clip: true,
+            ..RFeatures::default()
+        },
+    )
+    .nodes
+    .remove(0);
+    top.key = NodeId::new();
+    top.opacity = 0.5;
+    let (document, store) = v3_square_under(top);
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+        return;
+    };
+    let pixel =
+        |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+    assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
+    assert_eq!(pixel(100, 100), [191, 64, 0, 255]);
+}
+
+#[test]
+fn v3_clipping_chain_keeps_translucent_base_alpha() {
+    let mut document = scene(
+        RContent::Group {
+            children: vec![1, 2, 3],
+            isolated: false,
+        },
+        RFeatures::default(),
+    );
+    for (fill, clip) in [
+        ([1.0, 0.0, 0.0, 0.5], false),
+        ([0.0, 1.0, 0.0, 0.5], true),
+        ([0.0, 0.0, 1.0, 1.0], true),
+    ] {
+        let mut node = scene(
+            RContent::Mesh(std::sync::Arc::new(vec![test_rectangle(
+                80.0, 80.0, 180.0, 180.0, fill,
+            )])),
+            RFeatures {
+                clip,
+                ..RFeatures::default()
+            },
+        )
+        .nodes
+        .remove(0);
+        node.key = NodeId::new();
+        document.nodes.push(node);
+    }
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_vector_test_render(&document) else {
+        return;
+    };
+    let pixel =
+        |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+    assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
+    assert_eq!(pixel(100, 100), [0, 0, 128, 128]);
+}
+
+#[test]
+fn v3_clipped_adjustment_keeps_base_coverage() {
+    let top = v3_adjustment(
+        REffectKind::ColorAdjust {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        },
+        RFeatures {
+            clip: true,
+            ..RFeatures::default()
+        },
+    );
+    let (document, store) = v3_square_under(top);
+    assert_eq!(crate::renderer::v3_gap(&document), None);
+    let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+        return;
+    };
+    let pixel =
+        |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+    assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
+    assert_eq!(pixel(100, 100), [255, 51, 51, 255]);
 }
 
 #[test]

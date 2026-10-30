@@ -732,8 +732,8 @@ impl Context<'_> {
                 resource: uniform.as_entire_binding(),
             },
         ];
-        // The integer stages never read the clip base (clipping is refused in
-        // version 3), so the derived layout has no binding 2.
+        // The integer clipping stages read their base from input A, so the
+        // derived layout has no separate clip-base binding 2.
         if !self.resources.exact {
             entries.push(wgpu::BindGroupEntry {
                 binding: 2,
@@ -1738,8 +1738,32 @@ impl Context<'_> {
     }
     fn clip_blend(&mut self, base: Target, source: Target, node: &RNode) -> Result<Target> {
         let out = self.alloc(base.roi)?;
-        let mut p = Self::params(9, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        p.settings[1] = mode(node.blend);
+        let p = if self.resources.exact {
+            let opacity = if node.features.mask.is_some()
+                || node.features.vector_mask.is_some()
+                || node.features.clip_path.is_some()
+            {
+                1.0
+            } else {
+                node.opacity
+            };
+            Self::q14_params(
+                27,
+                base.roi,
+                [Some(base.roi), Some(source.roi)],
+                [
+                    crate::composite_opacity_q14(opacity),
+                    node.blend as i32,
+                    0,
+                    0,
+                ],
+                None,
+            )?
+        } else {
+            let mut p = Self::params(9, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            p.settings[1] = mode(node.blend);
+            p
+        };
         self.dispatch(&out, &base, &source, &base, p, &[])?;
         Ok(out)
     }
@@ -2158,14 +2182,18 @@ impl Context<'_> {
                 }
                 if node.features.clip {
                     let out = self.alloc(desired)?;
-                    self.dispatch(
-                        &out,
-                        &input,
-                        &mixed,
-                        &input,
-                        Self::params(10, transform.legacy()?),
-                        &[],
-                    )?;
+                    let p = if self.resources.exact {
+                        Self::q14_params(
+                            28,
+                            desired,
+                            [Some(input.roi), Some(mixed.roi)],
+                            [0; 4],
+                            None,
+                        )?
+                    } else {
+                        Self::params(10, transform.legacy()?)
+                    };
+                    self.dispatch(&out, &input, &mixed, &input, p, &[])?;
                     base = Some(out.clone());
                     accum = self.blend(
                         base_background

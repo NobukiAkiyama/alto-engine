@@ -131,6 +131,24 @@ fn layer_q14(dst: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
   let sa = mul_q(src.a, op);
   return blend_q(dst, s, vec3i(mul_q(s.r, sa), mul_q(s.g, sa), mul_q(s.b, sa)), sa, mode);
 }
+// A clipped layer changes base color while retaining base coverage.
+fn clip_layer_q14(base: vec4i, src: vec4i, op: i32, mode: u32) -> vec4i {
+  let sa=mul_q(src.a,op);
+  if sa==0 || base.a==0 {return base;}
+  let d=straight_q(base);let s=straight_q(src);let mixed=mix_q(d,s,mode);
+  var out=base;
+  for(var i=0u;i<3u;i++){
+    let color=div_q(d[i]*(Q14_ONE-sa)+mixed[i]*sa,Q14_ONE);
+    out[i]=mul_q(color,base.a);
+  }
+  return out;
+}
+// A clipped adjustment transfers its color to the base coverage.
+fn clip_adjust_q14(base: vec4i, adjusted: vec4i) -> vec4i {
+  let color=straight_q(adjusted);var out=base;
+  for(var i=0u;i<3u;i++){out[i]=mul_q(color[i],base.a);}
+  return out;
+}
 // Modes 21 to 23 and 26. Settings are `grid[0]`.
 fn mask_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];var out=vec4i(0);
@@ -221,5 +239,7 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if (c.info.x>=21u&&c.info.x<=23u)||c.info.x==26u{out=mask_stage(ix);}
  else if c.info.x==24u{out=blur_stage(ix);}
  else if c.info.x==25u{out=resample_stage(ix);}
+ else if c.info.x==27u{out=clip_layer_q14(texel_a(ix),texel_b(ix),settings.x,u32(settings.y));}
+ else if c.info.x==28u{out=clip_adjust_q14(texel_a(ix),texel_b(ix));}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

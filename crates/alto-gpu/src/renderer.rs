@@ -1015,9 +1015,6 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
     };
     for n in &scene.nodes {
         let f = &n.features;
-        if f.clip {
-            return Some("clip");
-        }
         if !f.effects.iter().all(integer_effect) {
             return Some("effects");
         }
