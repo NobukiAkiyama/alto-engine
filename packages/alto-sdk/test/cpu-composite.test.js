@@ -6,7 +6,7 @@ import { RENDER_VERSION_F32, colorAdjustGradient, colorAdjustGrid, fnv64, maskBy
 test("render version 2 matches the locked CPU reference hashes", () => {
   const lines = readFileSync(new URL("../../../tests/parity/cpu-reference.txt", import.meta.url), "utf8")
     .split("\n")
-    .filter((line) => line && !line.startsWith("#"));
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith("text-v3-"));
   const cases = new Map(parityCases().filter((item) => item.lock).map((item) => [item.name, item]));
   assert.equal(lines.length, cases.size);
   for (const line of lines) {
