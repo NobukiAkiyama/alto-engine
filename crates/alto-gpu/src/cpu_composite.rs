@@ -4693,7 +4693,7 @@ fn gap(scene: &RenderScene) -> Option<&'static str> {
         }
         match &n.content {
             RContent::Mesh(_) => return Some("vector"),
-            RContent::Text(_) => return Some("text"),
+            RContent::Text(_) | RContent::TextBake(_) => return Some("text"),
             RContent::Adjustment(_) => return Some("adjustment"),
             RContent::Unsupported => return Some("unsupported"),
             RContent::Group { .. } | RContent::Tiles(_) => {}
@@ -9203,6 +9203,134 @@ fn text_q14_invalid_bake_and_levels() {
             .iter()
             .all(|p| *p == [0; 4])
     );
+}
+
+/// A v3 scene of one text node drawn from `bake` at `[x, y]` on a `w x h` canvas.
+fn text_scene(bake: Option<Vec<u8>>, x: f64, y: f64, canvas: [i32; 2]) -> RenderScene {
+    let content = RContent::TextBake(bake.map(|bytes| alto_scene::RTextBake {
+        hash: ContentHash::of(&bytes),
+        bytes: std::sync::Arc::new(bytes),
+    }));
+    let mut document = scene(content, RFeatures::default());
+    document.canvas.x1 = canvas[0];
+    document.canvas.y1 = canvas[1];
+    document.nodes[0].transform = [1.0, 0.0, 0.0, 1.0, x, y];
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    document
+}
+
+/// The tile bytes of `text_q14` (a lone node over transparent is a Q14 copy).
+fn text_tile_reference(bake: &[u8], x: f64, y: f64, key: (i32, i32, i32)) -> Vec<u8> {
+    let (level, tx, ty) = key;
+    let q = text_q14(
+        bake,
+        moved(x, y),
+        level,
+        [i64::from(tx) * 256, i64::from(ty) * 256, 256, 256],
+    );
+    q.iter()
+        .flat_map(|p| p.map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8))
+        .collect()
+}
+
+/// A bake of `n` overlapping `px`-pixel squares (direct band), each moved 7 px
+/// right and 5 px down from the last, with alternating translucent colours.
+fn overlapping_squares(n: i64, px: i64) -> Vec<u8> {
+    use alto_core::text_bake::{BakeCommand, BakeGlyph, BakeOutline, PLACEHOLDER_FONT, TextBake};
+    let square = BakeOutline {
+        font: PLACEHOLDER_FONT,
+        glyph: 0,
+        upem: 1000,
+        commands: vec![
+            BakeCommand::Move([0, 0]),
+            BakeCommand::Line([64_000, 0]),
+            BakeCommand::Line([64_000, 64_000]),
+            BakeCommand::Line([0, 64_000]),
+            BakeCommand::Close,
+        ],
+    };
+    // px / 1000 node pixels per font unit, Q24.
+    let m = ((px << 24) / 1000) as i32;
+    let glyphs = (0..n)
+        .map(|i| BakeGlyph {
+            outline: 0,
+            m: [m, 0, 0, m],
+            t: [(7 * i) << 30, (5 * i) << 30],
+            color: if i % 2 == 0 {
+                [16384, 4096, 0, 9000]
+            } else {
+                [0, 8192, 16384, 12000]
+            },
+        })
+        .collect();
+    TextBake {
+        baker: 1,
+        fonts: vec![],
+        outlines: vec![square],
+        glyphs,
+    }
+    .encode()
+}
+
+#[test]
+fn v3_text_matches_the_integer_reference() {
+    let mut bakes = text_reference_bakes();
+    // Over 1024 glyphs (two glyph-q14 chunks), and overlapping 200 px direct
+    // glyphs whose crops overflow one scratch (several scratches for a tile).
+    let block = format!("{}\n", "AltoAltoAlto".repeat(4)).repeat(34);
+    bakes.push((
+        "many small",
+        bake_parity_text(&block, 6.0, [0.2, 0.3, 0.4, 1.0]),
+    ));
+    bakes.push(("many large", overlapping_squares(6, 200)));
+    // The two stress texts reach the paths they are for.
+    let crops = |i: usize| {
+        crate::glyph_q8::glyph_bitmaps(&bakes[i].1, moved(20.25, 60.625), 0, [0, 0, 256, 256])
+    };
+    assert!(
+        crops(3).len() > 1024,
+        "many small: {} crops",
+        crops(3).len()
+    );
+    let area: u64 = crops(4)
+        .iter()
+        .map(|c| u64::from(c.w) * u64::from(c.h))
+        .sum();
+    assert!(area > 256 * 256, "many large: crop area {area}");
+    for (name, bake) in &bakes {
+        for (x, y, key) in [
+            (20.25, 60.625, (0, 0, 0)),
+            // Across the seam: the right tile of a text starting left of 256.
+            (180.5, 30.0, (0, 1, 0)),
+            // Zoomed in (level -1): every glyph twice as large.
+            (10.0, 20.0, (-1, 0, 0)),
+        ] {
+            let document = text_scene(Some(bake.clone()), x, y, [512, 512]);
+            assert_eq!(crate::renderer::v3_gap(&document), None);
+            let Some(gpu) = v3_vector_test_render_at(&document, key) else {
+                return;
+            };
+            let cpu = text_tile_reference(bake, x, y, key);
+            let ink = cpu.iter().skip(3).step_by(4).filter(|&&a| a > 0).count();
+            let differ = gpu
+                .chunks(4)
+                .zip(cpu.chunks(4))
+                .filter(|(g, c)| g != c)
+                .count();
+            assert_eq!(
+                differ, 0,
+                "{name} at ({x}, {y}) key {key:?}: {differ} pixels differ, ink {ink}"
+            );
+        }
+    }
+    // Unbaked and undecodable nodes are transparent.
+    for bake in [None, Some(vec![1, 2, 3])] {
+        let document = text_scene(bake, 20.0, 60.0, [256, 256]);
+        let Some(gpu) = v3_vector_test_render(&document) else {
+            return;
+        };
+        assert!(gpu.iter().all(|&b| b == 0));
+    }
 }
 
 #[test]

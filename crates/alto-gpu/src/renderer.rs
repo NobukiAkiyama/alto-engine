@@ -999,7 +999,8 @@ pub(crate) fn mask_grid(
 /// masks on layers and adjustment layers, filled vectors (`raster_q8`), vector
 /// masks and clip paths (feathered through the integer blur), and blends of
 /// masked adjustment layers (v2 mode 7: screen, or multiply for every other
-/// non-normal mode). Visible strokes keep the v2 tessellator and are refused, and so
+/// non-normal mode), and text drawn from its bake. Visible strokes keep the v2
+/// tessellator and are refused, and so
 /// are vector masks and clip paths on adjustment layers. Everything
 /// else is refused before any command is
 /// built, so no v3 tile is ever written through a float or unorm target. Every
@@ -1030,6 +1031,8 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
             {
                 return Some("vector stroke");
             }
+            // Version 3 text draws from its bake (`TextBake`); layout runs are
+            // never a v3 input.
             RContent::Text(_) => return Some("text"),
             // Without a pixel mask, a non-normal blend stays refused (#37, Linus
             // 21:46). Its stages are integer since the float purge; drawing it
@@ -3112,8 +3115,10 @@ impl Renderer {
         let start = now();
         let zoom = view.zoom.max(0.01);
         let vector_scene = scene.nodes.iter().any(|n| {
-            matches!(n.content, RContent::Mesh(_) | RContent::Text(_))
-                || n.features.vector_mask.is_some()
+            matches!(
+                n.content,
+                RContent::Mesh(_) | RContent::Text(_) | RContent::TextBake(_)
+            ) || n.features.vector_mask.is_some()
                 || n.features.clip_path.is_some()
         });
         let min_level = if vector_scene { -6.0 } else { 0.0 };
@@ -4239,6 +4244,22 @@ mod shader_tests {
                 include_str!("../shaders/vector-dense-paint.wgsl"),
             ),
             ("glyph-atlas", include_str!("../shaders/glyph-atlas.wgsl")),
+            (
+                "vector-q14",
+                concat!(
+                    include_str!("../shaders/q14.wgsl"),
+                    "\n",
+                    include_str!("../shaders/vector-q14.wgsl")
+                ),
+            ),
+            (
+                "glyph-q14",
+                concat!(
+                    include_str!("../shaders/q14.wgsl"),
+                    "\n",
+                    include_str!("../shaders/glyph-q14.wgsl")
+                ),
+            ),
             (
                 "effects resolve",
                 include_str!("../shaders/effects-resolve.wgsl"),

@@ -264,6 +264,25 @@ struct IntegerResolve {
     span: [u32; 4],
     info: [u32; 4],
 }
+/// One v3 glyph instance of `glyph-q14.wgsl`: its crop's ROI box `[x, y, w, h]`,
+/// the crop's top-left in the scratch, and its straight Q14 colour.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GlyphQ14 {
+    dst: [i32; 4],
+    src: [u32; 4],
+    color: [u32; 4],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GlyphQ14Params {
+    count: u32,
+    w: u32,
+    h: u32,
+    pad: u32,
+}
+/// Glyph instances per `glyph-q14.wgsl` dispatch (memo `GLYPH_Q14_CHUNK`).
+const GLYPH_Q14_CHUNK: usize = 1024;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct VectorQ14Params {
@@ -319,6 +338,7 @@ pub(super) struct Resources {
     pipeline: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     vector_q14: Option<wgpu::ComputePipeline>,
+    glyph_q14: Option<wgpu::ComputePipeline>,
     pool: Vec<Pooled>,
     pub(super) allocations: u64,
     pub(super) reuses: u64,
@@ -366,6 +386,17 @@ impl Resources {
                         "{}\n{}",
                         include_str!("../../shaders/q14.wgsl"),
                         include_str!("../../shaders/vector-q14.wgsl")
+                    ),
+                )
+            }),
+            glyph_q14: exact.then(|| {
+                compute(
+                    device,
+                    "M5 integer glyph paint",
+                    &format!(
+                        "{}\n{}",
+                        include_str!("../../shaders/q14.wgsl"),
+                        include_str!("../../shaders/glyph-q14.wgsl")
                     ),
                 )
             }),
@@ -1114,6 +1145,191 @@ impl Context<'_> {
             self.r
                 .retired
                 .classified_buffer(&params, MemoryClass::Effects);
+            current = output;
+        }
+        Ok(current)
+    }
+
+    /// Render version 3 text from its bake only: every glyph's coverage
+    /// rasterized on the CPU and cropped to the ROI (`glyph_q8::glyph_bitmaps`),
+    /// shelf-packed into fresh `R8Unorm` scratch textures, and painted in order
+    /// by `glyph-q14.wgsl` in chunks that each read the previous chunk's Q14.
+    /// There is no persistent atlas, so cache state never changes a pixel. An
+    /// unbaked node is transparent (`TEXT_UNBAKED`).
+    fn text_q14(
+        &mut self,
+        bake: Option<&alto_scene::RTextBake>,
+        world: alto_core::FixedAffine,
+        roi: Roi,
+    ) -> Result<Target> {
+        let grid = RoiQ::from_roi(roi)?;
+        let mut current = self.zero(roi)?;
+        let Some(bake) = bake else {
+            return Ok(current);
+        };
+        let crops = crate::glyph_q8::glyph_bitmaps(
+            &bake.bytes,
+            world,
+            grid.level,
+            [grid.ox, grid.oy, i64::from(roi.w), i64::from(roi.h)],
+        );
+        let (sw, sh) = (bucket(roi.w), bucket(roi.h));
+        let mut next = 0;
+        while next < crops.len() {
+            // Pack as many crops as fit (each is at most the ROI) into one scratch.
+            let mut packer = crate::glyph_atlas::GlyphAtlas::new(sw, sh);
+            packer.begin(1);
+            let mut batch = vec![];
+            while next < crops.len() && batch.len() < GLYPH_Q14_CHUNK {
+                let crop = &crops[next];
+                let key = crate::glyph_atlas::GlyphKey {
+                    raster: 1,
+                    outline_hash: [0; 32],
+                    outline: next as u64,
+                    matrix: [0; 4],
+                    phase: [0; 2],
+                };
+                let Some(rect) = packer.insert(key, crop.w, crop.h) else {
+                    break;
+                };
+                batch.push((crop, rect));
+                next += 1;
+            }
+            if batch.is_empty() {
+                return Err(RenderError::Internal(
+                    "v3 glyph crop larger than its scratch".into(),
+                ));
+            }
+            let need = u64::from(sw) * u64::from(sh) + 48 * batch.len() as u64 + 16;
+            if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
+                return Err(RenderError::Budget(
+                    "v3 glyph scratch exceeds GPU budget".into(),
+                ));
+            }
+            let scratch = memory::create_texture(
+                &self.r.device,
+                &wgpu::TextureDescriptor {
+                    label: Some("v3 glyph scratch"),
+                    size: wgpu::Extent3d {
+                        width: sw,
+                        height: sh,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                Class::Vector,
+            )?;
+            let mut instances = Vec::with_capacity(batch.len());
+            for (crop, rect) in &batch {
+                self.r.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &scratch,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: rect.x,
+                            y: rect.y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &crop.bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(crop.w),
+                        rows_per_image: Some(crop.h),
+                    },
+                    wgpu::Extent3d {
+                        width: crop.w,
+                        height: crop.h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                instances.push(GlyphQ14 {
+                    dst: [
+                        crop.dst[0] as i32,
+                        crop.dst[1] as i32,
+                        crop.w as i32,
+                        crop.h as i32,
+                    ],
+                    src: [rect.x, rect.y, 0, 0],
+                    color: crop.color.map(u32::from),
+                });
+            }
+            let output = self.alloc(roi)?;
+            let pipeline =
+                self.resources.glyph_q14.as_ref().ok_or_else(|| {
+                    RenderError::Internal("v3 glyph pipeline was not created".into())
+                })?;
+            let glyphs = buffer(
+                &self.r.device,
+                &self.r.queue,
+                "v3 glyph instances",
+                &instances,
+                wgpu::BufferUsages::STORAGE,
+            )?;
+            let params = buffer(
+                &self.r.device,
+                &self.r.queue,
+                "v3 glyph paint params",
+                &[GlyphQ14Params {
+                    count: instances.len() as u32,
+                    w: roi.w,
+                    h: roi.h,
+                    pad: 0,
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?;
+            let scratch_view = scratch.create_view(&Default::default());
+            let previous = self.resources.pool[current.index]
+                .texture
+                .create_view(&Default::default());
+            let target = self.resources.pool[output.index]
+                .texture
+                .create_view(&Default::default());
+            let group = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("v3 glyph paint"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: glyphs.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&scratch_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&previous),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&target),
+                    },
+                ],
+            });
+            {
+                let mut pass = self.encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &group, &[]);
+                pass.dispatch_workgroups(roi.w.div_ceil(8), roi.h.div_ceil(8), 1);
+            }
+            self.r.retired.effect_texture(scratch);
+            self.r
+                .retired
+                .classified_buffer(&glyphs, MemoryClass::Vector);
+            self.r
+                .retired
+                .classified_buffer(&params, MemoryClass::Vector);
             current = output;
         }
         Ok(current)
@@ -2060,6 +2276,14 @@ impl Context<'_> {
             RContent::Text(runs) => {
                 self.vector(VectorContent::Text(runs), world.legacy()?, roi, false)?
             }
+            RContent::TextBake(bake) => {
+                if !self.resources.exact {
+                    return Err(RenderError::Internal(
+                        "a text bake reached a v1 / v2 renderer".into(),
+                    ));
+                }
+                self.text_q14(bake.as_ref(), world.fixed()?, roi)?
+            }
             RContent::Group { children, .. } => {
                 let blank = self.zero(roi)?;
                 self.children(children, blank, world, depth)?
@@ -2433,6 +2657,40 @@ mod pool_tests {
             }
         }
         found
+    }
+    /// The v3 paint shaders' only float is the `R8Unorm` coverage texel: one
+    /// `texture_2d<f32>` binding, read once and passed straight to `unorm_byte`.
+    #[test]
+    fn v3_paint_shaders_read_only_the_coverage_byte_as_float() {
+        for (name, text, texture) in [
+            (
+                "vector-q14",
+                include_str!("../../shaders/vector-q14.wgsl"),
+                "coverage",
+            ),
+            (
+                "glyph-q14",
+                include_str!("../../shaders/glyph-q14.wgsl"),
+                "scratch",
+            ),
+        ] {
+            let code = strip_comments(text);
+            assert_eq!(code.matches("f32").count(), 1, "{name}: one float binding");
+            assert!(
+                code.contains(&format!("var {texture}: texture_2d<f32>;")),
+                "{name}"
+            );
+            assert_eq!(
+                code.matches(&format!("textureLoad({texture},")).count(),
+                1,
+                "{name}"
+            );
+            assert!(
+                code.contains(&format!("unorm_byte(textureLoad({texture},")),
+                "{name}"
+            );
+            assert!(!code.contains("textureSample"), "{name}");
+        }
     }
     /// The float purge: no v3 M5 stage (`effects-q14.wgsl`, every mode from
     /// `main`) and not the v3 resolve reads or computes a float, except the

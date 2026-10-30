@@ -1414,7 +1414,8 @@ const strokeVisible = (stroke) => Boolean(stroke) && (stroke.width ?? 1) !== 0 &
  * null (integer tile compositor), "v3-m5-integer" (integer M5 stages: color-adjust
  * and Gaussian blur effects, with or without a selection, color-adjust adjustment
  * layers (any blend with an enabled pixel mask, normal blend without), enabled
- * pixel masks, filled vectors, and enabled vector masks and clip paths) and
+ * pixel masks, filled vectors, enabled vector masks and clip paths, and text
+ * drawn from its bake) and
  * "v3-unsupported" (the host refuses the scene; no tile is drawn). A visibly
  * stroked vector keeps the v2 tessellator and is refused, and so are vector masks and
  * clip paths on adjustment layers.
@@ -1438,7 +1439,7 @@ export function sceneGap(snapshot) {
     if (node.type === "text") found.add("text");
     if (node.type === "adjustment") found.add("adjustment");
     if (node.type === "unsupported") found.add("unsupported");
-    if (props.clip_to_below || node.type === "text" ||
+    if (props.clip_to_below ||
         (node.type === "vector" && (node.paths || []).some((path) => strokeVisible(path?.stroke))) ||
         (props.effects || []).some((effect) => !isIntegerEffect(effect)) ||
         (node.type === "adjustment" && (!isIntegerEffect(node.adjustment) ||
@@ -1451,7 +1452,7 @@ export function sceneGap(snapshot) {
   }
   if (snapshot.meta?.render_version === 3) {
     if (unsupported) return "v3-unsupported";
-    if (found.has("effects") || found.has("adjustment") || found.has("vector") || integer) return "v3-m5-integer";
+    if (found.has("effects") || found.has("adjustment") || found.has("vector") || found.has("text") || integer) return "v3-m5-integer";
     return null;
   }
   return GAP_ORDER.find((gap) => found.has(gap)) || null;
