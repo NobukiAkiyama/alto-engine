@@ -1055,7 +1055,25 @@ impl Context<'_> {
                     "v3 vector coverage exceeds GPU budget".into(),
                 ));
             }
-            let texture = memory::create_texture(
+            // Every fallible step comes before the coverage texture, so an
+            // error never drops a registered texture without destroying it.
+            let output = self.alloc(roi)?;
+            if self.resources.vector_q14.is_none() {
+                return Err(RenderError::Internal(
+                    "v3 vector pipeline was not created".into(),
+                ));
+            }
+            let params = buffer(
+                &self.r.device,
+                &self.r.queue,
+                "v3 vector paint params",
+                &[VectorQ14Params {
+                    color: color.map(u32::from),
+                    size: [roi.w, roi.h, 0, 0],
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            )?;
+            let created = memory::create_texture(
                 &self.r.device,
                 &wgpu::TextureDescriptor {
                     label: Some("v3 vector coverage"),
@@ -1072,7 +1090,14 @@ impl Context<'_> {
                     view_formats: &[],
                 },
                 Class::Effects,
-            )?;
+            );
+            let texture = match created {
+                Ok(texture) => texture,
+                Err(error) => {
+                    memory::destroy_buffer(&params, true);
+                    return Err(error);
+                }
+            };
             self.r.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -1092,20 +1117,7 @@ impl Context<'_> {
                     depth_or_array_layers: 1,
                 },
             );
-            let output = self.alloc(roi)?;
-            let pipeline = self.resources.vector_q14.as_ref().ok_or_else(|| {
-                RenderError::Internal("v3 vector pipeline was not created".into())
-            })?;
-            let params = buffer(
-                &self.r.device,
-                &self.r.queue,
-                "v3 vector paint params",
-                &[VectorQ14Params {
-                    color: color.map(u32::from),
-                    size: [roi.w, roi.h, 0, 0],
-                }],
-                wgpu::BufferUsages::UNIFORM,
-            )?;
+            let pipeline = self.resources.vector_q14.as_ref().expect("checked above");
             let input = self.resources.pool[current.index]
                 .texture
                 .create_view(&Default::default());
@@ -1206,7 +1218,54 @@ impl Context<'_> {
                     "v3 glyph scratch exceeds GPU budget".into(),
                 ));
             }
-            let scratch = memory::create_texture(
+            let instances: Vec<GlyphQ14> = batch
+                .iter()
+                .map(|(crop, rect)| GlyphQ14 {
+                    dst: [
+                        crop.dst[0] as i32,
+                        crop.dst[1] as i32,
+                        crop.w as i32,
+                        crop.h as i32,
+                    ],
+                    src: [rect.x, rect.y, 0, 0],
+                    color: crop.color.map(u32::from),
+                })
+                .collect();
+            // Every fallible step comes before the scratch texture, and the
+            // buffers made before a failure are destroyed: an error never drops
+            // a registered resource without releasing its budget.
+            let output = self.alloc(roi)?;
+            if self.resources.glyph_q14.is_none() {
+                return Err(RenderError::Internal(
+                    "v3 glyph pipeline was not created".into(),
+                ));
+            }
+            let glyphs = buffer(
+                &self.r.device,
+                &self.r.queue,
+                "glyph q14 instances",
+                &instances,
+                wgpu::BufferUsages::STORAGE,
+            )?;
+            let params = match buffer(
+                &self.r.device,
+                &self.r.queue,
+                "glyph q14 params",
+                &[GlyphQ14Params {
+                    count: instances.len() as u32,
+                    w: roi.w,
+                    h: roi.h,
+                    pad: 0,
+                }],
+                wgpu::BufferUsages::UNIFORM,
+            ) {
+                Ok(params) => params,
+                Err(error) => {
+                    memory::destroy_buffer(&glyphs, true);
+                    return Err(error);
+                }
+            };
+            let created = memory::create_texture(
                 &self.r.device,
                 &wgpu::TextureDescriptor {
                     label: Some("v3 glyph scratch"),
@@ -1223,8 +1282,15 @@ impl Context<'_> {
                     view_formats: &[],
                 },
                 Class::Vector,
-            )?;
-            let mut instances = Vec::with_capacity(batch.len());
+            );
+            let scratch = match created {
+                Ok(scratch) => scratch,
+                Err(error) => {
+                    memory::destroy_buffer(&glyphs, true);
+                    memory::destroy_buffer(&params, true);
+                    return Err(error);
+                }
+            };
             for (crop, rect) in &batch {
                 self.r.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -1249,41 +1315,8 @@ impl Context<'_> {
                         depth_or_array_layers: 1,
                     },
                 );
-                instances.push(GlyphQ14 {
-                    dst: [
-                        crop.dst[0] as i32,
-                        crop.dst[1] as i32,
-                        crop.w as i32,
-                        crop.h as i32,
-                    ],
-                    src: [rect.x, rect.y, 0, 0],
-                    color: crop.color.map(u32::from),
-                });
             }
-            let output = self.alloc(roi)?;
-            let pipeline =
-                self.resources.glyph_q14.as_ref().ok_or_else(|| {
-                    RenderError::Internal("v3 glyph pipeline was not created".into())
-                })?;
-            let glyphs = buffer(
-                &self.r.device,
-                &self.r.queue,
-                "v3 glyph instances",
-                &instances,
-                wgpu::BufferUsages::STORAGE,
-            )?;
-            let params = buffer(
-                &self.r.device,
-                &self.r.queue,
-                "v3 glyph paint params",
-                &[GlyphQ14Params {
-                    count: instances.len() as u32,
-                    w: roi.w,
-                    h: roi.h,
-                    pad: 0,
-                }],
-                wgpu::BufferUsages::UNIFORM,
-            )?;
+            let pipeline = self.resources.glyph_q14.as_ref().expect("checked above");
             let scratch_view = scratch.create_view(&Default::default());
             let previous = self.resources.pool[current.index]
                 .texture
