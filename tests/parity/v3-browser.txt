@@ -1,0 +1,87 @@
+# FNV-1a 64 of every enforced v3 browser tile outside the Rust composite catalog, then its test name.
+# Regenerate with ALTO_WRITE_PARITY=1 node scripts/verify-browser.mjs --suite=parity.
+334c9ecc55b234e4 v3-mask-up-to-2^23-draws (1, 0)
+426e4e110a8bc6f0 v3-plain-tile-32767-draws (32767, 0)
+9c735bed0a722325 v3-plain-tile-32768-no-contribution (32768, 0)
+9c735bed0a722325 v3-raster-at-tile-32767 (32767, 0)
+7653b3dacf9f4a5d color-adjust c=0.5 s=0 b=-0.35
+74bbfcc000f4b9bb color-adjust c=0.5 s=0 b=0.45
+628362e24b9f31df color-adjust c=0.5 s=0.35 b=-0.35
+cd2fba24007d3e58 color-adjust c=0.5 s=0.35 b=0.45
+cc0d355c44d9b665 color-adjust c=0.5 s=1.6 b=-0.35
+3f1281ebe63782d5 color-adjust c=0.5 s=1.6 b=0.45
+1181326aa3c6b1fd color-adjust c=1.7 s=0 b=-0.35
+2193ceed938b774e color-adjust c=1.7 s=0 b=0.45
+784796ff684f97ba color-adjust c=1.7 s=0.35 b=-0.35
+f8dd1fdfc273cc83 color-adjust c=1.7 s=0.35 b=0.45
+e1a6f921d39e706d color-adjust c=1.7 s=1.6 b=-0.35
+22c67fdcd3f3045e color-adjust c=1.7 s=1.6 b=0.45
+204b8da3774c1b25 color-adjust c=0 s=0 b=-1
+455fe98699531725 color-adjust c=0 s=0 b=1
+204b8da3774c1b25 color-adjust c=0 s=4 b=-1
+455fe98699531725 color-adjust c=0 s=4 b=1
+1de207d9c6ef6ab5 color-adjust c=4 s=0 b=-1
+33c42326a62c7eb0 color-adjust c=4 s=0 b=1
+e401eecb14e94b56 color-adjust c=4 s=4 b=-1
+63a34d861b27424e color-adjust c=4 s=4 b=1
+972fa7ebd77a2325 v3-invert-effect
+972fa7ebd77a2325 v3-invert-adjustment
+972fa7ebd77a2325 v3-curves-effect
+972fa7ebd77a2325 v3-curves-adjustment
+0a378baa0e8e2325 v3-levels-effect
+0a378baa0e8e2325 v3-levels-adjustment
+20e1d90880be2325 v3-levels-gamma-10-effect
+20e1d90880be2325 v3-levels-gamma-10-adjustment
+a631d78bb68c2325 v3-hue-saturation-effect
+a631d78bb68c2325 v3-hue-saturation-adjustment
+3c83af1c8826853f v3-m5-layer-opacity-half
+f7e6b8ed4ea85b34 v3-m5-adjustment-opacity-half
+dca6a7ffdb9c208d blur-v3-square
+e7ec0e7859411131 blur-v3-gradient
+6e3b4374413b6205 blur-v3-radii r=0.001
+04bb773c3e81a265 blur-v3-radii r=0.001953125
+04bb773c3e81a265 blur-v3-radii r=1
+077b9b0782b31315 blur-v3-radii r=63.99
+eb427b82bffaca1d blur-v3-radii r=64
+64d947bdd46255b5 blur-v3-stack
+9976187dfe818b83 blur-v3-seam (0, 0)
+533c18308509ea33 blur-v3-seam (1, 0)
+9d193f93e9fb020b blur-v3-seam (0, 1)
+86f0c24121f53b23 blur-v3-seam (1, 1)
+fed01a21bd0dd2a5 vector-v3-square
+1f16ac455ee182c3 vector-v3-fractional
+763b35f469eaf095 vector-v3-circle
+a42f079596eab4a1 vector-v3-fill-rules star non-zero
+6c1c84aa3c2debe1 vector-v3-fill-rules star even-odd
+4c8dd20191e2b5bb vector-v3-fill-rules hole non_zero
+4c8dd20191e2b5bb vector-v3-fill-rules hole non_zero reversed
+4c8dd20191e2b5bb vector-v3-fill-rules hole even_odd
+4c8dd20191e2b5bb vector-v3-fill-rules hole even_odd reversed
+a22f1f36382e63d5 vector-v3-shared-edge non_zero
+76176b18c68a82f3 vector-v3-shared-edge even_odd
+ae7308cae3cc823b vector-v3-overlap
+3c17c8b5cf9d4661 vector-v3-rotated
+0c9acc789e3e3205 vector-v3-seam (0, 0)
+a409ce3a8368bd65 vector-v3-seam (1, 0)
+3735f2a0e55616f5 vector-v3-seam (0, 1)
+37fe76c4496a5445 vector-v3-seam (1, 1)
+2b727ba6dd033a53 vector-v3-curve-range
+e0378cf5ac12e02b vector-v3-degenerate
+d6b3ec57438270f2 vector-v3-clip
+785ed64f8e0b2325 v3-mask
+8d084dd1062985fb v3-mask-coverage o=1
+550c075e0bbc0c95 v3-mask-coverage o=0.5
+14ca62ca928e656e v3-mask-coverage o=0.35
+9c735bed0a722325 v3-mask-coverage o=0
+426e4e110a8bc6f0 v3-mask-white o=1
+1bb069475a92eecc v3-mask-white o=0.5
+8580e4017f5daeee v3-mask-white o=0.35
+fad6d8190c961ac2 v3-mask-selection-color-adjust
+2b242b85bb2eefdb v3-mask-adjustment-normal o=1
+33ea7a7163a378ff v3-mask-adjustment-multiply o=1
+246ad403c12e2e5b v3-mask-adjustment-screen o=1
+33ea7a7163a378ff v3-mask-adjustment-overlay o=1
+1bd63ae4f7ced5a1 v3-mask-adjustment-screen o=0.5
+2bb3c7577b35b59a v3-adjustment-screen-unmasked
+03e5a9697e0db970 v3-mask-rotated
+fd373e2810ae1435 v3-mask-group

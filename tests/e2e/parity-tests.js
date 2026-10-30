@@ -222,6 +222,30 @@ export async function runParityTests(engine, log) {
   const textMeasure = [];
   const compositeV3 = [];
   let atlasRead = null;
+  // Every enforced v3 tile is locked. The composite catalog uses the FNV-1a column
+  // Rust's CPU reference writes to cpu-reference.txt; every other tile is locked in
+  // v3-browser.txt as "<fnv> <name>". Regenerate that file with
+  // ALTO_WRITE_PARITY=1 node scripts/verify-browser.mjs --suite=parity.
+  const writeParity = globalThis.__altoWriteParity === true;
+  const rustV3 = new Map((await (await fetch("../../tests/parity/cpu-reference.txt")).text()).split("\n")
+    .filter((line) => line.startsWith("v3-"))
+    .map((line) => { const [name, , fnv] = line.split(" "); return [name, fnv]; }));
+  const browserResponse = await fetch("../../tests/parity/v3-browser.txt");
+  const browserV3 = new Map(browserResponse.ok ? (await browserResponse.text()).split("\n")
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => [line.slice(17), line.slice(0, 16)]) : []);
+  const v3Browser = new Map();
+  const assertV3Locked = (name, cpu, gpu, locks = browserV3) => {
+    const hash = fnv64(gpu);
+    if (locks === browserV3) {
+      assert(!v3Browser.has(name), `${name} is locked twice`);
+      v3Browser.set(name, hash);
+    }
+    if (writeParity && locks === browserV3) return;
+    const locked = locks.get(name);
+    assert(locked, `${name} has no locked v3 hash`);
+    assert(fnv64(cpu) === locked && hash === locked, `${name} differs from its locked v3 hash ${locked}: reference ${fnv64(cpu)}, GPU ${hash}`);
+  };
   try {
     for (const testCase of parityCases()) {
       await test(testCase.name, async () => {
@@ -312,6 +336,7 @@ export async function runParityTests(engine, log) {
           compositeV3.push(row);
           log(`${renderPath || "v3 composite"} (${enforced ? "enforced" : "measured-not-enforced"}): ${formatMeasure(row)}`);
           if (enforced) assert(same(cpu, gpu), formatMeasure(row));
+          if (enforced) assertV3Locked(`v3-${testCase.name}`, cpu, gpu, rustV3);
           return { detail: formatMeasure(row), renderPath, enforced };
         } catch (error) {
           if (!compositeV3.some((row) => row.name === `v3-${testCase.name}`)) {
@@ -344,6 +369,7 @@ export async function runParityTests(engine, log) {
           if (enforced) {
             assert(same(cpu,gpu),formatMeasure(row));
             assert(coldMatchesWarm, `cold level 1 differs from warm: ${diff(gpu, cold)}`);
+            assertV3Locked(testCase.name, cpu, gpu, rustV3);
           }
           return { detail: formatMeasure(row), renderPath, enforced };
         } catch (error) {
@@ -401,6 +427,7 @@ export async function runParityTests(engine, log) {
         const row = { ...measureRow({ name, nodes: [], level: 0, tx: x, ty: y }, want, warm), renderPath, enforced: true, status: same(want, warm) ? "exact" : "mismatch" };
         compositeV3.push(row);
         assert(same(want, warm), formatMeasure(row));
+        assertV3Locked(`${name} (${x}, ${y})`, want, warm);
         return formatMeasure(row);
       };
       // RGBA 256x256 tiles of `image` by key, for `renderM5V3`.
@@ -586,6 +613,9 @@ export async function runParityTests(engine, log) {
         const gapName = sceneGap(doc.getSnapshot());
         if (gapName !== "v3-m5-integer") failures.push(`${name}: scene gap ${gapName}`);
         if (!same(cpu, gpu)) failures.push(`${name}: ${gap}`);
+        else {
+          try { assertV3Locked(name, cpu, gpu); } catch (error) { failures.push(String(error.message ?? error)); }
+        }
       }
       assert(failures.length === 0, failures.join("\n"));
       return `${colorAdjustGrid().length} settings, 0 pixels differ`;
@@ -610,6 +640,8 @@ export async function runParityTests(engine, log) {
           const image = await gpuTile(engine, { level: 0, tx: 0, ty: 0 });
           const pixel = image.slice((100 * 256 + 100) * 4, (100 * 256 + 100) * 4 + 4);
           assert(pixel.every((value, i) => Math.abs(value - expected[i]) <= tolerance), `${name} ${adjustment}: ${pixel} expected ${expected}`);
+          // No JS reference: the GPU tile itself is locked.
+          assertV3Locked(`v3-${name}-${adjustment ? "adjustment" : "effect"}`, image, image);
         });
       }
     }
@@ -655,6 +687,7 @@ export async function runParityTests(engine, log) {
         compositeV3.push(row);
         log(`${name} (enforced): ${formatMeasure(row)}`);
         assert(same(cpu, gpu), formatMeasure(row));
+        assertV3Locked(name, cpu, gpu);
         const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
         const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
         assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
@@ -712,6 +745,7 @@ export async function runParityTests(engine, log) {
           compositeV3.push(row);
           log(`${testCase.name} (enforced): ${formatMeasure(row)}`);
           assert(same(cpu, gpu), formatMeasure(row));
+          assertV3Locked(testCase.name, cpu, gpu);
           if (!testCase.tile) {
             const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
             const coldLevel1 = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
@@ -825,6 +859,7 @@ export async function runParityTests(engine, log) {
           compositeV3.push(row);
           log(`${testCase.name} (enforced): ${formatMeasure(row)}`);
           assert(same(cpu, gpu), formatMeasure(row));
+          assertV3Locked(testCase.name, cpu, gpu);
           assert(testCase.name.includes("degenerate") || gpu.some((v, i) => i % 4 === 3 && v > 0), `${testCase.name} drew nothing`);
           return formatMeasure(row);
         });
@@ -1078,6 +1113,7 @@ export async function runParityTests(engine, log) {
           compositeV3.push(row);
           log(`${name} (enforced): ${formatMeasure(row)}`);
           assert(same(cpu, gpu), formatMeasure(row));
+          assertV3Locked(name, cpu, gpu);
           const warm = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, pyramid: true }));
           const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
           assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
@@ -1222,6 +1258,13 @@ export async function runParityTests(engine, log) {
       const tile = await unstable(engine).readTile(0, 0);
       assert(tile.length === 262144, "readTile after recovery");
     });
+    await test("v3-browser.txt locks exactly the enforced v3 tiles", async () => {
+      if (writeParity) return `${v3Browser.size} hashes recorded for writing`;
+      const missing = [...v3Browser.keys()].filter((name) => !browserV3.has(name));
+      const stale = [...browserV3.keys()].filter((name) => !v3Browser.has(name));
+      assert(missing.length === 0 && stale.length === 0, `unlocked: ${missing.join(", ")}; stale: ${stale.join(", ")}`);
+      return `${v3Browser.size} browser and ${rustV3.size} Rust v3 hashes`;
+    });
   } finally {
     document.querySelector("#test-results").dataset.report = JSON.stringify({
       date: new Date().toISOString(),
@@ -1235,6 +1278,7 @@ export async function runParityTests(engine, log) {
       v3Unsupported: compositeV3.filter((row) => !isV3IntegerCase(row)),
       integerExactCount: compositeV3.filter((row) => isV3IntegerCase(row) && row.status === "exact" && row.count === 0).length,
       atlasRead,
+      v3Browser: Object.fromEntries(v3Browser),
       results,
     });
   }

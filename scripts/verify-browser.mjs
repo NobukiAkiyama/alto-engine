@@ -6,6 +6,7 @@
 // --suite=functional (or comma-separated names) narrows a diagnostic run.
 // --embed-test=substring isolates an embed test for before/after measurements.
 // ALTO_BROWSER_PRESENT_TIMING=1 records per-tick counters and GPU queue latency.
+// ALTO_WRITE_PARITY=1 rewrites tests/parity/v3-browser.txt, the locked v3 browser tiles.
 // ALTO_BROWSER_VERBOSE_GPU=1 enables Chrome verbose GPU/process logging.
 // Every run saves Chrome stderr and CDP GPU/process/console diagnostics. An explicit
 // ALTO_BROWSER_EXPECTED_VERSION refuses a changed browser; watchdogs stay on unless
@@ -36,6 +37,8 @@ const surfaceRecording = process.env.ALTO_BROWSER_SURFACE_RECORDING === "1";
 const resizeBarrier = process.env.ALTO_BROWSER_RESIZE_BARRIER === "1";
 const verboseGpu = process.env.ALTO_BROWSER_VERBOSE_GPU === "1";
 const presentTiming = process.env.ALTO_BROWSER_PRESENT_TIMING === "1";
+// Rewrites tests/parity/v3-browser.txt from the parity suite instead of checking it.
+const writeParity = process.env.ALTO_WRITE_PARITY === "1";
 const gpuTrace = process.env.ALTO_BROWSER_GPU_TRACE === "1";
 const graphiteBackend = process.env.ALTO_BROWSER_GRAPHITE_BACKEND || "default";
 if (!["default", "swiftshader"].includes(graphiteBackend)) throw Error("invalid Graphite comparison backend");
@@ -296,6 +299,7 @@ try {
   };
   await send("Page.enable");
   if (presentTiming) await send("Page.addScriptToEvaluateOnNewDocument", { source: "globalThis.__altoPresentTiming = true;" });
+  if (writeParity) await send("Page.addScriptToEvaluateOnNewDocument", { source: "globalThis.__altoWriteParity = true;" });
   if (surfaceRecording) await send("Page.addScriptToEvaluateOnNewDocument", { source: await readFile(join(root, "tests/diagnostics/surface-recorder.js"), "utf8") });
   await send("Runtime.enable");
   await send("Log.enable");
@@ -510,6 +514,13 @@ try {
         await writeFile(file, report.endsWith("\n") ? report : report + "\n");
       }
       const parsed = report ? JSON.parse(report) : null;
+      if (writeParity && name === "parity" && parsed?.v3Browser) {
+        const lines = Object.entries(parsed.v3Browser).map(([test, fnv]) => `${fnv} ${test}`);
+        const header = "# FNV-1a 64 of every enforced v3 browser tile outside the Rust composite catalog, then its test name.\n" +
+          "# Regenerate with ALTO_WRITE_PARITY=1 node scripts/verify-browser.mjs --suite=parity.\n";
+        await writeFile(join(root, "tests/parity/v3-browser.txt"), header + lines.join("\n") + "\n");
+        console.log("wrote tests/parity/v3-browser.txt with", lines.length, "hashes");
+      }
       const results = parsed?.results || [];
       const failed = results.filter((result) => result.pass === false);
       const ok = !suiteError && results.length > 0 && failed.length === 0;
