@@ -134,7 +134,12 @@ impl Renderer {
     /// Only for a level >= 1 key whose whole footprint lies inside the canvas, so
     /// no descendant is missing at the canvas edge.
     pub(super) fn uniform_subtree(&mut self, scene: &RenderScene, key: CacheKey) -> bool {
-        if !self.uniform_pyramid || !self.integer_cache || key.0 <= 0 || key.0 > 12 {
+        if !self.uniform_pyramid
+            || !self.integer_cache
+            || scene.render_version != alto_core::RENDER_VERSION_EXACT
+            || key.0 <= 0
+            || key.0 > 12
+        {
             return false;
         }
         let span = 256i64 << key.0;
