@@ -383,7 +383,7 @@ pub struct Renderer {
     visible_job: Option<TileJob>,
     visible_tile_jobs: bool,
     composite: wgpu::ComputePipeline,
-    // Keep v3 shader compilation off v1/v2 queues, including after GPU recovery.
+    // Built with the device: new documents are v3. v1/v2 never use them.
     composite_q14: OnceLock<wgpu::ComputePipeline>,
     downsample: wgpu::ComputePipeline,
     downsample_q14: OnceLock<wgpu::ComputePipeline>,
@@ -1540,14 +1540,30 @@ impl Renderer {
                 | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC,
         )?;
-        let cache = texture(
+        // New documents are render version 3, so the display cache starts in its
+        // uint format. Starting in Rgba8Unorm made the first v3 frame create a second
+        // cache and scratch while the first stayed charged until the GPU finished:
+        // about 11.5 MiB over a 64 MiB budget, which a slow adapter could exceed.
+        let cache = memory::create_texture(
             &device,
-            "display tiles",
-            display_layers,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            &wgpu::TextureDescriptor {
+                label: Some("display tiles"),
+                size: wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: display_layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            Class::Fixed,
         )?;
         let scratch = memory::create_texture(
             &device,
@@ -1561,7 +1577,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: wgpu::TextureFormat::Rgba8Uint,
                 usage: wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -1571,6 +1587,17 @@ impl Renderer {
         )?;
         let atlas_view = array_view(&atlas);
         let cache_view = array_view(&cache);
+        let composite_q14 = compute(
+            &device,
+            "integer tile compositor",
+            &crate::integer_composite_shader(),
+        );
+        let downsample_q14 = compute(
+            &device,
+            "integer display pyramid",
+            include_str!("../shaders/downsample-q14.wgsl"),
+        );
+        let present_q14 = integer_present(&device, config.format);
         let downsample = compute(
             &device,
             "display pyramid",
@@ -1649,11 +1676,11 @@ impl Renderer {
             visible_job: None,
             visible_tile_jobs: true,
             composite,
-            composite_q14: OnceLock::new(),
+            composite_q14: OnceLock::from(composite_q14),
             downsample,
-            downsample_q14: OnceLock::new(),
-            integer_cache: false,
-            present_q14: OnceLock::new(),
+            downsample_q14: OnceLock::from(downsample_q14),
+            integer_cache: true,
+            present_q14: OnceLock::from(present_q14),
             present,
             brush,
             sampler,
@@ -4326,5 +4353,33 @@ mod shader_tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         }
+    }
+}
+#[cfg(test)]
+mod v3_cache_tests {
+    /// A new renderer already holds the uint display cache, so the first v3 scene
+    /// charges no second cache while the first waits for the GPU to retire it.
+    #[test]
+    fn first_v3_scene_allocates_no_second_display_cache() {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        let instance = wgpu::Instance::new(descriptor);
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        let before = renderer.gpu_bytes().budget_used;
+        let scene = alto_scene::RenderScene {
+            canvas: alto_core::IRect {
+                x0: 0,
+                y0: 0,
+                x1: 8192,
+                y1: 8192,
+            },
+            root: 0,
+            nodes: vec![],
+            render_version: alto_core::RENDER_VERSION_EXACT,
+        };
+        renderer.prepare_scene(&scene).unwrap();
+        assert_eq!(renderer.gpu_bytes().budget_used, before);
     }
 }
