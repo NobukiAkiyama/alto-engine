@@ -73,14 +73,15 @@ async function settled(engine) {
   return unstable(engine).settle();
 }
 /**
- * Six layers whose 256 px tiles all differ (content addressing cannot merge them), seen
- * at zoom 0.5: each display tile needs up to 24 inputs, more than a job decodes inline.
+ * Twelve layers whose 256 px tiles all differ (content addressing cannot merge them),
+ * seen at zoom 0.5. A level-1 tile is the downsample of its level-0 tiles, and each of
+ * those needs 12 inputs, more than a job decodes inline (`INLINE_DECODE_MAX`, 8).
  * cold(workers) renders from empty caches with or without the decode pool.
  */
 async function decodeFixture(engine) {
-  const doc = await engine.createDocument({ width: 1024, height: 512, renderVersion: 2 });
+  const doc = await engine.createDocument({ width: 1024, height: 512 });
   const assets = [];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     const c = new OffscreenCanvas(1024, 512), ctx = c.getContext("2d");
     ctx.fillStyle = `rgba(${40 * i},${200 - 30 * i},120,.4)`;
     ctx.fillRect(0, 0, 1024, 512);

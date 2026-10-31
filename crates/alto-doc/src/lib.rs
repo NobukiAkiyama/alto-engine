@@ -18,21 +18,12 @@ pub struct DocumentMeta {
     pub height: u32,
     pub color: ColorSpace,
     pub depth: BitDepth,
+    /// File format 4. Earlier formats held render versions 1 and 2, which are
+    /// not supported.
     pub format_version: u32,
-    /// Which compositor samples this document. Absent in files written before
-    /// render version 2; those load as [`alto_core::RENDER_VERSION_F32`] and keep
-    /// the float bilinear path. New documents are [`alto_core::RENDER_VERSION`].
-    #[serde(
-        default = "legacy_render_version",
-        skip_serializing_if = "is_legacy_render"
-    )]
+    /// Which compositor samples this document: always
+    /// [`alto_core::RENDER_VERSION_EXACT`]. Kept so a later version can be told apart.
     pub render_version: u32,
-}
-fn legacy_render_version() -> u32 {
-    alto_core::RENDER_VERSION_F32
-}
-fn is_legacy_render(version: &u32) -> bool {
-    *version == alto_core::RENDER_VERSION_F32
 }
 impl DocumentMeta {
     pub fn srgb_u8(width: u32, height: u32) -> Self {
@@ -41,22 +32,10 @@ impl DocumentMeta {
             height,
             color: ColorSpace::Srgb,
             depth: BitDepth::U8,
-            // Render version 3 is file format 4. The live value matches the
-            // snapshot so a journal digest survives save and replay.
+            // The live value matches the snapshot so a journal digest survives
+            // save and replay.
             format_version: 4,
             render_version: alto_core::RENDER_VERSION_EXACT,
-        }
-    }
-    /// Explicit version-2 constructor for legacy fixtures and compatibility
-    /// checks. New documents use [`Self::srgb_u8`].
-    pub fn srgb_u8_v2(width: u32, height: u32) -> Self {
-        Self {
-            width,
-            height,
-            color: ColorSpace::Srgb,
-            depth: BitDepth::U8,
-            format_version: 3,
-            render_version: alto_core::RENDER_VERSION,
         }
     }
     fn validate(&self) -> Result<(), DocError> {
@@ -65,17 +44,10 @@ impl DocumentMeta {
                 "Canvas dimensions must be positive".into(),
             ));
         }
-        if self.format_version != 1
-            && self.format_version != 2
-            && self.format_version != 3
-            && self.format_version != 4
-        {
+        if self.format_version != 4 {
             return Err(DocError::Invalid("Unsupported document format".into()));
         }
-        if self.render_version != alto_core::RENDER_VERSION_F32
-            && self.render_version != alto_core::RENDER_VERSION
-            && self.render_version != alto_core::RENDER_VERSION_EXACT
-        {
+        if self.render_version != alto_core::RENDER_VERSION_EXACT {
             return Err(DocError::Invalid("Unsupported render version".into()));
         }
         if self.color != ColorSpace::Srgb || self.depth != BitDepth::U8 {
@@ -527,16 +499,6 @@ pub fn validate_effect(effect: &Effect) -> Result<(), DocError> {
     effect.validate()
 }
 
-pub fn extended_effect(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Levels { .. }
-            | Effect::Curves { .. }
-            | Effect::HueSaturation { .. }
-            | Effect::Invert { .. }
-    )
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
     Group {
@@ -551,10 +513,9 @@ pub enum NodeKind {
     },
     Text {
         content: Box<TextContent>,
-        /// Render version 3: the content's glyphs baked to integers (an `ALTB` blob,
-        /// doc/design/2026-10-28-v3-integer-text.md "焼き込み"), which is all a v3
-        /// render reads. Always `None` below version 3 and then not serialized, so
-        /// v1 / v2 JSON and content hashes are unchanged.
+        /// The content's glyphs baked to integers (an `ALTB` blob,
+        /// doc/design/2026-10-28-v3-integer-text.md "焼き込み"), which is all a
+        /// render reads. `None` until baked, and then not serialized.
         bake: Option<ContentHash>,
     },
     Adjustment {
@@ -1440,27 +1401,8 @@ impl Document {
             Ok(())
         }
         walk(self, self.root, &mut ordered)?;
-        let mut meta = self.meta.clone();
-        let extended = ordered.iter().any(|node| {
-            node.props.effects.iter().any(extended_effect)
-                || matches!(&node.kind, NodeKind::Adjustment { adjustment } if extended_effect(adjustment))
-        });
-        // Render version 2 changes pixels. Writing it as format 3 makes a build
-        // that only accepts 1 and 2 refuse the file, instead of skipping the
-        // unknown `render_version` field and compositing the f32 path.
-        // Render version 3 changes color-adjust. Writing it as format 4 makes a
-        // build that only accepts 1, 2 and 3 refuse the file.
-        meta.format_version = if meta.render_version >= alto_core::RENDER_VERSION_EXACT {
-            4
-        } else if meta.render_version >= alto_core::RENDER_VERSION {
-            3
-        } else if extended {
-            2
-        } else {
-            1
-        };
         let snapshot = Snapshot {
-            meta,
+            meta: self.meta.clone(),
             root: self.root,
             nodes: ordered,
             assets: self.assets.values().cloned().collect(),
@@ -1550,12 +1492,7 @@ impl Document {
             if let NodeKind::Adjustment { adjustment } = &node.kind {
                 validate_effect(adjustment)?;
             }
-            if let NodeKind::Text { content, bake } = &node.kind {
-                if bake.is_some() && doc.meta.render_version < alto_core::RENDER_VERSION_EXACT {
-                    return Err(DocError::Invalid(
-                        "A text bake needs render version 3".into(),
-                    ));
-                }
+            if let NodeKind::Text { content, .. } = &node.kind {
                 content
                     .validate()
                     .map_err(|e| DocError::Invalid(e.to_string()))?;
@@ -2688,55 +2625,37 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn render_version_two_is_format_three_and_version_one_bytes_do_not_change() {
-        let fresh = Document::new(DocumentMeta::srgb_u8_v2(8, 8)).unwrap();
-        let bytes = fresh.snapshot_bytes().unwrap();
+    fn only_render_version_three_and_format_four_load() {
+        let bytes = Document::new(DocumentMeta::srgb_u8(8, 8))
+            .unwrap()
+            .snapshot_bytes()
+            .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["meta"]["format_version"], 3);
-        assert_eq!(value["meta"]["render_version"], 2);
-        let format = value["meta"]["format_version"].as_u64().unwrap();
-        assert!(
-            format != 1 && format != 2,
-            "a build that only accepts format 1 and 2 refuses this file"
-        );
-        let loaded = Document::from_snapshot_bytes(&bytes).unwrap();
-        assert_eq!(loaded.meta.format_version, 3);
-        assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION);
-        assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
-
-        let mut legacy = DocumentMeta::srgb_u8(8, 8);
-        legacy.render_version = alto_core::RENDER_VERSION_F32;
-        legacy.format_version = 1;
-        let v1 = Document::new(legacy).unwrap();
-        let v1_bytes = v1.snapshot_bytes().unwrap();
-        let v1_text = String::from_utf8(v1_bytes.clone()).unwrap();
-        assert!(!v1_text.contains("render_version"));
-        let v1_value: serde_json::Value = serde_json::from_slice(&v1_bytes).unwrap();
-        assert_eq!(v1_value["meta"]["format_version"], 1);
-        assert_eq!(
-            Document::from_snapshot_bytes(&v1_bytes)
-                .unwrap()
-                .snapshot_bytes()
-                .unwrap(),
-            v1_bytes
-        );
-
-        let mut rejected = value;
-        rejected["meta"]["format_version"] = serde_json::json!(5);
-        let err =
-            Document::from_snapshot_bytes(&serde_json::to_vec(&rejected).unwrap()).unwrap_err();
-        assert!(
-            err.to_string().contains("Unsupported document format"),
-            "{err}"
-        );
-        rejected["meta"]["format_version"] = serde_json::json!(4);
-        rejected["meta"]["render_version"] = serde_json::json!(4);
-        let err =
-            Document::from_snapshot_bytes(&serde_json::to_vec(&rejected).unwrap()).unwrap_err();
-        assert!(
-            err.to_string().contains("Unsupported render version"),
-            "{err}"
-        );
+        let load = |meta: serde_json::Value| {
+            let mut v = value.clone();
+            v["meta"] = meta;
+            Document::from_snapshot_bytes(&serde_json::to_vec(&v).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        let mut meta = value["meta"].clone();
+        // Render version 1 files had no `render_version`.
+        meta.as_object_mut().unwrap().remove("render_version");
+        meta["format_version"] = serde_json::json!(1);
+        assert!(load(meta).contains("render_version"));
+        for (format, render, message) in [
+            (3, 2, "Unsupported document format"),
+            (4, 2, "Unsupported render version"),
+            (4, 1, "Unsupported render version"),
+            (5, 3, "Unsupported document format"),
+            (4, 4, "Unsupported render version"),
+        ] {
+            let mut meta = value["meta"].clone();
+            meta["format_version"] = serde_json::json!(format);
+            meta["render_version"] = serde_json::json!(render);
+            let err = load(meta);
+            assert!(err.contains(message), "{format}/{render}: {err}");
+        }
     }
 
     #[test]

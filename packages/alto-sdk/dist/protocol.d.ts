@@ -89,7 +89,7 @@ export interface Requests {
     createDocument: Q<{
         width: number;
         height: number;
-        renderVersion?: 2 | 3;
+        renderVersion?: 3;
     }, WireState>;
     transact: Q<{
         intent: string;
@@ -99,7 +99,6 @@ export interface Requests {
     }, WireState>;
     undo: Q<None, WireState>;
     redo: Q<None, WireState>;
-    upgradeRenderVersion: Q<None, WireState>;
     beginBrush: Q<{
         layer: string;
         config: BrushConfig;

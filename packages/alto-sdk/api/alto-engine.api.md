@@ -264,10 +264,10 @@ export class DocumentHandle {
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
     redo(): Promise<void>;
-    save(target: ArchiveTarget, options?: UnstableRenderV3Options): Promise<void>;
+    save(target: ArchiveTarget): Promise<void>;
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
-    } & UnstableRenderV3Options): Promise<{
+    }): Promise<{
         written: number;
         skipped: number;
     }>;
@@ -296,7 +296,6 @@ export class DocumentHandle {
     };
     transact<T>(intent: Intent, build: (tx: Transaction) => T): Promise<T>;
     undo(): Promise<void>;
-    upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void>;
     readonly vectors: {
         set: (id: NodeId, paths: StyledPath[]) => Promise<void>;
         setMask: (id: NodeId, mask: VectorMask | null) => Promise<void>;
@@ -408,7 +407,7 @@ export interface Engine {
     createDocument(meta: {
         width: number;
         height: number;
-        renderVersion?: 2 | 3;
+        renderVersion?: 3;
     }): Promise<DocumentHandle>;
     dispose(): Promise<void>;
     readonly document: DocumentHandle | null;
@@ -855,9 +854,6 @@ export interface Rect {
     y1: number;
 }
 
-// @public @deprecated (undocumented)
-export function renderVersionUpgrade(options?: UnstableRenderV3Options, buildEnabled?: boolean): "stable" | "unstable" | "rejected";
-
 // @public
 export function replaceText(content: TextContent, start: number, end: number, insert: string): TextContent;
 
@@ -1061,14 +1057,6 @@ export class Transaction {
     setVector(id: NodeId, paths: StyledPath[]): void;
     // (undocumented)
     setVectorMask(id: NodeId, mask: VectorMask | null): void;
-}
-
-// @public @deprecated (undocumented)
-export const UNSTABLE_RENDER_V3 = true;
-
-// @public @deprecated (undocumented)
-export interface UnstableRenderV3Options {
-    unstableRenderV3?: boolean;
 }
 
 // @public

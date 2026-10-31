@@ -34,28 +34,6 @@ export async function runM6Tests(engine,log){
    await doc.vectors.set(layer,[edited]);const after=await unstable(engine).readTile(0,0);assert(!same(before,after),'edit did not change GPU pixels');await doc.undo();assert(same(before,await unstable(engine).readTile(0,0)),'path Undo pixels');assert(paths===JSON.stringify(doc.getSnapshot().nodes.get(layer).paths),'path Undo data');await doc.redo();assert(same(after,await unstable(engine).readTile(0,0)),'path Redo pixels');
    await doc.transact('shear',tx=>tx.setTransform(layer,[1,.1,.25,.8,20,10]));await frame(engine);assert((await at(engine,220,270))[1]>0,'transformed vector');await doc.undo();assert(same(after,await unstable(engine).readTile(0,0)),'transform Undo');
  });
- await test('zoom levels -6 through 12 retain analytic curve contours across tile seams',async()=>{
-   doc=await engine.createDocument({width:65536,height:65536,renderVersion:2});const p=await styled(engine,'M128 192 Q256 64 384 192 L384 400 H128 Z',{fill:[1,1,1,1]});await doc.transact('analytic curve',tx=>layer=tx.addVector([p]));
-   for(const level of [-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,8,10,12]){
-     // Scale the same exact quadratic for minification; keep it within the document at L10/12.
-     const transform=Math.min(128,2**Math.max(0,level)),scale=2**level;
-     await doc.transact('zoom case',tx=>tx.setTransform(layer,[transform,0,0,transform,0,0]));
-     const px=192*transform,py=144*transform,tx0=Math.floor(px/(256*scale)),ty0=Math.floor(py/(256*scale));let checked=0,partial=0;
-     for(const ty of new Set([Math.max(0,ty0-1),ty0]))for(const tx of new Set([Math.max(0,tx0-1),tx0])){
-       const t=await unstable(engine).readTileLevel(level,tx,ty);
-       for(let y=0;y<256;y++)for(let x=0;x<256;x++){
-         const wx=(tx*256+x+.5)*scale/transform,wy=(ty*256+y+.5)*scale/transform;
-         if(wx<132||wx>380||wy<100||wy>380)continue;
-         const curve=128+(wx-256)**2/256,slope=(wx-256)/128,distance=(wy-curve)/Math.sqrt(1+slope*slope)*transform/scale,a=t[(y*256+x)*4+3];
-         if(distance>1.2&&wy<398){assert(a===255,`interior seam L${level} at ${wx},${wy}: ${a}`);checked++;}
-         if(distance< -1.2){assert(a===0,`exterior L${level}: ${a}`);checked++;}
-         if(Math.abs(distance)<1.2&&a>0&&a<255)partial++;
-       }
-     }
-     assert(checked>0,'no zoom samples L'+level);if(level<=8)assert(partial>0,'MSAA contour missing L'+level);metrics.zoom.push({level,documentPixelsPerOutputPixel:scale,checked,partial});
-   }
-   const stats=await unstable(engine).vectorStats();assert(stats.entries>1,'level-band mesh cache absent');metrics.meshCache=stats;
- });
  await test('vector masks / feather / raster mask intersection / canonical raster unchanged',async()=>{
    doc=await engine.createDocument({width:512,height:512});const canvas=new OffscreenCanvas(512,512),c=canvas.getContext('2d');c.fillStyle='blue';c.fillRect(0,0,512,512);const asset=await engine.assets.importImage(await canvas.convertToBlob());await doc.transact('raster',tx=>layer=tx.addRasterFromAsset(asset));const original=JSON.stringify(await doc.nodeTiles(layer));
    const path=await engine.vectors.parseSvg('M128 64 H384 V448 H128 Z');await doc.vectors.setMask(layer,{path,feather:0});assert((await at(engine,200,200))[3]===255,'vector mask interior');assert((await at(engine,64,200))[3]===0,'vector mask exterior');
@@ -108,8 +86,8 @@ export async function runM6Tests(engine,log){
    await testing(engine).destroyGpu();await restored;
    assert(same(masked,await unstable(engine).readTile(0,0)),'dense GPU rebuild pixels');await frame(engine);
  });
- await test('mesh cache reuse / invalid vector edits reject atomically',async()=>{
-   doc=await engine.createDocument({width:512,height:512,renderVersion:2});const p=await styled(engine,'M100 100 Q256 0 400 100 V400 H100 Z');await doc.transact('path',tx=>layer=tx.addVector([p]));await unstable(engine).readTile(0,0);const a=await unstable(engine).vectorStats();await doc.transact('opacity',tx=>tx.setProps(layer,{opacity:.8}));await unstable(engine).readTile(0,0);const b=await unstable(engine).vectorStats();assert(b.hits>a.hits,'mesh was not reused');assert(b.misses===a.misses,'opacity retessellated');
+ await test('invalid vector edits reject atomically',async()=>{
+   doc=await engine.createDocument({width:512,height:512});const p=await styled(engine,'M100 100 Q256 0 400 100 V400 H100 Z');await doc.transact('path',tx=>layer=tx.addVector([p]));await frame(engine);
    const snapshot=(await doc.snapshotHash()),revision=doc.getSnapshot().revision;
    for(const bad of [[],[{op:'line',x:2,y:3}],[{op:'move',x:1e20,y:0}],Array(4097).fill({op:'move',x:0,y:0})]){
      if(!bad.length)continue;let failed=false;try{await doc.vectors.set(layer,[{...p,data:{commands:bad}}]);}catch{failed=true;}assert(failed,'invalid path accepted');
