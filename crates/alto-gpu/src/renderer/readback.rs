@@ -135,8 +135,7 @@ impl FinishControl {
 pub(super) struct Lease(SharedPool);
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.buffer.unmap();
-        self.0.mapped.store(0, Ordering::Release);
+        self.0.unmap();
         self.0.busy.store(false, Ordering::Release);
     }
 }
@@ -246,10 +245,7 @@ impl StrokeReadback {
             // `fail_after` never reaches here. Unmap on every exit, then poison the
             // reader so a later `next_batch` cannot `map_async` a mapped buffer.
             release_after(
-                || {
-                    pool.buffer.unmap();
-                    pool.mapped.store(0, Ordering::Release);
-                },
+                || pool.unmap(),
                 || {
                     let mapped = pool
                         .buffer
@@ -396,10 +392,17 @@ impl Pool {
             c.1.lock().unwrap().take();
         }
         if result.is_err() {
-            self.buffer.unmap();
-            self.mapped.store(0, Ordering::Release);
+            self.unmap();
         }
         result
+    }
+    /// Unmaps once per `map`. Native wgpu reports a second unmap as an uncaptured
+    /// validation error, which marks the renderer lost. `mapped` is set before
+    /// `map_async`, so a pending map is cancelled here too.
+    pub(super) fn unmap(&self) {
+        if self.mapped.swap(0, Ordering::AcqRel) != 0 {
+            self.buffer.unmap();
+        }
     }
 }
 impl Renderer {
