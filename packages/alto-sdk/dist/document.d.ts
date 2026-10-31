@@ -1,4 +1,3 @@
-import { type UnstableRenderV3Options } from "./render-version.js";
 import { type Intent } from "./intents.js";
 import { type DocumentChange, type DocumentSnapshot } from "./snapshot.js";
 import { type ArchiveTarget, type ObjectStorageProvider } from "./storage.js";
@@ -57,11 +56,6 @@ export declare class DocumentHandle {
     undo(): Promise<void>;
     /** Redoes the last undone edit. */
     redo(): Promise<void>;
-    /**
-     * Switches a version-1 or version-2 document to render version 3 as one
-     * undoable edit. Opening or saving a document does not upgrade it.
-     */
-    upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void>;
     /**
      * Resolves once every edit made so far is in the recovery journal. Edits resolve
      * when applied; this rejects with STORAGE if the journal could not be written.
@@ -142,14 +136,14 @@ export declare class DocumentHandle {
      */
     exportImage(options?: ExportImageOptions): Promise<Blob>;
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-    save(target: ArchiveTarget, options?: UnstableRenderV3Options): Promise<void>;
+    save(target: ArchiveTarget): Promise<void>;
     /**
      * Saves the folder form. Content-addressed files are written once; manifest.json
      * last. A folder holding another document is refused unless `overwrite`.
      */
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
-    } & UnstableRenderV3Options): Promise<{
+    }): Promise<{
         written: number;
         skipped: number;
     }>;

@@ -78,7 +78,7 @@ async function settled(engine) {
  * cold(workers) renders from empty caches with or without the decode pool.
  */
 async function decodeFixture(engine) {
-  const doc = await engine.createDocument({ width: 1024, height: 512, renderVersion: 2 });
+  const doc = await engine.createDocument({ width: 1024, height: 512 });
   const assets = [];
   for (let i = 0; i < 6; i++) {
     const c = new OffscreenCanvas(1024, 512), ctx = c.getContext("2d");

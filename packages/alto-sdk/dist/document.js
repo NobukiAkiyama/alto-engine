@@ -119,14 +119,6 @@ export class DocumentHandle {
         return this.command("redo", {});
     }
     /**
-     * Switches a version-1 or version-2 document to render version 3 as one
-     * undoable edit. Opening or saving a document does not upgrade it.
-     */
-    upgradeRenderVersion(options) {
-        void options;
-        return this.command("upgradeRenderVersion", {});
-    }
-    /**
      * Resolves once every edit made so far is in the recovery journal. Edits resolve
      * when applied; this rejects with STORAGE if the journal could not be written.
      */
@@ -266,8 +258,7 @@ export class DocumentHandle {
         return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
     }
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-    async save(target, options) {
-        void options;
+    async save(target) {
         await this.endTool();
         this.core.emit("saveState", "saving");
         let token;

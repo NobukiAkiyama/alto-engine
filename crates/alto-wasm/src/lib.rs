@@ -234,8 +234,7 @@ impl Runtime {
         let mut engine = Engine::new();
         let meta = match render_version {
             None | Some(3) => DocumentMeta::srgb_u8(w, h),
-            Some(2) => DocumentMeta::srgb_u8_v2(w, h),
-            _ => return Err(error("INVALID_ARGUMENT: render version must be 2 or 3")),
+            _ => return Err(error("INVALID_ARGUMENT: render version must be 3")),
         };
         let doc = engine.create_document(meta).map_err(error)?;
         self.engine = engine;
@@ -1009,16 +1008,6 @@ impl Runtime {
             .effect_ops(self.doc, id, effects, use_selection)
             .map_err(error)?;
         self.command("effects.set", ops)
-    }
-    /// One undoable edit from render version 1 or 2 to version 3. Load and save
-    /// do not call this. A document already on version 3 is rejected.
-    #[wasm_bindgen(js_name=upgradeRenderVersion)]
-    pub fn upgrade_render_version(&mut self) -> Result<String, JsValue> {
-        if self.sampler.is_some() {
-            return Err(error("CONFLICT: finish tool first"));
-        }
-        let ops = self.engine.render_upgrade_ops(self.doc).map_err(error)?;
-        self.command("render.upgrade", ops)
     }
     #[wasm_bindgen(js_name=importRgba)]
     pub fn import_rgba(

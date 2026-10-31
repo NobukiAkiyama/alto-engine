@@ -1,6 +1,6 @@
 //! Canvas geometry, fills, and 1:1 reads. New hashes are stored before the transaction.
 use super::*;
-use alto_core::{Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, RENDER_VERSION_EXACT, TileKey};
+use alto_core::{Affine2, MAX_TREE_DEPTH, NodeId, PixelFormat, TileKey};
 use alto_doc::{Document, Node, NodeKind, Op, PropPatch, TileChange};
 use alto_raster::{TileData, TileMap};
 use alto_text::TextFrame;
@@ -1317,51 +1317,6 @@ impl Engine {
         self.transact(handle, "layer.merge", ops, doc.revision)?;
         Ok(())
     }
-
-    /// One undoable edit from render version 1 or 2 to version 3. This is never
-    /// applied by load or save, because rendered pixels can change. Text bakes
-    /// are regenerated as part of the same transaction.
-    pub fn upgrade_render_version(&mut self, handle: DocHandle) -> Result<ChangeSet, EngineError> {
-        let ops = self.render_upgrade_ops(handle)?;
-        let revision = self.document(handle)?.revision;
-        self.transact(handle, "render.upgrade", ops, revision)
-    }
-
-    /// The metadata and text edits for [`Self::upgrade_render_version`].
-    /// The WASM command applies them through the normal journal path.
-    pub fn render_upgrade_ops(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
-        let doc = self.document(handle)?;
-        if doc.meta.render_version >= RENDER_VERSION_EXACT {
-            return Err(bad("Render version is already current"));
-        }
-        let mut meta = doc.meta.clone();
-        meta.render_version = RENDER_VERSION_EXACT;
-        meta.format_version = 4;
-        let mut ops = vec![Op::SetMeta { meta }];
-        for node in doc.nodes.values() {
-            if let NodeKind::Text { content, .. } = &node.kind {
-                ops.push(Op::SetText {
-                    id: node.id,
-                    content: content.clone(),
-                    bake: None,
-                });
-            }
-        }
-        Ok(ops)
-    }
-
-    /// Compatibility alias for [`Self::upgrade_render_version`].
-    pub fn upgrade_render_version_unstable(
-        &mut self,
-        handle: DocHandle,
-    ) -> Result<ChangeSet, EngineError> {
-        self.upgrade_render_version(handle)
-    }
-
-    /// Compatibility alias for [`Self::render_upgrade_ops`].
-    pub fn render_upgrade_ops_unstable(&self, handle: DocHandle) -> Result<Vec<Op>, EngineError> {
-        self.render_upgrade_ops(handle)
-    }
 }
 
 fn paths_ref(node: &Node) -> &Vec<StyledPath> {
@@ -1381,7 +1336,7 @@ fn node_text(node: &Node) -> &alto_text::TextContent {
 mod tests {
     use super::*;
     use alto_core::PixelFormat;
-    use alto_doc::{BlendMode, Node, NodeKind};
+    use alto_doc::{BlendMode, Node};
     use alto_scene::RenderBlend;
 
     fn layer(engine: &mut Engine, handle: DocHandle) -> NodeId {
@@ -1436,7 +1391,7 @@ mod tests {
     fn overlay_reaches_the_renderer_and_levels_bump_the_format() {
         let mut engine = Engine::new();
         let handle = engine
-            .create_document(DocumentMeta::srgb_u8_v2(32, 32))
+            .create_document(DocumentMeta::srgb_u8(32, 32))
             .unwrap();
         let id = layer(&mut engine, handle);
         let mut node = engine.document(handle).unwrap().node(id).unwrap().clone();
@@ -1486,181 +1441,16 @@ mod tests {
             .unwrap();
         let snapshot = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 3);
-        assert_eq!(value["meta"]["render_version"], 2);
-        let reopened = engine.open_snapshot(&snapshot).unwrap();
-        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 3);
-        engine.undo(handle).unwrap();
-        let snapshot = engine.snapshot(handle).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        // The document is still render version 2, so removing levels does not
-        // drop the file back to a format a pre-#10 build would accept.
-        assert_eq!(value["meta"]["format_version"], 3);
-        assert_eq!(value["meta"]["render_version"], 2);
-        engine.open_snapshot(&snapshot).unwrap();
-    }
-
-    #[test]
-    fn render_version_one_levels_stay_format_two_and_resave_identically() {
-        let mut engine = Engine::new();
-        let mut meta = DocumentMeta::srgb_u8(32, 32);
-        meta.render_version = alto_core::RENDER_VERSION_F32;
-        meta.format_version = 1;
-        let handle = engine.create_document(meta).unwrap();
-        let id = layer(&mut engine, handle);
-        let revision = engine.document(handle).unwrap().revision;
-        engine
-            .transact(
-                handle,
-                "levels",
-                vec![Op::SetProps {
-                    id,
-                    patch: PropPatch {
-                        effects: Some(vec![alto_doc::Effect::Levels {
-                            in_black: 0.0,
-                            in_white: 1.0,
-                            gamma: 1.0,
-                            out_black: 0.0,
-                            out_white: 1.0,
-                            selection: None,
-                            extra: Default::default(),
-                        }]),
-                        ..PropPatch::default()
-                    },
-                }],
-                revision,
-            )
-            .unwrap();
-        let snapshot = engine.snapshot(handle).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 2);
-        assert!(value["meta"].get("render_version").is_none());
-        let reopened = engine.open_snapshot(&snapshot).unwrap();
-        let again = engine.document(reopened).unwrap().snapshot_bytes().unwrap();
-        assert_eq!(again, snapshot);
-        engine.undo(handle).unwrap();
-        let snapshot = engine.snapshot(handle).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 1);
-        assert!(value["meta"].get("render_version").is_none());
-        let reopened = engine.open_snapshot(&snapshot).unwrap();
-        let again = engine.document(reopened).unwrap().snapshot_bytes().unwrap();
-        assert_eq!(again, snapshot);
-    }
-
-    #[test]
-    fn render_upgrade_is_one_undoable_edit_and_load_save_stays_on_version_one() {
-        let mut engine = Engine::new();
-        let mut meta = DocumentMeta::srgb_u8(32, 32);
-        meta.render_version = alto_core::RENDER_VERSION_F32;
-        meta.format_version = 1;
-        let handle = engine.create_document(meta).unwrap();
-        let before = engine.snapshot(handle).unwrap();
-        let opened = engine.open_snapshot(&before).unwrap();
-        assert_eq!(engine.snapshot(opened).unwrap(), before);
-        assert_eq!(engine.history_state(opened).unwrap(), (0, 0));
-        assert_eq!(
-            engine.document(opened).unwrap().meta.render_version,
-            alto_core::RENDER_VERSION_F32
-        );
-        let value: serde_json::Value = serde_json::from_slice(&before).unwrap();
-        assert!(value["meta"].get("render_version").is_none());
-        assert_eq!(value["meta"]["format_version"], 1);
-
-        engine.upgrade_render_version(handle).unwrap();
-        assert_eq!(engine.history_state(handle).unwrap(), (1, 0));
-        assert_eq!(
-            engine.document(handle).unwrap().meta.render_version,
-            alto_core::RENDER_VERSION_EXACT
-        );
-        assert_eq!(engine.document(handle).unwrap().meta.format_version, 4);
-        let upgraded = engine.snapshot(handle).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&upgraded).unwrap();
-        assert_eq!(value["meta"]["render_version"], 3);
         assert_eq!(value["meta"]["format_version"], 4);
-        let reopened = engine.open_snapshot(&upgraded).unwrap();
-        assert_eq!(
-            engine.document(reopened).unwrap().snapshot_bytes().unwrap(),
-            upgraded
-        );
-
+        assert_eq!(value["meta"]["render_version"], 3);
+        let reopened = engine.open_snapshot(&snapshot).unwrap();
+        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 4);
         engine.undo(handle).unwrap();
-        assert_eq!(engine.history_state(handle).unwrap(), (0, 1));
-        assert_eq!(engine.snapshot(handle).unwrap(), before);
-        assert_eq!(
-            engine.document(handle).unwrap().meta.render_version,
-            alto_core::RENDER_VERSION_F32
-        );
-
-        engine.redo(handle).unwrap();
-        assert_eq!(engine.snapshot(handle).unwrap(), upgraded);
-        let err = engine.upgrade_render_version(handle).unwrap_err();
-        assert!(err.to_string().contains("already current"), "{err}");
-        assert_eq!(engine.history_state(handle).unwrap(), (1, 0));
-    }
-
-    /// The browser upgrade test opens this package. It is a version-1 512×512
-    /// document with the scale-bilinear ramp, so production readTile can be
-    /// compared with `renderCase("scale-bilinear")` after the explicit upgrade.
-    #[test]
-    fn render_v1_bilinear_fixture_is_version_one_and_load_save_does_not_upgrade() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/render-v1-bilinear.alto");
-        let bytes = std::fs::read(&path).unwrap();
-        let mut engine = Engine::new();
-        let (handle, warnings) = engine.open_package(&bytes).unwrap();
-        assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(engine.history_state(handle).unwrap(), (0, 0));
-        let (transform, tile_hash) = {
-            let doc = engine.document(handle).unwrap();
-            assert_eq!(doc.meta.width, 512);
-            assert_eq!(doc.meta.height, 512);
-            assert_eq!(doc.meta.render_version, alto_core::RENDER_VERSION_F32);
-            assert_eq!(doc.meta.format_version, 1);
-            let root = doc.node(doc.root).unwrap();
-            let children = root.children().unwrap();
-            assert_eq!(children.len(), 1);
-            let layer = doc.node(children[0]).unwrap();
-            let transform = layer.props.transform;
-            let NodeKind::Raster { tiles } = &layer.kind else {
-                panic!("fixture layer is not a raster");
-            };
-            assert_eq!(tiles.tiles.len(), 1);
-            let (key, hash) = tiles.tiles.iter().next().unwrap();
-            assert_eq!(*key, TileKey { tx: 0, ty: 0 });
-            (transform, *hash)
-        };
-        assert_eq!(
-            transform,
-            alto_core::Affine2([2.0, 0.0, 0.0, 2.0, 0.0, 0.0])
-        );
-        let tile = engine.require_tile(&tile_hash).unwrap();
-        for y in 0..256u32 {
-            for x in 0..256u32 {
-                let i = ((y * 256 + x) * 4) as usize;
-                assert_eq!(tile.pixels[i], (x & 255) as u8);
-                assert_eq!(tile.pixels[i + 1], (y & 255) as u8);
-                assert_eq!(tile.pixels[i + 2], ((x * 3 + y * 5) & 255) as u8);
-                assert_eq!(tile.pixels[i + 3], 255);
-            }
-        }
-        drop(tile);
         let snapshot = engine.snapshot(handle).unwrap();
-        let text = String::from_utf8(snapshot.clone()).unwrap();
-        assert!(!text.contains("render_version"));
-        assert!(text.contains("\"format_version\": 1"));
-        let opened = engine.open_snapshot(&snapshot).unwrap();
-        assert_eq!(engine.snapshot(opened).unwrap(), snapshot);
-        let again = engine.save_package(handle).unwrap();
-        let (reopened, warnings) = engine.open_package(&again).unwrap();
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let resaved = String::from_utf8(engine.snapshot(reopened).unwrap()).unwrap();
-        assert_eq!(
-            engine.document(reopened).unwrap().meta.render_version,
-            alto_core::RENDER_VERSION_F32
-        );
-        assert!(!resaved.contains("render_version"));
-        assert!(resaved.contains("\"format_version\": 1"));
+        let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(value["meta"]["format_version"], 4);
+        assert_eq!(value["meta"]["render_version"], 3);
+        engine.open_snapshot(&snapshot).unwrap();
     }
 
     #[test]

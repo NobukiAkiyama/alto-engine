@@ -110,11 +110,11 @@ export interface Engine {
         parseSvg(svg: string): Promise<PathData>;
         toSvg(data: PathData): Promise<string>;
     };
-    /** A new empty document. Version 3 is the default; version 2 is available for compatibility. */
+    /** A new empty document. It uses render version 3, the only version. */
     createDocument(meta: {
         width: number;
         height: number;
-        renderVersion?: 2 | 3;
+        renderVersion?: 3;
     }): Promise<DocumentHandle>;
     /** Opens a `.alto` archive. Refused while a recovery journal waits. */
     open(source: Blob | ArchiveSource): Promise<DocumentHandle>;

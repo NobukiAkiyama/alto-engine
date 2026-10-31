@@ -646,12 +646,6 @@ async function execute(m) {
             postMessage({ t: "patch", value: s });
             return s;
         }
-        case "upgradeRenderVersion": {
-            const s = JSON.parse(runtime.upgradeRenderVersion());
-            queueJournal();
-            postMessage({ t: "patch", value: s });
-            return s;
-        }
         case "beginBrush":
             runtime.beginBrush(m.layer, JSON.stringify(m.config), new Float32Array(m.color), m.erase, !!m.mask);
             return true;
