@@ -29,7 +29,7 @@ export class Runtime {
     checkpointParts(): Uint8Array;
     commit(message: string, created_at: number, author: string, allow_empty: boolean): string;
     cpuBrushReference(config: string, color: Float32Array, samples: Float32Array): Uint8Array;
-    createDocument(w: number, h: number): string;
+    createDocument(w: number, h: number, render_version?: number | null): string;
     static create(canvas: OffscreenCanvas, budget: number): Promise<Runtime>;
     destroyGpu(): void;
     endBrush(): Promise<string>;
@@ -129,6 +129,16 @@ export class Runtime {
     takeDecodeRequests(max: number): Uint8Array;
     takeFinishJournalError(): string | undefined;
     takeJournal(): Uint8Array;
+    /**
+     * True once after the renderer created pipelines; the Worker then waits for the
+     * queue before it counts a held-back present as idle.
+     */
+    takePipelinesBuilt(): boolean;
+    /**
+     * A text node's render version 3 bake for tests: `{ hash, hex }`, both null
+     * when the node has none. The JS reference reads exactly these bytes.
+     */
+    textBakeForTesting(id: string): string;
     textCaret(id: string, offset: number): string;
     textHitTest(id: string, x: number, y: number): number;
     textInfo(id: string): string;
@@ -142,8 +152,8 @@ export class Runtime {
     transact(request: string): string;
     undo(): string;
     /**
-     * One undoable edit from render version 1 to version 2. Load and save do not
-     * call this. A document already on version 2 is rejected.
+     * One undoable edit from render version 1 or 2 to version 3. Load and save
+     * do not call this. A document already on version 3 is rejected.
      */
     upgradeRenderVersion(): string;
     /**
@@ -195,7 +205,7 @@ export interface InitOutput {
     readonly runtime_commit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_cpuBrushReference: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_create: (a: any, b: number) => any;
-    readonly runtime_createDocument: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_createDocument: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_destroyGpu: (a: number) => void;
     readonly runtime_endBrush: (a: number) => any;
     readonly runtime_finishAbortHandle: (a: number) => number;
@@ -247,6 +257,8 @@ export interface InitOutput {
     readonly runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
     readonly runtime_takeFinishJournalError: (a: number) => [number, number];
     readonly runtime_takeJournal: (a: number) => [number, number];
+    readonly runtime_takePipelinesBuilt: (a: number) => number;
+    readonly runtime_textBakeForTesting: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_textCaret: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_textHitTest: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly runtime_textInfo: (a: number, b: number, c: number) => [number, number, number, number];
@@ -276,10 +288,10 @@ export interface InitOutput {
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__94: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__95: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__96: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__97: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__93: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__95: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
