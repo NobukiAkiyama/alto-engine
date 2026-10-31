@@ -4087,7 +4087,7 @@ impl Renderer {
                 .map_err(|e| RenderError::Internal(e.to_string()))?;
             out.extend_from_slice(&view);
             drop(view);
-            pool.buffer.unmap();
+            pool.unmap();
         }
         Ok(out)
     }
@@ -4381,5 +4381,55 @@ mod v3_cache_tests {
         };
         renderer.prepare_scene(&scene).unwrap();
         assert_eq!(renderer.gpu_bytes().budget_used, before);
+    }
+}
+#[cfg(test)]
+mod readback_unmap_tests {
+    /// One readback leaves the device usable. The pool buffer used to be unmapped
+    /// by `read_tiles` and again by the lease; native wgpu reports the second as
+    /// an uncaptured validation error, which marks the renderer lost.
+    #[test]
+    fn one_read_tile_does_not_mark_the_renderer_lost() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        let instance = wgpu::Instance::new(descriptor);
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        let scene = alto_scene::RenderScene {
+            canvas: alto_core::IRect {
+                x0: 0,
+                y0: 0,
+                x1: 256,
+                y1: 256,
+            },
+            root: 0,
+            nodes: vec![alto_scene::RNode {
+                key: alto_core::NodeId::new(),
+                version: 0,
+                visible: true,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                opacity: 1.0,
+                blend: crate::RenderBlend::Normal,
+                effects: 0,
+                features: Default::default(),
+                content: crate::RContent::Group {
+                    children: vec![],
+                    isolated: false,
+                },
+            }],
+            render_version: alto_core::RENDER_VERSION_EXACT,
+        };
+        let store = alto_raster::ObjectStore::default();
+        for _ in 0..2 {
+            pollster::block_on(renderer.read_tile(&scene, &store, (0, 0, 0))).unwrap();
+            let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
+            assert!(!renderer.is_lost(), "{}", renderer.lost_detail());
+            assert_eq!(renderer.lost_detail(), "");
+            assert_eq!(renderer.readback_stats().mapped, 0);
+        }
     }
 }
