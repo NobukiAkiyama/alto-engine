@@ -8029,7 +8029,7 @@ fn existing_v1_and_v2_hashes_are_unchanged() {
     );
 }
 
-static GPU_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static GPU_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn gpu_shader_matches_cpu_reference() {

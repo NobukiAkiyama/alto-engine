@@ -17,6 +17,7 @@ use cache::overview_level;
 mod memory;
 mod presentation;
 mod readback;
+mod uniform;
 pub use memory::GpuBytes;
 use memory::{Class, Governor, cache_layers};
 pub use presentation::DisplayReport;
@@ -419,6 +420,9 @@ pub struct Renderer {
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
+    /// Build v3 subtrees away from every edge from one leaf (`uniform`).
+    uniform_pyramid: bool,
+    uniform: Option<uniform::Memo>,
 }
 fn rgba_pixels(tile: &TileData) -> std::borrow::Cow<'_, [u8]> {
     if tile.format == alto_core::PixelFormat::R8 {
@@ -1704,6 +1708,8 @@ impl Renderer {
             presentation: Default::default(),
             clock: || 0.0,
             profile: RenderProfile::default(),
+            uniform_pyramid: true,
+            uniform: None,
         })
     }
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -2617,7 +2623,13 @@ impl Renderer {
         prefetch: bool,
     ) -> Result<bool> {
         let mut warm = true;
-        for child in pyramid_children(scene, key) {
+        let uniform = self.uniform_subtree(scene, key);
+        let mut children = pyramid_children(scene, key);
+        if uniform {
+            // Its four children are the same bytes: build the top-left one only.
+            children.truncate(1);
+        }
+        for child in children {
             if !self.cache_map.contains_key(&child) {
                 warm = false;
                 if !self.compose(scene, child, store, prefetch)? {
@@ -2632,7 +2644,12 @@ impl Renderer {
         let Some(slot) = self.cache_slot(key, prefetch)? else {
             return Ok(false);
         };
-        if !self.downsample_cached(scene, key, slot as u32)? {
+        let built = if uniform {
+            self.downsample_uniform(key, slot as u32)?
+        } else {
+            self.downsample_cached(scene, key, slot as u32)?
+        };
+        if !built {
             return Err(RenderError::Internal("v3 pyramid children missing".into()));
         }
         self.cache_slots[slot] = Some(key);
@@ -4179,6 +4196,21 @@ impl Renderer {
                 children.push((x, y, c.slot));
             }
         }
+        self.downsample_slots(&children, slot)?;
+        Ok(true)
+    }
+    /// A [`uniform`] subtree: the downsample of four copies of the top-left child.
+    fn downsample_uniform(&self, key: CacheKey, slot: u32) -> Result<bool> {
+        let Some(c) = self.cache_map.get(&(key.0 - 1, key.1 * 2, key.2 * 2)) else {
+            return Ok(false);
+        };
+        let children: Vec<_> = (0..4).map(|i| (i % 2, i / 2, c.slot)).collect();
+        self.downsample_slots(&children, slot)?;
+        Ok(true)
+    }
+    /// Downsample the 2x2 children at `(x, y, slot)` into `slot`; absent ones
+    /// are transparent.
+    fn downsample_slots(&self, children: &[(i32, i32, u32)], slot: u32) -> Result<()> {
         let mut e = self.device.create_command_encoder(&Default::default());
         // WebGPU has no command-encoder clear. An empty pass clears reused texels so a
         // missing edge child stays transparent. clear_texture aborts on this backend.
@@ -4198,7 +4230,7 @@ impl Renderer {
                 ..Default::default()
             });
         }
-        for (x, y, from) in children {
+        for &(x, y, from) in children {
             e.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.cache,
@@ -4274,7 +4306,7 @@ impl Renderer {
         // This takes &self; the uniform is its own and the submit above was its use.
         memory::destroy_buffer(&ub, false);
         self.governor.submitted(&self.queue);
-        Ok(true)
+        Ok(())
     }
 }
 
