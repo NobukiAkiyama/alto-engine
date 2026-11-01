@@ -1,11 +1,9 @@
 //! Render version 3 text bakes (doc/design/2026-10-28-v3-integer-text.md,
-//! implementation order 0). Version 3 renders from its bake; version 1 and 2
-//! retain their layout-run path.
+//! implementation order 0). Text renders from its bake.
 use super::*;
 use crate::text::BAKER_VERSION;
-use crate::unstable_render::UnstableRenderV3Guard;
 use alto_core::text_bake::{BakeCommand, PLACEHOLDER_FONT, TextBake};
-use alto_core::{AssetId, NodeId, RENDER_VERSION_EXACT};
+use alto_core::{AssetId, NodeId};
 use alto_doc::Node;
 use alto_text::{TextContent, TextFrame, TextStyle, WritingMode};
 
@@ -15,14 +13,9 @@ const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
 const LATIN_BLAKE3: &str = "cecfaa71790a6d0aa8744ddfdb3cb9fd6fbac9e2f8e0db476827710df1e0dbc3";
 const JP_BLAKE3: &str = "5e2213b3dfdcc9736b3bd951f51ec58935a3bde47bc4f9521838f042c0db8981";
 
-fn document(version: u32) -> (Engine, DocHandle, AssetId, AssetId) {
+fn document() -> (Engine, DocHandle, AssetId, AssetId) {
     let mut e = Engine::new();
-    let meta = if version == RENDER_VERSION_EXACT {
-        DocumentMeta::srgb_u8(1024, 768)
-    } else {
-        DocumentMeta::srgb_u8_v2(1024, 768)
-    };
-    let d = e.create_document(meta).unwrap();
+    let d = e.create_document(DocumentMeta::srgb_u8(1024, 768)).unwrap();
     let jp = e.import_font(JP.to_vec(), 0).unwrap();
     let latin = e.import_font(LATIN.to_vec(), 0).unwrap();
     assert_eq!(latin.record.hash.to_string(), LATIN_BLAKE3);
@@ -138,7 +131,7 @@ fn text_bake_dependencies_are_pinned() {
 
 #[test]
 fn text_bake_roundtrip_and_validation() {
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(1).1;
     let id = insert(&mut e, d, content.clone());
     let hash = bake_of(&e, d, id).expect("a v3 text node is baked on insert");
@@ -232,72 +225,8 @@ fn text_bake_roundtrip_and_validation() {
 }
 
 #[test]
-fn text_bake_only_on_render_version_three() {
-    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
-    let content = texts(latin, jp).remove(0).1;
-    let id = insert(&mut e, d, content.clone());
-    assert_eq!(bake_of(&e, d, id), None, "v1 / v2 never bake");
-    let snapshot = String::from_utf8(e.snapshot(d).unwrap()).unwrap();
-    assert!(
-        !snapshot.contains("\"bake\""),
-        "a v2 snapshot has no bake field"
-    );
-    // A bake on a v2 document is refused, whoever sends it.
-    let hash = e.put_blob(
-        e.bake_text(&e.document(d).unwrap().assets, &content)
-            .encode(),
-    );
-    let rev = e.document(d).unwrap().revision;
-    let refused = e.transact(
-        d,
-        "bake",
-        vec![Op::SetText {
-            id,
-            content: Box::new(content),
-            bake: Some(hash),
-        }],
-        rev,
-    );
-    assert!(refused.is_err());
-    assert_eq!(bake_of(&e, d, id), None);
-}
-
-#[test]
-fn text_bake_on_render_upgrade_is_one_undoable_edit() {
-    let _v3 = UnstableRenderV3Guard::enable();
-    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
-    let ids: Vec<NodeId> = texts(latin, jp)
-        .into_iter()
-        .map(|(_, content)| insert(&mut e, d, content))
-        .collect();
-    e.upgrade_render_version_unstable(d).unwrap();
-    assert_eq!(
-        e.document(d).unwrap().meta.render_version,
-        RENDER_VERSION_EXACT
-    );
-    for &id in &ids {
-        assert!(
-            bake_of(&e, d, id).is_some(),
-            "upgrade bakes every text node"
-        );
-    }
-    e.undo(d).unwrap();
-    assert_eq!(
-        e.document(d).unwrap().meta.render_version,
-        alto_core::RENDER_VERSION
-    );
-    for &id in &ids {
-        assert_eq!(
-            bake_of(&e, d, id),
-            None,
-            "undo removes the bakes with the upgrade"
-        );
-    }
-}
-
-#[test]
 fn text_bake_follows_font_replacement_in_the_same_transaction() {
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(0).1;
     let id = insert(&mut e, d, content);
     let before = bake_of(&e, d, id).unwrap();
@@ -334,7 +263,7 @@ fn text_bake_follows_font_replacement_in_the_same_transaction() {
 #[test]
 fn text_bake_keeps_a_received_bake() {
     // A bake in an incoming op is bytes from its author, applied as it is.
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(2).1;
     let id = insert(&mut e, d, content.clone());
     let mut foreign = decoded(&e, bake_of(&e, d, id).unwrap());
@@ -357,7 +286,7 @@ fn text_bake_keeps_a_received_bake() {
 
 #[test]
 fn text_bake_placeholder_and_fixture() {
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let mut lines = vec![];
     for (name, content) in texts(latin, jp) {
         let id = insert(&mut e, d, content);
@@ -401,7 +330,7 @@ fn latin_as_jp(e: &Engine, d: DocHandle, latin: AssetId, jp: AssetId) -> alto_do
 
 #[test]
 fn text_bake_uses_the_fonts_the_transaction_leaves() {
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(0).1;
     let id = insert(&mut e, d, content.clone());
     // A SetText before the font replacement still bakes with the new font.
@@ -430,7 +359,7 @@ fn text_bake_uses_the_fonts_the_transaction_leaves() {
 
 #[test]
 fn text_bake_skips_nodes_the_transaction_removes() {
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
     let replacement = latin_as_jp(&e, d, latin, jp);
     let rev = e.document(d).unwrap().revision;
@@ -451,16 +380,9 @@ fn text_bake_skips_nodes_the_transaction_removes() {
 }
 
 #[test]
-fn text_bake_on_any_move_onto_version_three_and_on_restore() {
-    // A bare SetMeta onto version 3 bakes the text it finds.
-    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
+fn text_bake_on_restore() {
+    let (mut e, d, latin, jp) = document();
     let id = insert(&mut e, d, texts(latin, jp).remove(1).1);
-    let mut meta = e.document(d).unwrap().meta.clone();
-    meta.render_version = RENDER_VERSION_EXACT;
-    meta.format_version = 4;
-    let rev = e.document(d).unwrap().revision;
-    e.transact(d, "meta", vec![Op::SetMeta { meta }], rev)
-        .unwrap();
     assert!(bake_of(&e, d, id).is_some());
     // A restored subtree without a bake is baked.
     let node = e.document(d).unwrap().node(id).unwrap().clone();
@@ -488,9 +410,9 @@ fn text_bake_on_any_move_onto_version_three_and_on_restore() {
 }
 
 #[test]
-fn render_scenes_carry_the_bake_on_version_three_only() {
+fn render_scenes_carry_the_bake() {
     use alto_scene::RContent;
-    let (mut e, d, latin, jp) = document(RENDER_VERSION_EXACT);
+    let (mut e, d, latin, jp) = document();
     let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
     let hash = bake_of(&e, d, id).unwrap();
     let scene = e.render_scene(d).unwrap();
@@ -500,10 +422,4 @@ fn render_scenes_carry_the_bake_on_version_three_only() {
     };
     assert_eq!(bake.hash, hash);
     assert_eq!(*bake.bytes, e.blobs[&hash]);
-    // Version 2 keeps the layout runs.
-    let (mut e, d, latin, jp) = document(alto_core::RENDER_VERSION);
-    let id = insert(&mut e, d, texts(latin, jp).remove(0).1);
-    let scene = e.render_scene(d).unwrap();
-    let node = scene.nodes.iter().find(|n| n.key == id).unwrap();
-    assert!(matches!(node.content, RContent::Text(_)));
 }

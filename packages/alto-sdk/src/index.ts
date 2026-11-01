@@ -12,8 +12,6 @@ export type {
 } from "./engine.js";
 export { DocumentHandle } from "./document.js";
 export type { ExportImageOptions, SelectionSpec } from "./document.js";
-export type { UnstableRenderV3Options } from "./render-version.js";
-export { UNSTABLE_RENDER_V3, renderVersionUpgrade } from "./render-version.js";
 export { AltoError } from "./errors.js";
 export type { ConflictReason, ErrorCode, ErrorDetails } from "./errors.js";
 export type { BuiltInIntent, Intent, IntentId } from "./intents.js";

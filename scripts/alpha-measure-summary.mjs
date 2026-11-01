@@ -11,8 +11,8 @@ if (!backendLabel || !jsonPath || !outDir) {
 
 const report = JSON.parse(await readFile(jsonPath, "utf8"));
 const rows = report.cases || report.alphaMeasure || [];
-if (!rows.length) {
-  console.error(`no measured-not-enforced rows in ${jsonPath}`);
+if (!rows.length && !report.compositeV3?.length) {
+  console.error(`no measured rows in ${jsonPath}`);
   process.exit(1);
 }
 const backend = report.backend || backendLabel;
@@ -31,23 +31,27 @@ function cell(row) {
   return shown.length ? shown.join("; ") : "none";
 }
 
-let markdown = `### Semi-transparent parity (${backendLabel})\n\n`;
-markdown += "These cases are **measured-not-enforced**. A mismatch does not fail the job.\n\n";
-markdown += `Backend: \`${backend}\`\n\n`;
-markdown += "| case | mismatched pixels | max abs r,g,b,a | first mismatches |\n";
-markdown += "| --- | ---: | --- | --- |\n";
-for (const row of rows) {
-  const maxAbs = (row.maxAbs || [0, 0, 0, 0]).join(",");
-  markdown += `| ${row.name} | ${row.count} | ${maxAbs} | ${cell(row)} |\n`;
-}
-markdown += "\n";
-for (const row of rows) {
-  if (!row.mismatches?.length) continue;
-  markdown += `#### ${row.name}\n\n`;
-  for (const pixel of row.mismatches) {
-    markdown += `- pixel ${pixel.x},${pixel.y} source ${sources(pixel)} gpu ${rgba(pixel.gpu)} cpu ${rgba(pixel.cpu)}\n`;
+let markdown = "";
+// Render version 2 rows; a v3-only report has none.
+if (rows.length) {
+  markdown += `### Semi-transparent parity (${backendLabel})\n\n`;
+  markdown += "These cases are **measured-not-enforced**. A mismatch does not fail the job.\n\n";
+  markdown += `Backend: \`${backend}\`\n\n`;
+  markdown += "| case | mismatched pixels | max abs r,g,b,a | first mismatches |\n";
+  markdown += "| --- | ---: | --- | --- |\n";
+  for (const row of rows) {
+    const maxAbs = (row.maxAbs || [0, 0, 0, 0]).join(",");
+    markdown += `| ${row.name} | ${row.count} | ${maxAbs} | ${cell(row)} |\n`;
   }
   markdown += "\n";
+  for (const row of rows) {
+    if (!row.mismatches?.length) continue;
+    markdown += `#### ${row.name}\n\n`;
+    for (const pixel of row.mismatches) {
+      markdown += `- pixel ${pixel.x},${pixel.y} source ${sources(pixel)} gpu ${rgba(pixel.gpu)} cpu ${rgba(pixel.cpu)}\n`;
+    }
+    markdown += "\n";
+  }
 }
 
 const v3Rows = report.compositeV3 || (report.label === "enforced" ? report.cases : []) || [];

@@ -8,9 +8,7 @@ const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
 
 fn setup() -> (Engine, DocHandle, AssetId, AssetId) {
     let mut e = Engine::new();
-    let d = e
-        .create_document(DocumentMeta::srgb_u8_v2(1024, 768))
-        .unwrap();
+    let d = e.create_document(DocumentMeta::srgb_u8(1024, 768)).unwrap();
     let jp = e.import_font(JP.to_vec(), 0).unwrap();
     let latin = e.import_font(LATIN.to_vec(), 0).unwrap();
     assert!(jp.warnings.is_empty());
@@ -69,20 +67,10 @@ fn text_layers_render_select_save_and_recover() {
     let (mut e, d, latin, jp) = setup();
     let id = add_text(&mut e, d, vertical(vec![latin, jp]));
     let scene = e.render_scene(d).unwrap();
-    let RContent::Text(runs) = &scene.nodes[1].content else {
-        panic!("text renders as glyph runs")
-    };
-    assert_eq!(runs.len(), 1, "one font size, one run");
-    assert!(!runs[0].paths.is_empty());
-    assert_eq!(
-        runs[0].glyphs.len(),
-        runs[0]
-            .glyphs
-            .iter()
-            .filter(|g| !g.outline.is_empty())
-            .count()
+    assert!(
+        matches!(&scene.nodes[1].content, RContent::TextBake(Some(_))),
+        "text renders from its bake"
     );
-    alto_vector::validate_paths(&runs[0].paths).unwrap();
     let info = e.text_info(d, id).unwrap();
     assert_eq!(info.lines.len(), 2);
     assert!(info.missing.is_empty());

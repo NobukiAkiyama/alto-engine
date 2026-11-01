@@ -1,8 +1,5 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
-import {
-  type UnstableRenderV3Options,
-} from "./render-version.js";
 import { intentRecord, type Intent } from "./intents.js";
 import type { Args } from "./protocol.js";
 import { SnapshotStore, type DocumentChange, type DocumentSnapshot, type WireState } from "./snapshot.js";
@@ -128,7 +125,7 @@ export class DocumentHandle {
     this.abortTool(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     this.listeners.clear();
   }
-  private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion" | "upgradeRenderVersion">(
+  private command<K extends "undo" | "redo" | "select" | "setMask" | "setEffects" | "restoreVersion">(
     type: K,
     payload: Args<K>,
   ): Promise<void> {
@@ -173,14 +170,6 @@ export class DocumentHandle {
   /** Redoes the last undone edit. */
   redo(): Promise<void> {
     return this.command("redo", {});
-  }
-  /**
-   * Switches a version-1 or version-2 document to render version 3 as one
-   * undoable edit. Opening or saving a document does not upgrade it.
-   */
-  upgradeRenderVersion(options?: UnstableRenderV3Options): Promise<void> {
-    void options;
-    return this.command("upgradeRenderVersion", {});
   }
   /**
    * Resolves once every edit made so far is in the recovery journal. Edits resolve
@@ -331,8 +320,7 @@ export class DocumentHandle {
     return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
   }
   /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-  async save(target: ArchiveTarget, options?: UnstableRenderV3Options): Promise<void> {
-    void options;
+  async save(target: ArchiveTarget): Promise<void> {
     await this.endTool();
     this.core.emit("saveState", "saving");
     let token: number | undefined;
@@ -355,7 +343,7 @@ export class DocumentHandle {
    */
   async saveFolder(
     provider: ObjectStorageProvider,
-    options: { overwrite?: boolean } & UnstableRenderV3Options = {},
+    options: { overwrite?: boolean } = {},
   ): Promise<{ written: number; skipped: number }> {
     await this.endTool();
     this.core.emit("saveState", "saving");
