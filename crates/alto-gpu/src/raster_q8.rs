@@ -527,6 +527,53 @@ pub(crate) fn flatten_stroke(commands: &[Command]) -> Result<Vec<Segment>, Raste
     Ok(sink.0)
 }
 
+/// The segments `rasterize` integrates for a fill, in the input's Q8 pixels:
+/// the same normalization and subdivision, no window skipping. `None` past
+/// `limit` segments, a range error, or the curve limit.
+pub(crate) fn fill_segments(commands: &[Command], limit: usize) -> Option<Vec<Segment>> {
+    struct Segments(Vec<Segment>, usize);
+    impl Sink for Segments {
+        fn segment(&mut self, a: [i64; 2], b: [i64; 2]) -> Option<()> {
+            if self.0.len() >= self.1 {
+                return None;
+            }
+            self.0.push((a, b));
+            Some(())
+        }
+    }
+    let (commands, origin) = normalized(commands)?;
+    let empty = Window {
+        lx: 0,
+        ly: 0,
+        width: 0,
+        height: 0,
+        xl: 0,
+        xr: 0,
+        yt: 0,
+        yb: 0,
+    };
+    let mut sink = Segments(Vec::new(), limit);
+    flatten(
+        &commands,
+        Curves::Reject(CURVE_LIMIT),
+        empty,
+        false,
+        true,
+        &mut sink,
+    )
+    .ok()?;
+    let [ox, oy] = [origin[0].checked_mul(256)?, origin[1].checked_mul(256)?];
+    sink.0
+        .into_iter()
+        .map(|(a, b)| {
+            Some((
+                [a[0].checked_add(ox)?, a[1].checked_add(oy)?],
+                [b[0].checked_add(ox)?, b[1].checked_add(oy)?],
+            ))
+        })
+        .collect()
+}
+
 /// Rasterize a path into the level-pixel window. An error means a defined range
 /// limit was exceeded; callers must not silently substitute float rendering.
 pub fn rasterize(

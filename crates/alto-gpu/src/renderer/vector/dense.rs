@@ -176,6 +176,7 @@ impl Dense {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
+        governor: &Arc<super::super::Governor>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -218,7 +219,7 @@ impl Dense {
             }
             self.uniforms.invalidate_paint();
             for _ in 1..LANES {
-                match Coverage::new(device, first.w, first.h) {
+                match Coverage::new(governor, device, first.w, first.h) {
                     Ok(c) => self.coverage.push(c),
                     Err(_) => {
                         for c in self.coverage.drain(..) {
@@ -241,6 +242,7 @@ impl Dense {
             })
             .collect();
         let Some(start) = self.uniforms.upload(
+            governor,
             device,
             queue,
             &self.geometry_layout,

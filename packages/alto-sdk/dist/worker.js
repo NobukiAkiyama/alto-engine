@@ -473,6 +473,7 @@ function decodeFrame(numbers) {
  */
 function takeFrame(budget, stick) {
     const frame = decodeFrame(runtime.tick(budget));
+    frame.gpuWait = runtime.takeGpuWaitRequested();
     if (stick && forceDeferred) {
         frame.presentDeferred = 1;
         frame.pending = 0;
@@ -959,6 +960,8 @@ async function execute(m) {
                     noteDeferred(frame, "wait");
                     tickMs.push(performance.now() - tickStart);
                     await pipelinesSettled();
+                    if (frame.gpuWait)
+                        await runtime.submittedWorkDone();
                     if (frame.pending)
                         await yieldTask();
                     else if (frame.presentDeferred)
@@ -1058,6 +1061,8 @@ async function drain() {
                         if (diagnosticTickMs)
                             diagnosticTickMs.push(performance.now() - tickStart);
                         await pipelinesSettled();
+                        if (value.gpuWait)
+                            await runtime.submittedWorkDone();
                         if (value.presentDeferred && !value.composed)
                             await presentSettled();
                         else if (value.pending)

@@ -100,8 +100,14 @@ impl Renderer {
                 break;
             }
             let mut missing = None;
-            for y in 0..2 {
-                for x in 0..2 {
+            // A uniform subtree needs its top-left child only (`uniform`).
+            let quadrants = if self.uniform_subtree(scene, key) {
+                1
+            } else {
+                2
+            };
+            for y in 0..quadrants {
+                for x in 0..quadrants {
                     let child = (key.0 - 1, key.1 * 2 + x, key.2 * 2 + y);
                     let span = 256i64 << child.0;
                     if child.1 as i64 * span >= scene.canvas.x1 as i64
@@ -126,7 +132,12 @@ impl Renderer {
             let Some(slot) = self.cache_slot(key, true)? else {
                 return Ok(JobStep::Blocked);
             };
-            if !self.downsample_cached(scene, key, slot as u32)? {
+            let built = if self.uniform_subtree(scene, key) {
+                self.downsample_uniform(key, slot as u32)?
+            } else {
+                self.downsample_cached(scene, key, slot as u32)?
+            };
+            if !built {
                 return Err(RenderError::Internal("overview children missing".into()));
             }
             self.cache_slots[slot] = Some(key);

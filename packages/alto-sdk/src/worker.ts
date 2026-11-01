@@ -495,6 +495,7 @@ function decodeFrame(numbers: Float64Array): FrameStats {
  */
 function takeFrame(budget: number, stick: boolean): FrameStats {
   const frame = decodeFrame(runtime.tick(budget));
+  (frame as FrameStats & { gpuWait?: boolean }).gpuWait = runtime.takeGpuWaitRequested();
   if (stick && forceDeferred) {
     frame.presentDeferred = 1;
     frame.pending = 0;
@@ -987,6 +988,7 @@ async function execute(m: Queued): Promise<unknown> {
           noteDeferred(frame, "wait");
           tickMs.push(performance.now() - tickStart);
           await pipelinesSettled();
+          if ((frame as FrameStats & { gpuWait?: boolean }).gpuWait) await runtime.submittedWorkDone();
           if (frame.pending) await yieldTask();
           else if (frame.presentDeferred) await presentSettled();
         } while (frame.pending || frame.presentDeferred);
@@ -1077,6 +1079,7 @@ async function drain() {
             noteDeferred(value, "drain");
             if (diagnosticTickMs) diagnosticTickMs.push(performance.now() - tickStart);
             await pipelinesSettled();
+            if ((value as FrameStats & { gpuWait?: boolean }).gpuWait) await runtime.submittedWorkDone();
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {
