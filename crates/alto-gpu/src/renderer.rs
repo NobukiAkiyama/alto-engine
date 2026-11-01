@@ -33,6 +33,7 @@ const MAX_JOB_RETRIES: u32 = 8;
 /// One reusable 512x512 RGBA texture for pyramid downsampling.
 const SCRATCH_BYTES: u64 = 512 * 512 * 4;
 const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
+const MAX_PYRAMID_STEPS_IN_FLIGHT: u32 = 8;
 /// Jobs that need at most this many inputs decode them inline even with a pool.
 const INLINE_DECODE_MAX: usize = 8;
 
@@ -378,6 +379,9 @@ pub struct Renderer {
     /// them on the GPU process before later queue work, so the next present can stay
     /// in flight for seconds without the device being lost.
     pipelines_built: bool,
+    /// Bounds pyramid submissions queued without a Worker-side queue completion wait.
+    pyramid_submissions_since_wait: u32,
+    gpu_wait_requested: bool,
     prefetch_stats: PrefetchStatus,
     prefetch_job: Option<TileJob>,
     visible_job: Option<TileJob>,
@@ -1434,6 +1438,13 @@ impl TileJob {
     }
 }
 impl Renderer {
+    pub fn take_gpu_wait_requested(&mut self) -> bool {
+        let requested = std::mem::take(&mut self.gpu_wait_requested);
+        if requested {
+            self.pyramid_submissions_since_wait = 0;
+        }
+        requested
+    }
     pub async fn new(
         instance: &wgpu::Instance,
         surface: wgpu::Surface<'static>,
@@ -1671,6 +1682,8 @@ impl Renderer {
             present_in_flight: Arc::new(AtomicBool::new(false)),
             present_deferred: false,
             pipelines_built: true,
+            pyramid_submissions_since_wait: 0,
+            gpu_wait_requested: false,
             prefetch_stats: PrefetchStatus::default(),
             prefetch_job: None,
             visible_job: None,
@@ -3322,6 +3335,7 @@ impl Renderer {
                     let step_start = now();
                     let step = self.hierarchy_step(scene, store, *key)?;
                     self.profile.steps += 1;
+                    self.pyramid_submissions_since_wait += 1;
                     self.profile.max_step_ms = self.profile.max_step_ms.max(now() - step_start);
                     if step == JobStep::Blocked {
                         return Err(RenderError::Budget(
@@ -3333,6 +3347,10 @@ impl Renderer {
                     composed += 1;
                     if self.cache_map.contains_key(key) {
                         done = true;
+                        break;
+                    }
+                    if self.pyramid_submissions_since_wait >= MAX_PYRAMID_STEPS_IN_FLIGHT {
+                        self.gpu_wait_requested = true;
                         break;
                     }
                     if now() - start >= budget_ms {
