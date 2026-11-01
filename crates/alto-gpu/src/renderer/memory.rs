@@ -161,7 +161,7 @@ mod tests {
 // Engine-owned API request accounting. Native uses a shared registry so moving a
 // renderer to another worker preserves its budget; WebGPU runs in its Worker.
 use std::collections::HashMap;
-use std::sync::{Mutex, Weak};
+use std::sync::Mutex;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Class {
     Fixed,
@@ -372,9 +372,15 @@ impl Drop for Reservation {
 }
 #[derive(Default)]
 struct Registry {
-    devices: HashMap<wgpu::Device, Weak<Governor>>,
-    buffers: HashMap<wgpu::Buffer, (Weak<Governor>, u64)>,
-    textures: HashMap<wgpu::Texture, (Weak<Governor>, u64)>,
+    owners: HashMap<usize, OwnerRegistry>,
+}
+#[derive(Default)]
+struct OwnerRegistry {
+    buffers: HashMap<wgpu::Buffer, u64>,
+    textures: HashMap<wgpu::Texture, u64>,
+}
+fn owner_key(g: &Governor) -> usize {
+    g as *const Governor as usize
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn registry<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
@@ -388,34 +394,27 @@ fn registry<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
     thread_local! { static REGISTRY:std::cell::RefCell<Registry>=std::cell::RefCell::new(Registry::default()); }
     REGISTRY.with(|r| f(&mut r.borrow_mut()))
 }
-pub(super) fn install(device: &wgpu::Device, g: &Arc<Governor>) {
-    registry(|r| {
-        r.devices.insert(device.clone(), Arc::downgrade(g));
-    });
-}
-fn governor(device: &wgpu::Device) -> Option<Arc<Governor>> {
-    registry(|r| r.devices.get(device).and_then(Weak::upgrade))
-}
 pub(super) fn create_buffer(
+    g: &Arc<Governor>,
     device: &wgpu::Device,
     desc: &wgpu::BufferDescriptor<'_>,
     class: Class,
     work: bool,
 ) -> Result<wgpu::Buffer> {
-    let reservation = governor(device)
-        .map(|g| g.reserve(desc.size, class, work))
-        .transpose()?;
+    let reservation = g.reserve(desc.size, class, work)?;
     let b = device.create_buffer(desc);
-    if let Some(q) = reservation {
-        let weak = Arc::downgrade(&q.governor);
-        let id = q.install();
-        registry(|r| {
-            r.buffers.insert(b.clone(), (weak, id));
-        });
-    }
+    let id = reservation.install();
+    registry(|r| {
+        r.owners
+            .entry(owner_key(g))
+            .or_default()
+            .buffers
+            .insert(b.clone(), id);
+    });
     Ok(b)
 }
 pub(super) fn create_texture(
+    g: &Arc<Governor>,
     device: &wgpu::Device,
     desc: &wgpu::TextureDescriptor<'_>,
     class: Class,
@@ -431,54 +430,55 @@ pub(super) fn create_texture(
                 * desc.format.block_copy_size(None).unwrap_or(4) as u64
         })
         .sum();
-    let reservation = governor(device)
-        .map(|g| g.reserve(bytes, class, false))
-        .transpose()?;
+    let reservation = g.reserve(bytes, class, false)?;
     let t = device.create_texture(desc);
-    if let Some(q) = reservation {
-        let weak = Arc::downgrade(&q.governor);
-        let id = q.install();
-        registry(|r| {
-            r.textures.insert(t.clone(), (weak, id));
-        });
-    }
+    let id = reservation.install();
+    registry(|r| {
+        r.owners
+            .entry(owner_key(g))
+            .or_default()
+            .textures
+            .insert(t.clone(), id);
+    });
     Ok(t)
 }
-pub(super) fn destroy_buffer(b: &wgpu::Buffer, complete: bool) {
-    if let Some((g, id)) = registry(|r| r.buffers.remove(b))
-        && let Some(g) = g.upgrade()
-    {
-        g.retire(id, complete);
-    }
+pub(super) fn destroy_buffer(g: &Arc<Governor>, b: &wgpu::Buffer, complete: bool) {
+    let id = registry(|r| {
+        r.owners
+            .get_mut(&owner_key(g))
+            .and_then(|owner| owner.buffers.remove(b))
+    });
+    let Some(id) = id else {
+        log::warn!("ignoring untracked buffer destruction (wrong owner or duplicate)");
+        return;
+    };
+    g.retire(id, complete);
     b.destroy();
 }
-pub(super) fn destroy_texture(t: &wgpu::Texture, complete: bool) {
-    if let Some((g, id)) = registry(|r| r.textures.remove(t))
-        && let Some(g) = g.upgrade()
-    {
-        g.retire(id, complete);
-    }
+pub(super) fn destroy_texture(g: &Arc<Governor>, t: &wgpu::Texture, complete: bool) {
+    let id = registry(|r| {
+        r.owners
+            .get_mut(&owner_key(g))
+            .and_then(|owner| owner.textures.remove(t))
+    });
+    let Some(id) = id else {
+        log::warn!("ignoring untracked texture destruction (wrong owner or duplicate)");
+        return;
+    };
+    g.retire(id, complete);
     t.destroy();
 }
 impl Drop for Governor {
     fn drop(&mut self) {
-        registry(|r| {
-            r.devices.retain(|_, g| !std::ptr::eq(g.as_ptr(), self));
-            r.buffers.retain(|b, (g, _)| {
-                let keep = !std::ptr::eq(g.as_ptr(), self);
-                if !keep {
-                    b.destroy();
-                }
-                keep
-            });
-            r.textures.retain(|t, (g, _)| {
-                let keep = !std::ptr::eq(g.as_ptr(), self);
-                if !keep {
-                    t.destroy();
-                }
-                keep
-            });
-        });
+        let owner = registry(|r| r.owners.remove(&owner_key(self)));
+        if let Some(owner) = owner {
+            for b in owner.buffers.into_keys() {
+                b.destroy();
+            }
+            for t in owner.textures.into_keys() {
+                t.destroy();
+            }
+        }
     }
 }
 
@@ -499,33 +499,32 @@ impl Governor {
 impl Checkpoint {
     pub fn rollback(self, queue: &wgpu::Queue) {
         queue.submit(std::iter::empty());
+        let owner_id = owner_key(&self.governor);
         let (buffers, textures) = registry(|r| {
-            let owns = |g: &Weak<Governor>, id: u64| {
-                std::ptr::eq(g.as_ptr(), Arc::as_ptr(&self.governor)) && id > self.after
+            let Some(owner) = r.owners.get(&owner_id) else {
+                return (Vec::new(), Vec::new());
             };
             (
-                r.buffers
+                owner
+                    .buffers
                     .iter()
-                    .filter(|(_, (g, id))| owns(g, *id))
+                    .filter(|(_, id)| **id > self.after)
                     .map(|(b, _)| b.clone())
                     .collect::<Vec<_>>(),
-                r.textures
+                owner
+                    .textures
                     .iter()
-                    .filter(|(_, (g, id))| owns(g, *id))
+                    .filter(|(_, id)| **id > self.after)
                     .map(|(t, _)| t.clone())
                     .collect::<Vec<_>>(),
             )
         });
         for b in buffers {
-            destroy_buffer(&b, false);
+            destroy_buffer(&self.governor, &b, false);
         }
         for t in textures {
-            destroy_texture(&t, false);
+            destroy_texture(&self.governor, &t, false);
         }
         self.governor.submitted(queue);
     }
-}
-
-pub(super) fn checkpoint(device: &wgpu::Device) -> Option<Checkpoint> {
-    governor(device).map(|g| g.checkpoint())
 }

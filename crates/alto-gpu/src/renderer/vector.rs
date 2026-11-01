@@ -91,9 +91,10 @@ struct Coverage {
     h: u32,
 }
 impl Coverage {
-    fn new(device: &wgpu::Device, w: u32, h: u32) -> Result<Self> {
+    fn new(governor: &Arc<super::Governor>, device: &wgpu::Device, w: u32, h: u32) -> Result<Self> {
         let make = |samples, usage| {
             super::memory::create_texture(
+                governor,
                 device,
                 &wgpu::TextureDescriptor {
                     label: Some("R8 vector coverage"),
@@ -119,7 +120,7 @@ impl Coverage {
         ) {
             Ok(t) => t,
             Err(e) => {
-                memory::destroy_texture(&multi, true);
+                memory::destroy_texture(governor, &multi, true);
                 return Err(e);
             }
         };
@@ -138,6 +139,8 @@ fn dense_candidate(paths: usize, groups: usize) -> bool {
     paths >= 8 && groups >= paths - paths / 5
 }
 pub struct VectorResources {
+    governor: Arc<super::Governor>,
+    last_queue: Option<wgpu::Queue>,
     format: wgpu::TextureFormat,
     dense: Option<dense::Dense>,
     /// The dense pipelines were built (first use, or again after a budget retire)
@@ -165,7 +168,20 @@ pub struct VectorResources {
     pub(crate) retired: super::Retired,
 }
 impl VectorResources {
+    /// Create resources with unlimited standalone allocation accounting.
+    pub fn new_standalone(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_with_governor(device, format, super::Governor::new(u64::MAX, 0))
+    }
+    /// Deprecated standalone constructor; this does not share a Renderer budget.
+    #[deprecated(note = "use new_standalone for independent GPU accounting")]
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_standalone(device, format)
+    }
+    pub(super) fn new_with_governor(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        governor: Arc<super::Governor>,
+    ) -> Self {
         let geometry = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vector coverage"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/vector.wgsl").into()),
@@ -364,6 +380,8 @@ impl VectorResources {
             cache: None,
         });
         Self {
+            governor: governor.clone(),
+            last_queue: None,
             format,
             dense: None,
             pipelines_built: false,
@@ -383,7 +401,7 @@ impl VectorResources {
             atlas: None,
             glyph_stats: AtlasStats::default(),
             hits: 0,
-            retired: super::Retired::default(),
+            retired: super::Retired::new(governor),
             misses: 0,
         }
     }
@@ -407,12 +425,20 @@ impl VectorResources {
             dense.uniforms.reset();
         }
         self.retired.release();
+        if let Some(queue) = &self.last_queue {
+            self.governor.submitted(queue);
+        }
     }
     /// Standalone probes call this after submitting all work, before dropping resources.
     pub fn destroy_after_submit(self) {
-        let mut retired = super::Retired::default();
+        let governor = self.governor.clone();
+        let queue = self.last_queue.clone();
+        let mut retired = super::Retired::new(governor.clone());
         self.retire(&mut retired);
         retired.release();
+        if let Some(queue) = queue {
+            governor.submitted(&queue);
+        }
     }
     fn check_allocation(&self, additional: u64, budget: u64) -> Result<()> {
         if self
@@ -522,6 +548,7 @@ impl VectorResources {
         budget: u64,
         use_atlas: bool,
     ) -> Result<()> {
+        self.last_queue = Some(queue.clone());
         let [x, y, scale, w, h] = roi;
         let px_per_unit = max_scale([world[0], world[1], world[2], world[3]]) / scale;
         let mut vector: Vec<&StyledPath> = vec![];
@@ -539,6 +566,7 @@ impl VectorResources {
             }
             if self.atlas.is_none() {
                 let texture = super::memory::create_texture(
+                    &self.governor,
                     device,
                     &wgpu::TextureDescriptor {
                         label: Some("R8 glyph atlas"),
@@ -645,6 +673,7 @@ impl VectorResources {
             budget,
         )?;
         let uniform = buffer(
+            &self.governor,
             device,
             queue,
             "glyph atlas config",
@@ -652,6 +681,7 @@ impl VectorResources {
             wgpu::BufferUsages::UNIFORM,
         )?;
         let glyphs = buffer(
+            &self.governor,
             device,
             queue,
             "glyph instances",
@@ -708,6 +738,7 @@ impl VectorResources {
         frame: u64,
         budget: u64,
     ) -> Result<()> {
+        self.last_queue = Some(queue.clone());
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
@@ -796,7 +827,7 @@ impl VectorResources {
             // Evicted objects still occupy memory until this encoder is submitted
             // and its completion callback reclaims their ledger entries.
             self.check_allocation(bytes, budget)?;
-            let checkpoint = memory::checkpoint(device);
+            let checkpoint = self.governor.checkpoint();
             let batches = meshes
                 .into_iter()
                 .filter(|m| !m.indices.is_empty())
@@ -820,6 +851,7 @@ impl VectorResources {
                             },
                         ),
                         vertices: buffer(
+                            &self.governor,
                             device,
                             queue,
                             "vector vertices",
@@ -827,6 +859,7 @@ impl VectorResources {
                             wgpu::BufferUsages::VERTEX,
                         )?,
                         indices: buffer(
+                            &self.governor,
                             device,
                             queue,
                             "vector indices",
@@ -841,9 +874,7 @@ impl VectorResources {
             let batches = match batches {
                 Ok(b) => b,
                 Err(e) => {
-                    if let Some(c) = checkpoint {
-                        c.rollback(queue);
-                    }
+                    checkpoint.rollback(queue);
                     return Err(e);
                 }
             };
@@ -882,7 +913,7 @@ impl VectorResources {
             if let Some(dense) = &mut self.dense {
                 dense.uniforms.invalidate_paint();
             }
-            self.coverage = Some(Coverage::new(device, w, h)?);
+            self.coverage = Some(Coverage::new(&self.governor, device, w, h)?);
         }
         let coverage = self
             .coverage
@@ -971,6 +1002,7 @@ impl VectorResources {
                 self.counters.resolve_pixels += w as u64 * h as u64;
                 self.check_allocation(std::mem::size_of::<Uniform>() as u64, budget)?;
                 let uniform = buffer(
+                    &self.governor,
                     device,
                     queue,
                     "vector ROI uniform",
@@ -1176,6 +1208,7 @@ impl VectorResources {
                 .dense
                 .get_or_insert_with(|| dense::Dense::new(device, self.format));
             if dense.render(
+                &self.governor,
                 device,
                 queue,
                 encoder,
@@ -1194,6 +1227,7 @@ impl VectorResources {
         }
         let values: Vec<_> = draws.iter().map(|d| d.uniform).collect();
         let Some(start) = self.uniforms.upload(
+            &self.governor,
             device,
             queue,
             &self.geometry_layout,

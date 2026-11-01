@@ -344,7 +344,7 @@ pub(super) struct Resources {
     pub(super) reuses: u64,
 }
 impl Resources {
-    fn new(device: &wgpu::Device, exact: bool) -> Result<Self> {
+    fn new(device: &wgpu::Device, governor: &Arc<Governor>, exact: bool) -> Result<Self> {
         let (pipeline, resolve) = if exact {
             (
                 compute(
@@ -402,6 +402,7 @@ impl Resources {
             }),
             pool: vec![Pooled {
                 texture: memory::create_texture(
+                    governor,
                     device,
                     &wgpu::TextureDescriptor {
                         label: Some("M5 transparent input"),
@@ -593,6 +594,7 @@ impl Context<'_> {
             self.resources.allocations += 1;
             self.resources.pool.push(Pooled {
                 texture: memory::create_texture(
+                    &self.r.governor,
                     &self.r.device,
                     &wgpu::TextureDescriptor {
                         label: Some("M5 bucket target"),
@@ -687,6 +689,7 @@ impl Context<'_> {
             .texture
             .create_view(&Default::default());
         let tiles = buffer(
+            &self.r.governor,
             &self.r.device,
             &self.r.queue,
             "M5 sparse tiles",
@@ -694,6 +697,7 @@ impl Context<'_> {
             wgpu::BufferUsages::STORAGE,
         )?;
         let uniform = buffer(
+            &self.r.governor,
             &self.r.device,
             &self.r.queue,
             "M5 ROI",
@@ -1105,6 +1109,7 @@ impl Context<'_> {
                     ));
                 }
                 let params = buffer(
+                    &self.r.governor,
                     &self.r.device,
                     &self.r.queue,
                     "v3 vector paint params",
@@ -1115,6 +1120,7 @@ impl Context<'_> {
                     wgpu::BufferUsages::UNIFORM,
                 )?;
                 let created = memory::create_texture(
+                    &self.r.governor,
                     &self.r.device,
                     &wgpu::TextureDescriptor {
                         label: Some("v3 vector coverage"),
@@ -1135,7 +1141,7 @@ impl Context<'_> {
                 let texture = match created {
                     Ok(texture) => texture,
                     Err(error) => {
-                        memory::destroy_buffer(&params, true);
+                        memory::destroy_buffer(&self.r.governor, &params, true);
                         return Err(error);
                     }
                 };
@@ -1283,6 +1289,7 @@ impl Context<'_> {
                 ));
             }
             let glyphs = buffer(
+                &self.r.governor,
                 &self.r.device,
                 &self.r.queue,
                 "glyph q14 instances",
@@ -1290,6 +1297,7 @@ impl Context<'_> {
                 wgpu::BufferUsages::STORAGE,
             )?;
             let params = match buffer(
+                &self.r.governor,
                 &self.r.device,
                 &self.r.queue,
                 "glyph q14 params",
@@ -1303,11 +1311,12 @@ impl Context<'_> {
             ) {
                 Ok(params) => params,
                 Err(error) => {
-                    memory::destroy_buffer(&glyphs, true);
+                    memory::destroy_buffer(&self.r.governor, &glyphs, true);
                     return Err(error);
                 }
             };
             let created = memory::create_texture(
+                &self.r.governor,
                 &self.r.device,
                 &wgpu::TextureDescriptor {
                     label: Some("v3 glyph scratch"),
@@ -1328,8 +1337,8 @@ impl Context<'_> {
             let scratch = match created {
                 Ok(scratch) => scratch,
                 Err(error) => {
-                    memory::destroy_buffer(&glyphs, true);
-                    memory::destroy_buffer(&params, true);
+                    memory::destroy_buffer(&self.r.governor, &glyphs, true);
+                    memory::destroy_buffer(&self.r.governor, &params, true);
                     return Err(error);
                 }
             };
@@ -1426,7 +1435,11 @@ impl Context<'_> {
         let target = self.resources.pool[out.index].texture.clone();
         let mut resources = self.r.vector.take().unwrap_or_else(|| {
             self.r.pipelines_built = true;
-            super::vector::VectorResources::new(&self.r.device, wgpu::TextureFormat::Rgba16Float)
+            super::vector::VectorResources::new_with_governor(
+                &self.r.device,
+                wgpu::TextureFormat::Rgba16Float,
+                self.r.governor.clone(),
+            )
         });
         let usage = self.r.gpu_bytes();
         let budget = self
@@ -2487,7 +2500,7 @@ impl Renderer {
                     old.retire(&mut self.retired);
                 }
                 self.pipelines_built = true;
-                Resources::new(&self.device, exact)?
+                Resources::new(&self.device, &self.governor, exact)?
             }
         };
         resources.expire(self.frame, &mut self.retired);
@@ -2550,6 +2563,7 @@ impl Renderer {
                 .create_view(&Default::default());
             let uniform = if let Some(grid) = origin {
                 buffer(
+                    &cx.r.governor,
                     &cx.r.device,
                     &cx.r.queue,
                     "M5 integer resolve config",
@@ -2561,6 +2575,7 @@ impl Renderer {
                 )?
             } else {
                 buffer(
+                    &cx.r.governor,
                     &cx.r.device,
                     &cx.r.queue,
                     "M5 resolve config",

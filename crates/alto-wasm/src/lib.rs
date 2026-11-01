@@ -619,6 +619,10 @@ impl Runtime {
     pub fn take_pipelines_built(&mut self) -> bool {
         self.renderer.take_pipelines_built()
     }
+    #[wasm_bindgen(js_name=takeGpuWaitRequested)]
+    pub fn take_gpu_wait_requested(&mut self) -> bool {
+        self.renderer.take_gpu_wait_requested()
+    }
     #[wasm_bindgen(js_name=adapterName)]
     pub fn adapter_name(&self) -> String {
         self.renderer.adapter_name.clone()

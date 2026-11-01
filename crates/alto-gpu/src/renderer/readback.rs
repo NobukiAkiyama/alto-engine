@@ -59,6 +59,7 @@ impl Pool {
             let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let buffer = memory::create_buffer(
+                g,
                 device,
                 &wgpu::BufferDescriptor {
                     label: Some("bounded readback pool"),
@@ -72,7 +73,7 @@ impl Pool {
             let v = validation.pop();
             let o = oom.pop();
             if let Some(e) = v.await {
-                memory::destroy_buffer(&buffer, true);
+                memory::destroy_buffer(g, &buffer, true);
                 return Err(RenderError::Internal(e.to_string()));
             }
             if o.await.is_none() {
@@ -87,7 +88,7 @@ impl Pool {
                     _poller: NativePoller::new(device.clone()),
                 });
             }
-            memory::destroy_buffer(&buffer, true);
+            memory::destroy_buffer(g, &buffer, true);
             if bytes == TILE_RGBA_BYTES {
                 return Err(RenderError::Budget(
                     "cannot allocate one readback tile".into(),
@@ -135,8 +136,7 @@ impl FinishControl {
 pub(super) struct Lease(SharedPool);
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.buffer.unmap();
-        self.0.mapped.store(0, Ordering::Release);
+        self.0.unmap();
         self.0.busy.store(false, Ordering::Release);
     }
 }
@@ -246,10 +246,7 @@ impl StrokeReadback {
             // `fail_after` never reaches here. Unmap on every exit, then poison the
             // reader so a later `next_batch` cannot `map_async` a mapped buffer.
             release_after(
-                || {
-                    pool.buffer.unmap();
-                    pool.mapped.store(0, Ordering::Release);
-                },
+                || pool.unmap(),
                 || {
                     let mapped = pool
                         .buffer
@@ -282,11 +279,11 @@ impl StrokeReadback {
         Ok(Some(out))
     }
     fn retire_tile(&self, tile: StrokeTile) {
-        memory::destroy_texture(&tile.output, false);
-        memory::destroy_texture(&tile.base, false);
-        memory::destroy_buffer(&tile.coverage, false);
+        memory::destroy_texture(&self.governor, &tile.output, false);
+        memory::destroy_texture(&self.governor, &tile.base, false);
+        memory::destroy_buffer(&self.governor, &tile.coverage, false);
         if let Some(t) = tile.selection {
-            memory::destroy_texture(&t, false);
+            memory::destroy_texture(&self.governor, &t, false);
         }
         self.governor.submitted(&self.queue);
     }
@@ -325,11 +322,11 @@ struct PendingBatch {
 impl Drop for PendingBatch {
     fn drop(&mut self) {
         for (_, tile) in self.tiles.drain(..) {
-            memory::destroy_texture(&tile.output, self.complete);
-            memory::destroy_texture(&tile.base, self.complete);
-            memory::destroy_buffer(&tile.coverage, self.complete);
+            memory::destroy_texture(&self.governor, &tile.output, self.complete);
+            memory::destroy_texture(&self.governor, &tile.base, self.complete);
+            memory::destroy_buffer(&self.governor, &tile.coverage, self.complete);
             if let Some(t) = tile.selection {
-                memory::destroy_texture(&t, self.complete);
+                memory::destroy_texture(&self.governor, &t, self.complete);
             }
         }
         self.governor.submitted(&self.queue);
@@ -396,10 +393,17 @@ impl Pool {
             c.1.lock().unwrap().take();
         }
         if result.is_err() {
-            self.buffer.unmap();
-            self.mapped.store(0, Ordering::Release);
+            self.unmap();
         }
         result
+    }
+    /// Unmaps once per `map`. Native wgpu reports a second unmap as an uncaptured
+    /// validation error, which marks the renderer lost. `mapped` is set before
+    /// `map_async`, so a pending map is cancelled here too.
+    pub(super) fn unmap(&self) {
+        if self.mapped.swap(0, Ordering::AcqRel) != 0 {
+            self.buffer.unmap();
+        }
     }
 }
 impl Renderer {

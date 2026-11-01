@@ -133,7 +133,7 @@ pub async fn compare_vector_backends() -> Result<String, JsValue> {
         }
     }
     let time = clock();
-    let mut lyon = VectorResources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut lyon = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba8Unorm);
     lyon.set_mode(alto_gpu::renderer::vector::VectorMode::Legacy);
     let lyon_setup = clock() - time;
     let time = clock();
@@ -607,7 +607,7 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
         let mut images = vec![];
         for mode in order {
             let t = clock();
-            let mut r = VectorResources::new(&device, wgpu::TextureFormat::Rgba16Float);
+            let mut r = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
             r.set_mode(mode);
             let setup = clock() - t;
             let mut timing = timed_vectors(
@@ -664,7 +664,7 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
     // Same resource set, two distinct render calls in one encoder. No arena reuse before submit.
     let mut expected = vec![];
     for (i, target) in [&a, &b].iter().enumerate() {
-        let mut r = VectorResources::new(&device, wgpu::TextureFormat::Rgba16Float);
+        let mut r = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
         r.set_mode(VectorMode::Legacy);
         let mut e = device.create_command_encoder(&Default::default());
         r.render(
@@ -684,7 +684,7 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
         expected.push(pixels(&device, &queue, target).await?);
         r.destroy_after_submit();
     }
-    let mut r = VectorResources::new(&device, wgpu::TextureFormat::Rgba16Float);
+    let mut r = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
     let mut e = device.create_command_encoder(&Default::default());
     for (i, target) in [&a, &b].iter().enumerate() {
         r.render(
@@ -710,7 +710,7 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
     let multi_stats = metrics(r.take_counters());
     r.destroy_after_submit();
     let refs: Vec<_> = base.iter().collect();
-    let mut r = VectorResources::new(&device, wgpu::TextureFormat::Rgba16Float);
+    let mut r = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
     for (i, target) in [&a, &b].iter().enumerate() {
         let mut e = device.create_command_encoder(&Default::default());
         r.render(
@@ -735,7 +735,7 @@ pub async fn verify_vector_optimization(frames: u32, reverse: bool) -> Result<St
     pass &= queued;
     r.destroy_after_submit();
     // A budget that permits existing meshes/coverage but no arena page must use the reference path.
-    let mut r = VectorResources::new(&device, wgpu::TextureFormat::Rgba16Float);
+    let mut r = VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
     r.set_mode(VectorMode::Legacy);
     let mut e = device.create_command_encoder(&Default::default());
     r.render(
@@ -812,7 +812,7 @@ async fn check_dense_lifetimes(
     let world = [0.8, 0.2, -0.35, 0.9, 100., -40.];
     let mut expected = vec![];
     for (i, target) in [a, b].iter().enumerate() {
-        let mut r = VectorResources::new(device, wgpu::TextureFormat::Rgba16Float);
+        let mut r = VectorResources::new_standalone(device, wgpu::TextureFormat::Rgba16Float);
         r.set_mode(alto_gpu::renderer::vector::VectorMode::Legacy);
         let mut e = device.create_command_encoder(&Default::default());
         r.render(
@@ -832,7 +832,7 @@ async fn check_dense_lifetimes(
         expected.push(pixels(device, queue, target).await?);
         r.destroy_after_submit();
     }
-    let mut r = VectorResources::new(device, wgpu::TextureFormat::Rgba16Float);
+    let mut r = VectorResources::new_standalone(device, wgpu::TextureFormat::Rgba16Float);
     let mut e = device.create_command_encoder(&Default::default());
     for (i, target) in [a, b].iter().enumerate() {
         r.render(
