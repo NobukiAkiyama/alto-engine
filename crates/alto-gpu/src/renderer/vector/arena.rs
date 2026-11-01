@@ -1,5 +1,5 @@
 use super::{Counters, Uniform};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 const SLOTS: usize = 256;
 const MAX_PAGES: usize = 16;
@@ -61,6 +61,7 @@ impl<T: bytemuck::Pod> Arena<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn upload(
         &mut self,
+        governor: &Arc<super::super::Governor>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         geometry_layout: &wgpu::BindGroupLayout,
@@ -79,6 +80,7 @@ impl<T: bytemuck::Pod> Arena<T> {
         self.stride = stride;
         while self.pages.len() < needed {
             let buffer = super::super::memory::create_buffer(
+                governor,
                 device,
                 &wgpu::BufferDescriptor {
                     label: Some("vector uniform arena"),

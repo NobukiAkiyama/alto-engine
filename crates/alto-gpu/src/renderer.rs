@@ -432,12 +432,14 @@ fn rgba_pixels(tile: &TileData) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 fn texture(
+    governor: &Arc<Governor>,
     device: &wgpu::Device,
     label: &str,
     layers: u32,
     usage: wgpu::TextureUsages,
 ) -> Result<wgpu::Texture> {
     memory::create_texture(
+        governor,
         device,
         &wgpu::TextureDescriptor {
             label: Some(label),
@@ -487,12 +489,19 @@ impl MemoryClass {
         }
     }
 }
-#[derive(Default)]
 pub(crate) struct Retired {
+    governor: Arc<Governor>,
     buffers: Vec<(wgpu::Buffer, MemoryClass)>,
     textures: Vec<(wgpu::Texture, MemoryClass)>,
 }
 impl Retired {
+    fn new(governor: Arc<Governor>) -> Self {
+        Self {
+            governor,
+            buffers: Vec::new(),
+            textures: Vec::new(),
+        }
+    }
     pub(crate) fn buffer(&mut self, b: &wgpu::Buffer) {
         self.buffers.push((b.clone(), MemoryClass::Vector));
     }
@@ -523,16 +532,20 @@ impl Retired {
         self.buffers.push((b.clone(), class));
     }
     pub(crate) fn take(&mut self, other: &mut Retired) {
+        assert!(
+            Arc::ptr_eq(&self.governor, &other.governor),
+            "cannot combine retired resources from different GPU owners"
+        );
         self.buffers.append(&mut other.buffers);
         self.textures.append(&mut other.textures);
     }
     /// Only after the submit that used them.
     pub(crate) fn release(&mut self) {
         for (b, _) in self.buffers.drain(..) {
-            memory::destroy_buffer(&b, false);
+            memory::destroy_buffer(&self.governor, &b, false);
         }
         for (t, _) in self.textures.drain(..) {
-            memory::destroy_texture(&t, false);
+            memory::destroy_texture(&self.governor, &t, false);
         }
     }
 }
@@ -541,6 +554,7 @@ impl Retired {
 /// it in Rust does nothing there), and creating one per composed tile ran the
 /// renderer out of mappings on slow machines ("size (144) is too large").
 fn buffer<T: Pod>(
+    governor: &Arc<Governor>,
     d: &wgpu::Device,
     q: &wgpu::Queue,
     label: &str,
@@ -563,6 +577,7 @@ fn buffer<T: Pod>(
         Class::Fixed
     };
     let b = memory::create_buffer(
+        governor,
         d,
         &wgpu::BufferDescriptor {
             label: Some(label),
@@ -1497,7 +1512,6 @@ impl Renderer {
             budget_mb as u64 * 1048576,
             readback::capacity(budget_mb as u64 * 1048576),
         );
-        memory::install(&device, &governor);
         let readback = readback::Pool::new(&device, &governor).await?;
         let config = match &surface {
             Some(surface) => {
@@ -1544,6 +1558,7 @@ impl Renderer {
             flag.store(true, Ordering::Release);
         }));
         let atlas = texture(
+            &governor,
             &device,
             "content atlas",
             slots,
@@ -1556,6 +1571,7 @@ impl Renderer {
         // cache and scratch while the first stayed charged until the GPU finished:
         // about 11.5 MiB over a 64 MiB budget, which a slow adapter could exceed.
         let cache = memory::create_texture(
+            &governor,
             &device,
             &wgpu::TextureDescriptor {
                 label: Some("display tiles"),
@@ -1577,6 +1593,7 @@ impl Renderer {
             Class::Fixed,
         )?;
         let scratch = memory::create_texture(
+            &governor,
             &device,
             &wgpu::TextureDescriptor {
                 label: Some("pyramid input"),
@@ -1710,7 +1727,7 @@ impl Renderer {
             glyph_atlas: true,
             profiling: false,
             decoder: None,
-            retired: Retired::default(),
+            retired: Retired::new(governor.clone()),
             governor,
             readback: Some(readback.shared()),
             readback_fault: None,
@@ -1920,6 +1937,7 @@ impl Renderer {
             wgpu::TextureFormat::Rgba8Unorm
         };
         let cache = memory::create_texture(
+            &self.governor,
             &self.device,
             &wgpu::TextureDescriptor {
                 label: Some("display tiles"),
@@ -1934,6 +1952,7 @@ impl Renderer {
             Class::Fixed,
         )?;
         let scratch = memory::create_texture(
+            &self.governor,
             &self.device,
             &wgpu::TextureDescriptor {
                 label: Some("pyramid input"),
@@ -2699,6 +2718,7 @@ impl Renderer {
         };
         let integer_output = if integer {
             Some(memory::create_buffer(
+                &self.governor,
                 &self.device,
                 &wgpu::BufferDescriptor {
                     label: Some("integer composite bytes"),
@@ -2713,6 +2733,7 @@ impl Renderer {
             None
         };
         let cb = buffer(
+            &self.governor,
             &self.device,
             &self.queue,
             "scene commands",
@@ -2721,6 +2742,7 @@ impl Renderer {
         )?;
         self.retired.classified_buffer(&cb, MemoryClass::Fixed);
         let tb = buffer(
+            &self.governor,
             &self.device,
             &self.queue,
             "sparse tile index",
@@ -2738,6 +2760,7 @@ impl Renderer {
                 ));
             };
             buffer(
+                &self.governor,
                 &self.device,
                 &self.queue,
                 "integer tile config",
@@ -2754,6 +2777,7 @@ impl Renderer {
             )?
         } else {
             buffer(
+                &self.governor,
                 &self.device,
                 &self.queue,
                 "tile config",
@@ -3496,6 +3520,7 @@ impl Renderer {
             })
             .collect();
         let ub = buffer(
+            &self.governor,
             &self.device,
             &self.queue,
             "viewport",
@@ -3518,6 +3543,7 @@ impl Renderer {
         )?;
         self.retired.classified_buffer(&ub, MemoryClass::Fixed);
         let tb = buffer(
+            &self.governor,
             &self.device,
             &self.queue,
             "visible tiles",
@@ -3777,18 +3803,21 @@ impl Renderer {
             for (key, dabs) in affected {
                 if let std::collections::btree_map::Entry::Vacant(entry) = stroke.tiles.entry(key) {
                     let base = texture(
+                        &self.governor,
                         &self.device,
                         "stroke base",
                         1,
                         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     )?;
                     let output = texture(
+                        &self.governor,
                         &self.device,
                         "stroke output",
                         1,
                         wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
                     )?;
                     let coverage = memory::create_buffer(
+                        &self.governor,
                         &self.device,
                         &wgpu::BufferDescriptor {
                             label: Some("stroke coverage"),
@@ -3832,6 +3861,7 @@ impl Renderer {
                     let selected = selection
                         .map(|(_, world, size)| -> Result<wgpu::Texture> {
                             let target = texture(
+                                &self.governor,
                                 &self.device,
                                 "stroke selection",
                                 1,
@@ -3901,6 +3931,7 @@ impl Renderer {
                     .get(&key)
                     .ok_or(RenderError::Internal("stroke tile".into()))?;
                 let db = buffer(
+                    &self.governor,
                     &self.device,
                     &self.queue,
                     "dabs",
@@ -3909,6 +3940,7 @@ impl Renderer {
                 )?;
                 self.retired.classified_buffer(&db, MemoryClass::Fixed);
                 let ub = buffer(
+                    &self.governor,
                     &self.device,
                     &self.queue,
                     "brush config",
@@ -4258,6 +4290,7 @@ impl Renderer {
         };
         let input = self.scratch.create_view(&Default::default());
         let ub = buffer(
+            &self.governor,
             &self.device,
             &self.queue,
             "pyramid slot",
@@ -4290,7 +4323,7 @@ impl Renderer {
         }
         self.queue.submit(Some(e.finish()));
         // This takes &self; the uniform is its own and the submit above was its use.
-        memory::destroy_buffer(&ub, false);
+        memory::destroy_buffer(&self.governor, &ub, false);
         self.governor.submitted(&self.queue);
         Ok(true)
     }
@@ -4417,6 +4450,42 @@ mod readback_unmap_tests {
         let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
             return;
         };
+        let before_drop = renderer.gpu_bytes();
+        // Native wgpu resource IDs are only unique within an Instance. Dropping
+        // another renderer must not destroy resources owned by this one.
+        let mut other_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        other_descriptor.backends =
+            wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        let other_instance = wgpu::Instance::new(other_descriptor);
+        let Ok(other) = pollster::block_on(super::Renderer::headless(&other_instance, 64)) else {
+            return;
+        };
+        if renderer.readback.as_ref().unwrap().buffer != other.readback.as_ref().unwrap().buffer {
+            // wgpu may make native IDs global in a future release; then this test
+            // no longer exercises the collision this regression covers.
+            return;
+        }
+        drop(other);
+        let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
+        assert_eq!(renderer.gpu_bytes().budget_used, before_drop.budget_used);
+        assert!(!renderer.is_lost(), "{}", renderer.lost_detail());
+        let before_probe = renderer.gpu_bytes().budget_used;
+        let probe = super::memory::create_buffer(
+            &renderer.governor,
+            &renderer.device,
+            &wgpu::BufferDescriptor {
+                label: Some("multi-instance registry probe"),
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            super::memory::Class::Vector,
+            false,
+        )
+        .unwrap();
+        assert_eq!(renderer.gpu_bytes().budget_used, before_probe + 4);
+        super::memory::destroy_buffer(&renderer.governor, &probe, true);
+        assert_eq!(renderer.gpu_bytes().budget_used, before_probe);
         let scene = alto_scene::RenderScene {
             canvas: alto_core::IRect {
                 x0: 0,
