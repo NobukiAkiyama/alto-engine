@@ -157,7 +157,9 @@ fn folder_packages_are_managed_by_git_with_layer_level_diffs() {
         "{text}"
     );
     // textconv makes plain `git diff` hunks name layers and tiles.
-    alto_git::install(&root, env!("CARGO_BIN_EXE_alto-git")).unwrap();
+    let alto_git_bin = std::env::var("CARGO_BIN_EXE_alto-git")
+        .expect("Cargo sets CARGO_BIN_EXE_alto-git while running integration tests");
+    alto_git::install(&root, &alto_git_bin).unwrap();
     let plain = git(
         &root,
         &["diff", "HEAD~1", "HEAD", "--", "art.altoproj/document.json"],

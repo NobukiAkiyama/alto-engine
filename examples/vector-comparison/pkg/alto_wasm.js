@@ -963,6 +963,13 @@ export class Runtime {
         return v1;
     }
     /**
+     * @returns {boolean}
+     */
+    takeGpuWaitRequested() {
+        const ret = wasm.runtime_takeGpuWaitRequested(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @returns {Uint8Array}
      */
     takeJournal() {
@@ -1160,29 +1167,6 @@ export class Runtime {
         let deferred2_1;
         try {
             const ret = wasm.runtime_undo(this.__wbg_ptr);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
-                ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred2_0 = ptr1;
-            deferred2_1 = len1;
-            return getStringFromWasm0(ptr1, len1);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-        }
-    }
-    /**
-     * One undoable edit from render version 1 or 2 to version 3. Load and save
-     * do not call this. A document already on version 3 is rejected.
-     * @returns {string}
-     */
-    upgradeRenderVersion() {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ret = wasm.runtime_upgradeRenderVersion(this.__wbg_ptr);
             var ptr1 = ret[0];
             var len1 = ret[1];
             if (ret[3]) {
@@ -2696,7 +2680,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_generic_0000000000000007: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 272, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 271, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke_______true_);
             return ret;
         },

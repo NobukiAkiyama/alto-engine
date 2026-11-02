@@ -66,6 +66,7 @@ export const runtime_snapshotHash: (a: number) => [number, number, number, numbe
 export const runtime_submittedWorkDone: (a: number) => any;
 export const runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
 export const runtime_takeFinishJournalError: (a: number) => [number, number];
+export const runtime_takeGpuWaitRequested: (a: number) => number;
 export const runtime_takeJournal: (a: number) => [number, number];
 export const runtime_takePipelinesBuilt: (a: number) => number;
 export const runtime_textBakeForTesting: (a: number, b: number, c: number) => [number, number, number, number];
@@ -77,7 +78,6 @@ export const runtime_textSelection: (a: number, b: number, c: number, d: number,
 export const runtime_tick: (a: number, b: number) => [number, number, number, number];
 export const runtime_transact: (a: number, b: number, c: number) => [number, number, number, number];
 export const runtime_undo: (a: number) => [number, number, number, number];
-export const runtime_upgradeRenderVersion: (a: number) => [number, number, number, number];
 export const runtime_validateFrame: (a: number) => any;
 export const runtime_vectorPathSvg: (a: number, b: number, c: number) => [number, number, number, number];
 export const runtime_vectorStats: (a: number) => [number, number];
