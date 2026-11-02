@@ -1112,6 +1112,7 @@ export async function runParityTests(engine, log) {
         await Promise.race([settled, new Promise((_, reject) => setTimeout(() => reject(Error("cold pyramid never settled")), 60000))]);
       } finally {
         off();
+        await testing(engine).request("enablePrefetch");
       }
       const waits = frames.filter((f) => f.gpuWait);
       assert(waits.length > 0, `no GPU wait in ${frames.length} frames`);
