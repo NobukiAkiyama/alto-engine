@@ -4468,56 +4468,12 @@ mod v3_cache_tests {
 }
 #[cfg(test)]
 mod readback_unmap_tests {
-    /// One readback leaves the device usable. The pool buffer used to be unmapped
-    /// by `read_tiles` and again by the lease; native wgpu reports the second as
-    /// an uncaptured validation error, which marks the renderer lost.
-    #[test]
-    fn one_read_tile_does_not_mark_the_renderer_lost() {
-        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    fn headless_instance() -> wgpu::Instance {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
-        let instance = wgpu::Instance::new(descriptor);
-        let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
-            return;
-        };
-        let before_drop = renderer.gpu_bytes();
-        // Native wgpu resource IDs are only unique within an Instance. Dropping
-        // another renderer must not destroy resources owned by this one.
-        let mut other_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        other_descriptor.backends =
-            wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
-        let other_instance = wgpu::Instance::new(other_descriptor);
-        let Ok(other) = pollster::block_on(super::Renderer::headless(&other_instance, 64)) else {
-            return;
-        };
-        if renderer.readback.as_ref().unwrap().buffer != other.readback.as_ref().unwrap().buffer {
-            // wgpu may make native IDs global in a future release; then this test
-            // no longer exercises the collision this regression covers.
-            return;
-        }
-        drop(other);
-        let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
-        assert_eq!(renderer.gpu_bytes().budget_used, before_drop.budget_used);
-        assert!(!renderer.is_lost(), "{}", renderer.lost_detail());
-        let before_probe = renderer.gpu_bytes().budget_used;
-        let probe = super::memory::create_buffer(
-            &renderer.governor,
-            &renderer.device,
-            &wgpu::BufferDescriptor {
-                label: Some("multi-instance registry probe"),
-                size: 4,
-                usage: wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            },
-            super::memory::Class::Vector,
-            false,
-        )
-        .unwrap();
-        assert_eq!(renderer.gpu_bytes().budget_used, before_probe + 4);
-        super::memory::destroy_buffer(&renderer.governor, &probe, true);
-        assert_eq!(renderer.gpu_bytes().budget_used, before_probe);
+        wgpu::Instance::new(descriptor)
+    }
+    fn assert_reads_leave_renderer_usable(renderer: &mut super::Renderer) {
         let scene = alto_scene::RenderScene {
             canvas: alto_core::IRect {
                 x0: 0,
@@ -4550,5 +4506,63 @@ mod readback_unmap_tests {
             assert_eq!(renderer.lost_detail(), "");
             assert_eq!(renderer.readback_stats().mapped, 0);
         }
+    }
+    /// One readback leaves the device usable. The pool buffer used to be unmapped
+    /// by `read_tiles` and again by the lease; native wgpu reports the second as
+    /// an uncaptured validation error, which marks the renderer lost.
+    #[test]
+    fn one_read_tile_does_not_mark_the_renderer_lost() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let instance = headless_instance();
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        assert_reads_leave_renderer_usable(&mut renderer);
+    }
+    #[test]
+    fn dropping_another_instances_renderer_leaves_this_one_usable() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let instance = headless_instance();
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        let before_drop = renderer.gpu_bytes();
+        // Native wgpu resource IDs are only unique within an Instance. Dropping
+        // another renderer must not destroy resources owned by this one.
+        let other_instance = headless_instance();
+        let Ok(other) = pollster::block_on(super::Renderer::headless(&other_instance, 64)) else {
+            return;
+        };
+        if renderer.readback.as_ref().unwrap().buffer != other.readback.as_ref().unwrap().buffer {
+            // wgpu may make native IDs global in a future release; then this test
+            // no longer exercises the collision this regression covers.
+            return;
+        }
+        drop(other);
+        let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
+        assert_eq!(renderer.gpu_bytes().budget_used, before_drop.budget_used);
+        assert!(!renderer.is_lost(), "{}", renderer.lost_detail());
+        let before_probe = renderer.gpu_bytes().budget_used;
+        let probe = super::memory::create_buffer(
+            &renderer.governor,
+            &renderer.device,
+            &wgpu::BufferDescriptor {
+                label: Some("multi-instance registry probe"),
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            super::memory::Class::Vector,
+            false,
+        )
+        .unwrap();
+        assert_eq!(renderer.gpu_bytes().budget_used, before_probe + 4);
+        super::memory::destroy_buffer(&renderer.governor, &probe, true);
+        assert_eq!(renderer.gpu_bytes().budget_used, before_probe);
+        assert_reads_leave_renderer_usable(&mut renderer);
     }
 }
