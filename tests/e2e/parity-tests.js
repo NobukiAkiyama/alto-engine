@@ -1090,6 +1090,37 @@ export async function runParityTests(engine, log) {
       const tile = await unstable(engine).readTile(0, 0);
       assert(tile.length === 262144, "readTile after recovery");
     });
+    await test("cold v3 pyramid waits for the GPU queue between bounded submissions", async () => {
+      const doc = await engine.createDocument({ width: 4096, height: 4096 });
+      const data = await engine.vectors.parseSvg("M128 192 Q256 64 384 192 L384 400 H128 Z");
+      let layer;
+      await doc.transact("curve", (tx) => layer = tx.addVector([{ data, fill: [1, 1, 1, 1], stroke: null, fill_rule: "non_zero" }]));
+      await doc.transact("scale", (tx) => tx.setTransform(layer, [8, 0, 0, 8, 0, 0]));
+      await unstable(engine).settle();
+      await testing(engine).request("resetRenderCache", { cpu: true });
+      // Drain-loop frames: settle() would take the waitFrame path, which never posts them.
+      const frames = [];
+      let off;
+      const settled = new Promise((resolve) => {
+        off = unstable(engine).onFrame((frame) => {
+          frames.push(frame);
+          if (frames.some((f) => f.composed) && frame.pending === 0 && !frame.presentDeferred) resolve();
+        });
+      });
+      engine.viewport.set({ center: [2048, 2048], zoom: 1 / 16, rotation: 0 });
+      try {
+        await Promise.race([settled, new Promise((_, reject) => setTimeout(() => reject(Error("cold pyramid never settled")), 60000))]);
+      } finally {
+        off();
+      }
+      const waits = frames.filter((f) => f.gpuWait);
+      assert(waits.length > 0, `no GPU wait in ${frames.length} frames`);
+      const most = Math.max(...frames.map((f) => f.composed));
+      assert(most <= 8, `${most} hierarchy steps in one tick`);
+      // A waiting tick made progress, so the deferred-present watchdog cannot count it.
+      assert(waits.every((f) => f.composed > 0), "a GPU wait with nothing composed");
+      return `${frames.length} frames, ${waits.length} waits`;
+    });
     await test("v3 locked hashes are exactly the enforced v3 tiles", async () => {
       // A Rust v3- line that no enforced composite tile checked is unused, for
       // example when a case leaves the integer path.
