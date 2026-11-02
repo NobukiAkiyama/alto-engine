@@ -270,11 +270,11 @@ export interface Requests {
     }, Uint8Array>;
     stallDecodeWorkers: Q<None, number>;
     destroyGpu: Q<None, true>;
-    /** Test hook: the next ticks look like an idle deferred present, until `limit` of them. */
+    /** Test hook: the next ticks look like an idle deferred present, until `limit` of them. Returns the limit it replaced. */
     stickPresent: Q<{
         enabled: boolean;
         limit?: number;
-    }, true>;
+    }, number>;
     recoveryStore: Q<None, {
         latestGeneration: number;
         records: number;
