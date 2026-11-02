@@ -1089,6 +1089,9 @@ export async function runParityTests(engine, log) {
       assert(lost && restored, `gpu events lost=${lost} restored=${restored}`);
       const tile = await unstable(engine).readTile(0, 0);
       assert(tile.length === 262144, "readTile after recovery");
+      // A short test limit that outlived the loss would call a slow GPU lost later.
+      const limit = await testing(engine).request("stickPresent", { enabled: false });
+      assert(limit === 40, `defer limit after recovery ${limit}`);
     });
     await test("cold v3 pyramid waits for the GPU queue between bounded submissions", async () => {
       const doc = await engine.createDocument({ width: 4096, height: 4096 });

@@ -487,6 +487,7 @@ function noteDeferred(frame, where) {
 /** Recreate the device from the document. The next tick draws it again. */
 async function recoverLostGpu() {
     forceDeferred = false;
+    deferLimit = PRESENT_DEFER_LIMIT;
     deferredWaits = 0;
     postMessage({ t: "gpuLost" });
     try {
@@ -908,10 +909,11 @@ async function execute(m) {
                 m.limit !== undefined &&
                 (!Number.isInteger(m.limit) || m.limit < 1 || m.limit > PRESENT_DEFER_LIMIT))
                 throw Error("INVALID_ARGUMENT: present defer limit");
+            const replaced = deferLimit;
             forceDeferred = enabled;
             deferLimit = enabled && m.limit !== undefined ? m.limit : PRESENT_DEFER_LIMIT;
             deferredWaits = 0;
-            return true;
+            return replaced;
         }
         case "setDecodeWorkers":
             // Diagnostic: compare inline decoding with the pool. Enabling after the pool
