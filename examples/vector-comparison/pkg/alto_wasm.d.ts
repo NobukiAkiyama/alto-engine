@@ -128,6 +128,7 @@ export class Runtime {
      */
     takeDecodeRequests(max: number): Uint8Array;
     takeFinishJournalError(): string | undefined;
+    takeGpuWaitRequested(): boolean;
     takeJournal(): Uint8Array;
     /**
      * True once after the renderer created pipelines; the Worker then waits for the
@@ -151,11 +152,6 @@ export class Runtime {
     tick(budget_ms: number): Float64Array;
     transact(request: string): string;
     undo(): string;
-    /**
-     * One undoable edit from render version 1 or 2 to version 3. Load and save
-     * do not call this. A document already on version 3 is rejected.
-     */
-    upgradeRenderVersion(): string;
     /**
      * Exercises an uncached frame under a WebGPU validation error scope.
      */
@@ -256,6 +252,7 @@ export interface InitOutput {
     readonly runtime_submittedWorkDone: (a: number) => any;
     readonly runtime_takeDecodeRequests: (a: number, b: number) => [number, number];
     readonly runtime_takeFinishJournalError: (a: number) => [number, number];
+    readonly runtime_takeGpuWaitRequested: (a: number) => number;
     readonly runtime_takeJournal: (a: number) => [number, number];
     readonly runtime_takePipelinesBuilt: (a: number) => number;
     readonly runtime_textBakeForTesting: (a: number, b: number, c: number) => [number, number, number, number];
@@ -267,7 +264,6 @@ export interface InitOutput {
     readonly runtime_tick: (a: number, b: number) => [number, number, number, number];
     readonly runtime_transact: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_undo: (a: number) => [number, number, number, number];
-    readonly runtime_upgradeRenderVersion: (a: number) => [number, number, number, number];
     readonly runtime_validateFrame: (a: number) => any;
     readonly runtime_vectorPathSvg: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_vectorStats: (a: number) => [number, number];

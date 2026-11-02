@@ -1,8 +1,8 @@
-# Alto Engine — M7・M8（crates 0.4.0 / TypeScript SDK 0.5.0 / プロトコル4）
+# Alto Engine — render v3 / format 4（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 4）
 
 Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Playgroundです。**M7：テキスト（横組み・日本語縦組み・フォントフォールバック・OpenType機能・テキスト選択）**と、**M8：版管理（コミット・意味的差分・フォルダ形式・Git Adapter）**を追加しました。M6までのベクター・選択範囲・ラスター編集・調整・非破壊ぼかしも使えます。文書・Undo/Redo・`.alto`保存・OPFSジャーナル復旧につながっています。
 
-[ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [最終検証結果](doc/verification/RESULTS.md) / [M7/M8サンプル文書](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
+[ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [リリース手順とバージョン方針](RELEASING.md) / [最終検証結果](doc/verification/RESULTS.md) / [M7/M8サンプル文書（format 4）](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
 
 [コールド表示の実装・測定結果](doc/verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](doc/design/COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
@@ -39,7 +39,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 
 ## M7の使い方（テキスト・縦組み）
 
-「検証と計測」の「M7/M8サンプルを開く」で、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。
+「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 4に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜3 / render v1・v2の文書は現行エンジンでは開けません。
 
 ### フォント
 
@@ -135,7 +135,7 @@ await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDKは **0.5.0 / プロトコル4**、クレートとWASMは **0.4.0** で照合します。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **4** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
 
 ## M6の使い方
 
