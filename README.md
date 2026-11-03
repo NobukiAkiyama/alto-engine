@@ -1,4 +1,4 @@
-# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 6）
+# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 8）
 
 未リリースの開発版です。旧ファイル・旧通信との互換性はありません。
 
@@ -12,7 +12,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-この開発版は Protocol 6 / format 5 を使います。WASM バイナリは Git に入れないため、現在のソースからビルドしてください。公開済みバイナリを取得する `fetch-wasm.sh` は本ブランチ用のビルドを代替しません。
+この開発版は Protocol 8 / format 5 を使います。WASM バイナリは Git に入れないため、現在のソースからビルドしてください。公開済みバイナリを取得する `fetch-wasm.sh` は本ブランチ用のビルドを代替しません。
 
 ```sh
 sh scripts/build-m0.sh
@@ -34,7 +34,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 - 「保存 .alto」で保存。「開く」で復元。File System Access API対応環境ではファイルへ書き込み、それ以外ではダウンロードします。
 - 異常終了後、同じオリジンで開き直すと「編集を復旧」が表示されます。OPFSの記録はブラウザのサイトデータに保存されます。
 
-「検証と計測」から画像編集・版管理テスト6件、機能テスト36件、M5テスト9件、M6テスト10件、M7テスト8件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+「検証と計測」から画像編集・版管理、機能、M5〜M8の各テスト、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
 
 ## 確定画像編集とブランチ
 
@@ -42,7 +42,7 @@ Playground の「レイヤーの画像編集」で切り抜き・拡縮・90度�
 
 「ブランチと統合」で分岐・切替・保護・削除と、競合を選択してから確定する3-wayマージを扱います。未コミットの切替は拒否します。保存・版の記録・過去版の内容復元は別操作です。履歴表示は第一親・統合元を含むDAG・全ブランチを切り替えられます。
 
-GCは確認（dry-run）が既定です。SDKのメモリ保存先とネイティブのフォルダ/ZIPは実削除に対応します。File System Access/OPFSフォルダは共有排他を保証しないため確認のみです。SDKの単一ファイル整理は、新しいZIPの出力で行います。`alto-git` のブランチ・二親出力は後続段階で、現在はその履歴のsyncを明示的に拒否します。
+GCは確認（dry-run）が既定です。SDKのメモリ保存先、OPFSフォルダ、ネイティブのフォルダ/ZIPは実削除に対応します。File System Accessで選んだフォルダは他のオリジンやネイティブのアプリを排他できないため確認のみです。SDKの単一ファイル整理は、新しいZIPの出力で行います。`alto-git sync` はブランチ・タグ・二親マージをGitのrefとparentsへ写します。
 
 詳細は[設計書](doc/design/VERSIONING-AND-IMAGE-EDITING.md)と[実装・検証記録](doc/verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照してください。
 
@@ -144,7 +144,7 @@ await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **4** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **8** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
 
 ## M6の使い方
 
@@ -311,7 +311,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル8）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル8）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 
