@@ -100,9 +100,10 @@ async function opfsLockName(handle: FileSystemDirectoryHandle): Promise<string |
   return path ? `alto-engine-folder:${path.join("/")}` : null;
 }
 function withFolderLock<T>(name: string, waitMs: number, run: () => Promise<T>): Promise<T> {
-  return navigator.locks.request(name, { signal: AbortSignal.timeout(waitMs) }, run).catch((e: unknown) => {
-    const n = (e as { name?: string } | null)?.name;
-    if (n === "TimeoutError" || n === "AbortError") throw new AltoError("BUSY", "the folder is in use elsewhere");
+  const signal = AbortSignal.timeout(waitMs);
+  return navigator.locks.request(name, { signal }, run).catch((e: unknown) => {
+    // Only the wait: an error from `run` itself keeps its own meaning.
+    if (e === signal.reason) throw new AltoError("BUSY", "the folder is in use elsewhere");
     throw e;
   }) as Promise<T>;
 }
