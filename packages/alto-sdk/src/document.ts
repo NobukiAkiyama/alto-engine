@@ -307,7 +307,10 @@ export class DocumentHandle {
       this.imageCommand({ type: "smudge", node, stroke: { hardness: 1, ...stroke }, strength: options.strength ?? 0.5, selection: options.selection ?? "current" }),
     /** Merges a raster into the raster below it. Refused when the result could not look the same. */
     mergeDown: (node: NodeId) => this.layerCommand({ type: "merge_down", node }),
-    /** Bakes a whole-pixel offset into a raster, or flattens a group of rasters. */
+    /**
+     * Bakes a raster's whole-pixel offset, turns a vector layer into a raster on the same node, or
+     * flattens a group of rasters and vectors. A vector must sit at a whole-pixel position at scale 1.
+     */
     rasterize: (node: NodeId) => this.layerCommand({ type: "rasterize", node }),
     histogram: (node: NodeId, range?: ImageBounds): Promise<ImageHistogram> => this.request("imageHistogram", range ? { node, range } : { node }),
     pickColor: (node: NodeId, point: [number, number]) => this.request("pickColor", { node, x: point[0], y: point[1] }),

@@ -19,6 +19,10 @@ pub enum ImageFilter {
     Nearest,
     #[default]
     Bilinear,
+    /// Sharper than bilinear when enlarging or mildly shrinking.
+    CatmullRom,
+    /// The exact average of the source area under each new pixel, for large reductions.
+    Area,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -281,7 +285,11 @@ fn rounded(n: i128, d: i128) -> i64 {
     let q = (a / d + u128::from(a % d >= d.div_ceil(2))) as i64;
     if n < 0 { -q } else { q }
 }
-fn world(engine: &Engine, h: DocHandle, id: NodeId) -> Result<alto_core::FixedAffine, EngineError> {
+pub(crate) fn world(
+    engine: &Engine,
+    h: DocHandle,
+    id: NodeId,
+) -> Result<alto_core::FixedAffine, EngineError> {
     let doc = engine.document(h)?;
     let mut chain = vec![];
     let mut next = Some(id);
@@ -435,6 +443,9 @@ fn resize_pixel(
             b.y + (((2 * v + 1) * i128::from(b.height)) / (2 * i128::from(dst.height))) as i32,
         );
     }
+    if matches!(filter, ImageFilter::Area) {
+        return area_pixel(engine, map, b, dst, u, v);
+    }
     let coordinate = |origin: i32, u: i128, old: u32, new: u32| {
         rounded(
             i128::from(origin) * 256 * 2 * i128::from(new) + (2 * u + 1) * i128::from(old) * 256
@@ -448,6 +459,9 @@ fn resize_pixel(
     let iy = qy.div_euclid(256) as i32;
     let fx = qx.rem_euclid(256) as u64;
     let fy = qy.rem_euclid(256) as u64;
+    if matches!(filter, ImageFilter::CatmullRom) {
+        return catmull_rom_pixel(engine, map, b, [ix, iy], [fx as i128, fy as i128]);
+    }
     let mut acc = [0u64; 4];
     for (dx, dy, w) in [
         (0, 0, (256 - fx) * (256 - fy)),
@@ -474,6 +488,101 @@ fn resize_pixel(
         out[c] = (p * 255 + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
     }
     Ok(out)
+}
+/// Premultiplied Q14 RGBA from straight RGBA8, with the bilinear filter's rounding.
+fn premultiplied_q14(p: [u8; 4]) -> [i128; 4] {
+    let a = (u64::from(p[3]) * 16384 + 127) / 255;
+    let mut out = [0i128; 4];
+    out[3] = i128::from(a);
+    for c in 0..3 {
+        out[c] = i128::from((u64::from(p[c]) * u64::from(p[3]) * 16384 + 32512) / 65025);
+    }
+    out
+}
+/// Back to straight RGBA8. Colors stay inside alpha, because a filter can overshoot.
+fn straight_from_q14(p: [i128; 4]) -> [u8; 4] {
+    let a = p[3].clamp(0, 16384) as u64;
+    let mut out = [0; 4];
+    out[3] = ((a * 255 + 8192) / 16384) as u8;
+    for c in 0..3 {
+        let v = p[c].clamp(0, a as i128) as u64;
+        out[c] = (v * 255 + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
+    }
+    out
+}
+/// Catmull-Rom in exact integers: the weights of `t = f / 256` over `2 * 256^3`,
+/// premultiplied, clamped to the source range at the edges.
+fn catmull_rom_pixel(
+    engine: &Engine,
+    map: &TileMap,
+    b: ImageBounds,
+    at: [i32; 2],
+    f: [i128; 2],
+) -> Result<[u8; 4], EngineError> {
+    let weights = |t: i128| {
+        const D: i128 = 256;
+        [
+            -t * D * D + 2 * t * t * D - t * t * t,
+            2 * D * D * D - 5 * t * t * D + 3 * t * t * t,
+            t * D * D + 4 * t * t * D - 3 * t * t * t,
+            -t * t * D + t * t * t,
+        ]
+    };
+    let (wx, wy) = (weights(f[0]), weights(f[1]));
+    let mut acc = [0i128; 4];
+    for (j, wj) in wy.iter().enumerate() {
+        if *wj == 0 {
+            continue;
+        }
+        for (i, wi) in wx.iter().enumerate() {
+            if *wi == 0 {
+                continue;
+            }
+            let p = premultiplied_q14(read(
+                engine,
+                map,
+                (at[0] + i as i32 - 1).clamp(b.x, b.right() - 1),
+                (at[1] + j as i32 - 1).clamp(b.y, b.bottom() - 1),
+            )?);
+            for c in 0..4 {
+                acc[c] += p[c] * wi * wj;
+            }
+        }
+    }
+    // The weights of each axis sum to 2 * 256^3, so the product is 2^50.
+    Ok(straight_from_q14(acc.map(|v| (v + (1 << 49)) >> 50)))
+}
+/// One new pixel's source area, in exact rational weights.
+fn area_pixel(
+    engine: &Engine,
+    map: &TileMap,
+    b: ImageBounds,
+    dst: ImageBounds,
+    u: i128,
+    v: i128,
+) -> Result<[u8; 4], EngineError> {
+    let spans = |d: i128, old: u32, new: u32| {
+        let (old, new) = (i128::from(old), i128::from(new));
+        let (start, end) = (d * old, (d + 1) * old);
+        let first = start.div_euclid(new);
+        let last = (end - 1).div_euclid(new);
+        (first..=last).map(move |s| {
+            let weight = end.min((s + 1) * new) - start.max(s * new);
+            (s as i32, weight)
+        })
+    };
+    let mut acc = [0i128; 4];
+    for (sy, wy) in spans(v, b.height, dst.height) {
+        for (sx, wx) in spans(u, b.width, dst.width) {
+            let p = premultiplied_q14(read(engine, map, b.x + sx, b.y + sy)?);
+            for c in 0..4 {
+                acc[c] += p[c] * wx * wy;
+            }
+        }
+    }
+    // Weights sum to the source size on each axis.
+    let total = i128::from(b.width) * i128::from(b.height);
+    Ok(straight_from_q14(acc.map(|v| (v + total / 2) / total)))
 }
 impl Engine {
     pub fn pick_color(
@@ -1346,6 +1455,137 @@ mod tests {
             .unwrap();
         e.undo(h).unwrap();
         assert!(e.apply_image_edit(h, prepared, "stale").is_err());
+    }
+    /// A one-row image of the given pixels at the origin.
+    fn row(pixels: &[[u8; 4]]) -> (Engine, DocHandle, NodeId) {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(300, 10)).unwrap();
+        let mut n = Node::raster("row");
+        let id = n.id;
+        let mut data = BTreeMap::new();
+        for (x, p) in pixels.iter().enumerate() {
+            write(&mut data, x as i32, 0, *p);
+        }
+        let mut tiles = TileMap::new(PixelFormat::Rgba8);
+        for (k, v) in data {
+            let hash = e
+                .put_tile(TileData::new(PixelFormat::Rgba8, v).unwrap())
+                .unwrap();
+            tiles.tiles.insert(k, hash);
+        }
+        n.kind = NodeKind::Raster {
+            bounds: ImageBounds {
+                x: 0,
+                y: 0,
+                width: pixels.len() as u32,
+                height: 1,
+            },
+            tiles,
+        };
+        let root = e.document(h).unwrap().root;
+        e.transact(
+            h,
+            "add",
+            vec![Op::InsertNode {
+                node: n,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        (e, h, id)
+    }
+    fn resize_row(pixels: &[[u8; 4]], width: u32, filter: ImageFilter) -> Vec<[u8; 4]> {
+        let (mut e, h, id) = row(pixels);
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Resize {
+                node: id,
+                width,
+                height: 1,
+                filter,
+            },
+        );
+        (0..width)
+            .map(|x| e.pick_color(h, id, [f64::from(x), 0.0]).unwrap().bytes)
+            .collect()
+    }
+    #[test]
+    fn area_filter_averages_premultiplied_source_exactly() {
+        let black = [0, 0, 0, 255];
+        let white = [255, 255, 255, 255];
+        assert_eq!(
+            resize_row(&[black, white, black, white], 2, ImageFilter::Area),
+            [[128, 128, 128, 255]; 2],
+            "bilinear would alias this pattern"
+        );
+        // Three source pixels into two: 1.5 source pixels each, with exact weights.
+        assert_eq!(
+            resize_row(&[black, white, black], 2, ImageFilter::Area),
+            [[85, 85, 85, 255]; 2]
+        );
+        // Transparent pixels do not darken the color.
+        assert_eq!(
+            resize_row(&[[255, 0, 0, 255], [0, 0, 0, 0]], 1, ImageFilter::Area),
+            [[255, 0, 0, 128]]
+        );
+    }
+    #[test]
+    fn catmull_rom_keeps_flat_areas_and_stays_in_range() {
+        let flat = [[10, 20, 30, 255]; 4];
+        assert_eq!(
+            resize_row(&flat, 9, ImageFilter::CatmullRom),
+            [[10, 20, 30, 255]; 9]
+        );
+        // Enlarging an edge overshoots only up to the clamp, and passes through source
+        // values where the destination center lands exactly on a source center.
+        let edge = [
+            [0, 0, 0, 255],
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+            [255, 255, 255, 255],
+        ];
+        let up = resize_row(&edge, 12, ImageFilter::CatmullRom);
+        assert_eq!(up[0], [0, 0, 0, 255]);
+        assert_eq!(up[11], [255, 255, 255, 255]);
+        assert!(up.windows(2).all(|w| w[0][3] == 255 && w[1][3] == 255));
+        let bilinear = resize_row(&edge, 12, ImageFilter::Bilinear);
+        assert_ne!(up, bilinear, "the kernels differ");
+        // A half-transparent pixel never gets more color than its alpha allows.
+        let soft = resize_row(
+            &[[255, 0, 0, 255], [0, 0, 0, 0], [255, 0, 0, 255]],
+            7,
+            ImageFilter::CatmullRom,
+        );
+        assert!(soft.iter().all(|p| p[3] == 0 || p[0] == 255), "{soft:?}");
+    }
+    #[test]
+    fn filters_are_reproducible_and_undo_and_save() {
+        let pixels: Vec<[u8; 4]> = (0..40u8).map(|i| [i * 6, 255 - i, i, 200 + i]).collect();
+        for filter in [ImageFilter::CatmullRom, ImageFilter::Area] {
+            assert_eq!(
+                resize_row(&pixels, 13, filter),
+                resize_row(&pixels, 13, filter)
+            );
+        }
+        let (mut e, h, id) = row(&pixels);
+        let before = e.snapshot(h).unwrap();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Resize {
+                node: id,
+                width: 13,
+                height: 1,
+                filter: ImageFilter::Area,
+            },
+        );
+        let bytes = e.save_package(h).unwrap();
+        assert!(Engine::new().open_package(&bytes).is_ok());
+        e.undo(h).unwrap();
+        assert_eq!(e.snapshot(h).unwrap(), before);
     }
     #[test]
     fn fill_uses_four_neighbors_and_seed_comparison_and_journal() {

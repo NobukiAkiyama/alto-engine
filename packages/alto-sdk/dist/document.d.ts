@@ -148,7 +148,10 @@ export declare class DocumentHandle {
         }) => Promise<ImageEditResult>;
         /** Merges a raster into the raster below it. Refused when the result could not look the same. */
         mergeDown: (node: NodeId) => Promise<LayerEditResult>;
-        /** Bakes a whole-pixel offset into a raster, or flattens a group of rasters. */
+        /**
+         * Bakes a raster's whole-pixel offset, turns a vector layer into a raster on the same node, or
+         * flattens a group of rasters and vectors. A vector must sit at a whole-pixel position at scale 1.
+         */
         rasterize: (node: NodeId) => Promise<LayerEditResult>;
         histogram: (node: NodeId, range?: ImageBounds) => Promise<ImageHistogram>;
         pickColor: (node: NodeId, point: [number, number]) => Promise<import("./image-types.js").PickedColor>;

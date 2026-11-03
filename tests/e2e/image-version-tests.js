@@ -97,6 +97,27 @@ export async function runImageVersionTests(engine, log) {
       const baked = await d.image.rasterize(upper); assert(eq(baked.bounds, { x: 300, y: 1, width: 8, height: 8 }), "rasterize bounds"); assert(eq((await d.image.pickComposite([301, 2])).bytes, [0, 255, 0, 255]), "rasterize picture");
       const hash = await d.snapshotHash(), saved = blobTarget(); await d.save(saved); d = await engine.open(saved.blob); assert(await d.snapshotHash() === hash, "layer edit reopen");
     });
+    await test("Catmull-Rom and area filters / vector layers and groups become pixels with the same picture", async () => {
+      d = await engine.createDocument({ width: 64, height: 64 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 4, height: 1 } }); });
+      await d.image.fill(layer, [0, 0], [1, 1, 1, 1]); await d.image.resize(layer, 2, 1, { filter: "area" }); assert(eq((await d.image.pickColor(layer, [1, 0])).bytes, [255, 255, 255, 255]), "area");
+      await d.image.resize(layer, 5, 1, { filter: "catmull_rom" }); assert(eq((await d.image.pickColor(layer, [4, 0])).bytes, [255, 255, 255, 255]), "catmull-rom");
+      await reject(d.image.resize(layer, 2, 1, { filter: "lanczos" }), "UNSUPPORTED");
+      d = await engine.createDocument({ width: 300, height: 64 });
+      const svg = await d.image.importSvg('<svg width="300" height="64"><rect x="250" y="10" width="20" height="20" fill="#f00"/><circle cx="260" cy="40" r="12" fill="#00f" stroke="#0f0" stroke-width="4"/></svg>');
+      let group = null, vector = svg.node; while (d.getSnapshot().nodes.get(vector).type !== "vector") { group = vector; vector = d.getSnapshot().nodes.get(vector).children[0]; }
+      const samples = [[255, 15], [260, 40], [260, 28], [272, 40], [248, 40], [120, 30]];
+      const before = await Promise.all(samples.map((p) => d.image.pickComposite(p))), hash = await d.snapshotHash();
+      const baked = await d.image.rasterize(vector); assert(d.getSnapshot().nodes.get(vector).type === "raster" && baked.bounds.width > 0, "kind");
+      const after = await Promise.all(samples.map((p) => d.image.pickComposite(p)));
+      for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - after[i].bytes[c]) <= 1), `vector picture changed at ${p}: ${before[i].bytes} ${after[i].bytes}`);
+      assert(eq((await d.image.pickComposite([255, 15])).bytes, [255, 0, 0, 255]), "opaque interior is exact");
+      await d.undo(); assert(await d.snapshotHash() === hash, "vector bake Undo");
+      await d.transact("layer.props", (tx) => tx.setProps(vector, { transform: [2, 0, 0, 2, 0, 0] })); const scaled = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "UNSUPPORTED"); assert(await d.snapshotHash() === scaled, "refused bake changed the document"); await d.undo();
+      if (group) { const merged = await d.image.rasterize(group); assert(merged.node === group && d.getSnapshot().nodes.get(group).type === "raster" && !d.getSnapshot().nodes.has(vector), "group bake");
+        const flat = await Promise.all(samples.map((p) => d.image.pickComposite(p))); for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - flat[i].bytes[c]) <= 1), `group picture changed at ${p}`); }
+      const saved = blobTarget(), done = await d.snapshotHash(); await d.save(saved); d = await engine.open(saved.blob); assert(await d.snapshotHash() === done, "bake reopen");
+    });
     await test("branches / dirty refusal / conflict resolution / two-parent roundtrip", async () => {
       d = await engine.createDocument({ width: 8, height: 8 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster(); });
       const base = await d.versions.commit("base"); await d.versions.createBranch("案A", { checkout: true });

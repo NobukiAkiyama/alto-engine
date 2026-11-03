@@ -574,6 +574,66 @@ pub(crate) fn fill_segments(commands: &[Command], limit: usize) -> Option<Vec<Se
         .collect()
 }
 
+/// A vector layer's premultiplied Q14 pixels at level 0, as the v3 renderer paints
+/// them: fill before stroke, every path over the last, with the same coverage and
+/// blend. `window` is `[x, y, width, height]` in world pixels. A path whose integer
+/// curve budget is exceeded is skipped, as it is on screen.
+pub fn vector_pixels_q14(
+    paths: &[alto_vector::StyledPath],
+    world: FixedAffine,
+    window: [i64; 4],
+) -> Result<Vec<[u16; 4]>, RasterError> {
+    let len = usize::try_from(window[2].checked_mul(window[3]).ok_or(RasterError::Range)?)
+        .map_err(|_| RasterError::Range)?;
+    let mut out = vec![[0u16; 4]; len];
+    for path in paths {
+        let commands = map_path(&path.data, world, 0).ok_or(RasterError::Range)?;
+        for paint in 0..2 {
+            let paint_color = if paint == 0 {
+                path.fill
+            } else {
+                path.stroke
+                    .as_ref()
+                    .filter(|stroke| stroke_visible(stroke))
+                    .map(|stroke| stroke.color)
+            };
+            let Some(paint_color) = paint_color else {
+                continue;
+            };
+            let color = color_q14(paint_color).ok_or(RasterError::Range)?;
+            if color[3] == 0 {
+                continue;
+            }
+            let coverage = if paint == 0 {
+                let rule = match path.fill_rule {
+                    alto_vector::FillRule::NonZero => FillRule::NonZero,
+                    alto_vector::FillRule::EvenOdd => FillRule::EvenOdd,
+                };
+                rasterize(&commands, rule, window, CURVE_LIMIT)
+            } else {
+                crate::stroke_q8::rasterize_stroke(
+                    &path.data,
+                    path.stroke.as_ref().expect("visible stroke"),
+                    world,
+                    0,
+                    window,
+                )
+            };
+            let coverage = match coverage {
+                Ok(coverage) => coverage,
+                Err(RasterError::CurveRange) => continue,
+                Err(RasterError::Range) => return Err(RasterError::Range),
+            };
+            for (pixel, c) in out.iter_mut().zip(coverage) {
+                if c != 0 {
+                    *pixel = source_over_q14(*pixel, color, c);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Rasterize a path into the level-pixel window. An error means a defined range
 /// limit was exceeded; callers must not silently substitute float rendering.
 pub fn rasterize(
