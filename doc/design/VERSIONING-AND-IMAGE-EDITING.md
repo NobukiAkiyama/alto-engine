@@ -500,7 +500,7 @@ stroke はノードローカルの折れ線（1〜4096 点）と丸い先端（�
 スタンプの参照元は編集前の画素で固定する。自分の出力を再度写さず、重なった dab は画素ごとの
 最大被覆率で一度だけ normal source-over する。指先は先頭の dab の画素を持ち運び、
 dab ごとに premultiplied で補間して、持ち運ぶ色も結果へ更新する。処理量の上限は
-合計 64M 画素・dab と作業メモリ `EDIT_BUDGET`。超過は全体を `RESOURCE_LIMIT` にする。
+dab 数 × 先端の画素数で合計 64M、スタンプの被覆は 4M 画素、作業メモリは `EDIT_BUDGET`。超過は全体を `RESOURCE_LIMIT` にする。
 
 `image.histogram(id, range?)` は読み取り専用。range は bounds 内に限り、既定は bounds 全体。
 効果・マスク・opacity を適用する前の格納値を数える。範囲内の透明画素はタイルの有無に
