@@ -5,6 +5,7 @@
 - [Alto Engine 設計書（PDF）](<Alto Engine 設計書.pdf>)
 - [版管理の拡張と最低限の画像編集](design/VERSIONING-AND-IMAGE-EDITING.md)
 - [版管理・画像編集の実装検証（2026-11-03）](verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)
+- [未対応機能の段階実装の検証（2026-11-03）](verification/FOLLOWUP-STAGES-2026-11-03.md)
 - [`design/`](design/)：設計と実装計画
 - [`verification/`](verification/)：実装結果・測定・調査の記録。総まとめは [RESULTS.md](verification/RESULTS.md)
 
