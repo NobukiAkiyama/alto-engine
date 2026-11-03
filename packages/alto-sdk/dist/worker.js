@@ -772,6 +772,19 @@ async function execute(m) {
             postMessage({ t: "patch", value: r.state });
             return r;
         }
+        case "canvasEdit": {
+            const r = JSON.parse(runtime.canvasEdit(JSON.stringify(m.edit)));
+            queueJournal();
+            postMessage({ t: "patch", value: r.state });
+            return r;
+        }
+        case "layerEdit": {
+            const r = JSON.parse(runtime.layerEdit(JSON.stringify(m.edit)));
+            queueJournal();
+            postMessage({ t: "patch", value: r.state });
+            return r;
+        }
+        case "imageHistogram": return JSON.parse(runtime.imageHistogram(m.node, m.range ? JSON.stringify(m.range) : ""));
         case "pickColor": return JSON.parse(runtime.pickColor(m.node, m.x, m.y));
         case "pickComposite": {
             if (!Number.isSafeInteger(m.x) || !Number.isSafeInteger(m.y) || m.x < -2147483648 || m.x > 2147483647 || m.y < -2147483648 || m.y > 2147483647)
