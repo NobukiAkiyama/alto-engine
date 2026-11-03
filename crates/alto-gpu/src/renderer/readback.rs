@@ -227,6 +227,7 @@ impl StrokeReadback {
             .pool
             .0
             .map_controlled(
+                &self.queue,
                 batch.tiles.len() as u64 * TILE_RGBA_BYTES,
                 Some(&self.control),
             )
@@ -354,10 +355,15 @@ impl Pool {
             mapped: self.mapped.load(Ordering::Acquire),
         }
     }
-    pub(super) async fn map(&self, bytes: u64) -> Result<()> {
-        self.map_controlled(bytes, None).await
+    pub(super) async fn map(&self, queue: &wgpu::Queue, bytes: u64) -> Result<()> {
+        self.map_controlled(queue, bytes, None).await
     }
-    async fn map_controlled(&self, bytes: u64, control: Option<&FinishControl>) -> Result<()> {
+    async fn map_controlled(
+        &self,
+        queue: &wgpu::Queue,
+        bytes: u64,
+        control: Option<&FinishControl>,
+    ) -> Result<()> {
         use std::{future::Future, task::Poll};
         self.mapped.store(bytes, Ordering::Release);
         self.batches.fetch_add(1, Ordering::AcqRel);
@@ -368,7 +374,8 @@ impl Pool {
                 let _ = tx.send(r);
             });
         let mut rx = std::pin::pin!(rx);
-        let timeout = deadline::Deadline::new();
+        let mut timeout = deadline::MapDeadline::new();
+        queue.on_submitted_work_done(timeout.queue_finished());
         let result = std::future::poll_fn(|cx| {
             if let Some(c) = control {
                 *c.1.lock().unwrap() = Some(cx.waker().clone());
@@ -378,10 +385,8 @@ impl Pool {
                     )));
                 }
             }
-            if timeout.expired(cx.waker()) {
-                return Poll::Ready(Err(RenderError::Internal(
-                    "readback map timed out after 30 seconds".into(),
-                )));
+            if let Some(reason) = timeout.expired(cx.waker()) {
+                return Poll::Ready(Err(RenderError::Internal(reason.into())));
             }
             rx.as_mut().poll(cx).map(|r| {
                 r.map_err(|e| RenderError::Internal(e.to_string()))?
@@ -491,13 +496,63 @@ mod deadline {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Waker;
+    use std::time::Duration;
+    pub(super) const MAP_TIMED_OUT: &str = "readback map timed out after 30 seconds";
+    pub(super) const QUEUE_TIMED_OUT: &str = "readback waited 120 seconds for the GPU queue";
+    /// Bounds one readback map. `map_async` resolves after every earlier submission, and
+    /// a software adapter compiles pipelines before that work: after GPU recovery the
+    /// queue can be busy for most of 30 seconds on a slow host. So the map's own limit
+    /// starts when the queue finishes, and a longer limit covers a queue that never does.
+    pub(super) struct MapDeadline {
+        queue: Deadline,
+        map_limit: Duration,
+        map: Option<Deadline>,
+        finished: Arc<Mutex<(bool, Option<Waker>)>>,
+    }
+    impl MapDeadline {
+        pub(super) fn new() -> Self {
+            Self::with_limits(Duration::from_secs(120), Duration::from_secs(30))
+        }
+        pub(super) fn with_limits(queue: Duration, map: Duration) -> Self {
+            Self {
+                queue: Deadline::after(queue),
+                map_limit: map,
+                map: None,
+                finished: Arc::new(Mutex::new((false, None))),
+            }
+        }
+        /// For `Queue::on_submitted_work_done`.
+        pub(super) fn queue_finished(&self) -> impl FnOnce() + Send + 'static {
+            let finished = self.finished.clone();
+            move || {
+                let mut s = finished.lock().unwrap();
+                s.0 = true;
+                if let Some(w) = s.1.take() {
+                    w.wake();
+                }
+            }
+        }
+        pub(super) fn expired(&mut self, w: &Waker) -> Option<&'static str> {
+            if self.map.is_none() {
+                let mut s = self.finished.lock().unwrap();
+                if s.0 {
+                    self.map = Some(Deadline::after(self.map_limit));
+                } else {
+                    s.1 = Some(w.clone());
+                }
+            }
+            match &self.map {
+                Some(map) => map.expired(w).then_some(MAP_TIMED_OUT),
+                None => self.queue.expired(w).then_some(QUEUE_TIMED_OUT),
+            }
+        }
+    }
     pub(super) struct Deadline {
         state: Arc<Mutex<(bool, Option<Waker>)>>,
         /// Set on drop so the waiter exits without reporting a timeout.
         /// `park_timeout` can return early; the thread loops until this flag
-        /// or the real deadline. One thread per map is the existing shape:
-        /// finish maps a few batches, and drop unparks the thread when the
-        /// map ends.
+        /// or the real deadline. Up to two threads per map is the existing shape:
+        /// finish maps a few batches, and drop unparks them when the map ends.
         #[cfg(not(target_arch = "wasm32"))]
         stop: Arc<AtomicBool>,
         #[cfg(not(target_arch = "wasm32"))]
@@ -516,7 +571,7 @@ mod deadline {
         fn clear_timeout(id: i32);
     }
     impl Deadline {
-        pub(super) fn new() -> Self {
+        pub(super) fn after(limit: Duration) -> Self {
             let state = Arc::new(Mutex::new((false, None::<Waker>)));
             let signal = state.clone();
             #[cfg(not(target_arch = "wasm32"))]
@@ -524,7 +579,7 @@ mod deadline {
                 let stop = Arc::new(AtomicBool::new(false));
                 let stop_flag = stop.clone();
                 let thread = std::thread::spawn(move || {
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    let deadline = std::time::Instant::now() + limit;
                     loop {
                         if stop_flag.load(Ordering::Acquire) {
                             return;
@@ -562,7 +617,8 @@ mod deadline {
                     }
                 })
                     as Box<dyn FnMut()>);
-                let timer = set_timeout(callback.as_ref().unchecked_ref(), 30000);
+                let timer =
+                    set_timeout(callback.as_ref().unchecked_ref(), limit.as_millis() as i32);
                 Self {
                     state,
                     timer,
@@ -641,13 +697,85 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn deadline_waits_through_a_spurious_wake() {
-        let deadline = super::deadline::Deadline::new();
+        let deadline = super::deadline::Deadline::after(std::time::Duration::from_secs(30));
         std::thread::sleep(std::time::Duration::from_millis(50));
         deadline.wake_thread_for_test();
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
             !deadline.expired(std::task::Waker::noop()),
             "a single wake was treated as the 30s map timeout"
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_until_expired(deadline: &mut super::deadline::MapDeadline) -> Option<&'static str> {
+        let stop = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < stop {
+            if let Some(reason) = deadline.expired(std::task::Waker::noop()) {
+                return Some(reason);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn map_window_starts_when_the_queue_finishes() {
+        use std::time::Duration;
+        // A software adapter compiles pipelines before later queue work, so a long
+        // queue must not use up the time the map itself is given.
+        let mut deadline = super::deadline::MapDeadline::with_limits(
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        );
+        let finished = deadline.queue_finished();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            deadline.expired(std::task::Waker::noop()),
+            None,
+            "the map window ran while the queue was still busy"
+        );
+        finished();
+        assert_eq!(
+            poll_until_expired(&mut deadline),
+            Some(super::deadline::MAP_TIMED_OUT),
+            "the map window did not run after the queue finished"
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_queue_that_never_finishes_hits_the_total_limit() {
+        use std::time::Duration;
+        let mut deadline = super::deadline::MapDeadline::with_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            poll_until_expired(&mut deadline),
+            Some(super::deadline::QUEUE_TIMED_OUT)
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn queue_finish_wakes_the_waiter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        struct Flag(AtomicBool);
+        impl std::task::Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = std::task::Waker::from(flag.clone());
+        let mut deadline = super::deadline::MapDeadline::with_limits(
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+        assert_eq!(deadline.expired(&waker), None);
+        deadline.queue_finished()();
+        assert!(
+            flag.0.load(Ordering::Acquire),
+            "nothing would poll the map again to start its window"
         );
     }
 }

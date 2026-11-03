@@ -4146,7 +4146,8 @@ impl Renderer {
             for (i, key) in batch.iter().enumerate() {
                 self.copy_display_tile(scene, store, *key, &pool.buffer, i as u64 * TILE_BYTES)?;
             }
-            pool.map(batch.len() as u64 * TILE_BYTES).await?;
+            pool.map(&self.queue, batch.len() as u64 * TILE_BYTES)
+                .await?;
             let view = pool
                 .buffer
                 .slice(..batch.len() as u64 * TILE_BYTES)
