@@ -16,7 +16,7 @@ export declare function pickSaveTarget(options: {
 export declare function fileSource(file: Blob | FileSystemFileHandle): ArchiveSource;
 /** Picks a folder for the `.altoproj` form (File System Access API). */
 export declare function pickFolder(): Promise<ObjectStorageProvider>;
-/** A folder inside the origin private file system. */
+/** A folder inside the origin private file system. It supports `versions.gc({ dryRun: false })`. */
 export declare function opfsFolder(name: string): Promise<ObjectStorageProvider>;
 /** Whether this browser can run the engine, and if not, what is missing. */
 export declare function isSupported(): Promise<{

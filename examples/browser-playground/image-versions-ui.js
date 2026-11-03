@@ -1,4 +1,5 @@
 /** Thin controls for the public image/history APIs. */
+import { opfsFolder } from "../../packages/alto-sdk/dist/browser.js";
 export function installImageVersions({ engine, getDocument, getSelected, select, attach, run }) {
   document.querySelector("#test-image-versions").onclick = () => run(async () => {
     const button = document.querySelector("#test-image-versions"), result = document.querySelector("#test-results");
@@ -67,7 +68,8 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
       <p id="merge-result" class="meta" aria-live="polite"></p>
     </fieldset>
     <fieldset><legend>未使用データの整理</legend>
-      <p class="meta">先にフォルダへ保存してください。参照される過去の版は残します。</p>
+      <p class="meta">先にフォルダへ保存してください。参照される過去の版は残します。実際の削除はブラウザ内の保存先（OPFS）だけで行えます。選んだフォルダは他のアプリも変更できるため確認のみです。</p>
+      <button id="gc-save-opfs">ブラウザ内の保存先へ保存</button>
       <button id="gc-preview">削除候補を確認</button><button id="gc-execute" disabled>確認した候補を削除</button>
       <p id="gc-report" class="meta" aria-live="polite"></p>
     </fieldset>`;
@@ -122,6 +124,7 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
   });
   bind("merge-finish", async () => { if (!plan) return; const choices = [...$("merge-conflicts").querySelectorAll("select")]; if (choices.some((s) => !s.value)) throw Error("すべての競合の解決方法を選んでください"); const r = await getDocument().versions.finishMerge(plan.token, choices.map((s) => ({ conflict_id: s.dataset.conflict, choice: s.value }))); endMerge(); $("merge-result").textContent = r.kind === "no_op" ? "変更はありません" : "統合を確定しました"; });
   bind("merge-cancel", async () => { await getDocument().versions.cancelMerge(); endMerge(); $("merge-result").textContent = "統合をキャンセルしました"; });
+  bind("gc-save-opfs", async () => { const d = getDocument(); await d.saveFolder(await opfsFolder(`playground-${d.getSnapshot().root}`)); $("gc-report").textContent = "ブラウザ内の保存先へ保存しました"; });
   bind("gc-preview", async () => { const d = getDocument(); preview = await d.versions.gc(); const counts = Object.values(preview.by_kind); const removed = counts.reduce((n, c) => n + c.removed, 0), bytes = counts.reduce((n, c) => n + c.removed_bytes, 0); const caps = d.folder?.gcCapabilities; const capable = typeof d.folder?.exclusive === "function" && caps?.exclusive === true && caps.atomicManifest === true && caps.deleteObjects === true; $("gc-report").textContent = `削除候補 ${removed}件、${(bytes / 1048576).toFixed(2)} MiB。${capable ? "内容を確認して実行してください。" : "この保存先は確認のみ対応しています。"}`; $("gc-execute").disabled = !capable || !removed; });
   bind("gc-execute", async () => { if (!preview) return; const r = await getDocument().versions.gc({ dryRun: false, expectedBaseline: preview.baseline }); preview = null; $("gc-execute").disabled = true; $("gc-report").textContent = `未使用データを整理しました（保護対象 ${r.roots}件）${r.warnings.length ? " · " + r.warnings.join("、") : ""}`; });
   async function refresh() {

@@ -3,7 +3,7 @@ export { isSupported } from "./browser.js";
 export { deleteRecovery, listRecoveryNamespaces } from "./recovery-store.js";
 export { DocumentHandle } from "./document.js";
 export { AltoError } from "./errors.js";
-export { FileSystemDirectoryProvider, MemoryObjectProvider, sha256Hex } from "./storage.js";
+export { FileSystemDirectoryProvider, MemoryObjectProvider, OpfsFolderProvider, sha256Hex } from "./storage.js";
 export { applyTextStyle, replaceText } from "./text-edit.js";
 export { ToolSession } from "./tools.js";
 export { Transaction } from "./transaction.js";

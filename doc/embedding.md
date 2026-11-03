@@ -231,4 +231,4 @@ await doc.durable();
 
 画像座標はノードローカルで、cropの矩形は整数です。pickColorは効果適用前のレイヤー画素、pickCompositeは文書座標でscale 1の合成色を返します。履歴操作は編集Undoに積まず、切替・内容を変えるmerge成功時に編集Undo/Redoをクリアします。
 
-`versions.gc()` は開いた/保存したフォルダのdry-runです。実削除は `gc({ dryRun: false, expectedBaseline: preview.baseline })` で明示し、保存先の `exclusive` と `gcCapabilities` が必要です。FileSystemDirectoryProviderは実削除を拒否します。保存後の比較用ミラー更新に失敗した場合は、正本の保存成功と `warnings` を返します。
+`versions.gc()` は開いた/保存したフォルダのdry-runです。実削除は `gc({ dryRun: false, expectedBaseline: preview.baseline })` で明示し、保存先の `exclusive` と `gcCapabilities` が必要です。`opfsFolder(name)` のOPFSフォルダは実削除に対応します。`pickFolder()` で選んだフォルダ（FileSystemDirectoryProvider）は他のオリジンやネイティブのアプリも変更できるため、確認のみで実削除を拒否します。保存後の比較用ミラー更新に失敗した場合は、正本の保存成功と `warnings` を返します。
