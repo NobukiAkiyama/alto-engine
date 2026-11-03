@@ -194,7 +194,9 @@ fn generated_selection(
         if tiles.tiles.len() > MAX_SELECTION_SOURCE_TILES {
             return Err(invalid("Color selection exceeds the pixel budget"));
         }
-        let linear = node.props.transform.0;
+        // Seeds and the result are in document pixels, so the whole chain counts:
+        // parent groups and the root, which canvas edits move.
+        let linear = engine.node_world(handle, layer)?;
         if (linear[0] - 1.0).abs() > 1e-6
             || linear[1].abs() > 1e-6
             || linear[2].abs() > 1e-6
@@ -1009,5 +1011,101 @@ mod tests {
             assert!(e.transact(h, "bad", ops, revision).is_err());
             assert_eq!(before, e.snapshot(h).unwrap());
         }
+    }
+
+    #[test]
+    fn color_selections_use_the_whole_transform_chain() {
+        // An 8x1 row: red at x 0..4, blue at x 4..8.
+        let (mut e, h, id) = layer_doc(8, 1, |key| {
+            (key == TileKey { tx: 0, ty: 0 }).then(|| {
+                let mut px = vec![0u8; 262144];
+                for x in 0..8 {
+                    let c = if x < 4 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    };
+                    px[x * 4..x * 4 + 4].copy_from_slice(&c);
+                }
+                px
+            })
+        });
+        let columns = |e: &mut Engine, spec: Value| -> Vec<i32> {
+            let ops = e.selection_ops(h, &spec).unwrap();
+            commit(e, h, ops);
+            let map = e.document(h).unwrap().selection.clone().unwrap();
+            let decoded = decode(&map, e).unwrap();
+            (0..8).filter(|x| sample(&decoded, *x, 0) > 0).collect()
+        };
+        let layer = id.0.to_string();
+        // A canvas crop moves the root by -2: red shows at document x 0..2.
+        let p = e
+            .prepare_canvas_edit(
+                h,
+                crate::canvas::CanvasEdit::Crop {
+                    x: 2,
+                    y: 0,
+                    width: 6,
+                    height: 1,
+                },
+            )
+            .unwrap();
+        commit(&mut e, h, p.ops);
+        e.release_staged_tiles(p.stage);
+        assert_eq!(
+            columns(
+                &mut e,
+                json!({"kind":"contiguous","layer":layer,"x":0,"y":0})
+            ),
+            vec![0, 1]
+        );
+        assert_eq!(
+            columns(
+                &mut e,
+                json!({"kind":"color","layer":layer,"r":255,"g":0,"b":0,"a":255})
+            ),
+            vec![0, 1]
+        );
+        e.undo(h).unwrap();
+        e.undo(h).unwrap();
+        e.undo(h).unwrap();
+        // In a group moved by 3, red shows at document x 3..7.
+        let root = e.document(h).unwrap().root;
+        let mut g = Node::group("g");
+        let gid = g.id;
+        g.props.transform = Affine2([1.0, 0.0, 0.0, 1.0, 3.0, 0.0]);
+        commit(
+            &mut e,
+            h,
+            vec![
+                Op::InsertNode {
+                    node: g,
+                    parent: root,
+                    index: 1,
+                },
+                Op::MoveNode {
+                    id,
+                    parent: gid,
+                    index: 0,
+                },
+            ],
+        );
+        assert_eq!(
+            columns(
+                &mut e,
+                json!({"kind":"contiguous","layer":layer,"x":5,"y":0})
+            ),
+            vec![3, 4, 5, 6]
+        );
+        // A rotated root is refused instead of answering with the wrong pixels.
+        let p = e
+            .prepare_canvas_edit(h, crate::canvas::CanvasEdit::Rotate { quarter_turns: 1 })
+            .unwrap();
+        commit(&mut e, h, p.ops);
+        e.release_staged_tiles(p.stage);
+        assert!(
+            e.selection_ops(h, &json!({"kind":"contiguous","layer":layer,"x":0,"y":0}))
+                .is_err()
+        );
     }
 }

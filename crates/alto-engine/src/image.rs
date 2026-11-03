@@ -1080,6 +1080,31 @@ impl Engine {
                 path.validate()
                     .map_err(|e| err("UNSUPPORTED", &e.to_string()))?;
             }
+            // Effect selections are node-local R8 maps without a transform of their own,
+            // so their pixels move with the image's.
+            let remap = match &edit {
+                ImageEdit::Rotate { quarter_turns, .. } => Remap::Rotate(*quarter_turns),
+                ImageEdit::Flip { axis, .. } => Remap::Flip(*axis),
+                _ => Remap::Scale,
+            };
+            let mut effects = node.props.effects.clone();
+            for effect in &mut effects {
+                let Some(selection) = effect.selection_mut().as_mut() else {
+                    continue;
+                };
+                let out = remap_selection(self, selection, remap, old, bounds)?;
+                let mut moved = TileMap::new(PixelFormat::R8);
+                for (key, pixels) in out {
+                    if let Some(hash) =
+                        self.stage_tile(stage, TileData::new(PixelFormat::R8, pixels)?)?
+                    {
+                        moved.tiles.insert(key, hash);
+                    }
+                }
+                // An empty map still limits the effect to no pixels; `None` would mean all.
+                *selection = moved;
+            }
+            node.props.effects = effects;
         }
         let mut tiles = TileMap::new(PixelFormat::Rgba8);
         for (key, pixels) in out {
@@ -1117,6 +1142,149 @@ impl Engine {
             },
         })
     }
+}
+
+/// How a geometry edit moves node-local pixels.
+#[derive(Clone, Copy)]
+enum Remap {
+    Rotate(u8),
+    Flip(FlipAxis),
+    Scale,
+}
+/// Selection tiles a geometry edit may produce for one effect.
+const MAX_REMAPPED_SELECTION_TILES: usize = 4096;
+/// An effect's R8 selection carried through a geometry edit from `old` to `new` bounds.
+/// Flips and quarter turns move each pixel exactly as `image.flip`/`image.rotate` move
+/// image pixels. A resize samples the selection bilinearly at the new pixel centers,
+/// with the same Q8 source coordinates as `image.resize`, and zero outside its tiles.
+fn remap_selection(
+    engine: &Engine,
+    map: &TileMap,
+    remap: Remap,
+    old: ImageBounds,
+    new: ImageBounds,
+) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
+    let limit = || {
+        err(
+            "RESOURCE_LIMIT",
+            "the moved effect selection is out of range",
+        )
+    };
+    let mut out: BTreeMap<TileKey, Vec<u8>> = BTreeMap::new();
+    let (ox, oy) = (i64::from(old.x), i64::from(old.y));
+    let (w, h) = (i64::from(old.width), i64::from(old.height));
+    if let Remap::Scale = remap {
+        let Some(tx0) = map.tiles.keys().map(|k| k.tx).min() else {
+            return Ok(out);
+        };
+        let ty0 = map.tiles.keys().map(|k| k.ty).min().unwrap_or(0);
+        let tx1 = map.tiles.keys().map(|k| k.tx).max().unwrap_or(0);
+        let ty1 = map.tiles.keys().map(|k| k.ty).max().unwrap_or(0);
+        let (nw, nh) = (i64::from(new.width), i64::from(new.height));
+        // Destination pixels whose bilinear footprint can reach a source tile.
+        let lo = |t: i32, o: i64, from: i64, to: i64| {
+            o + ((i64::from(t) * 256 - 1 - o) * to).div_euclid(from) - 1
+        };
+        let hi = |t: i32, o: i64, from: i64, to: i64| {
+            o + ((i64::from(t) * 256 + 256 + 1 - o) * to + from - 1).div_euclid(from) + 1
+        };
+        let (dx0, dx1) = (lo(tx0, ox, w, nw), hi(tx1, ox, w, nw));
+        let (dy0, dy1) = (lo(ty0, oy, h, nh), hi(ty1, oy, h, nh));
+        let tiles = ((dx1 - 1).div_euclid(256) - dx0.div_euclid(256) + 1)
+            * ((dy1 - 1).div_euclid(256) - dy0.div_euclid(256) + 1);
+        if tiles > MAX_REMAPPED_SELECTION_TILES as i64 {
+            return Err(err(
+                "RESOURCE_LIMIT",
+                "the resized effect selection exceeds 4096 tiles",
+            ));
+        }
+        if dx0 < i64::from(i32::MIN)
+            || dy0 < i64::from(i32::MIN)
+            || dx1 > i64::from(i32::MAX)
+            || dy1 > i64::from(i32::MAX)
+        {
+            return Err(limit());
+        }
+        let source = |origin: i64, d: i64, from: i64, to: i64| {
+            rounded(
+                i128::from(origin) * 256 * 2 * i128::from(to)
+                    + (2 * i128::from(d - origin) + 1) * i128::from(from) * 256
+                    - 256 * i128::from(to),
+                2 * i128::from(to),
+            )
+        };
+        let mut reader = Reader::new(engine, map);
+        for v in dy0..dy1 {
+            let qy = source(oy, v, h, nh);
+            let (iy, fy) = (qy.div_euclid(256), qy.rem_euclid(256) as u64);
+            for u in dx0..dx1 {
+                let qx = source(ox, u, w, nw);
+                let (ix, fx) = (qx.div_euclid(256), qx.rem_euclid(256) as u64);
+                let mut acc = 0u64;
+                for (dx, dy, weight) in [
+                    (0, 0, (256 - fx) * (256 - fy)),
+                    (1, 0, fx * (256 - fy)),
+                    (0, 1, (256 - fx) * fy),
+                    (1, 1, fx * fy),
+                ] {
+                    if weight == 0 {
+                        continue;
+                    }
+                    let (Ok(x), Ok(y)) = (i32::try_from(ix + dx), i32::try_from(iy + dy)) else {
+                        continue;
+                    };
+                    acc += u64::from(reader.get(x, y)?[3]) * weight;
+                }
+                let value = ((acc + 32768) / 65536) as u8;
+                if value != 0 {
+                    let key = TileKey {
+                        tx: u.div_euclid(256) as i32,
+                        ty: v.div_euclid(256) as i32,
+                    };
+                    out.entry(key).or_insert_with(|| vec![0; 65536])
+                        [v.rem_euclid(256) as usize * 256 + u.rem_euclid(256) as usize] = value;
+                }
+            }
+        }
+        return Ok(out);
+    }
+    for (key, hash) in &map.tiles {
+        let tile = engine.require_tile(hash)?;
+        if tile.format != PixelFormat::R8 {
+            return Err(err("CORRUPT_DATA", "effect selection requires R8"));
+        }
+        for (i, value) in tile.pixels.iter().enumerate() {
+            if *value == 0 {
+                continue;
+            }
+            let x = i64::from(key.tx) * 256 + (i % 256) as i64;
+            let y = i64::from(key.ty) * 256 + (i / 256) as i64;
+            let (nx, ny) = match remap {
+                Remap::Flip(FlipAxis::Horizontal) => (2 * ox + w - 1 - x, y),
+                Remap::Flip(FlipAxis::Vertical) => (x, 2 * oy + h - 1 - y),
+                Remap::Rotate(1) => (ox + h - 1 - (y - oy), oy + (x - ox)),
+                Remap::Rotate(2) => (2 * ox + w - 1 - x, 2 * oy + h - 1 - y),
+                Remap::Rotate(_) => (ox + (y - oy), oy + w - 1 - (x - ox)),
+                Remap::Scale => unreachable!("handled above"),
+            };
+            let (Ok(nx), Ok(ny)) = (i32::try_from(nx), i32::try_from(ny)) else {
+                return Err(limit());
+            };
+            out.entry(TileKey {
+                tx: nx.div_euclid(256),
+                ty: ny.div_euclid(256),
+            })
+            .or_insert_with(|| vec![0; 65536])
+                [ny.rem_euclid(256) as usize * 256 + nx.rem_euclid(256) as usize] = *value;
+        }
+        if out.len() > MAX_REMAPPED_SELECTION_TILES {
+            return Err(err(
+                "RESOURCE_LIMIT",
+                "the moved effect selection exceeds 4096 tiles",
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Pixels of a raster being edited by a stroke. Untouched tiles keep their hashes.
@@ -1908,5 +2076,191 @@ mod reference_validation_tests {
         assert_eq!(e.snapshot(h).unwrap(), before);
         assert_eq!(e.document(h).unwrap().revision, revision);
         assert_eq!(e.history_state(h).unwrap(), history);
+    }
+
+    fn edit(e: &mut Engine, h: DocHandle, request: ImageEdit) -> ImageEditResult {
+        let intent = request.intent();
+        let p = e.prepare_image_edit(h, request).unwrap();
+        e.apply_image_edit(h, p, intent).unwrap()
+    }
+    /// A 4x1 row (red, green, blue, white) with an Invert limited to the pixel at x=0.
+    fn row_with_effect_selection() -> (Engine, DocHandle, NodeId) {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(4, 1)).unwrap();
+        let mut n = Node::raster("row");
+        let id = n.id;
+        let mut out = BTreeMap::new();
+        for (x, p) in [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255; 4],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            write(&mut out, x as i32, 0, p);
+        }
+        let mut tiles = TileMap::new(PixelFormat::Rgba8);
+        for (k, v) in out {
+            let hash = e
+                .put_tile(TileData::new(PixelFormat::Rgba8, v).unwrap())
+                .unwrap();
+            tiles.tiles.insert(k, hash);
+        }
+        n.kind = NodeKind::Raster {
+            bounds: ImageBounds {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 1,
+            },
+            tiles,
+        };
+        let mut r8 = vec![0; 65536];
+        r8[0] = 255;
+        let mut selection = TileMap::new(PixelFormat::R8);
+        selection.tiles.insert(
+            TileKey { tx: 0, ty: 0 },
+            e.put_tile(TileData::new(PixelFormat::R8, r8).unwrap())
+                .unwrap(),
+        );
+        n.props.effects = vec![alto_doc::Effect::Invert {
+            selection: Some(selection),
+            extra: Default::default(),
+        }];
+        let root = e.document(h).unwrap().root;
+        e.transact(
+            h,
+            "add",
+            vec![Op::InsertNode {
+                node: n,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        (e, h, id)
+    }
+    fn effect_selection(e: &Engine, h: DocHandle, id: NodeId, x: i32, y: i32) -> u8 {
+        let node = e.document(h).unwrap().node(id).unwrap();
+        read(e, node.props.effects[0].selection().unwrap(), x, y).unwrap()[3]
+    }
+    #[test]
+    fn flip_and_rotate_move_effect_selections_with_the_pixels() {
+        let (mut e, h, id) = row_with_effect_selection();
+        let before = e.snapshot(h).unwrap();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Flip {
+                node: id,
+                axis: FlipAxis::Horizontal,
+            },
+        );
+        assert_eq!(
+            e.pick_color(h, id, [3.0, 0.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(effect_selection(&e, h, id, 3, 0), 255);
+        assert_eq!(effect_selection(&e, h, id, 0, 0), 0);
+        e.undo(h).unwrap();
+        assert_eq!(e.snapshot(h).unwrap(), before);
+        // A quarter turn sends the old (3, 0) to (0, 3).
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Rotate {
+                node: id,
+                quarter_turns: 1,
+            },
+        );
+        assert_eq!(
+            e.pick_color(h, id, [0.0, 0.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(effect_selection(&e, h, id, 0, 0), 255);
+        e.undo(h).unwrap();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Rotate {
+                node: id,
+                quarter_turns: 3,
+            },
+        );
+        assert_eq!(
+            e.pick_color(h, id, [0.0, 3.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(effect_selection(&e, h, id, 0, 3), 255);
+        assert_eq!(effect_selection(&e, h, id, 0, 0), 0);
+        e.undo(h).unwrap();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Rotate {
+                node: id,
+                quarter_turns: 2,
+            },
+        );
+        assert_eq!(effect_selection(&e, h, id, 3, 0), 255);
+        assert_eq!(effect_selection(&e, h, id, 0, 0), 0);
+    }
+    #[test]
+    fn resize_resamples_effect_selections_and_keeps_an_empty_one_empty() {
+        let (mut e, h, id) = row_with_effect_selection();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Resize {
+                node: id,
+                width: 8,
+                height: 2,
+                filter: ImageFilter::Nearest,
+            },
+        );
+        // Red now covers x 0..2; the selection's bilinear edge stays around it.
+        for y in 0..2 {
+            assert!(effect_selection(&e, h, id, 0, y) > 128);
+            assert!(effect_selection(&e, h, id, 1, y) > 128);
+            assert_eq!(effect_selection(&e, h, id, 3, y), 0);
+        }
+        // Halving samples between x=0 (selected) and x=1 for the first new pixel.
+        let (mut e, h, id) = row_with_effect_selection();
+        edit(
+            &mut e,
+            h,
+            ImageEdit::Resize {
+                node: id,
+                width: 2,
+                height: 1,
+                filter: ImageFilter::Bilinear,
+            },
+        );
+        assert_eq!(effect_selection(&e, h, id, 0, 0), 128);
+        assert_eq!(effect_selection(&e, h, id, 1, 0), 0);
+        // An empty selection stays an empty `Some`: the effect must not spread to all pixels.
+        let emptied = {
+            let (mut e, h, id) = row_with_effect_selection();
+            let mut node = e.document(h).unwrap().node(id).unwrap().clone();
+            *node.props.effects[0].selection_mut() = Some(TileMap::new(PixelFormat::R8));
+            let revision = e.document(h).unwrap().revision;
+            e.transact(h, "empty", vec![Op::ReplaceNode { id, node }], revision)
+                .unwrap();
+            edit(
+                &mut e,
+                h,
+                ImageEdit::Flip {
+                    node: id,
+                    axis: FlipAxis::Vertical,
+                },
+            );
+            e.document(h).unwrap().node(id).unwrap().props.effects[0]
+                .selection()
+                .cloned()
+        };
+        assert!(emptied.is_some_and(|m| m.tiles.is_empty()));
     }
 }
