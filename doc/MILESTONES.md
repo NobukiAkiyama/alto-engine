@@ -26,10 +26,12 @@
 
 ## M8の基礎実装（初期実装の記録）
 
+以下はM8時点の線形履歴の記録です。ブランチ・二親マージ・GCの現行仕様は[設計書](design/VERSIONING-AND-IMAGE-EDITING.md)を参照してください。
+
 - **コミット**：`Commit { parents, snapshot, message, intents, created_at, author }` を整形済みJSONの正規形で保存し、そのBLAKE3をIDにします。Intentは前回コミット以降のTransactionを「意図×対象ノード」で集計し、Undoで打ち消した編集は除きます。変更の無いコミットは拒否します。
 - **意味的差分**：NodeIdで木を照合し、追加・削除（部分木の頂点のみ）・移動（親の変更、または兄弟の最長共通部分列から外れたもの）・属性（フィールド名）・画素（タイルハッシュの比較のみ。レイヤー座標と文書座標の範囲）・内容（ベクター命令数、テキストの抜粋・縦横・書式・縦中横）・アセット・選択範囲を返します。画素は読みません。
 - **復元**：任意の版を、現在の文書からその版への可逆Op列（1回のUndoで戻せるTransaction）として適用します。履歴は書き換えません。
-- **保存**：スナップショットJSONを整形・木の順序の正規形に変え、gitの行差分に向く形にしました。`.alto` とフォルダ形式は同じエントリ（manifest / snapshots / commits / objects）を共有し、manifestに `head` を追加しました。版が参照するタイル・アセットはGCの根として保持し、保存にも含めます。コミットはジャーナルの対象外のため、コミット直後にチェックポイントを取ります。現在はformat 4 / render v3のみを受け付けます。
+- **保存**：スナップショットJSONを整形・木の順序の正規形に変え、gitの行差分に向く形にしました。`.alto` とフォルダ形式は同じエントリ（manifest / snapshots / commits / objects）を共有し、manifestに `head` を追加しました。版が参照するタイル・アセットはGCの根として保持し、保存にも含めます。コミットはジャーナルの対象外のため、コミット直後にチェックポイントを取ります（当時の記録。現在の履歴状態遷移はジャーナルにも記録し、受け付ける形式はformat 5 / manifest 2 / commit 2 / render v3のみです）。
 - **フォルダ形式**：`objects/`・`snapshots/`・`commits/` は存在しなければ書き、既存は書き換えません。`document.json`（現在のスナップショットの読みやすい写し）と `.gitattributes` を書き、最後に `manifest.json` を置き換えて読み返します。保存の基準にしたmanifestのSHA-256が現在値と違えば、何も書かずにCONFLICTを返します。SDKは `ObjectStorageProvider` として File System Access のフォルダ、OPFS、メモリを同梱します。読み込みはmanifest・スナップショット・コミットから到達するオブジェクトだけを読みます。
 - **Git Adapter（`alto-git`）**：エンジンにリンクしない別crateのCLI（設計書の候補のgitoxideではなく、gitコマンドのplumbingを使用）。`sync` は未反映のAltoコミットを古い順に `git fast-import` で1対1のgitコミットへ写します。ツリーはその版の時点のフォルダ、メッセージはIntent要約とレイヤー単位の変更、トレーラ `Alto-Commit` で対応を記録します。オブジェクトは追加だけなので、後のコミットは新しいblobだけを含みます。`diff` / `log` は `.alto`・フォルダ・`<rev>:<folder>` を比較し、`install` で `document.json` のtextconvを登録すると通常の `git diff` もレイヤー見出し付きで読めます。`export` / `pack` で単一ファイルとフォルダを相互変換します。
 
@@ -60,7 +62,7 @@
 
 ## 上限・継続課題
 
-画像編集ソフトとして足す操作の設計は [IMAGE-EDITING.md](design/IMAGE-EDITING.md) に固定しています。エンジン API に入った範囲と、まだ設計だけの範囲はそちらにあります。以下は現行実装の上限です。
+以下は現行実装の上限です。[IMAGE-EDITING.md](design/IMAGE-EDITING.md) は2026-10-20時点の過去の設計です。形式番号と版管理の記述は現状と異なるため、現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](design/VERSIONING-AND-IMAGE-EDITING.md) を優先します。
 
 1. sRGB/RGBA8とR8。効果はGaussianぼかし、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転です。シャープ、移動ぼかし、ノイズ、ハイパス、ドロップシャドウ、境界線は未実装です。
 2. Gaussianの打ち切り半径・選択のぼかし幅は0〜64文書px、効果はノード当たり32個まで。半径の単位はレイヤー変形後の文書座標です。

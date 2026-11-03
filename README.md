@@ -311,7 +311,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、一本の履歴の版管理とフォルダ形式・gitへの写像が対象です。ルビ・圏点、グリフアトラス、版の分岐・マージ、ブラウザ内のgit操作などの継続課題、各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に記載しています。画像編集ソフトの操作をこの正本の上へ足す設計は [IMAGE-EDITING.md](doc/design/IMAGE-EDITING.md) です。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル6）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 
