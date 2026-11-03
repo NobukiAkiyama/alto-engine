@@ -77,6 +77,7 @@ dependencies = [
  "alto-raster",
  "alto-store",
  "alto-text",
+ "serde",
  "serde_json",
 ]
 
