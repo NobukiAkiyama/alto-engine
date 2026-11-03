@@ -144,13 +144,13 @@ impl Engine {
             }
             verified.push((hash, bytes));
         }
-        for (hash, bytes) in verified {
-            self.install_object(hash, &bytes)?;
-            if let Some(lazy) = self.lazy.get_mut(&h) {
-                lazy.pinned.insert(hash);
-            }
-        }
         let checked = (|| -> Result<(), EngineError> {
+            for (hash, bytes) in verified {
+                self.install_object(hash, &bytes)?;
+                if let Some(lazy) = self.lazy.get_mut(&h) {
+                    lazy.pinned.insert(hash);
+                }
+            }
             for doc in self.target_docs(h, target)? {
                 if let Some(selection) = &doc.selection {
                     self.validate_mask_plane(selection)?;
@@ -499,6 +499,40 @@ mod tests {
         let target = ObjectTarget::All;
         provide(&mut fresh, r, &f, &target);
         assert!(fresh.save_package(r).is_ok());
+    }
+
+    #[test]
+    fn an_object_only_another_documents_folder_holds_stays_in_memory() {
+        let f = fixture();
+        let (mut e, d) = open(&f);
+        // A second document uses the old tile but knows nothing of this folder.
+        let other = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+        let target = ObjectTarget::Commit { hash: f.old };
+        provide(&mut e, d, &f, &target);
+        let node = Node::raster("other");
+        let layer = node.id;
+        let parent = e.document(other).unwrap().root;
+        e.transact(
+            other,
+            "add",
+            vec![Op::InsertNode {
+                node,
+                parent,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        paint(&mut e, other, layer, 10);
+        e.commit(other, "uses the same tile", 1, None, false)
+            .unwrap();
+        paint(&mut e, other, layer, 11);
+        e.commit(other, "moves on", 2, None, false).unwrap();
+        e.release_objects(d);
+        assert!(
+            e.tiles.reachable(&f.old_tile),
+            "the other document still needs it"
+        );
     }
 
     #[test]

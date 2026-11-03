@@ -293,6 +293,7 @@ export class DocumentHandle {
    */
   async withObjects<T>(target: ObjectTarget, run: () => Promise<T>): Promise<T> {
     const missing = await this.request("missingObjects", { target });
+    let provided: Promise<unknown> | undefined;
     if (missing.length) {
       const owner = this.savedFolder?.provider;
       const unavailable = (why: string) => new AltoError("STORAGE", why, { reason: "objects-unavailable" });
@@ -307,9 +308,10 @@ export class DocumentHandle {
         return entries;
       };
       const framed = frameEntries(await (owner.exclusive ? owner.exclusive(read) : read(owner)));
-      await this.request("provideObjects", { bytes: framed.buffer as ArrayBuffer, target }, [framed.buffer]);
+      provided = this.request("provideObjects", { bytes: framed.buffer as ArrayBuffer, target }, [framed.buffer]);
     }
     try {
+      await provided;
       return await run();
     } finally {
       if (missing.length) await this.request("releaseObjects").catch(() => {});

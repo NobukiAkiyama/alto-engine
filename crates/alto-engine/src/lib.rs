@@ -1068,10 +1068,12 @@ impl Engine {
                 in_folder.remove(hash);
             }
         }
+        // Each document can only read back from its own folder.
         for (handle, v) in &self.versions {
-            if !self.lazy.contains_key(handle) {
-                in_folder.retain(|hash| !v.retained.contains(hash));
-            }
+            let known = self.lazy.get(handle).map(|lazy| &lazy.known);
+            in_folder.retain(|hash| {
+                !v.retained.contains(hash) || known.is_some_and(|known| known.contains(hash))
+            });
         }
         reachable.retain(|hash| !in_folder.contains(hash) || current.contains(hash));
         if self.backed {
