@@ -5,6 +5,13 @@ use alto_engine::{DocHandle, Engine};
 use alto_raster::TileData;
 use std::path::{Path, PathBuf};
 
+/// A child process forked by another test thread briefly inherits the package lease,
+/// so tests that hold leases and tests that spawn git run one at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     alto_git::git(dir, args).unwrap()
 }
@@ -64,6 +71,7 @@ fn save(e: &Engine, d: DocHandle, dir: &Path) {
 
 #[test]
 fn folder_packages_are_managed_by_git_with_layer_level_diffs() {
+    let _serial = serial();
     let Some(root) = repo("sync") else { return };
     let folder = root.join("art.altoproj");
     let mut e = Engine::new();
@@ -241,6 +249,7 @@ fn poison_author(folder: &Path, author: &str) {
 
 #[test]
 fn sync_rejects_author_and_branch_injection() {
+    let _serial = serial();
     let Some(root) = repo("inject") else { return };
     let folder = one_commit(&root);
     let head = git(&root, &["rev-parse", "HEAD"]);
@@ -274,6 +283,7 @@ fn sync_rejects_author_and_branch_injection() {
 
 #[test]
 fn open_keeps_an_angled_author_and_sync_strips_it() {
+    let _serial = serial();
     let Some(root) = repo("author-open") else {
         return;
     };
@@ -300,6 +310,7 @@ fn open_keeps_an_angled_author_and_sync_strips_it() {
 
 #[test]
 fn sync_rejects_a_spaced_path_and_a_mismatched_object() {
+    let _serial = serial();
     let Some(root) = repo("path-object") else {
         return;
     };
