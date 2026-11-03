@@ -19,6 +19,10 @@ export interface ObjectStorageProvider {
   /** True only when all clients of this storage participate in the same lock. */
   readonly gcCapabilities?: { readonly exclusive: true; readonly atomicManifest: true; readonly deleteObjects: true };
   exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+  /** Keeps real GC from running until the returned function's promise settles. */
+  holdObjects?(): Promise<() => Promise<void>>;
+  /** Runs `run` only if no other document holds this storage's objects, else `BUSY`. */
+  whileNotHeld?<T>(run: () => Promise<T>): Promise<T>;
   getObject(path: string): Promise<Uint8Array | null>;
   /** Idempotent: existing paths are skipped. */
   putObjects(entries: { path: string; data: Uint8Array }[]): Promise<{ written: number; skipped: number }>;
@@ -233,6 +237,23 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
     const name = await opfsLockName(handle);
     if (!name) throw new AltoError("UNSUPPORTED", "the directory is not inside the origin private file system");
     return new OpfsFolderProvider(handle, name, options.waitMs ?? LOCK_WAIT_MS);
+  }
+  holdObjects(): Promise<() => Promise<void>> {
+    return new Promise((resolve, reject) => {
+      let end = () => {};
+      const held = new Promise<void>((done) => { end = done; });
+      // The lock is free once this promise settles, a task after `end` runs.
+      const lock: Promise<void> = navigator.locks.request(this.#name + ":hold", { mode: "shared" }, () => {
+        resolve(() => { end(); return lock; });
+        return held;
+      });
+      lock.catch(reject);
+    });
+  }
+  async whileNotHeld<T>(run: () => Promise<T>): Promise<T> {
+    const outcome = await navigator.locks.request(this.#name + ":hold", { ifAvailable: true }, async (lock) => (lock ? { value: await run() } : null));
+    if (!outcome) throw new AltoError("BUSY", "another document has this folder open");
+    return outcome.value;
   }
   exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T> {
     return withFolderLock(this.#name, this.#waitMs, async () => {

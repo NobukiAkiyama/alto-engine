@@ -160,6 +160,7 @@ impl Engine {
         let target = self.resolve(h, VersionRef::Commit(from))?;
         if checkout {
             self.clean_head(h)?;
+            self.require_objects(h, &super::lazy::ObjectTarget::Commit { hash: from })?;
         }
         let revision = self.document(h)?.revision;
         if checkout {
@@ -197,6 +198,12 @@ impl Engine {
         Ok(())
     }
     pub fn checkout(&mut self, h: DocHandle, name: &str) -> Result<(), EngineError> {
+        self.require_objects(
+            h,
+            &super::lazy::ObjectTarget::Branch {
+                name: name.to_string(),
+            },
+        )?;
         self.clean_head(h)?;
         let name = ref_name(name)?;
         let store = self.versions(h)?;
@@ -212,6 +219,7 @@ impl Engine {
         self.switch_version(h, head, Some(name))
     }
     pub fn detach(&mut self, h: DocHandle, head: ContentHash) -> Result<(), EngineError> {
+        self.require_objects(h, &super::lazy::ObjectTarget::Commit { hash: head })?;
         self.clean_head(h)?;
         self.switch_version(h, head, None)
     }

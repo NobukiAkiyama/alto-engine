@@ -124,7 +124,11 @@ export interface Engine {
   /** Opens a `.alto` archive. Refused while a recovery journal waits. */
   open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
   /** Opens the folder form, reading only objects reachable from the document and its history. */
-  openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
+  /**
+   * Opens a folder. With `history: "on-demand"`, only the working document's pixels are read;
+   * a version's are read when an operation needs them, so a damaged one shows up then.
+   */
+  openFolder(provider: ObjectStorageProvider, options?: { history?: "all" | "on-demand" }): Promise<DocumentHandle>;
   /** Retries a failed Worker without discarding the confirmed journal. */
   retry(): Promise<void>;
   /** Waits briefly for journal writes, then stops the Worker and removes the canvas. */
@@ -138,6 +142,7 @@ const readableAfterStorageFailure = new Set([
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 
@@ -691,31 +696,40 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       return this.requestReplacement("open", { bytes }, epoch, [bytes]);
     });
   }
-  async openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle> {
+  async openFolder(provider: ObjectStorageProvider, options: { history?: "all" | "on-demand" } = {}): Promise<DocumentHandle> {
+    const onDemand = options.history === "on-demand";
     let manifestHash = "";
-    const doc = await this.replaceDocument(async (epoch) => {
-      const load = async (storage: ObjectStorageProvider) => {
-      const manifest = await storage.readRef("manifest.json");
-      if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
-      manifestHash = await sha256Hex(manifest);
-      const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
-      for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
-        const d = await storage.getObject(p);
-        if (d) entries.set(p, d);
-      }
-      const meta = frameEntries(entries);
-      const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer }, [meta.buffer]);
-      for (const p of plan) {
-        const d = await storage.getObject(p);
-        if (d) entries.set(p, d);
-      }
-      const all = frameEntries(entries);
-      return this.requestReplacement("openFolder", { bytes: all.buffer as ArrayBuffer }, epoch, [all.buffer]);
-      };
-      return provider.exclusive ? provider.exclusive(load) : load(provider);
-    });
-    doc.setFolder(provider, manifestHash);
-    return doc;
+    // Before the folder lock, in the order GC takes them.
+    const releaseHold = onDemand ? await provider.holdObjects?.() : undefined;
+    try {
+      const doc = await this.replaceDocument(async (epoch) => {
+        const load = async (storage: ObjectStorageProvider) => {
+          const manifest = await storage.readRef("manifest.json");
+          if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
+          manifestHash = await sha256Hex(manifest);
+          const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
+          for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
+            const d = await storage.getObject(p);
+            if (d) entries.set(p, d);
+          }
+          const meta = frameEntries(entries);
+          const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer, onDemand }, [meta.buffer]);
+          for (const p of plan) {
+            const d = await storage.getObject(p);
+            if (d) entries.set(p, d);
+          }
+          const all = frameEntries(entries);
+          const known = onDemand ? await storage.list("objects/") : undefined;
+          return this.requestReplacement("openFolder", { bytes: all.buffer as ArrayBuffer, ...(known ? { known } : {}) }, epoch, [all.buffer]);
+        };
+        return provider.exclusive ? provider.exclusive(load) : load(provider);
+      });
+      doc.setFolder(provider, manifestHash, releaseHold);
+      return doc;
+    } catch (e) {
+      void releaseHold?.();
+      throw e;
+    }
   }
 
   readonly recovery = this.makeRecovery();
@@ -748,8 +762,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     if (!this.recoveryWaiting || this.document)
       throw new AltoError("CONFLICT", "there is no waiting recovery journal", { reason: "no-recovery" });
   }
-  private exportEmergency = async (): Promise<Blob> =>
-    new Blob([(await this.request("emergencyExport")) as Uint8Array<ArrayBuffer>]);
+  private exportEmergency = async (): Promise<Blob> => {
+    const read = () => this.request("emergencyExport");
+    const bytes = await (this.document ? this.document.withObjects({ type: "all" }, read) : read());
+    return new Blob([bytes as Uint8Array<ArrayBuffer>]);
+  };
   private recoverAfterStorageFailure = async (): Promise<RecoveryReport> => {
     const failure = this.storageError();
     if (!failure) throw new AltoError("CONFLICT", "storage has not failed", { reason: "not-failed" });

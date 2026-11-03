@@ -14,7 +14,7 @@ Alto は未リリースである。旧ファイルの読み込み、旧 SDK API�
 | 文書スナップショット | format 4 | format 5。ラスターの編集範囲を必須化 |
 | パッケージ manifest | `format: 1` | `format: 2`。参照・世代を追加 |
 | コミット | 明示的な形式番号なし | `format: 2`。親は最大二つ |
-| SDK / Worker / WASM 通信 | protocol 5 | protocol 7。同一番号だけ接続（6 はブランチ・GC、7 でキャンバス・結合を追加） |
+| SDK / Worker / WASM 通信 | protocol 5 | protocol 8。同一番号だけ接続（6 はブランチ・GC、7 でキャンバス・結合、8 で必要時の読み込みを追加） |
 | レンダリング | render v3 | v3 の画素演算を維持。ラスター範囲のクリップを追加 |
 
 RGBA8・R8、256 px タイル、BLAKE3 の内容アドレス、CPU 正本と再構築可能な GPU

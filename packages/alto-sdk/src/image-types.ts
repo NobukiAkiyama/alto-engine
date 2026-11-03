@@ -1,4 +1,11 @@
 import type { NodeId } from "./types.js";
+/** @internal What an operation is about to read from a folder. */
+export type ObjectTarget =
+  | { type: "commit"; hash: string }
+  | { type: "branch"; name: string }
+  | { type: "merge"; name: string }
+  | { type: "merge_plan" }
+  | { type: "all" };
 /** Exact integer extent in node-local pixels; transparent images retain this extent. */
 export interface ImageBounds { x: number; y: number; width: number; height: number }
 /** Straight sRGB channels, each between zero and one. */

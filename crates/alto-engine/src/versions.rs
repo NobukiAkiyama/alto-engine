@@ -1,7 +1,10 @@
 mod gc;
 pub use gc::{GcCounts, GcPlan, GcReport};
 mod journal;
+mod lazy;
 pub use journal::VersionCheckpoint;
+pub(crate) use lazy::LazyObjects;
+pub use lazy::ObjectTarget;
 mod merge;
 pub use merge::{MergeConflict, MergePlan, MergeResolution, MergeResult, MergeValue};
 mod branches;
@@ -50,6 +53,9 @@ pub struct RecoveryCheckpoint {
     pub entries: BTreeMap<String, Vec<u8>>,
     /// Objects whose bytes `entries` carries.
     pub written: Vec<ContentHash>,
+    /// Objects left in the document's folder. The recovery store may drop them, so they
+    /// have to be written again if they come back.
+    pub external: BTreeSet<ContentHash>,
 }
 
 /// Which side of a diff: a commit or the working document.
@@ -155,7 +161,7 @@ impl Engine {
             s.merge = None;
         }
     }
-    fn versions(&self, h: DocHandle) -> Result<&VersionStore, EngineError> {
+    pub(crate) fn versions(&self, h: DocHandle) -> Result<&VersionStore, EngineError> {
         self.document(h)?;
         Ok(self.versions.get(&h).unwrap_or(&self.empty_versions))
     }
@@ -429,6 +435,7 @@ impl Engine {
         commit: ContentHash,
     ) -> Result<(Vec<alto_doc::Op>, alto_doc::Intent), EngineError> {
         let target = self.resolve(h, VersionRef::Commit(commit))?;
+        self.require_objects(h, &ObjectTarget::Commit { hash: commit })?;
         let message = self.versions(h)?.commits[&commit].message.clone();
         let current = self.document(h)?;
         let ops = alto_doc::restore_ops(current, &target).map_err(|e| invalid(e.to_string()))?;
@@ -497,8 +504,18 @@ impl Engine {
         for tx in history.undo.iter().chain(&history.redo) {
             crate::tx_hashes(tx, &mut history_objects);
         }
-        let (parts, refs) = self.package_parts_except(h, stored, history_objects)?;
+        let external = self.external_objects(h)?;
+        let skip: BTreeSet<_> = stored.union(&external).copied().collect();
+        let (parts, mut refs) = self.package_parts_except(h, &skip, history_objects)?;
+        refs.retain(|hash| !external.contains(hash));
         let mut entries = alto_store::package_entries(&parts)?;
+        if let Some(lazy) = self.lazy.get(&h) {
+            entries.insert(
+                "lazy-objects.json".into(),
+                serde_json::to_vec(&lazy.known)
+                    .map_err(|e| DocError::Serialization(e.to_string()))?,
+            );
+        }
         entries.insert(
             "history.json".into(),
             serde_json::to_vec(&history).map_err(|e| DocError::Serialization(e.to_string()))?,
@@ -514,6 +531,7 @@ impl Engine {
         Ok(RecoveryCheckpoint {
             entries,
             written: parts.objects.into_keys().collect(),
+            external,
         })
     }
 
@@ -563,7 +581,7 @@ impl Engine {
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false, None)
+        self.open_decoded_package(p, false, None, None)
     }
 
     /// Journal-only fast path. The caller must verify the entire checkpoint's
@@ -590,8 +608,15 @@ impl Engine {
             ),
             None => None,
         };
+        let lazy = match entries.remove("lazy-objects.json") {
+            Some(bytes) => Some(
+                serde_json::from_slice::<BTreeSet<ContentHash>>(&bytes)
+                    .map_err(|e| alto_store::StoreError::Corrupt(format!("lazy objects: {e}")))?,
+            ),
+            None => None,
+        };
         let p = alto_store::decode_recovery_entries(entries, opaque)?;
-        self.open_decoded_package(p, true, history)
+        self.open_decoded_package(p, true, history, lazy)
     }
 
     fn open_decoded_package(
@@ -599,6 +624,7 @@ impl Engine {
         p: alto_store::Package,
         deferred_verify: bool,
         history: Option<alto_doc::History>,
+        lazy: Option<BTreeSet<ContentHash>>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let current_doc = Document::from_snapshot_bytes(&p.snapshot)?;
         let current = ContentHash::of(&p.snapshot);
@@ -676,10 +702,19 @@ impl Engine {
         store.refs = p.refs;
         store.set_head(p.head);
         store.validate_graph()?;
+        // A recovery replays history records that may need what the checkpoint carries.
+        let carried: BTreeSet<ContentHash> = if deferred_verify {
+            p.objects.keys().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
         let (handle, mut warnings) =
             self.install_package(p.objects, p.opaque, &p.snapshot, vec![], deferred_verify)?;
         for hash in &store.retained {
-            if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
+            if !self.tiles.contains(hash)
+                && !self.blobs.contains_key(hash)
+                && !lazy.as_ref().is_some_and(|known| known.contains(hash))
+            {
                 self.documents.remove(&handle);
                 return Err(branches::fail(
                     "CORRUPT_DATA",
@@ -695,7 +730,9 @@ impl Engine {
                 for node in self.document(handle)?.nodes.values() {
                     self.validate_node_content_impl(node, deferred_verify)?;
                 }
-                for bytes in store.snapshots.values() {
+                // With objects left in the folder, a version is checked when they are read.
+                let versions = store.snapshots.values().filter(|_| lazy.is_none());
+                for bytes in versions {
                     let doc = Document::from_snapshot_bytes(bytes)?;
                     if let Some(selection) = &doc.selection {
                         self.validate_mask_plane_impl(selection, deferred_verify)?;
@@ -713,6 +750,15 @@ impl Engine {
         }
         warnings.dedup();
         self.versions.insert(handle, store);
+        if let Some(known) = lazy {
+            self.lazy.insert(
+                handle,
+                LazyObjects {
+                    known,
+                    pinned: carried,
+                },
+            );
+        }
         // Before maintain(): the objects only the history references are kept for it.
         if let Some(history) = history
             && let Some(editor) = self.documents.get_mut(&handle)

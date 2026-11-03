@@ -87,6 +87,7 @@ const readableAfterFailure = new Set<string>([
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -738,7 +739,7 @@ async function execute(m: Queued): Promise<unknown> {
     }
     case "folderEntries": {
       const state = JSON.parse(runtime.view());
-      const bytes = runtime.folderEntries();
+      const bytes = m.keepExternal ? runtime.folderEntriesKeepingExternal() : runtime.folderEntries();
       const token = rememberSave({
         hash: state.stateHash,
         revision: state.document.revision,
@@ -746,9 +747,20 @@ async function execute(m: Queued): Promise<unknown> {
       return { bytes, token };
     }
     case "folderPlan":
-      return JSON.parse(runtime.folderPlan(new Uint8Array(m.bytes)));
+      return JSON.parse(m.onDemand ? runtime.folderPlanOnDemand(new Uint8Array(m.bytes)) : runtime.folderPlan(new Uint8Array(m.bytes)));
+    case "missingObjects": return JSON.parse(runtime.missingObjects(JSON.stringify(m.target)));
+    case "provideObjects": {
+      runtime.provideObjects(new Uint8Array(m.bytes), JSON.stringify(m.target));
+      // A later history record replays from this checkpoint, so it has to land first.
+      if (!storageFailure) { queueCheckpoint(); await durable(); }
+      return true;
+    }
+    case "releaseObjects": runtime.releaseObjects(); return true;
+    case "markFolderSaved": runtime.markFolderSaved(); return true;
+    case "externalObjects": return runtime.externalObjects();
+    case "saveWithoutHistory": return runtime.saveWithoutHistory();
     case "openFolder": {
-      const s = JSON.parse(runtime.openFolder(new Uint8Array(m.bytes)));
+      const s = JSON.parse(m.known ? runtime.openFolderOnDemand(new Uint8Array(m.bytes), JSON.stringify(m.known)) : runtime.openFolder(new Uint8Array(m.bytes)));
       adoptDocument(m.nextDocumentEpoch);
       queueCheckpoint();
       return s;

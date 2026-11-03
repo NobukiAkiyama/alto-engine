@@ -10,6 +10,7 @@ const readableAfterStorageFailure = new Set([
     "selectionOutline", "textInfo", "textHitTest", "textCaret",
     "textSelection", "textNavigate", "versionLog", "versionDiff",
     "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+    "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 /** @internal The engine. Public callers see it through `Engine`. */
@@ -566,34 +567,44 @@ export class EngineCore extends Emitter {
             return this.requestReplacement("open", { bytes }, epoch, [bytes]);
         });
     }
-    async openFolder(provider) {
+    async openFolder(provider, options = {}) {
+        const onDemand = options.history === "on-demand";
         let manifestHash = "";
-        const doc = await this.replaceDocument(async (epoch) => {
-            const load = async (storage) => {
-                const manifest = await storage.readRef("manifest.json");
-                if (!manifest)
-                    throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
-                manifestHash = await sha256Hex(manifest);
-                const entries = new Map([["manifest.json", manifest]]);
-                for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
-                    const d = await storage.getObject(p);
-                    if (d)
-                        entries.set(p, d);
-                }
-                const meta = frameEntries(entries);
-                const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
-                for (const p of plan) {
-                    const d = await storage.getObject(p);
-                    if (d)
-                        entries.set(p, d);
-                }
-                const all = frameEntries(entries);
-                return this.requestReplacement("openFolder", { bytes: all.buffer }, epoch, [all.buffer]);
-            };
-            return provider.exclusive ? provider.exclusive(load) : load(provider);
-        });
-        doc.setFolder(provider, manifestHash);
-        return doc;
+        // Before the folder lock, in the order GC takes them.
+        const releaseHold = onDemand ? await provider.holdObjects?.() : undefined;
+        try {
+            const doc = await this.replaceDocument(async (epoch) => {
+                const load = async (storage) => {
+                    const manifest = await storage.readRef("manifest.json");
+                    if (!manifest)
+                        throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
+                    manifestHash = await sha256Hex(manifest);
+                    const entries = new Map([["manifest.json", manifest]]);
+                    for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
+                        const d = await storage.getObject(p);
+                        if (d)
+                            entries.set(p, d);
+                    }
+                    const meta = frameEntries(entries);
+                    const plan = await this.request("folderPlan", { bytes: meta.buffer, onDemand }, [meta.buffer]);
+                    for (const p of plan) {
+                        const d = await storage.getObject(p);
+                        if (d)
+                            entries.set(p, d);
+                    }
+                    const all = frameEntries(entries);
+                    const known = onDemand ? await storage.list("objects/") : undefined;
+                    return this.requestReplacement("openFolder", { bytes: all.buffer, ...(known ? { known } : {}) }, epoch, [all.buffer]);
+                };
+                return provider.exclusive ? provider.exclusive(load) : load(provider);
+            });
+            doc.setFolder(provider, manifestHash, releaseHold);
+            return doc;
+        }
+        catch (e) {
+            void releaseHold?.();
+            throw e;
+        }
     }
     recovery = this.makeRecovery();
     makeRecovery() {
@@ -626,7 +637,11 @@ export class EngineCore extends Emitter {
         if (!this.recoveryWaiting || this.document)
             throw new AltoError("CONFLICT", "there is no waiting recovery journal", { reason: "no-recovery" });
     }
-    exportEmergency = async () => new Blob([(await this.request("emergencyExport"))]);
+    exportEmergency = async () => {
+        const read = () => this.request("emergencyExport");
+        const bytes = await (this.document ? this.document.withObjects({ type: "all" }, read) : read());
+        return new Blob([bytes]);
+    };
     recoverAfterStorageFailure = async () => {
         const failure = this.storageError();
         if (!failure)

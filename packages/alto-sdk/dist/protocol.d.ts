@@ -1,7 +1,7 @@
-import type { BranchView, CanvasEditResult, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
 import type { ImportedImage, WireOp } from "./transaction.js";
 import type { CommitView, FontInfo, PathData, Rect, TextCaret, TextInfo, TextMotion, TileRef, VersionDiff } from "./types.js";
-export declare const PROTOCOL = 7;
+export declare const PROTOCOL = 8;
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
     code: string;
@@ -134,16 +134,31 @@ export interface Requests {
         bytes: Uint8Array;
         token: number;
     }>;
-    folderEntries: Q<None, {
+    folderEntries: Q<{
+        keepExternal?: boolean;
+    }, {
         bytes: Uint8Array;
         token: number;
     }>;
     folderPlan: Q<{
         bytes: ArrayBuffer;
+        onDemand?: boolean;
     }, string[]>;
     openFolder: Q<{
         bytes: ArrayBuffer;
+        known?: string[];
     }, WireState>;
+    missingObjects: Q<{
+        target: ObjectTarget;
+    }, string[]>;
+    provideObjects: Q<{
+        bytes: ArrayBuffer;
+        target: ObjectTarget;
+    }, true>;
+    releaseObjects: Q<None, true>;
+    markFolderSaved: Q<None, true>;
+    externalObjects: Q<None, number>;
+    saveWithoutHistory: Q<None, Uint8Array>;
     importFont: Q<{
         bytes: ArrayBuffer;
         faceIndex: number;

@@ -214,6 +214,7 @@ impl Engine {
     pub fn prepare_merge(&mut self, h: DocHandle, name: &str) -> Result<MergePlan, EngineError> {
         let ours = self.clean_head(h)?;
         let name = super::branches::ref_name(name)?;
+        self.require_objects(h, &super::lazy::ObjectTarget::Merge { name: name.clone() })?;
         let s = self.versions(h)?;
         if s.refs.current_branch.is_none() {
             return Err(fail("CONFLICT", "create a branch before merging"));
@@ -315,6 +316,7 @@ impl Engine {
         created_at: i64,
         author: Option<String>,
     ) -> Result<MergeResult, EngineError> {
+        self.require_objects(h, &super::lazy::ObjectTarget::MergePlan)?;
         let s = self.versions(h)?;
         let plan = s
             .merge

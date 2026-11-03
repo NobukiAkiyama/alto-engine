@@ -106,7 +106,7 @@ export function installM8({ engine, getDocument, attach, run }) {
   });
   $("#open-folder").onclick = () => run(async () => {
     const provider = await pickFolder();
-    attach(await engine.openFolder(provider));
+    attach(await engine.openFolder(provider, { history: $("#open-folder-on-demand").checked ? "on-demand" : "all" }));
     folder = provider;
   });
   $("#test-m8").onclick = () => run(async () => {
