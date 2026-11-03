@@ -1,4 +1,4 @@
-import type { ImageBounds, ImageColor, ImageFilter, ImageSelection, GradientOptions, ImageEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
+import type { CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
 import { intentRecord, type Intent } from "./intents.js";
@@ -274,6 +274,12 @@ export class DocumentHandle {
   private imageCommand(edit: Record<string, unknown>): Promise<ImageEditResult> {
     return this.edit(async () => { const r = await this.request("imageEdit", { edit }); this.apply(r.state); return r.result; });
   }
+  private canvasCommand(edit: Record<string, unknown>): Promise<CanvasEditResult> {
+    return this.edit(async () => { const r = await this.request("canvasEdit", { edit }); this.apply(r.state); return r.result; });
+  }
+  private layerCommand(edit: Record<string, unknown>): Promise<LayerEditResult> {
+    return this.edit(async () => { const r = await this.request("layerEdit", { edit }); this.apply(r.state); return r.result; });
+  }
   private historyCommand(command: Record<string, unknown>): Promise<MergeResult | null> {
     return this.edit(async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; });
   }
@@ -293,8 +299,31 @@ export class DocumentHandle {
     gradient: (node: NodeId, options: GradientOptions) => this.imageCommand({ type: "gradient", node, options }),
     fill: (node: NodeId, point: [number, number], color: ImageColor, options: { tolerance?: number; selection?: ImageSelection } = {}) =>
       this.imageCommand({ type: "fill", node, point, color, tolerance: options.tolerance ?? 0, selection: options.selection ?? "current" }),
+    /** Copies the layer's own pixels along a stroke. `source` is sampled for the first point. */
+    cloneStamp: (node: NodeId, source: [number, number], stroke: ImageStroke, options: { opacity?: number; selection?: ImageSelection } = {}) =>
+      this.imageCommand({ type: "clone_stamp", node, source, stroke: { hardness: 1, ...stroke }, opacity: options.opacity ?? 1, selection: options.selection ?? "current" }),
+    /** Carries the pixels under the tip along a stroke. */
+    smudge: (node: NodeId, stroke: ImageStroke, options: { strength?: number; selection?: ImageSelection } = {}) =>
+      this.imageCommand({ type: "smudge", node, stroke: { hardness: 1, ...stroke }, strength: options.strength ?? 0.5, selection: options.selection ?? "current" }),
+    /** Merges a raster into the raster below it. Refused when the result could not look the same. */
+    mergeDown: (node: NodeId) => this.layerCommand({ type: "merge_down", node }),
+    /** Bakes a whole-pixel offset into a raster, or flattens a group of rasters. */
+    rasterize: (node: NodeId) => this.layerCommand({ type: "rasterize", node }),
+    histogram: (node: NodeId, range?: ImageBounds): Promise<ImageHistogram> => this.request("imageHistogram", range ? { node, range } : { node }),
     pickColor: (node: NodeId, point: [number, number]) => this.request("pickColor", { node, x: point[0], y: point[1] }),
     pickComposite: (point: [number, number]) => this.request("pickComposite", { x: point[0], y: point[1] }),
+  };
+  /**
+   * Whole-document geometry, separate from the layer-local `image` edits. Each is one Undo
+   * step that moves the document's root transform, so layer pixels stay as they are.
+   */
+  readonly canvas = {
+    /** The rectangle becomes the canvas. Content outside it is kept, only no longer visible. */
+    crop: (rect: ImageBounds) => this.canvasCommand({ type: "crop", ...rect }),
+    /** Scales the whole document to the new canvas size. */
+    resize: (width: number, height: number) => this.canvasCommand({ type: "resize", width, height }),
+    rotate: (quarterTurns: 1 | 2 | 3) => this.canvasCommand({ type: "rotate", quarter_turns: quarterTurns }),
+    flip: (axis: "horizontal" | "vertical") => this.canvasCommand({ type: "flip", axis }),
   };
   /** Version commits, diffs and restores. */
   readonly versions = {

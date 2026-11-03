@@ -106,6 +106,16 @@ export interface BrushOptions {
 // @public
 export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "render.upgrade" | "recovered.edit";
 
+// @public
+export interface CanvasEditResult {
+    // (undocumented)
+    height: number;
+    // (undocumented)
+    no_op: boolean;
+    // (undocumented)
+    width: number;
+}
+
 // @public (undocumented)
 export interface ClipPath {
     // (undocumented)
@@ -264,6 +274,12 @@ export interface DocumentChange {
 // @public
 export class DocumentHandle {
     get activeTool(): ToolSession | null;
+    readonly canvas: {
+        crop: (rect: ImageBounds) => Promise<CanvasEditResult>;
+        resize: (width: number, height: number) => Promise<CanvasEditResult>;
+        rotate: (quarterTurns: 1 | 2 | 3) => Promise<CanvasEditResult>;
+        flip: (axis: "horizontal" | "vertical") => Promise<CanvasEditResult>;
+    };
     durable(): Promise<void>;
     readonly effects: {
         set: (layer: NodeId, effects: Effect[], options?: {
@@ -289,6 +305,17 @@ export class DocumentHandle {
             tolerance?: number;
             selection?: ImageSelection;
         }) => Promise<ImageEditResult>;
+        cloneStamp: (node: NodeId, source: [number, number], stroke: ImageStroke, options?: {
+            opacity?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        smudge: (node: NodeId, stroke: ImageStroke, options?: {
+            strength?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        mergeDown: (node: NodeId) => Promise<LayerEditResult>;
+        rasterize: (node: NodeId) => Promise<LayerEditResult>;
+        histogram: (node: NodeId, range?: ImageBounds) => Promise<ImageHistogram>;
         pickColor: (node: NodeId, point: [number, number]) => Promise<PickedColor>;
         pickComposite: (point: [number, number]) => Promise<PickedColor>;
     };
@@ -751,8 +778,32 @@ export interface ImageEditResult {
 // @public (undocumented)
 export type ImageFilter = "nearest" | "bilinear";
 
+// @public
+export interface ImageHistogram {
+    // (undocumented)
+    a: number[];
+    // (undocumented)
+    b: number[];
+    // (undocumented)
+    g: number[];
+    // (undocumented)
+    pixels: number;
+    // (undocumented)
+    r: number[];
+}
+
 // @public (undocumented)
 export type ImageSelection = "current" | "ignore";
+
+// @public
+export interface ImageStroke {
+    // (undocumented)
+    hardness?: number;
+    // (undocumented)
+    points: [number, number][];
+    // (undocumented)
+    radius: number;
+}
 
 // @public
 export interface InputSample {
@@ -805,6 +856,16 @@ export function isSupported(): Promise<{
     ok: boolean;
     reason?: "webgpu" | "offscreen-canvas" | "web-locks" | "opfs";
 }>;
+
+// @public (undocumented)
+export interface LayerEditResult {
+    // (undocumented)
+    bounds: ImageBounds;
+    // (undocumented)
+    no_op: boolean;
+    // (undocumented)
+    node: NodeId;
+}
 
 // @public
 export function listRecoveryNamespaces(): Promise<{

@@ -31,6 +31,26 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
       <p id="image-color-result" class="meta" aria-live="polite"></p>
       <label>SVGファイル<input id="image-svg" type="file" accept=".svg,image/svg+xml"></label>
     </fieldset>
+    <fieldset><legend>レイヤーの筆と結合</legend>
+      <p class="meta">座標はレイヤー内の画素です。筆は「始点」から「終点」へ動かします。</p>
+      <label>筆の半径<input id="image-radius" type="number" min="1" max="1024" step="1" value="16"></label>
+      <label>スタンプの参照元 X<input id="image-source-x" type="number" step="1" value="0"></label>
+      <label>スタンプの参照元 Y<input id="image-source-y" type="number" step="1" value="0"></label>
+      <button id="image-stamp">コピースタンプ</button><button id="image-smudge">指先</button>
+      <button id="image-histogram">ヒストグラムを表示</button>
+      <p id="image-histogram-result" class="meta" aria-live="polite"></p>
+      <p class="meta">結合とラスタライズは、見た目を保てない構造（マスク・効果・合成モードなど）では何も変更しません。</p>
+      <button id="image-merge-down">下のレイヤーと結合</button><button id="layer-rasterize">位置を画素へ確定 / グループを1枚に</button>
+    </fieldset>
+    <fieldset><legend>キャンバス全体</legend>
+      <p class="meta">全レイヤーと選択範囲が一緒に動きます。レイヤーの画素は書き換えません。</p>
+      <label>左端<input id="canvas-x" type="number" step="1" value="0"></label>
+      <label>上端<input id="canvas-y" type="number" step="1" value="0"></label>
+      <label>幅<input id="canvas-width" type="number" min="1" max="65536" step="1" value="512"></label>
+      <label>高さ<input id="canvas-height" type="number" min="1" max="65536" step="1" value="512"></label>
+      <button id="canvas-crop">この範囲をキャンバスにする</button><button id="canvas-resize">この幅・高さへ拡縮</button>
+      <div class="tools"><button id="canvas-rotate">右へ90度回転</button><button id="canvas-flip-h">左右反転</button><button id="canvas-flip-v">上下反転</button></div>
+    </fieldset>
     <fieldset><legend>ブランチと統合</legend>
       <p class="meta">切替には未コミットの変更がない状態が必要です。切替・内容が変わる統合を行うと、元に戻す履歴はクリアされます。</p>
       <p id="branch-current" class="meta" aria-live="polite"></p>
@@ -69,12 +89,23 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
   bind("image-gradient", () => { const { d, id } = target(); return d.image.gradient(id, { kind: $("image-gradient-kind").value, start: start(), end: [value("image-end-x"), value("image-end-y")], stops: [{ offset: 0, color: color(document.querySelector("#color").value) }, { offset: 1, color: color($("image-end-color").value) }], selection: selection() }); });
   bind("image-fill", () => { const { d, id } = target(); return d.image.fill(id, start(), color(document.querySelector("#color").value), { tolerance: value("image-tolerance"), selection: selection() }); });
   bind("image-pick", async () => { const { d, id } = target(); const p = await d.image.pickColor(id, start()); document.querySelector("#color").value = "#" + p.bytes.slice(0, 3).map((v) => v.toString(16).padStart(2, "0")).join(""); $("image-color-result").textContent = `取得した色：RGBA ${p.bytes.join(", ")}`; });
+  const strokeOf = () => ({ points: [start(), [value("image-end-x"), value("image-end-y")]], radius: value("image-radius") });
+  bind("image-stamp", () => { const { d, id } = target(); return d.image.cloneStamp(id, [value("image-source-x"), value("image-source-y")], strokeOf(), { selection: selection() }); });
+  bind("image-smudge", () => { const { d, id } = target(); return d.image.smudge(id, strokeOf(), { selection: selection() }); });
+  bind("image-histogram", async () => { const { d, id } = target(); const h = await d.image.histogram(id); const peak = (bins) => bins.indexOf(Math.max(...bins)); $("image-histogram-result").textContent = `${h.pixels}画素。最多の値 R ${peak(h.r)} / G ${peak(h.g)} / B ${peak(h.b)} / A ${peak(h.a)}。透明 ${h.a[0]}画素`; });
+  bind("image-merge-down", () => { const { d, id } = target(); return d.image.mergeDown(id); });
+  bind("layer-rasterize", async () => { const d = getDocument(), id = getSelected(); if (!d || !id) throw Error("レイヤーを選んでください"); const r = await d.image.rasterize(id); select(r.node); });
+  bind("canvas-crop", () => getDocument().canvas.crop({ x: value("canvas-x"), y: value("canvas-y"), width: value("canvas-width"), height: value("canvas-height") }));
+  bind("canvas-resize", () => getDocument().canvas.resize(value("canvas-width"), value("canvas-height")));
+  bind("canvas-rotate", () => getDocument().canvas.rotate(1));
+  bind("canvas-flip-h", () => getDocument().canvas.flip("horizontal"));
+  bind("canvas-flip-v", () => getDocument().canvas.flip("vertical"));
   $("image-svg").onchange = () => run(async () => {
     const file = $("image-svg").files[0]; if (!file) return;
     try { if (file.size > 4 * 1024 * 1024) throw Error("SVGは4 MiB以下にしてください"); const d = getDocument(); if (!d) return; const r = await d.image.importSvg(await file.text()); select(r.node); }
     finally { $("image-svg").value = ""; }
   });
-  let plan = null, planDocument = null, planState = "", preview = null, boundsKey = "", ticket = 0;
+  let plan = null, planDocument = null, planState = "", preview = null, boundsKey = "", canvasKey = "", ticket = 0;
   bind("branch-create", () => getDocument().versions.createBranch($("branch-name").value, { from: $("branch-from").value.trim() || undefined, checkout: true }));
   bind("branch-checkout", () => getDocument().versions.checkout($("branch-target").value));
   bind("branch-protect", () => getDocument().versions.setBranchProtection($("branch-target").value, $("branch-protected").checked));
@@ -99,6 +130,8 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
     if (plan && (planDocument !== d || planState !== s.stateHash)) { endMerge(); $("merge-result").textContent = "文書が変わりました。統合を準備し直してください。"; }
     const n = s.nodes.get(getSelected()), b = n?.type === "raster" ? n.bounds : null;
     for (const button of panel.querySelectorAll("button[id^='image-']")) button.disabled = !b;
+    $("layer-rasterize").disabled = !n || n.type === "root";
+    if (document.activeElement !== $("canvas-width") && document.activeElement !== $("canvas-height") && (canvasKey !== `${s.meta.width}x${s.meta.height}`)) { canvasKey = `${s.meta.width}x${s.meta.height}`; $("canvas-width").value = s.meta.width; $("canvas-height").value = s.meta.height; }
     const key = b ? `${n.id}:${JSON.stringify(b)}` : "";
     if (b && key !== boundsKey) { boundsKey = key; for (const [field, v] of Object.entries(b)) $("image-" + field).value = v; $("image-start-x").value = b.x; $("image-start-y").value = b.y; $("image-end-x").value = b.x + b.width; $("image-end-y").value = b.y; }
     const refs = s.versions.refs; $("branch-current").textContent = refs.current_branch ? `現在：${refs.current_branch}` : s.versions.head ? "過去の版を閲覧中" : "最初の版を記録するとブランチを作れます";

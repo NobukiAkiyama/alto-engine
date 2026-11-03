@@ -12,6 +12,16 @@ fn hash(s: &str) -> Result<ContentHash, JsValue> {
 fn id(s: &str) -> Result<NodeId, JsValue> {
     serde_json::from_value(json!(s)).map_err(error)
 }
+fn parse_edit<'a, T: Deserialize<'a>>(request: &'a str) -> Result<T, JsValue> {
+    serde_json::from_str(request).map_err(|e| {
+        let code = if e.to_string().contains("unknown variant") {
+            "UNSUPPORTED"
+        } else {
+            "INVALID_ARGUMENT"
+        };
+        error(format!("{code}: {e}"))
+    })
+}
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum HistoryCommand {
@@ -58,6 +68,25 @@ enum HistoryCommand {
         author: Option<String>,
     },
 }
+impl Runtime {
+    fn apply_prepared<R: serde::Serialize>(
+        &mut self,
+        intent: &str,
+        p: alto_engine::canvas::PreparedOps<R>,
+    ) -> Result<String, JsValue> {
+        let result = serde_json::to_value(&p.result).map_err(error)?;
+        let state = if p.ops.is_empty() {
+            self.view()
+        } else {
+            self.command(intent, p.ops)
+        };
+        self.engine.release_staged_tiles(p.stage);
+        Ok(
+            json!({"state":serde_json::from_str::<Value>(&state?).map_err(error)?,"result":result})
+                .to_string(),
+        )
+    }
+}
 #[wasm_bindgen]
 impl Runtime {
     #[wasm_bindgen(js_name=imageEdit)]
@@ -65,14 +94,7 @@ impl Runtime {
         if self.sampler.is_some() {
             return Err(error("BUSY: finish active tool first"));
         }
-        let edit: ImageEdit = serde_json::from_str(request).map_err(|e| {
-            let code = if e.to_string().contains("unknown variant") {
-                "UNSUPPORTED"
-            } else {
-                "INVALID_ARGUMENT"
-            };
-            error(format!("{code}: {e}"))
-        })?;
+        let edit: ImageEdit = parse_edit(request)?;
         let intent = edit.intent();
         let p = self
             .engine
@@ -89,6 +111,47 @@ impl Runtime {
             json!({"state":serde_json::from_str::<Value>(&state?).map_err(error)?,"result":result})
                 .to_string(),
         )
+    }
+    #[wasm_bindgen(js_name=canvasEdit)]
+    pub fn canvas_edit(&mut self, request: &str) -> Result<String, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("BUSY: finish active tool first"));
+        }
+        let edit: alto_engine::canvas::CanvasEdit = parse_edit(request)?;
+        let intent = edit.intent();
+        let p = self
+            .engine
+            .prepare_canvas_edit(self.doc, edit)
+            .map_err(error)?;
+        self.apply_prepared(intent, p)
+    }
+    #[wasm_bindgen(js_name=layerEdit)]
+    pub fn layer_edit(&mut self, request: &str) -> Result<String, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("BUSY: finish active tool first"));
+        }
+        let edit: alto_engine::canvas::LayerEdit = parse_edit(request)?;
+        let intent = edit.intent();
+        let p = self
+            .engine
+            .prepare_layer_edit(self.doc, edit)
+            .map_err(error)?;
+        self.apply_prepared(intent, p)
+    }
+    #[wasm_bindgen(js_name=imageHistogram)]
+    pub fn image_histogram(&self, node: &str, range: &str) -> Result<String, JsValue> {
+        let range = if range.is_empty() {
+            None
+        } else {
+            Some(parse_edit(range)?)
+        };
+        serde_json::to_string(
+            &self
+                .engine
+                .image_histogram(self.doc, id(node)?, range)
+                .map_err(error)?,
+        )
+        .map_err(error)
     }
     #[wasm_bindgen(js_name=gcPlan)]
     pub fn gc_plan(&self, framed: &[u8], dry_run: bool) -> Result<Vec<u8>, JsValue> {

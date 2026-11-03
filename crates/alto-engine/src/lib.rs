@@ -1,3 +1,4 @@
+pub mod canvas;
 mod edit;
 pub mod image;
 pub mod m5;

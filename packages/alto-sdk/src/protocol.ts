@@ -1,4 +1,4 @@
-import type { BranchView, MergePlan, MergeResult, ImageEditResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
 /**
  * @internal The messages between the SDK and its engine Worker, written once. The SDK's
  * `request` and the Worker's `execute` are both checked against `Requests`. Not part
@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 6;
+export const PROTOCOL = 7;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -121,6 +121,9 @@ export interface Requests {
   compactArchive: Q<{ bytes: ArrayBuffer }, Uint8Array>;
   importSvg: Q<{ svg: string; parent: string; index: number }, { state: WireState; result: SvgImportResult }>;
   imageEdit: Q<{ edit: Record<string, unknown> }, { state: WireState; result: ImageEditResult }>;
+  canvasEdit: Q<{ edit: Record<string, unknown> }, { state: WireState; result: CanvasEditResult }>;
+  layerEdit: Q<{ edit: Record<string, unknown> }, { state: WireState; result: LayerEditResult }>;
+  imageHistogram: Q<{ node: string; range?: ImageBounds }, ImageHistogram>;
   pickColor: Q<{ node: string; x: number; y: number }, PickedColor>;
   pickComposite: Q<{ x: number; y: number }, PickedColor>;
   listBranches: Q<None, BranchView[]>;

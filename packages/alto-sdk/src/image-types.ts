@@ -12,6 +12,13 @@ export interface GradientOptions {
   opacity?: number; selection?: ImageSelection;
 }
 export interface ImageEditResult { node: NodeId; bounds: ImageBounds; changed_tiles: number; no_op: boolean }
+/** Result of a whole-document edit. Layer pixels are not rewritten. */
+export interface CanvasEditResult { width: number; height: number; no_op: boolean }
+export interface LayerEditResult { node: NodeId; bounds: ImageBounds; no_op: boolean }
+/** Stored pixels per channel, before opacity, masks and effects. Each channel has 256 bins. */
+export interface ImageHistogram { r: number[]; g: number[]; b: number[]; a: number[]; pixels: number }
+/** A polyline in node-local pixels, drawn with a round tip. */
+export interface ImageStroke { points: [number, number][]; radius: number; hardness?: number }
 export interface PickedColor { bytes: [number, number, number, number]; color: ImageColor }
 export interface BranchView { name: string; head: string; current: boolean; protected: boolean; ahead: number; behind: number }
 export interface VersionRefs {
