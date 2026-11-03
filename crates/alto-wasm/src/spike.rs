@@ -499,7 +499,7 @@ impl Spike {
             .map_err(js_error)?
             .node(self.layer)
             .map_err(js_error)?;
-        let NodeKind::Raster { tiles } = &node.kind else {
+        let NodeKind::Raster { tiles, .. } = &node.kind else {
             return Err(js_error("M0 layer is not raster"));
         };
         Ok(tiles.tiles.get(&key).copied())

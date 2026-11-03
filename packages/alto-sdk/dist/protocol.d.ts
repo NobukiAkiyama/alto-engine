@@ -1,6 +1,7 @@
+import type { BranchView, MergePlan, MergeResult, ImageEditResult, PickedColor, SvgImportResult } from "./image-types.js";
 import type { ImportedImage, WireOp } from "./transaction.js";
 import type { CommitView, FontInfo, PathData, Rect, TextCaret, TextInfo, TextMotion, TileRef, VersionDiff } from "./types.js";
-export declare const PROTOCOL = 5;
+export declare const PROTOCOL = 6;
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
     code: string;
@@ -188,7 +189,51 @@ export interface Requests {
         commit: CommitView;
         state: WireState;
     }>;
-    versionLog: Q<None, CommitView[]>;
+    gcPlan: Q<{
+        bytes: ArrayBuffer;
+        dryRun: boolean;
+    }, Uint8Array>;
+    compactArchive: Q<{
+        bytes: ArrayBuffer;
+    }, Uint8Array>;
+    importSvg: Q<{
+        svg: string;
+        parent: string;
+        index: number;
+    }, {
+        state: WireState;
+        result: SvgImportResult;
+    }>;
+    imageEdit: Q<{
+        edit: Record<string, unknown>;
+    }, {
+        state: WireState;
+        result: ImageEditResult;
+    }>;
+    pickColor: Q<{
+        node: string;
+        x: number;
+        y: number;
+    }, PickedColor>;
+    pickComposite: Q<{
+        x: number;
+        y: number;
+    }, PickedColor>;
+    listBranches: Q<None, BranchView[]>;
+    prepareMerge: Q<{
+        name: string;
+    }, MergePlan>;
+    cancelMerge: Q<None, true>;
+    historyCommand: Q<{
+        command: Record<string, unknown>;
+    }, {
+        state: WireState;
+        result: MergeResult | null;
+    }>;
+    versionLog: Q<{
+        dag?: boolean;
+        allBranches?: boolean;
+    }, CommitView[]>;
     versionDiff: Q<{
         from: string;
         to: string;

@@ -40,7 +40,7 @@ export class Transaction {
         this.snapshot = snapshot;
     }
     addRaster(options = {}) {
-        return this.insert({ kind: "raster", tiles: { format: "rgba8", tiles: {} } }, options, "Layer");
+        return this.insert({ kind: "raster", bounds: options.bounds ?? { x: 0, y: 0, width: this.snapshot.meta.width, height: this.snapshot.meta.height }, tiles: { format: "rgba8", tiles: {} } }, options, "Layer");
     }
     addGroup(options = {}) {
         const isolation = options.isolated ? "isolated" : "pass_through";
@@ -49,7 +49,7 @@ export class Transaction {
     /** A raster layer showing an imported image. */
     addRasterFromAsset(asset, options = {}) {
         const image = asset;
-        const id = this.insert({ kind: "raster", tiles: image.tiles }, options, "Image");
+        const id = this.insert({ kind: "raster", bounds: { x: 0, y: 0, width: image.width, height: image.height }, tiles: image.tiles }, options, "Image");
         this.ops.push({ type: "set_asset", id: image.record.id, record: image.record });
         return id;
     }

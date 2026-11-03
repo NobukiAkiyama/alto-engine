@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tiles.tiles.insert(TileKey { tx: x, ty: y }, hash);
         }
     }
-    bg.kind = NodeKind::Raster { tiles };
+    bg.kind = NodeKind::raster(tiles)?;
     let bg_id = bg.id;
 
     let body = TextContent {

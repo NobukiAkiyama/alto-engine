@@ -1,5 +1,7 @@
 mod edit;
+pub mod image;
 pub mod m5;
+pub mod svg;
 pub mod text;
 pub mod unstable_render;
 pub mod versions;
@@ -41,6 +43,8 @@ pub struct DocHandle(pub u64);
 #[derive(Debug, thiserror::Error)]
 /// Messages start with the code the SDK reports (`CODE: detail`).
 pub enum EngineError {
+    #[error("{code}: {message}")]
+    Operation { code: &'static str, message: String },
     #[error("NOT_FOUND: document not found: {0:?}")]
     NotFound(DocHandle),
     #[error("NOT_FOUND: content tile not found: {0}")]
@@ -181,6 +185,110 @@ impl Engine {
         self.tile(hash)?.ok_or(EngineError::MissingTile(*hash))
     }
 
+    fn validate_mask_plane(&self, map: &alto_raster::TileMap) -> Result<(), EngineError> {
+        self.validate_mask_plane_impl(map, false)
+    }
+    fn validate_mask_plane_impl(
+        &self,
+        map: &alto_raster::TileMap,
+        deferred: bool,
+    ) -> Result<(), EngineError> {
+        if map.format != alto_core::PixelFormat::R8 {
+            return Err(DocError::Invalid("mask requires R8".into()).into());
+        }
+        for hash in map.tiles.values() {
+            if !deferred {
+                self.encoded(*hash)?
+                    .ok_or(EngineError::MissingTile(*hash))?;
+            }
+            let stored = self
+                .tiles
+                .object(hash)
+                .ok_or(EngineError::MissingTile(*hash))?;
+            if stored.format != alto_core::PixelFormat::R8 {
+                return Err(DocError::Invalid("mask tile requires R8".into()).into());
+            }
+        }
+        Ok(())
+    }
+    fn validate_node_content(&self, node: &alto_doc::Node) -> Result<(), EngineError> {
+        self.validate_node_content_impl(node, false)
+    }
+    // Recovery keeps interior tiles lazy, but must verify boundary padding before display.
+    fn validate_node_content_impl(
+        &self,
+        node: &alto_doc::Node,
+        deferred: bool,
+    ) -> Result<(), EngineError> {
+        let mut referenced = std::collections::BTreeSet::new();
+        node_hashes(node, &mut referenced);
+        if !deferred {
+            for hash in referenced {
+                self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+            }
+        }
+        if let Some(mask) = &node.props.mask {
+            self.validate_mask_plane_impl(mask, deferred)?;
+        }
+        for effect in &node.props.effects {
+            if let Some(selection) = effect.selection() {
+                self.validate_mask_plane_impl(selection, deferred)?;
+            }
+        }
+        if let NodeKind::Adjustment { adjustment } = &node.kind
+            && let Some(selection) = adjustment.selection()
+        {
+            self.validate_mask_plane_impl(selection, deferred)?;
+        }
+        let NodeKind::Raster { bounds, tiles } = &node.kind else {
+            return Ok(());
+        };
+        bounds.validate()?;
+        for (key, hash) in &tiles.tiles {
+            let r = alto_doc::ImageBounds::tile(*key)?;
+            let interior = r.x >= bounds.x
+                && r.y >= bounds.y
+                && r.right() <= bounds.right()
+                && r.bottom() <= bounds.bottom();
+            let stored = self
+                .tiles
+                .object(hash)
+                .ok_or(EngineError::MissingTile(*hash))?;
+            if stored.format != alto_core::PixelFormat::Rgba8 {
+                return Err(EngineError::Operation {
+                    code: "CORRUPT_DATA",
+                    message: "raster tile requires RGBA8".into(),
+                });
+            }
+            if deferred && interior {
+                continue;
+            }
+            let tile = self.require_tile(hash)?;
+            if tile.is_empty() {
+                return Err(EngineError::Operation {
+                    code: "CORRUPT_DATA",
+                    message: "noncanonical raster tile".into(),
+                });
+            }
+            if interior {
+                continue;
+            }
+            for y in 0..256 {
+                for x in 0..256 {
+                    if !bounds.contains(r.x + x, r.y + y) {
+                        let i = (y as usize * 256 + x as usize) * 4;
+                        if tile.pixels[i..i + 4].iter().any(|b| *b != 0) {
+                            return Err(EngineError::Operation {
+                                code: "CORRUPT_DATA",
+                                message: "nonzero pixels outside image bounds".into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn transact(
         &mut self,
         handle: DocHandle,
@@ -189,6 +297,7 @@ impl Engine {
         base_revision: u64,
     ) -> Result<ChangeSet, EngineError> {
         // Render version 3 text is drawn from its bake only; local edits bake here.
+        let old_revision = self.document(handle)?.revision;
         ops = self.bake_text_ops(handle, ops)?;
         let mut referenced = std::collections::BTreeSet::new();
         for op in &ops {
@@ -200,12 +309,46 @@ impl Engine {
             }
         }
         for op in &ops {
+            match op {
+                Op::SetMask {
+                    mask: Some(mask), ..
+                }
+                | Op::SetSelection {
+                    selection: Some(mask),
+                } => self.validate_mask_plane(mask)?,
+                Op::SetProps { patch, .. } => {
+                    for effect in patch.effects.iter().flatten() {
+                        if let Some(selection) = effect.selection() {
+                            self.validate_mask_plane(selection)?;
+                        }
+                    }
+                }
+                Op::SetAdjustment { adjustment, .. } => {
+                    if let Some(selection) = adjustment.selection() {
+                        self.validate_mask_plane(selection)?;
+                    }
+                }
+                Op::InsertNode { node, .. } | Op::ReplaceNode { node, .. } => {
+                    self.validate_node_content(node)?
+                }
+                Op::RestoreSubtree { nodes, .. } => {
+                    for node in nodes {
+                        self.validate_node_content(node)?;
+                    }
+                }
+                _ => {}
+            }
             if let Op::SetTiles { changes, .. } = op {
                 for change in changes {
                     if let Some(hash) = change.after
                         && !self.tiles.contains(&hash)
                     {
                         return Err(EngineError::MissingTile(hash));
+                    }
+                    if let Some(hash) = change.after
+                        && self.require_tile(&hash)?.format != alto_core::PixelFormat::Rgba8
+                    {
+                        return Err(DocError::Invalid("raster tile requires RGBA8".into()).into());
                     }
                 }
             }
@@ -215,6 +358,9 @@ impl Engine {
             .get_mut(&handle)
             .ok_or(EngineError::NotFound(handle))?
             .transact(intent, ops, base_revision)?;
+        if self.document(handle)?.revision != old_revision {
+            self.invalidate_merge(handle);
+        }
         self.maintain();
         self.unpin_referenced();
         Ok(changes)
@@ -243,6 +389,9 @@ impl Engine {
             .get_mut(&handle)
             .ok_or(EngineError::NotFound(handle))?
             .undo()?;
+        if c.is_some() {
+            self.invalidate_merge(handle);
+        }
         self.maintain();
         self.unpin_referenced();
         Ok(c)
@@ -253,6 +402,9 @@ impl Engine {
             .get_mut(&handle)
             .ok_or(EngineError::NotFound(handle))?
             .redo()?;
+        if c.is_some() {
+            self.invalidate_merge(handle);
+        }
         self.maintain();
         self.unpin_referenced();
         Ok(c)
@@ -330,7 +482,7 @@ impl Engine {
                         isolated: matches!(isolation, alto_doc::Isolation::Isolated),
                     }
                 }
-                NodeKind::Raster { tiles } => RContent::Tiles(
+                NodeKind::Raster { tiles, .. } => RContent::Tiles(
                     tiles
                         .tiles
                         .iter()
@@ -464,13 +616,15 @@ mod tests {
         assert_eq!(scene.compile(scene.canvas).unwrap().passes.len(), 2);
         let bytes = engine.snapshot(handle).unwrap();
         let reopened = engine.open_snapshot(&bytes).unwrap();
-        let NodeKind::Raster { tiles } = &engine.document(reopened).unwrap().node(id).unwrap().kind
+        let NodeKind::Raster { tiles, .. } =
+            &engine.document(reopened).unwrap().node(id).unwrap().kind
         else {
             panic!("raster expected")
         };
         assert_eq!(tiles.tiles.get(&key), Some(&hash));
         engine.undo(handle).unwrap();
-        let NodeKind::Raster { tiles } = &engine.document(handle).unwrap().node(id).unwrap().kind
+        let NodeKind::Raster { tiles, .. } =
+            &engine.document(handle).unwrap().node(id).unwrap().kind
         else {
             panic!("raster expected")
         };
@@ -689,6 +843,9 @@ impl Engine {
     /// A step that does not reach the recorded state is reverted and reported.
     pub fn replay_record(&mut self, h: DocHandle, bytes: &[u8]) -> Result<Replayed, EngineError> {
         let mut entries = alto_store::read_entries(bytes)?;
+        if entries.contains_key("version-state.json") {
+            return self.replay_version_record(h, entries);
+        }
         let tx = entries
             .remove("transaction.json")
             .ok_or_else(|| alto_store::StoreError::Corrupt("journal transaction missing".into()))?;
@@ -773,7 +930,7 @@ pub enum Replayed {
     Diverged,
 }
 pub(crate) fn node_hashes(n: &alto_doc::Node, h: &mut std::collections::BTreeSet<ContentHash>) {
-    if let NodeKind::Raster { tiles } = &n.kind {
+    if let NodeKind::Raster { tiles, .. } = &n.kind {
         h.extend(tiles.tiles.values().copied());
     }
     for effect in &n.props.effects {
@@ -1281,7 +1438,8 @@ mod package_tests {
             let after = e.put_tile(TileData::new(PixelFormat::Rgba8, px).unwrap());
             let rev = e.document(d).unwrap().revision;
             let key = TileKey { tx, ty: 0 };
-            let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+            let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind
+            else {
                 panic!()
             };
             let before = tiles.tiles.get(&key).copied();
@@ -1491,7 +1649,7 @@ mod render_v3_fixture {
         assert!(warnings.is_empty(), "{warnings:?}");
         let loaded = engine.document(opened).unwrap();
         assert_eq!(loaded.meta.render_version, RENDER_VERSION_EXACT);
-        assert_eq!(loaded.meta.format_version, 4);
+        assert_eq!(loaded.meta.format_version, 5);
         assert_eq!((loaded.meta.width, loaded.meta.height), (256, 256));
         assert_eq!(loaded.nodes.len(), 1);
         assert_eq!(engine.save_package(opened).unwrap(), bytes);
@@ -1527,7 +1685,7 @@ mod render_v3_fixture {
             engine.document(fresh).unwrap().meta.render_version,
             RENDER_VERSION_EXACT
         );
-        assert_eq!(engine.document(fresh).unwrap().meta.format_version, 4);
+        assert_eq!(engine.document(fresh).unwrap().meta.format_version, 5);
         assert!(!engine.save_package(fresh).unwrap().is_empty());
         assert!(!engine.folder_entries(fresh).unwrap().is_empty());
 
@@ -1536,10 +1694,10 @@ mod render_v3_fixture {
         assert!(warnings.is_empty(), "{warnings:?}");
         let loaded = engine.document(opened).unwrap();
         assert_eq!(loaded.meta.render_version, RENDER_VERSION_EXACT);
-        assert_eq!(loaded.meta.format_version, 4);
+        assert_eq!(loaded.meta.format_version, 5);
         assert_eq!(loaded.nodes.len(), 1);
         assert_eq!(engine.save_package(opened).unwrap(), bytes);
-        assert!(!engine.save_package_trimmed(opened, 0).unwrap().is_empty());
+        assert!(engine.save_package_trimmed(opened, 0).is_err());
         assert!(!engine.folder_entries(opened).unwrap().is_empty());
         assert_eq!(
             engine.document(opened).unwrap().meta.render_version,
@@ -1547,11 +1705,11 @@ mod render_v3_fixture {
         );
         let text = String::from_utf8(engine.snapshot(opened).unwrap()).unwrap();
         assert!(text.contains("\"render_version\": 3"));
-        assert!(text.contains("\"format_version\": 4"));
+        assert!(text.contains("\"format_version\": 5"));
     }
 
     /// The empty v3 fixtures are the engine's own save of an empty document:
-    /// render version 3 (format 4) at each size.
+    /// render version 3 (format 5) at each size.
     /// `render-v3-empty-8389120x256.alto` is 8388864 + 256 px wide, past 2^23
     /// px, for the browser's plain-path 2^23 checks (Linus 08:10); it opens
     /// through `open_package` (`engine.open`), which has no canvas limit

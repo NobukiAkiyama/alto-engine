@@ -98,7 +98,7 @@ export function toNode(wire: WireNode): DocNode {
       children: k.children as NodeId[],
       isolation: k.isolation as "pass_through" | "isolated",
     };
-  else if (k.kind === "raster") node = { ...base, type: "raster", tiles: k.tiles as never };
+  else if (k.kind === "raster") node = { ...base, type: "raster", bounds: k.bounds as never, tiles: k.tiles as never };
   else if (k.kind === "text") node = { ...base, type: "text", content: k.content as never };
   else if (k.kind === "vector") node = { ...base, type: "vector", paths: k.paths as never };
   else node = { ...base, type: "adjustment", adjustment: k.adjustment as never };

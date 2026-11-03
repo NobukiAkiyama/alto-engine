@@ -471,7 +471,7 @@ fn draws(doc: &Document, id: NodeId) -> Result<Vec<Draw>, EngineError> {
                     walk(doc, *child, out)?;
                 }
             }
-            NodeKind::Raster { tiles } => out.push(Draw {
+            NodeKind::Raster { tiles, .. } => out.push(Draw {
                 map: tiles.clone(),
                 offset: chain(doc, id, true)?,
                 opacity: node.props.opacity,
@@ -544,7 +544,7 @@ impl Engine {
                 (nx - ancestor.0 as f64, ny - ancestor.1 as f64)
             };
             match &node.kind {
-                NodeKind::Raster { tiles } => {
+                NodeKind::Raster { tiles, .. } => {
                     let moved = remap_map(self, tiles, |x, y| {
                         map_px(x + offset.0, y + offset.1)
                             .map(|(nx, ny)| (nx - ancestor.0, ny - ancestor.1))
@@ -811,7 +811,7 @@ impl Engine {
                 )
             };
             match &node.kind {
-                NodeKind::Raster { tiles } => {
+                NodeKind::Raster { tiles, .. } => {
                     let moved = resample(
                         self,
                         tiles,
@@ -911,7 +911,7 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let (tiles, offset, revision) = {
             let doc = self.document(handle)?;
-            let NodeKind::Raster { tiles } = &doc.node(layer)?.kind else {
+            let NodeKind::Raster { tiles, .. } = &doc.node(layer)?.kind else {
                 return Err(bad("Fill target must be a raster"));
             };
             (tiles.clone(), chain(doc, layer, true)?, doc.revision)
@@ -1008,7 +1008,7 @@ impl Engine {
         let copied = {
             let doc = self.document(handle)?;
             let node = doc.node(layer)?;
-            let NodeKind::Raster { tiles } = &node.kind else {
+            let NodeKind::Raster { tiles, .. } = &node.kind else {
                 return Err(bad("Clone target must be a raster"));
             };
             let offset = chain(doc, layer, true)?;
@@ -1049,7 +1049,7 @@ impl Engine {
         let (sources, radius_i, span) = {
             let doc = self.document(handle)?;
             let node = doc.node(layer)?;
-            let NodeKind::Raster { tiles } = &node.kind else {
+            let NodeKind::Raster { tiles, .. } = &node.kind else {
                 return Err(bad("Smudge target must be a raster"));
             };
             let offset = chain(doc, layer, true)?;
@@ -1099,7 +1099,7 @@ impl Engine {
         layer: NodeId,
     ) -> Result<[[u32; 256]; 4], EngineError> {
         let doc = self.document(handle)?;
-        let NodeKind::Raster { tiles } = &doc.node(layer)?.kind else {
+        let NodeKind::Raster { tiles, .. } = &doc.node(layer)?.kind else {
             return Err(bad("Histogram requires a raster layer"));
         };
         let mut bins = [[0u32; 256]; 4];
@@ -1141,7 +1141,7 @@ impl Engine {
         }
         let ancestor = chain(&doc, id, false)?;
         match &node.kind {
-            NodeKind::Raster { tiles } => {
+            NodeKind::Raster { tiles, .. } => {
                 let offset = chain(&doc, id, true)?;
                 let moved = remap_map(self, tiles, |x, y| {
                     Some((x + offset.0 - ancestor.0, y + offset.1 - ancestor.1))
@@ -1175,7 +1175,7 @@ impl Engine {
                 let mut draws = Vec::new();
                 for child in children {
                     let child_node = doc.node(*child)?;
-                    let NodeKind::Raster { tiles } = &child_node.kind else {
+                    let NodeKind::Raster { tiles, .. } = &child_node.kind else {
                         return Err(bad("Group rasterize supports raster children"));
                     };
                     if !child_node.props.effects.is_empty() {
@@ -1207,7 +1207,7 @@ impl Engine {
                 replacement.props.effects.clear();
                 replacement.props.vector_mask = None;
                 replacement.props.clip_path = None;
-                replacement.kind = NodeKind::Raster { tiles };
+                replacement.kind = NodeKind::raster(tiles)?;
                 let mut ops: Vec<_> = children
                     .iter()
                     .copied()
@@ -1242,11 +1242,17 @@ impl Engine {
             return Err(bad("There is no layer below"));
         }
         let lower = siblings[index - 1];
-        let NodeKind::Raster { tiles: upper_tiles } = &node.kind else {
+        let NodeKind::Raster {
+            tiles: upper_tiles, ..
+        } = &node.kind
+        else {
             return Err(bad("Merge supports raster layers"));
         };
         let lower_node = doc.node(lower)?;
-        let NodeKind::Raster { tiles: lower_tiles } = &lower_node.kind else {
+        let NodeKind::Raster {
+            tiles: lower_tiles, ..
+        } = &lower_node.kind
+        else {
             return Err(bad("Merge supports raster layers"));
         };
         let upper_tiles = upper_tiles.clone();
@@ -1441,14 +1447,14 @@ mod tests {
             .unwrap();
         let snapshot = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 4);
+        assert_eq!(value["meta"]["format_version"], 5);
         assert_eq!(value["meta"]["render_version"], 3);
         let reopened = engine.open_snapshot(&snapshot).unwrap();
-        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 4);
+        assert_eq!(engine.document(reopened).unwrap().meta.format_version, 5);
         engine.undo(handle).unwrap();
         let snapshot = engine.snapshot(handle).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(value["meta"]["format_version"], 4);
+        assert_eq!(value["meta"]["format_version"], 5);
         assert_eq!(value["meta"]["render_version"], 3);
         engine.open_snapshot(&snapshot).unwrap();
     }

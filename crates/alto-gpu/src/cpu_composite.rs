@@ -9266,7 +9266,6 @@ fn bake_parity_content(mut content: alto_text::TextContent, font_count: usize) -
     let mut e = alto_engine::Engine::new();
     let mut meta = alto_doc::DocumentMeta::srgb_u8(512, 512);
     meta.render_version = alto_core::RENDER_VERSION_EXACT;
-    meta.format_version = 4;
     let d = e.create_document(meta).unwrap();
     let mut fonts = vec![];
     let mut ops = vec![];

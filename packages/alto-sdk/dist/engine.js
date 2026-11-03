@@ -569,25 +569,28 @@ export class EngineCore extends Emitter {
     async openFolder(provider) {
         let manifestHash = "";
         const doc = await this.replaceDocument(async (epoch) => {
-            const manifest = await provider.readRef("manifest.json");
-            if (!manifest)
-                throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
-            manifestHash = await sha256Hex(manifest);
-            const entries = new Map([["manifest.json", manifest]]);
-            for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
-                const d = await provider.getObject(p);
-                if (d)
-                    entries.set(p, d);
-            }
-            const meta = frameEntries(entries);
-            const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
-            for (const p of plan) {
-                const d = await provider.getObject(p);
-                if (d)
-                    entries.set(p, d);
-            }
-            const all = frameEntries(entries);
-            return this.requestReplacement("openFolder", { bytes: all.buffer }, epoch, [all.buffer]);
+            const load = async (storage) => {
+                const manifest = await storage.readRef("manifest.json");
+                if (!manifest)
+                    throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
+                manifestHash = await sha256Hex(manifest);
+                const entries = new Map([["manifest.json", manifest]]);
+                for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
+                    const d = await storage.getObject(p);
+                    if (d)
+                        entries.set(p, d);
+                }
+                const meta = frameEntries(entries);
+                const plan = await this.request("folderPlan", { bytes: meta.buffer }, [meta.buffer]);
+                for (const p of plan) {
+                    const d = await storage.getObject(p);
+                    if (d)
+                        entries.set(p, d);
+                }
+                const all = frameEntries(entries);
+                return this.requestReplacement("openFolder", { bytes: all.buffer }, epoch, [all.buffer]);
+            };
+            return provider.exclusive ? provider.exclusive(load) : load(provider);
         });
         doc.setFolder(provider, manifestHash);
         return doc;

@@ -17,7 +17,7 @@ export type { ConflictReason, ErrorCode, ErrorDetails } from "./errors.js";
 export type { BuiltInIntent, Intent, IntentId } from "./intents.js";
 export type { DocumentChange, DocumentSnapshot } from "./snapshot.js";
 export { FileSystemDirectoryProvider, MemoryObjectProvider, sha256Hex } from "./storage.js";
-export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider } from "./storage.js";
+export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider, ExclusiveObjectStorage } from "./storage.js";
 export { applyTextStyle, replaceText } from "./text-edit.js";
 export { ToolSession } from "./tools.js";
 export type { BrushOptions, InputSample } from "./tools.js";
@@ -26,3 +26,5 @@ export type { InsertOptions } from "./transaction.js";
 export { ViewportControl } from "./viewport.js";
 export type { Viewport } from "./viewport.js";
 export type * from "./types.js";
+
+export type * from "./image-types.js";

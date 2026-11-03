@@ -1,3 +1,4 @@
+import type { BranchView, MergePlan, MergeResult, ImageEditResult, PickedColor, SvgImportResult } from "./image-types.js";
 /**
  * @internal The messages between the SDK and its engine Worker, written once. The SDK's
  * `request` and the Worker's `execute` are both checked against `Requests`. Not part
@@ -17,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -116,7 +117,17 @@ export interface Requests {
   textSelection: Q<{ node: string; start: number; end: number }, [number, number][][]>;
   textNavigate: Q<{ node: string; offset: number; motion: TextMotion }, number>;
   commit: Q<{ message: string; author: string; allowEmpty: boolean; time: number }, { commit: CommitView; state: WireState }>;
-  versionLog: Q<None, CommitView[]>;
+  gcPlan: Q<{ bytes: ArrayBuffer; dryRun: boolean }, Uint8Array>;
+  compactArchive: Q<{ bytes: ArrayBuffer }, Uint8Array>;
+  importSvg: Q<{ svg: string; parent: string; index: number }, { state: WireState; result: SvgImportResult }>;
+  imageEdit: Q<{ edit: Record<string, unknown> }, { state: WireState; result: ImageEditResult }>;
+  pickColor: Q<{ node: string; x: number; y: number }, PickedColor>;
+  pickComposite: Q<{ x: number; y: number }, PickedColor>;
+  listBranches: Q<None, BranchView[]>;
+  prepareMerge: Q<{ name: string }, MergePlan>;
+  cancelMerge: Q<None, true>;
+  historyCommand: Q<{ command: Record<string, unknown> }, { state: WireState; result: MergeResult | null }>;
+  versionLog: Q<{ dag?: boolean; allBranches?: boolean }, CommitView[]>;
   versionDiff: Q<{ from: string; to: string }, VersionDiff>;
   restoreVersion: Q<{ hash: string }, WireState>;
   saved: Q<{ token: number }, WireState>;

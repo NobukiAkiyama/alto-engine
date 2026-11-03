@@ -83,7 +83,7 @@ export async function runM8Tests(engine, log) {
         assert(files.filter((f) => f.startsWith("commits/")).length === 2, "commits " + files);
         assert(files.filter((f) => f.startsWith("snapshots/")).length >= 2, "snapshots");
         const manifest = JSON.parse(new TextDecoder().decode(await provider.readRef("manifest.json")));
-        assert(manifest.head === v2.hash && manifest.format === 1, "manifest head");
+        assert(manifest.head === v2.hash && manifest.format === 2, "manifest head");
         const docJson = new TextDecoder().decode(await provider.readRef("document.json"));
         assert(docJson.split("\n").length > 50 && docJson.includes('"name": "線画"'), "readable document.json");
         await doc.transact("名前", (tx) => tx.setProps(bg, { name: "背景（明）" }));
@@ -117,7 +117,7 @@ export async function runM8Tests(engine, log) {
       await stroke(doc, bg, 300, 400, [1, 0, 0, 1]);
       const c = await doc.versions.commit("赤い線");
       const after = await unstable(engine).readTile(1, 1);
-      // The commit's checkpoint is written after the reply.
+      // The commit's transition is written after the reply.
       await doc.durable();
       await testing(engine).crash();
       doc = engine.document;

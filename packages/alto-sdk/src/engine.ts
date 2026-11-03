@@ -694,22 +694,25 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   async openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle> {
     let manifestHash = "";
     const doc = await this.replaceDocument(async (epoch) => {
-      const manifest = await provider.readRef("manifest.json");
+      const load = async (storage: ObjectStorageProvider) => {
+      const manifest = await storage.readRef("manifest.json");
       if (!manifest) throw new AltoError("NOT_FOUND", "the folder has no manifest.json");
       manifestHash = await sha256Hex(manifest);
       const entries = new Map<string, Uint8Array>([["manifest.json", manifest]]);
-      for (const p of [...(await provider.list("snapshots/")), ...(await provider.list("commits/"))]) {
-        const d = await provider.getObject(p);
+      for (const p of [...(await storage.list("snapshots/")), ...(await storage.list("commits/"))]) {
+        const d = await storage.getObject(p);
         if (d) entries.set(p, d);
       }
       const meta = frameEntries(entries);
       const plan = await this.request("folderPlan", { bytes: meta.buffer as ArrayBuffer }, [meta.buffer]);
       for (const p of plan) {
-        const d = await provider.getObject(p);
+        const d = await storage.getObject(p);
         if (d) entries.set(p, d);
       }
       const all = frameEntries(entries);
       return this.requestReplacement("openFolder", { bytes: all.buffer as ArrayBuffer }, epoch, [all.buffer]);
+      };
+      return provider.exclusive ? provider.exclusive(load) : load(provider);
     });
     doc.setFolder(provider, manifestHash);
     return doc;

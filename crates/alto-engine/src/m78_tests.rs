@@ -157,7 +157,7 @@ fn paint(e: &mut Engine, d: DocHandle, layer: alto_core::NodeId, key: TileKey, v
         .put_tile(TileData::new(PixelFormat::Rgba8, vec![v; 262144]).unwrap())
         .unwrap();
     let doc = e.document(d).unwrap();
-    let NodeKind::Raster { tiles } = &doc.node(layer).unwrap().kind else {
+    let NodeKind::Raster { tiles, .. } = &doc.node(layer).unwrap().kind else {
         panic!()
     };
     let before = tiles.tiles.get(&key).copied();
@@ -224,7 +224,7 @@ fn commits_diff_restore_and_persist_history() {
     )
     .unwrap();
     let status = e.version_status(d).unwrap();
-    assert!(status.changed && status.changes == 3);
+    assert!(status.changed && status.changes == 4);
     let c2 = e.commit(d, "人物と本文", 3_000, None, false).unwrap();
     let brush = c2.intents.iter().find(|i| i.intent == "ブラシ").unwrap();
     assert_eq!(
@@ -323,7 +323,7 @@ fn committed_tiles_survive_garbage_collection() {
     .unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 77);
     let old = {
-        let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+        let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
             panic!()
         };
         tiles.tiles[&TileKey { tx: 0, ty: 0 }]
@@ -339,7 +339,7 @@ fn committed_tiles_survive_garbage_collection() {
         "committed tile is a GC root"
     );
     e.restore_version(d, c.hash).unwrap();
-    let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+    let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
         panic!()
     };
     assert_eq!(tiles.tiles[&TileKey { tx: 0, ty: 0 }], old);
@@ -365,7 +365,7 @@ fn saved_history_tiles_leave_residency_and_fault_back() {
     .unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 250);
     let old = {
-        let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+        let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
             panic!()
         };
         tiles.tiles[&TileKey { tx: 0, ty: 0 }]
@@ -383,7 +383,7 @@ fn saved_history_tiles_leave_residency_and_fault_back() {
     assert_eq!(restored.pixels[0], 250);
     e.restore_version(d, c.hash).unwrap();
     assert!(e.tile_resident(&old));
-    let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+    let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
         panic!()
     };
     assert_eq!(tiles.tiles[&TileKey { tx: 0, ty: 0 }], old);
@@ -409,7 +409,7 @@ fn parked_tile_with_a_bad_hash_is_corrupt() {
     .unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 3);
     let old = {
-        let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+        let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
             panic!()
         };
         tiles.tiles[&TileKey { tx: 0, ty: 0 }]
@@ -437,7 +437,7 @@ fn parked_tile_with_a_bad_hash_is_corrupt() {
 }
 
 #[test]
-fn trimmed_package_drops_older_commits_without_touching_the_open_history() {
+fn history_truncation_is_rejected_without_touching_open_history() {
     let mut e = Engine::new();
     let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
     let layer = Node::raster("A");
@@ -460,15 +460,15 @@ fn trimmed_package_drops_older_commits_without_touching_the_open_history() {
     e.commit(d, "v2", 2, None, false).unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 3);
     let c3 = e.commit(d, "v3", 3, None, false).unwrap();
-    let bytes = e.save_package_trimmed(d, 0).unwrap();
+    assert!(
+        e.save_package_trimmed(d, 0)
+            .unwrap_err()
+            .to_string()
+            .starts_with("UNSUPPORTED:")
+    );
     assert_eq!(e.log(d).unwrap().len(), 3);
-    let mut fresh = Engine::new();
-    let (f, warnings) = fresh.open_package(&bytes).unwrap();
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let log = fresh.log(f).unwrap();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0].hash, c3.hash);
-    assert!(fresh.restore_version(f, c1.hash).is_err());
+    assert!(e.commit_view(d, c1.hash).is_ok());
+    assert!(e.commit_view(d, c3.hash).is_ok());
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn divergent_history_survives_commit_and_reopen_until_prune() {
     let a = e.commit(d, "A", 1, None, false).unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 2);
     let only_b = {
-        let NodeKind::Raster { tiles } = &e.document(d).unwrap().node(id).unwrap().kind else {
+        let NodeKind::Raster { tiles, .. } = &e.document(d).unwrap().node(id).unwrap().kind else {
             panic!()
         };
         tiles.tiles[&TileKey { tx: 0, ty: 0 }]

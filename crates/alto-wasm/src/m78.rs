@@ -145,15 +145,43 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: time"));
         }
         let author = (!author.is_empty()).then(|| author.to_string());
-        let c = self
-            .engine
-            .commit(self.doc, message, created_at as i64, author, allow_empty)
-            .map_err(error)?;
-        serde_json::to_string(&c).map_err(error)
+        let checkpoint = self.engine.capture_version_state(self.doc).map_err(error)?;
+        let outcome = (|| {
+            let c = self
+                .engine
+                .commit(self.doc, message, created_at as i64, author, allow_empty)
+                .map_err(error)?;
+            let result = serde_json::to_string(&c).map_err(error)?;
+            self.journal.push(
+                self.engine
+                    .version_record(self.doc, checkpoint.digest)
+                    .map_err(error)?,
+            );
+            Ok(result)
+        })();
+        match outcome {
+            Ok(v) => {
+                self.engine.release_version_state(checkpoint);
+                Ok(v)
+            }
+            Err(e) => {
+                self.engine.rollback_version_state(self.doc, checkpoint);
+                Err(e)
+            }
+        }
     }
     #[wasm_bindgen(js_name=versionLog)]
-    pub fn version_log(&self) -> Result<String, JsValue> {
-        serde_json::to_string(&self.engine.log(self.doc).map_err(error)?).map_err(error)
+    pub fn version_log(&self, dag: bool, all_branches: bool) -> Result<String, JsValue> {
+        if all_branches && !dag {
+            return Err(error("INVALID_ARGUMENT: allBranches requires DAG mode"));
+        }
+        let log = if dag {
+            self.engine.log_dag(self.doc, all_branches)
+        } else {
+            self.engine.log(self.doc)
+        }
+        .map_err(error)?;
+        serde_json::to_string(&log).map_err(error)
     }
     #[wasm_bindgen(js_name=versionDiff)]
     pub fn version_diff(&self, from: &str, to: &str) -> Result<String, JsValue> {

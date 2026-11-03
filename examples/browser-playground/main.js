@@ -1,3 +1,4 @@
+import { installImageVersions } from "./image-versions-ui.js";
 import { installM6 } from "./m6-ui.js";
 import { installM7 } from "./m7-ui.js";
 import { installM8 } from "./m8-ui.js";
@@ -14,7 +15,7 @@ let engine,
   tool = "brush",
   gesture = null;
 let target;
-let m5UI, m6UI, m7UI, m8UI;
+let m5UI, m6UI, m7UI, m8UI, imageVersionsUI;
 const status = (t) => ($("#status").textContent = t);
 function fail(e) {
   $("#error").textContent = describeError(e);
@@ -74,6 +75,7 @@ function render() {
   m6UI?.refresh();
   m7UI?.refresh();
   m8UI?.refresh();
+  imageVersionsUI?.refresh();
 }
 function attach(d) {
   $("#recovery").hidden = true;
@@ -432,6 +434,8 @@ try {
   m6UI = installM6(context);
   m7UI = installM7(context);
   m8UI = installM8(context);
+  imageVersionsUI = installImageVersions(context);
+  imageVersionsUI.refresh();
   window.altoEngine = engine;
 } catch (e) {
   fail(e);

@@ -16,12 +16,19 @@ export interface ArchiveSource {
  */
 export interface ObjectStorageProvider {
   readonly kind: string;
+  /** True only when all clients of this storage participate in the same lock. */
+  readonly gcCapabilities?: { exclusive: true; atomicManifest: true; deleteObjects: true };
+  exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
   getObject(path: string): Promise<Uint8Array | null>;
   /** Idempotent: existing paths are skipped. */
   putObjects(entries: { path: string; data: Uint8Array }[]): Promise<{ written: number; skipped: number }>;
   list(prefix: string): Promise<string[]>;
   readRef(name: string): Promise<Uint8Array | null>;
   writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
+}
+/** A storage view valid only for the duration of its exclusive callback. */
+export interface ExclusiveObjectStorage extends ObjectStorageProvider {
+  deleteObjects(paths: string[]): Promise<void>;
 }
 export async function sha256Hex(data: Uint8Array): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", data as BufferSource);
@@ -34,26 +41,51 @@ function validPath(p: string) {
 }
 export class MemoryObjectProvider implements ObjectStorageProvider {
   readonly kind = "memory";
-  readonly files = new Map<string, Uint8Array>();
-  async getObject(path: string) { return this.files.get(path)?.slice() ?? null; }
-  async putObjects(entries: { path: string; data: Uint8Array }[]) {
-    let written = 0, skipped = 0;
-    for (const e of entries) {
-      if (!validPath(e.path)) throw new AltoError("INVALID_ARGUMENT", "invalid path " + e.path);
-      if (this.files.has(e.path)) skipped++;
-      else { this.files.set(e.path, e.data.slice()); written++; }
-    }
-    return { written, skipped };
+  readonly gcCapabilities = { exclusive: true, atomicManifest: true, deleteObjects: true } as const;
+  readonly #files = new Map<string, Uint8Array>();
+  #tail: Promise<unknown> = Promise.resolve();
+  exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T> {
+    const result = this.#tail.then(async () => {
+      let active = true;
+      const guard = () => { if (!active) throw new AltoError("CONFLICT", "storage lease expired"); };
+      const view: ExclusiveObjectStorage = {
+        kind: this.kind,
+        getObject: async (path) => { guard(); return this.#files.get(path)?.slice() ?? null; },
+        readRef: async (path) => { guard(); return this.#files.get(path)?.slice() ?? null; },
+        list: async (prefix) => { guard(); return [...this.#files.keys()].filter((k) => k.startsWith(prefix)).sort(); },
+        putObjects: async (entries) => {
+          guard(); let written = 0, skipped = 0;
+          for (const { path, data } of entries) {
+            if (!validPath(path) || !immutable(path)) throw new AltoError("INVALID_ARGUMENT", "invalid object path " + path);
+            const previous = this.#files.get(path);
+            if (previous) {
+              if (previous.length !== data.length || previous.some((b, i) => b !== data[i])) throw new AltoError("CORRUPT_DATA", "immutable bytes differ: " + path);
+              skipped++;
+            } else { this.#files.set(path, data.slice()); written++; }
+          }
+          return { written, skipped };
+        },
+        writeRef: async (name, data, expectHash) => {
+          guard(); if (!validPath(name) || immutable(name)) throw new AltoError("INVALID_ARGUMENT", "invalid reference path");
+          const current = this.#files.get(name);
+          if (expectHash !== undefined && (current ? await sha256Hex(current) : "") !== expectHash)
+            throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
+          guard(); this.#files.set(name, data.slice());
+        },
+        deleteObjects: async (paths) => { guard();
+          if (paths.some((p) => !validPath(p) || !immutable(p))) throw new AltoError("INVALID_ARGUMENT", "invalid GC path");
+          for (const path of paths) this.#files.delete(path);
+        },
+      };
+      try { return await run(view); } finally { active = false; }
+    });
+    this.#tail = result.catch(() => {}); return result;
   }
-  async list(prefix: string) { return [...this.files.keys()].filter((k) => k.startsWith(prefix)).sort(); }
-  async readRef(name: string) { return this.getObject(name); }
-  async writeRef(name: string, data: Uint8Array, expectHash?: string) {
-    if (expectHash !== undefined) {
-      const cur = this.files.get(name);
-      if ((cur ? await sha256Hex(cur) : "") !== expectHash) throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
-    }
-    this.files.set(name, data.slice());
-  }
+  getObject(path: string) { return this.exclusive((s) => s.getObject(path)); }
+  readRef(name: string) { return this.exclusive((s) => s.readRef(name)); }
+  list(prefix: string) { return this.exclusive((s) => s.list(prefix)); }
+  putObjects(entries: { path: string; data: Uint8Array }[]) { return this.exclusive((s) => s.putObjects(entries)); }
+  writeRef(name: string, data: Uint8Array, expectHash?: string) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
 /** A directory from the File System Access API or OPFS. Writes replace atomically on close. */
 export class FileSystemDirectoryProvider implements ObjectStorageProvider {

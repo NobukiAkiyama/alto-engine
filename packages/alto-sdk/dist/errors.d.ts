@@ -1,5 +1,5 @@
 /** What kind of failure an `AltoError` reports. Hosts branch on this, not on `message`. */
-export type ErrorCode = "INVALID_ARGUMENT" | "CONFLICT" | "NOT_FOUND" | "CORRUPT_DATA" | "GPU_LOST" | "GPU_UNSUPPORTED" | "STORAGE" | "INTERNAL" | "WORKER_CRASHED" | "WORKER_UNAVAILABLE" | "WORKER_TIMEOUT";
+export type ErrorCode = "UNSUPPORTED" | "BUSY" | "NO_COMMIT" | "RESOURCE_LIMIT" | "EMPTY_SELECTION" | "BRANCH_NOT_MERGED" | "STALE_MERGE" | "UNRELATED_HISTORY" | "MULTIPLE_MERGE_BASES" | "INVALID_MERGE_RESULT" | "INVALID_ARGUMENT" | "CONFLICT" | "NOT_FOUND" | "CORRUPT_DATA" | "GPU_LOST" | "GPU_UNSUPPORTED" | "STORAGE" | "INTERNAL" | "WORKER_CRASHED" | "WORKER_UNAVAILABLE" | "WORKER_TIMEOUT";
 /** Why a `CONFLICT` happened. */
 export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed";
 /**

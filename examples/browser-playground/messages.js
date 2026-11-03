@@ -1,6 +1,16 @@
 // The engine reports codes; this page words them in Japanese. A host keeps a table like
 // this one in its own language.
 export const errorText = {
+  UNSUPPORTED: "この形式・操作・保存先には対応していません",
+  BUSY: "実行中の操作を終えてからお試しください",
+  NO_COMMIT: "先に最初の版を記録してください",
+  RESOURCE_LIMIT: "画像サイズまたは処理量の上限を超えました",
+  EMPTY_SELECTION: "対象になる選択範囲がありません",
+  BRANCH_NOT_MERGED: "統合されていない版があるため削除できません",
+  STALE_MERGE: "内容が変わりました。統合を準備し直してください",
+  UNRELATED_HISTORY: "共通の履歴がありません",
+  MULTIPLE_MERGE_BASES: "共通の起点が複数ある履歴の統合は未対応です",
+  INVALID_MERGE_RESULT: "解決内容では文書を構成できません。選択を見直してください",
   INVALID_ARGUMENT: "入力が正しくありません",
   CONFLICT: "ほかの操作と競合しました",
   NOT_FOUND: "見つかりません",

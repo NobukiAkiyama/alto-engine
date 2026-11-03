@@ -1,3 +1,4 @@
+import type { ImageBounds } from "./image-types.js";
 import type { DocumentSnapshot } from "./snapshot.js";
 import type {
   Affine,
@@ -74,8 +75,8 @@ export class Transaction {
   readonly ops: WireOp[] = [];
   /** @internal */
   constructor(private readonly snapshot: DocumentSnapshot) {}
-  addRaster(options: InsertOptions = {}): NodeId {
-    return this.insert({ kind: "raster", tiles: { format: "rgba8", tiles: {} } }, options, "Layer");
+  addRaster(options: InsertOptions & { bounds?: ImageBounds } = {}): NodeId {
+    return this.insert({ kind: "raster", bounds: options.bounds ?? { x: 0, y: 0, width: this.snapshot.meta.width, height: this.snapshot.meta.height }, tiles: { format: "rgba8", tiles: {} } }, options, "Layer");
   }
   addGroup(options: InsertOptions & { isolated?: boolean } = {}): NodeId {
     const isolation = options.isolated ? "isolated" : "pass_through";
@@ -84,7 +85,7 @@ export class Transaction {
   /** A raster layer showing an imported image. */
   addRasterFromAsset(asset: ImageAsset, options: InsertOptions = {}): NodeId {
     const image = asset as unknown as ImportedImage;
-    const id = this.insert({ kind: "raster", tiles: image.tiles }, options, "Image");
+    const id = this.insert({ kind: "raster", bounds: { x: 0, y: 0, width: image.width, height: image.height }, tiles: image.tiles }, options, "Image");
     this.ops.push({ type: "set_asset", id: image.record.id, record: image.record });
     return id;
   }

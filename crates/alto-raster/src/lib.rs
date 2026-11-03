@@ -9,6 +9,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TileMap {
     pub format: PixelFormat,
     pub tiles: BTreeMap<TileKey, ContentHash>,

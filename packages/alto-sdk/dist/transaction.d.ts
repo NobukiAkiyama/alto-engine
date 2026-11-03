@@ -1,3 +1,4 @@
+import type { ImageBounds } from "./image-types.js";
 import type { Affine, ClipPath, Effect, FontAsset, ImageAsset, NodeId, PropPatch, StyledPath, TextContent, TileRef, VectorMask } from "./types.js";
 export interface InsertOptions {
     /** Defaults to the document root. */
@@ -12,7 +13,9 @@ export interface InsertOptions {
  */
 export declare class Transaction {
     private readonly snapshot;
-    addRaster(options?: InsertOptions): NodeId;
+    addRaster(options?: InsertOptions & {
+        bounds?: ImageBounds;
+    }): NodeId;
     addGroup(options?: InsertOptions & {
         isolated?: boolean;
     }): NodeId;

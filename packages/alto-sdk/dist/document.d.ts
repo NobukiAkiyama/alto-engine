@@ -1,3 +1,4 @@
+import type { ImageBounds, ImageColor, ImageFilter, ImageSelection, GradientOptions, ImageEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
 import { type Intent } from "./intents.js";
 import { type DocumentChange, type DocumentSnapshot } from "./snapshot.js";
 import { type ArchiveTarget, type ObjectStorageProvider } from "./storage.js";
@@ -114,14 +115,66 @@ export declare class DocumentHandle {
             useSelection?: boolean;
         }) => Promise<void>;
     };
+    private imageCommand;
+    private historyCommand;
+    /** Pixel edits use node-local coordinates; each successful edit is one Undo step. */
+    readonly image: {
+        importSvg: (svg: string, options?: {
+            parent?: NodeId;
+            index?: number;
+        }) => Promise<import("./image-types.js").SvgImportResult>;
+        crop: (node: NodeId, bounds: ImageBounds) => Promise<ImageEditResult>;
+        resize: (node: NodeId, width: number, height: number, options?: {
+            filter?: ImageFilter;
+        }) => Promise<ImageEditResult>;
+        rotate: (node: NodeId, quarterTurns: 1 | 2 | 3) => Promise<ImageEditResult>;
+        flip: (node: NodeId, axis: "horizontal" | "vertical") => Promise<ImageEditResult>;
+        gradient: (node: NodeId, options: GradientOptions) => Promise<ImageEditResult>;
+        fill: (node: NodeId, point: [number, number], color: ImageColor, options?: {
+            tolerance?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        pickColor: (node: NodeId, point: [number, number]) => Promise<import("./image-types.js").PickedColor>;
+        pickComposite: (point: [number, number]) => Promise<import("./image-types.js").PickedColor>;
+    };
     /** Version commits, diffs and restores. */
     readonly versions: {
+        gc: (options?: GcOptions) => Promise<GcReport>;
+        /** Returns a new compact archive. Does not overwrite an existing file. */
+        compactArchive: (archive: Blob) => Promise<{
+            bytes: Uint8Array<ArrayBufferLike>;
+            report: GcReport;
+        }>;
+        createBranch: (name: string, options?: {
+            from?: string;
+            checkout?: boolean;
+        }) => Promise<void>;
+        checkout: (name: string) => Promise<void>;
+        detach: (hash: string) => Promise<void>;
+        deleteBranch: (name: string, options?: {
+            force?: boolean;
+        }) => Promise<void>;
+        setBranchProtection: (name: string, protectedState: boolean) => Promise<void>;
+        listBranches: () => Promise<import("./image-types.js").BranchView[]>;
+        createTag: (name: string, hash: string) => Promise<void>;
+        deleteTag: (name: string) => Promise<void>;
+        pin: (hash: string) => Promise<void>;
+        unpin: (hash: string) => Promise<void>;
+        prepareMerge: (name: string) => Promise<import("./image-types.js").MergePlan>;
+        cancelMerge: () => Promise<void>;
+        finishMerge: (token: string, resolutions: MergeResolution[], options?: {
+            message?: string;
+            author?: string;
+        }) => Promise<MergeResult>;
         /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
         commit: (message: string, options?: {
             author?: string;
             allowEmpty?: boolean;
         }) => Promise<CommitView>;
-        log: () => Promise<CommitView[]>;
+        log: (options?: {
+            mode?: "first_parent" | "dag";
+            allBranches?: boolean;
+        }) => Promise<CommitView[]>;
         /** Semantic, layer-level diff. Use "working" for the current document. */
         diff: (from: string, to?: string) => Promise<VersionDiff>;
         status: () => VersionStatus;
@@ -137,6 +190,7 @@ export declare class DocumentHandle {
     exportImage(options?: ExportImageOptions): Promise<Blob>;
     /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
     save(target: ArchiveTarget): Promise<void>;
+    private gcFolder;
     /**
      * Saves the folder form. Content-addressed files are written once; manifest.json
      * last. A folder holding another document is refused unless `overwrite`.
@@ -146,7 +200,9 @@ export declare class DocumentHandle {
     }): Promise<{
         written: number;
         skipped: number;
+        warnings: string[];
     }>;
+    private saveFolderLocked;
     /** A cancelled or failed save no longer needs the Worker's copy of the package. */
     private releaseSave;
 }

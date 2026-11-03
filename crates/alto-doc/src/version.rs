@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_MESSAGE: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntentSummary {
     pub intent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -20,7 +21,10 @@ pub struct IntentSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Commit {
+    pub format: u32,
+    pub merge_base: Option<ContentHash>,
     pub parents: Vec<ContentHash>,
     pub snapshot: ContentHash,
     pub message: String,
@@ -31,11 +35,9 @@ pub struct Commit {
     pub author: Option<String>,
 }
 impl Commit {
-    /// Canonical bytes: pretty JSON in field order with a trailing newline.
+    /// Canonical bytes: sorted JSON keys, normalized zero, and a trailing newline.
     pub fn bytes(&self) -> Vec<u8> {
-        let mut b = serde_json::to_vec_pretty(self).expect("commit serializes");
-        b.push(b'\n');
-        b
+        alto_core::json::canonical_bytes(self).expect("commit serializes")
     }
     pub fn hash(&self) -> ContentHash {
         ContentHash::of(&self.bytes())
@@ -49,7 +51,12 @@ impl Commit {
         {
             return Err("commit message must be at most 4096 printable characters".into());
         }
-        if self.parents.len() > 16 || self.intents.len() > 4096 {
+        if self.format != 2
+            || self.parents.len() > 2
+            || self.intents.len() > 4096
+            || (self.parents.len() == 2) != self.merge_base.is_some()
+            || (self.parents.len() == 2 && self.parents[0] == self.parents[1])
+        {
             return Err("too many commit parents or intents".into());
         }
         if let Some(author) = &self.author
@@ -66,7 +73,7 @@ impl Commit {
         Ok(())
     }
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let c: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let c: Self = alto_core::json::from_slice(bytes).map_err(|e| e.to_string())?;
         c.validate()?;
         Ok(c)
     }
@@ -75,7 +82,7 @@ impl Commit {
     /// hash. New commits still go through [`Self::validate`], and `sync`
     /// strips those characters before they reach a `fast-import` author line.
     pub fn parse_history(bytes: &[u8]) -> Result<(Self, Option<String>), String> {
-        let c: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let c: Self = alto_core::json::from_slice(bytes).map_err(|e| e.to_string())?;
         match c.validate() {
             Ok(()) => Ok((c, None)),
             Err(e) => {
@@ -140,6 +147,7 @@ pub enum ContentDetail {
     Adjustment,
     Unsupported,
     /// The node became a different kind of node.
+    Geometry,
     KindChanged {
         from: String,
         to: String,
@@ -340,6 +348,9 @@ fn excerpt(s: &str) -> String {
 
 fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
     let detail = match (&a.kind, &b.kind) {
+        (NodeKind::Raster { bounds: x, .. }, NodeKind::Raster { bounds: y, .. }) if x != y => {
+            ContentDetail::Geometry
+        }
         (NodeKind::Vector { paths: x }, NodeKind::Vector { paths: y }) if x != y => {
             let cmds = |p: &[alto_vector::StyledPath]| {
                 p.iter().map(|p| p.data.commands.len()).sum::<usize>()
@@ -510,10 +521,11 @@ pub fn diff(a: &Document, b: &Document) -> Vec<DiffItem> {
                     to: n.kind_name().into(),
                 },
             });
-        } else if let (NodeKind::Raster { tiles: x }, NodeKind::Raster { tiles: y }) =
+        } else if let (NodeKind::Raster { tiles: x, .. }, NodeKind::Raster { tiles: y, .. }) =
             (&old.kind, &n.kind)
         {
             out.extend(pixels(b, n, "content", &changed_tiles(Some(x), Some(y))));
+            out.extend(content_change(old, n));
         } else {
             out.extend(content_change(old, n));
         }
@@ -549,7 +561,7 @@ pub fn diff(a: &Document, b: &Document) -> Vec<DiffItem> {
         });
     }
     let selection = changed_tiles(a.selection.as_ref(), b.selection.as_ref()).len();
-    if selection > 0 {
+    if selection > 0 || a.selection.is_some() != b.selection.is_some() {
         out.push(DiffItem::SelectionChanged { tiles: selection });
     }
     out
@@ -1165,6 +1177,8 @@ mod tests {
     #[test]
     fn commit_bytes_are_canonical() {
         let c = Commit {
+            format: 2,
+            merge_base: None,
             parents: vec![],
             snapshot: ContentHash::of(b"s"),
             message: "最初の版".into(),

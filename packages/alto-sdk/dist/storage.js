@@ -10,32 +10,71 @@ function validPath(p) {
 }
 export class MemoryObjectProvider {
     kind = "memory";
-    files = new Map();
-    async getObject(path) { return this.files.get(path)?.slice() ?? null; }
-    async putObjects(entries) {
-        let written = 0, skipped = 0;
-        for (const e of entries) {
-            if (!validPath(e.path))
-                throw new AltoError("INVALID_ARGUMENT", "invalid path " + e.path);
-            if (this.files.has(e.path))
-                skipped++;
-            else {
-                this.files.set(e.path, e.data.slice());
-                written++;
+    gcCapabilities = { exclusive: true, atomicManifest: true, deleteObjects: true };
+    #files = new Map();
+    #tail = Promise.resolve();
+    exclusive(run) {
+        const result = this.#tail.then(async () => {
+            let active = true;
+            const guard = () => { if (!active)
+                throw new AltoError("CONFLICT", "storage lease expired"); };
+            const view = {
+                kind: this.kind,
+                getObject: async (path) => { guard(); return this.#files.get(path)?.slice() ?? null; },
+                readRef: async (path) => { guard(); return this.#files.get(path)?.slice() ?? null; },
+                list: async (prefix) => { guard(); return [...this.#files.keys()].filter((k) => k.startsWith(prefix)).sort(); },
+                putObjects: async (entries) => {
+                    guard();
+                    let written = 0, skipped = 0;
+                    for (const { path, data } of entries) {
+                        if (!validPath(path) || !immutable(path))
+                            throw new AltoError("INVALID_ARGUMENT", "invalid object path " + path);
+                        const previous = this.#files.get(path);
+                        if (previous) {
+                            if (previous.length !== data.length || previous.some((b, i) => b !== data[i]))
+                                throw new AltoError("CORRUPT_DATA", "immutable bytes differ: " + path);
+                            skipped++;
+                        }
+                        else {
+                            this.#files.set(path, data.slice());
+                            written++;
+                        }
+                    }
+                    return { written, skipped };
+                },
+                writeRef: async (name, data, expectHash) => {
+                    guard();
+                    if (!validPath(name) || immutable(name))
+                        throw new AltoError("INVALID_ARGUMENT", "invalid reference path");
+                    const current = this.#files.get(name);
+                    if (expectHash !== undefined && (current ? await sha256Hex(current) : "") !== expectHash)
+                        throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
+                    guard();
+                    this.#files.set(name, data.slice());
+                },
+                deleteObjects: async (paths) => {
+                    guard();
+                    if (paths.some((p) => !validPath(p) || !immutable(p)))
+                        throw new AltoError("INVALID_ARGUMENT", "invalid GC path");
+                    for (const path of paths)
+                        this.#files.delete(path);
+                },
+            };
+            try {
+                return await run(view);
             }
-        }
-        return { written, skipped };
+            finally {
+                active = false;
+            }
+        });
+        this.#tail = result.catch(() => { });
+        return result;
     }
-    async list(prefix) { return [...this.files.keys()].filter((k) => k.startsWith(prefix)).sort(); }
-    async readRef(name) { return this.getObject(name); }
-    async writeRef(name, data, expectHash) {
-        if (expectHash !== undefined) {
-            const cur = this.files.get(name);
-            if ((cur ? await sha256Hex(cur) : "") !== expectHash)
-                throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
-        }
-        this.files.set(name, data.slice());
-    }
+    getObject(path) { return this.exclusive((s) => s.getObject(path)); }
+    readRef(name) { return this.exclusive((s) => s.readRef(name)); }
+    list(prefix) { return this.exclusive((s) => s.list(prefix)); }
+    putObjects(entries) { return this.exclusive((s) => s.putObjects(entries)); }
+    writeRef(name, data, expectHash) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
 /** A directory from the File System Access API or OPFS. Writes replace atomically on close. */
 export class FileSystemDirectoryProvider {

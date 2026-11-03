@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    bg.kind = NodeKind::Raster { tiles };
+    bg.kind = NodeKind::raster(tiles)?;
     let mut group = Node::group("クリッピングパスのグループ");
     group.props.clip_path = Some(Box::new(ClipPath {
         path: PathData::from_svg("M85 80 Q480 -10 875 80 V520 Q480 650 85 520 Z")?,

@@ -34,7 +34,7 @@ fn paint(e: &mut Engine, d: DocHandle, layer: alto_core::NodeId, key: TileKey, v
         .put_tile(TileData::new(PixelFormat::Rgba8, vec![v; 262144]).unwrap())
         .unwrap();
     let doc = e.document(d).unwrap();
-    let NodeKind::Raster { tiles } = &doc.node(layer).unwrap().kind else {
+    let NodeKind::Raster { tiles, .. } = &doc.node(layer).unwrap().kind else {
         panic!()
     };
     let before = tiles.tiles.get(&key).copied();
@@ -229,6 +229,11 @@ fn poison_author(folder: &Path, author: &str) {
     let hash = alto_core::ContentHash::of(&bytes);
     std::fs::write(folder.join(format!("commits/{hash}.json")), &bytes).unwrap();
     manifest.head = Some(hash);
+    for b in manifest.refs.branches.values_mut() {
+        if b.head == old {
+            b.head = hash;
+        }
+    }
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
     manifest_bytes.push(b'\n');
     std::fs::write(manifest_path, manifest_bytes).unwrap();
@@ -339,6 +344,9 @@ fn sync_rejects_a_spaced_path_and_a_mismatched_object() {
     }
     assert!(flipped);
     let err = alto_git::sync(&folder, None).unwrap_err();
-    assert!(err.contains("content does not match"), "{err}");
+    assert!(
+        err.contains("CORRUPT_DATA") || err.contains("content does not match"),
+        "{err}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
