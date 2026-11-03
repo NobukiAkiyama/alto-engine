@@ -1,5 +1,5 @@
-import { MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
-import { blobTarget } from "../../packages/alto-sdk/dist/browser.js";
+import { FileSystemDirectoryProvider, MemoryObjectProvider, OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
+import { blobTarget, opfsFolder } from "../../packages/alto-sdk/dist/browser.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
@@ -145,6 +145,66 @@ export async function runImageVersionTests(engine, log) {
       await d.saveFolder(brokenGc); const beforeBrokenGc = await brokenGc.readRef("manifest.json");
       await reject(d.versions.gc({ dryRun: false }), "UNSUPPORTED");
       assert(eq([...beforeBrokenGc], [...await brokenGc.readRef("manifest.json")]), "missing delete method changed storage");
+    });
+    await test("OPFS folder: writers exclude each other / stale views / lock in another context", async () => {
+      const name = "gc-lock-" + crypto.randomUUID(), root = await navigator.storage.getDirectory();
+      const handle = await root.getDirectoryHandle(name, { create: true }), a = await opfsFolder(name), b = await OpfsFolderProvider.open(handle, { waitMs: 200 });
+      assert(a.gcCapabilities?.exclusive && a.kind === "opfs-dir", "OPFS capability");
+      // A picked folder needs a user gesture here, so the browser's answer for one is stubbed.
+      const resolve = FileSystemDirectoryHandle.prototype.resolve; FileSystemDirectoryHandle.prototype.resolve = async () => null;
+      try { await reject(OpfsFolderProvider.open(handle), "UNSUPPORTED"); } finally { FileSystemDirectoryHandle.prototype.resolve = resolve; }
+      const legacy = new FileSystemDirectoryProvider(handle); assert(!legacy.gcCapabilities, "plain provider must not claim GC");
+      let release, stale; const gate = new Promise((r) => { release = r; }); let entered;
+      const held = new Promise((r) => { entered = r; });
+      const holding = a.exclusive(async (view) => { stale = view; entered(); await gate; await view.writeRef("manifest.json", new TextEncoder().encode("first")); });
+      await held;
+      // Another SDK writer, and another browsing context, cannot get in while it is held.
+      await reject(b.writeRef("manifest.json", new TextEncoder().encode("second")), "BUSY");
+      let legacyDone = false; const legacyWrite = legacy.writeRef("other.json", new TextEncoder().encode("x")).then(() => { legacyDone = true; });
+      await new Promise((r) => setTimeout(r, 150)); assert(!legacyDone, "a plain provider on the same OPFS directory ignored the lock");
+      const frame = document.createElement("iframe"); document.body.append(frame);
+      const lockName = (await navigator.locks.query()).held.map((l) => l.name).find((n) => n.endsWith(name)); assert(lockName, "lock not held");
+      assert(await frame.contentWindow.navigator.locks.request(lockName, { ifAvailable: true }, (lock) => lock === null), "another context got the lock"); frame.remove();
+      release(); await holding; await legacyWrite;
+      await reject(stale.writeRef("manifest.json", new TextEncoder().encode("late")), "CONFLICT");
+      assert(new TextDecoder().decode(await a.readRef("manifest.json")) === "first", "stale view wrote");
+      await reject(a.writeRef("manifest.json", new TextEncoder().encode("cas"), "wrong"), "CONFLICT");
+      assert(new TextDecoder().decode(await a.readRef("manifest.json")) === "first", "compare-and-replace wrote");
+      await a.putObjects([{ path: "commits/x.json", data: new Uint8Array([1]) }]);
+      await reject(a.putObjects([{ path: "commits/x.json", data: new Uint8Array([2]) }]), "CORRUPT_DATA");
+      await (await (await handle.getDirectoryHandle("commits")).getFileHandle("x.json.crswap", { create: true }));
+      assert(eq(await a.list("commits/"), ["commits/x.json"]), "a leftover swap file was listed");
+      await root.removeEntry(name, { recursive: true });
+    });
+    await test("OPFS folder GC: deletes only garbage / interrupted run recovers / Undo / reopen", async () => {
+      const name = "gc-real-" + crypto.randomUUID(), folder = await opfsFolder(name), root = await navigator.storage.getDirectory();
+      d = await engine.createDocument({ width: 600, height: 8 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 600, height: 8 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1]); const base = await d.versions.commit("base");
+      await d.versions.createBranch("discard", { checkout: true }); await d.image.fill(layer, [0, 0], [0, 0, 1, 1]); const discard = await d.versions.commit("discard");
+      await d.versions.createBranch("discard2", { checkout: true }); await d.image.fill(layer, [0, 0], [0, 1, 0, 1]); const discard2 = await d.versions.commit("discard2");
+      await d.versions.checkout("main"); await d.versions.deleteBranch("discard", { force: true }); await d.versions.deleteBranch("discard2", { force: true });
+      await d.transact("layer.props", (tx) => tx.setProps(layer, { name: "before undo" }));
+      // The run stops partway through its deletions, as a closed tab would.
+      let deletions = 0, failing = true;
+      const interrupted = new Proxy(folder, { get(target, key) {
+        if (key === "exclusive") return (run) => target.exclusive((view) => run({ ...view, deleteObjects: async (paths) => { if (failing && ++deletions > 1) throw Error("injected stop"); return view.deleteObjects(paths); } }));
+        const value = target[key]; return typeof value === "function" ? value.bind(target) : value;
+      } });
+      await d.saveFolder(interrupted);
+      await reject(d.versions.gc({ dryRun: false, expectedBaseline: "stale" }), "CONFLICT");
+      assert(await folder.getObject(`commits/${discard.hash}.json`), "stale baseline deleted");
+      const preview = await d.versions.gc(); assert(preview.by_kind.commits.removed === 2, "two unreachable commits " + JSON.stringify(preview.by_kind));
+      const again = await d.versions.gc(); const snapshot = await d.snapshotHash();
+      await reject(d.versions.gc({ dryRun: false, expectedBaseline: again.baseline }), "STORAGE");
+      failing = false;
+      const redone = await d.versions.gc(); assert(redone.by_kind.commits.removed + redone.by_kind.snapshots.removed + redone.by_kind.objects.removed > 0, "garbage left to collect");
+      const finished = await d.versions.gc({ dryRun: false, expectedBaseline: redone.baseline }); assert(!finished.dry_run && !d.getSnapshot().dirty, "GC finished clean");
+      assert(!await folder.getObject(`commits/${discard.hash}.json`) && !await folder.getObject(`commits/${discard2.hash}.json`), "garbage kept"); assert(await folder.getObject(`commits/${base.hash}.json`), "history lost");
+      await d.undo(); assert(d.getSnapshot().nodes.get(layer).name !== undefined, "Undo after GC"); await d.redo(); assert(await d.snapshotHash() === snapshot, "Redo after GC");
+      await d.saveFolder(interrupted); assert(!await folder.getObject(`commits/${discard.hash}.json`), "save resurrected garbage");
+      const hash = await d.snapshotHash(); d = await engine.openFolder(folder); assert(await d.snapshotHash() === hash, "reopen after GC");
+      assert((await d.versions.log())[0].hash === base.hash, "head after GC"); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes.slice(3), [255]), "pixels after GC");
+      await d.versions.commit("after GC"); await root.removeEntry(name, { recursive: true });
     });
     await test("history and images survive Worker restart and GPU device loss", async () => {
       await d.versions.createBranch("recovery", { checkout: true }); await d.image.fill(layer, [0, 0], [1, 0, 1, 1]); const commit = await d.versions.commit("recover");

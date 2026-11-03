@@ -43,9 +43,9 @@ export interface ObjectStorageProvider {
     // (undocumented)
     exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     readonly gcCapabilities?: {
-        exclusive: true;
-        atomicManifest: true;
-        deleteObjects: true;
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
     };
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;

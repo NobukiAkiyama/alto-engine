@@ -16,7 +16,7 @@ export { AltoError } from "./errors.js";
 export type { ConflictReason, ErrorCode, ErrorDetails } from "./errors.js";
 export type { BuiltInIntent, Intent, IntentId } from "./intents.js";
 export type { DocumentChange, DocumentSnapshot } from "./snapshot.js";
-export { FileSystemDirectoryProvider, MemoryObjectProvider, sha256Hex } from "./storage.js";
+export { FileSystemDirectoryProvider, MemoryObjectProvider, OpfsFolderProvider, sha256Hex } from "./storage.js";
 export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider, ExclusiveObjectStorage } from "./storage.js";
 export { applyTextStyle, replaceText } from "./text-edit.js";
 export { ToolSession } from "./tools.js";

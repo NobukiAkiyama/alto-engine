@@ -299,8 +299,23 @@ manifest の原子的 compare-and-replace、冪等 deleteObjects を追加する
   含めた排他保証として扱わない。provider ごとに保証範囲を明示する。
 - 排他・原子的置換・削除を保証できない provider の実 GC は `UNSUPPORTED`。
   capability を偽装する外部 writer や直接のファイル改変は保証対象外。
-- Memory provider はプロセス内の排他で適合検証できる。FS/OPFS/native provider
-  の実 GC 対応は個別に障害・競合試験を通してから有効化する。
+- Memory provider はプロセス内の排他で適合検証できる。
+
+ブラウザの保存先は別々に評価した（`OpfsFolderProvider`、`FileSystemDirectoryProvider`）。
+
+| 要件 | OPFS | File System Access（選択フォルダ） |
+|---|---|---|
+| 到達できる writer | 同一オリジンのコードのみ | 他オリジンのページ、別ブラウザ、ネイティブ CLI |
+| 全 writer の排他 | 同一オリジン全コンテキストで共有される Web Lock（フォルダのパスごと） | OS lock を取れず、Web Locks は届かない |
+| manifest 比較置換 | ロック内で読み取り・比較し `createWritable` の close で置換 | 比較と置換の間に外部 writer が入れる |
+| 失効した処理 | 排他 view はコールバック終了で無効。保持者が死ぬとロックは解放され、死んだ文脈は書かない | 保証なし |
+| 実 GC | 対応 | `UNSUPPORTED`、dry-run のみ |
+
+OPFS の保証は SDK を経由する writer が対象で、同一オリジンのスクリプトがディレクトリを直接
+変更する場合は含まない。OPFS 上のディレクトリに `FileSystemDirectoryProvider` を使っても
+書き込みは同じロックに参加する。ロック待ちが上限（既定 30 秒）を超えると `BUSY`。
+ブラウザのプロセス障害後は `.crswap` を残すことがあり、`list` はこれを除外する。
+GC は実行のたびに現在の root から再計算し、前回の `.alto-gc.json` の候補を再利用しない。
 
 ZIP 生成と元ファイルの置換も分ける。任意の `ArchiveTarget.write` に原子的な
 置換能力があるとは仮定しない。既存ファイルの直接更新には atomic replace と

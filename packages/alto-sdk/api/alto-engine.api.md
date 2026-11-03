@@ -603,11 +603,11 @@ export interface ExportImageOptions {
 export class FileSystemDirectoryProvider implements ObjectStorageProvider {
     constructor(handle: FileSystemDirectoryHandle);
     // (undocumented)
-    getObject(path: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    getObject(path: string): Promise<Uint8Array | null>;
     // (undocumented)
     readonly handle: FileSystemDirectoryHandle;
     // (undocumented)
-    readonly kind = "fs-access-dir";
+    readonly kind: string;
     // (undocumented)
     list(prefix: string): Promise<string[]>;
     // (undocumented)
@@ -619,7 +619,7 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
         skipped: number;
     }>;
     // (undocumented)
-    readRef(name: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }
@@ -1014,9 +1014,9 @@ export interface ObjectStorageProvider {
     // (undocumented)
     exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     readonly gcCapabilities?: {
-        exclusive: true;
-        atomicManifest: true;
-        deleteObjects: true;
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
     };
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
@@ -1033,6 +1033,39 @@ export interface ObjectStorageProvider {
     }>;
     // (undocumented)
     readRef(name: string): Promise<Uint8Array | null>;
+    // (undocumented)
+    writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
+}
+
+// @public
+export class OpfsFolderProvider extends FileSystemDirectoryProvider {
+    // (undocumented)
+    exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    // (undocumented)
+    readonly gcCapabilities: {
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
+    };
+    // (undocumented)
+    getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    // (undocumented)
+    readonly kind: string;
+    // (undocumented)
+    list(prefix: string): Promise<string[]>;
+    static open(handle: FileSystemDirectoryHandle, options?: {
+        waitMs?: number;
+    }): Promise<OpfsFolderProvider>;
+    // (undocumented)
+    putObjects(entries: {
+        path: string;
+        data: Uint8Array;
+    }[]): Promise<{
+        written: number;
+        skipped: number;
+    }>;
+    // (undocumented)
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }

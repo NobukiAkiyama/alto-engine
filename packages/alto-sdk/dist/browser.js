@@ -3,7 +3,7 @@
  * opens a picker; a host that wants one calls these.
  */
 import { AltoError } from "./errors.js";
-import { FileSystemDirectoryProvider } from "./storage.js";
+import { FileSystemDirectoryProvider, OpfsFolderProvider } from "./storage.js";
 /** Writes to a file handle from the File System Access API, replacing it on success. */
 export function fileHandleTarget(handle) {
     return {
@@ -68,10 +68,10 @@ export async function pickFolder() {
         throw new AltoError("STORAGE", "this browser cannot save to folders");
     return new FileSystemDirectoryProvider(await picker({ mode: "readwrite" }));
 }
-/** A folder inside the origin private file system. */
+/** A folder inside the origin private file system. It supports `versions.gc({ dryRun: false })`. */
 export async function opfsFolder(name) {
     const root = await navigator.storage.getDirectory();
-    return new FileSystemDirectoryProvider(await root.getDirectoryHandle(name, { create: true }));
+    return OpfsFolderProvider.open(await root.getDirectoryHandle(name, { create: true }));
 }
 /** Whether this browser can run the engine, and if not, what is missing. */
 export async function isSupported() {

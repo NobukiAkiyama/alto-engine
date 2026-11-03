@@ -17,7 +17,7 @@ export interface ArchiveSource {
 export interface ObjectStorageProvider {
   readonly kind: string;
   /** True only when all clients of this storage participate in the same lock. */
-  readonly gcCapabilities?: { exclusive: true; atomicManifest: true; deleteObjects: true };
+  readonly gcCapabilities?: { readonly exclusive: true; readonly atomicManifest: true; readonly deleteObjects: true };
   exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
   getObject(path: string): Promise<Uint8Array | null>;
   /** Idempotent: existing paths are skipped. */
@@ -87,9 +87,36 @@ export class MemoryObjectProvider implements ObjectStorageProvider {
   putObjects(entries: { path: string; data: Uint8Array }[]) { return this.exclusive((s) => s.putObjects(entries)); }
   writeRef(name: string, data: Uint8Array, expectHash?: string) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
-/** A directory from the File System Access API or OPFS. Writes replace atomically on close. */
+const LOCK_WAIT_MS = 30_000;
+/** Browsers leave this beside a file when a tab dies during `createWritable`. */
+const SWAP_SUFFIX = ".crswap";
+type OpfsRoot = FileSystemDirectoryHandle & { resolve?(h: FileSystemHandle): Promise<string[] | null> };
+/** The Web Lock for a directory inside OPFS, or null for a directory outside it. */
+async function opfsLockName(handle: FileSystemDirectoryHandle): Promise<string | null> {
+  const storage = (globalThis as { navigator?: Navigator }).navigator?.storage;
+  if (!storage?.getDirectory || !(globalThis as { navigator?: Navigator }).navigator?.locks) return null;
+  const root = await storage.getDirectory() as OpfsRoot;
+  const path = await root.resolve?.(handle);
+  return path ? `alto-engine-folder:${path.join("/")}` : null;
+}
+function withFolderLock<T>(name: string, waitMs: number, run: () => Promise<T>): Promise<T> {
+  return navigator.locks.request(name, { signal: AbortSignal.timeout(waitMs) }, run).catch((e: unknown) => {
+    const n = (e as { name?: string } | null)?.name;
+    if (n === "TimeoutError" || n === "AbortError") throw new AltoError("BUSY", "the folder is in use elsewhere");
+    throw e;
+  }) as Promise<T>;
+}
+/**
+ * A directory from the File System Access API. Writes replace atomically on close.
+ *
+ * A folder the user picked can be changed by other origins and native programs, and
+ * nothing a page can do excludes them, so this provider offers no garbage collection.
+ * Given a directory inside OPFS, its writes still take the same lock as
+ * {@link OpfsFolderProvider}, so that every writer of an OPFS folder participates.
+ */
 export class FileSystemDirectoryProvider implements ObjectStorageProvider {
-  readonly kind = "fs-access-dir";
+  readonly kind: string = "fs-access-dir";
+  #lock: Promise<string | null> | null = null;
   constructor(readonly handle: FileSystemDirectoryHandle) {}
   private async dir(parts: string[], create: boolean) {
     let d = this.handle;
@@ -102,7 +129,13 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
     const name = parts.pop()!;
     return (await this.dir(parts, create)).getFileHandle(name, { create });
   }
-  async getObject(path: string) {
+  private async participate<T>(run: () => Promise<T>): Promise<T> {
+    const name = await (this.#lock ??= opfsLockName(this.handle));
+    return name ? withFolderLock(name, LOCK_WAIT_MS, run) : run();
+  }
+  getObject(path: string): Promise<Uint8Array | null> { return this.readUnlocked(path); }
+  /** @internal */
+  protected async readUnlocked(path: string): Promise<Uint8Array | null> {
     try {
       const f = await (await this.file(path, false)).getFile();
       return new Uint8Array(await f.arrayBuffer());
@@ -112,7 +145,8 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
       throw new AltoError("STORAGE", String(e));
     }
   }
-  private async write(path: string, data: Uint8Array) {
+  /** @internal */
+  protected async write(path: string, data: Uint8Array) {
     try {
       const w = await (await this.file(path, true)).createWritable();
       try { await w.write(data as BufferSource); await w.close(); } catch (e) { await w.abort(); throw e; }
@@ -120,13 +154,36 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
       throw e instanceof AltoError ? e : new AltoError("STORAGE", String(e));
     }
   }
-  async putObjects(entries: { path: string; data: Uint8Array }[]) {
+  /** @internal */
+  protected async remove(path: string) {
+    if (!validPath(path) || !immutable(path)) throw new AltoError("INVALID_ARGUMENT", "invalid GC path");
+    const parts = path.split("/");
+    const name = parts.pop()!;
+    try {
+      await (await this.dir(parts, false)).removeEntry(name);
+    } catch (e) {
+      if ((e as { name?: string } | null)?.name !== "NotFoundError") throw new AltoError("STORAGE", String(e));
+    }
+  }
+  /** @internal */
+  protected async putUnlocked(entries: { path: string; data: Uint8Array }[]) {
     let written = 0, skipped = 0;
     for (const e of entries) {
       if (await this.exists(e.path)) skipped++;
       else { await this.write(e.path, e.data); written++; }
     }
     return { written, skipped };
+  }
+  /** @internal */
+  protected async writeRefUnlocked(name: string, data: Uint8Array, expectHash?: string) {
+    if (expectHash !== undefined) {
+      const cur = await this.readUnlocked(name);
+      if ((cur ? await sha256Hex(cur) : "") !== expectHash) throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
+    }
+    await this.write(name, data);
+  }
+  putObjects(entries: { path: string; data: Uint8Array }[]) {
+    return this.participate(() => this.putUnlocked(entries));
   }
   private async exists(path: string) {
     try { await this.file(path, false); return true; } catch { return false; }
@@ -138,7 +195,7 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
     try { root = await this.dir(parts, false); } catch { return out; }
     const walk = async (d: FileSystemDirectoryHandle, base: string) => {
       for await (const [name, h] of (d as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
-        if (name.startsWith(".")) continue;
+        if (name.startsWith(".") || name.endsWith(SWAP_SUFFIX)) continue;
         if (h.kind === "directory") await walk(h as FileSystemDirectoryHandle, base + name + "/");
         else out.push(base + name);
       }
@@ -147,13 +204,72 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
     return out.sort();
   }
   async readRef(name: string) { return this.getObject(name); }
-  async writeRef(name: string, data: Uint8Array, expectHash?: string) {
-    if (expectHash !== undefined) {
-      const cur = await this.getObject(name);
-      if ((cur ? await sha256Hex(cur) : "") !== expectHash) throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
-    }
-    await this.write(name, data);
+  writeRef(name: string, data: Uint8Array, expectHash?: string) {
+    return this.participate(() => this.writeRefUnlocked(name, data, expectHash));
   }
+}
+/**
+ * A folder inside the origin private file system, with garbage collection.
+ *
+ * Only code of this origin can reach OPFS, and every context of an origin shares its Web
+ * Locks, so one lock per folder excludes all SDK writers: other tabs, workers and
+ * {@link FileSystemDirectoryProvider} on the same directory. The browser releases the
+ * lock if its holder dies, and a dead context writes nothing. A script that edits the
+ * directory without the SDK is outside this guarantee.
+ */
+export class OpfsFolderProvider extends FileSystemDirectoryProvider {
+  override readonly kind: string = "opfs-dir";
+  readonly gcCapabilities = { exclusive: true, atomicManifest: true, deleteObjects: true } as const;
+  readonly #name: string;
+  readonly #waitMs: number;
+  private constructor(handle: FileSystemDirectoryHandle, name: string, waitMs: number) {
+    super(handle);
+    this.#name = name; this.#waitMs = waitMs;
+  }
+  /** Refuses a directory outside OPFS, where this provider's guarantee would not hold. */
+  static async open(handle: FileSystemDirectoryHandle, options: { waitMs?: number } = {}): Promise<OpfsFolderProvider> {
+    const name = await opfsLockName(handle);
+    if (!name) throw new AltoError("UNSUPPORTED", "the directory is not inside the origin private file system");
+    return new OpfsFolderProvider(handle, name, options.waitMs ?? LOCK_WAIT_MS);
+  }
+  exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T> {
+    return withFolderLock(this.#name, this.#waitMs, async () => {
+      let active = true;
+      const guard = () => { if (!active) throw new AltoError("CONFLICT", "storage lease expired"); };
+      const view: ExclusiveObjectStorage = {
+        kind: this.kind,
+        getObject: async (path) => { guard(); return this.readUnlocked(path); },
+        readRef: async (path) => { guard(); return this.readUnlocked(path); },
+        list: async (prefix) => { guard(); return super.list(prefix); },
+        putObjects: async (entries) => {
+          guard(); let written = 0, skipped = 0;
+          for (const { path, data } of entries) {
+            if (!validPath(path) || !immutable(path)) throw new AltoError("INVALID_ARGUMENT", "invalid object path " + path);
+            const previous = await this.readUnlocked(path);
+            if (previous) {
+              if (previous.length !== data.length || previous.some((b, i) => b !== data[i])) throw new AltoError("CORRUPT_DATA", "immutable bytes differ: " + path);
+              skipped++;
+            } else { guard(); await this.write(path, data); written++; }
+          }
+          return { written, skipped };
+        },
+        writeRef: async (name, data, expectHash) => {
+          guard(); if (!validPath(name) || immutable(name)) throw new AltoError("INVALID_ARGUMENT", "invalid reference path");
+          await this.writeRefUnlocked(name, data, expectHash);
+        },
+        deleteObjects: async (paths) => {
+          guard();
+          for (const path of paths) { guard(); await this.remove(path); }
+        },
+      };
+      try { return await run(view); } finally { active = false; }
+    });
+  }
+  override getObject(path: string) { return this.exclusive((s) => s.getObject(path)); }
+  override readRef(name: string) { return this.exclusive((s) => s.readRef(name)); }
+  override list(prefix: string) { return this.exclusive((s) => s.list(prefix)); }
+  override putObjects(entries: { path: string; data: Uint8Array }[]) { return this.exclusive((s) => s.putObjects(entries)); }
+  override writeRef(name: string, data: Uint8Array, expectHash?: string) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
 /** @internal Worker <-> main framing for package entries. */
 export function frameEntries(entries: Map<string, Uint8Array>): Uint8Array {

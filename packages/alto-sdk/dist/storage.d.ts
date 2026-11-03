@@ -16,9 +16,9 @@ export interface ObjectStorageProvider {
     readonly kind: string;
     /** True only when all clients of this storage participate in the same lock. */
     readonly gcCapabilities?: {
-        exclusive: true;
-        atomicManifest: true;
-        deleteObjects: true;
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
     };
     exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     getObject(path: string): Promise<Uint8Array | null>;
@@ -60,15 +60,23 @@ export declare class MemoryObjectProvider implements ObjectStorageProvider {
     }>;
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }
-/** A directory from the File System Access API or OPFS. Writes replace atomically on close. */
+/**
+ * A directory from the File System Access API. Writes replace atomically on close.
+ *
+ * A folder the user picked can be changed by other origins and native programs, and
+ * nothing a page can do excludes them, so this provider offers no garbage collection.
+ * Given a directory inside OPFS, its writes still take the same lock as
+ * {@link OpfsFolderProvider}, so that every writer of an OPFS folder participates.
+ */
 export declare class FileSystemDirectoryProvider implements ObjectStorageProvider {
+    #private;
     readonly handle: FileSystemDirectoryHandle;
-    readonly kind = "fs-access-dir";
+    readonly kind: string;
     constructor(handle: FileSystemDirectoryHandle);
     private dir;
     private file;
-    getObject(path: string): Promise<Uint8Array<ArrayBuffer> | null>;
-    private write;
+    private participate;
+    getObject(path: string): Promise<Uint8Array | null>;
     putObjects(entries: {
         path: string;
         data: Uint8Array;
@@ -78,6 +86,41 @@ export declare class FileSystemDirectoryProvider implements ObjectStorageProvide
     }>;
     private exists;
     list(prefix: string): Promise<string[]>;
-    readRef(name: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
+}
+/**
+ * A folder inside the origin private file system, with garbage collection.
+ *
+ * Only code of this origin can reach OPFS, and every context of an origin shares its Web
+ * Locks, so one lock per folder excludes all SDK writers: other tabs, workers and
+ * {@link FileSystemDirectoryProvider} on the same directory. The browser releases the
+ * lock if its holder dies, and a dead context writes nothing. A script that edits the
+ * directory without the SDK is outside this guarantee.
+ */
+export declare class OpfsFolderProvider extends FileSystemDirectoryProvider {
+    #private;
+    readonly kind: string;
+    readonly gcCapabilities: {
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
+    };
+    private constructor();
+    /** Refuses a directory outside OPFS, where this provider's guarantee would not hold. */
+    static open(handle: FileSystemDirectoryHandle, options?: {
+        waitMs?: number;
+    }): Promise<OpfsFolderProvider>;
+    exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    list(prefix: string): Promise<string[]>;
+    putObjects(entries: {
+        path: string;
+        data: Uint8Array;
+    }[]): Promise<{
+        written: number;
+        skipped: number;
+    }>;
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }

@@ -76,10 +76,38 @@ export class MemoryObjectProvider {
     putObjects(entries) { return this.exclusive((s) => s.putObjects(entries)); }
     writeRef(name, data, expectHash) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
-/** A directory from the File System Access API or OPFS. Writes replace atomically on close. */
+const LOCK_WAIT_MS = 30_000;
+/** Browsers leave this beside a file when a tab dies during `createWritable`. */
+const SWAP_SUFFIX = ".crswap";
+/** The Web Lock for a directory inside OPFS, or null for a directory outside it. */
+async function opfsLockName(handle) {
+    const storage = globalThis.navigator?.storage;
+    if (!storage?.getDirectory || !globalThis.navigator?.locks)
+        return null;
+    const root = await storage.getDirectory();
+    const path = await root.resolve?.(handle);
+    return path ? `alto-engine-folder:${path.join("/")}` : null;
+}
+function withFolderLock(name, waitMs, run) {
+    return navigator.locks.request(name, { signal: AbortSignal.timeout(waitMs) }, run).catch((e) => {
+        const n = e?.name;
+        if (n === "TimeoutError" || n === "AbortError")
+            throw new AltoError("BUSY", "the folder is in use elsewhere");
+        throw e;
+    });
+}
+/**
+ * A directory from the File System Access API. Writes replace atomically on close.
+ *
+ * A folder the user picked can be changed by other origins and native programs, and
+ * nothing a page can do excludes them, so this provider offers no garbage collection.
+ * Given a directory inside OPFS, its writes still take the same lock as
+ * {@link OpfsFolderProvider}, so that every writer of an OPFS folder participates.
+ */
 export class FileSystemDirectoryProvider {
     handle;
     kind = "fs-access-dir";
+    #lock = null;
     constructor(handle) {
         this.handle = handle;
     }
@@ -96,7 +124,13 @@ export class FileSystemDirectoryProvider {
         const name = parts.pop();
         return (await this.dir(parts, create)).getFileHandle(name, { create });
     }
-    async getObject(path) {
+    async participate(run) {
+        const name = await (this.#lock ??= opfsLockName(this.handle));
+        return name ? withFolderLock(name, LOCK_WAIT_MS, run) : run();
+    }
+    getObject(path) { return this.readUnlocked(path); }
+    /** @internal */
+    async readUnlocked(path) {
         try {
             const f = await (await this.file(path, false)).getFile();
             return new Uint8Array(await f.arrayBuffer());
@@ -108,6 +142,7 @@ export class FileSystemDirectoryProvider {
             throw new AltoError("STORAGE", String(e));
         }
     }
+    /** @internal */
     async write(path, data) {
         try {
             const w = await (await this.file(path, true)).createWritable();
@@ -124,7 +159,22 @@ export class FileSystemDirectoryProvider {
             throw e instanceof AltoError ? e : new AltoError("STORAGE", String(e));
         }
     }
-    async putObjects(entries) {
+    /** @internal */
+    async remove(path) {
+        if (!validPath(path) || !immutable(path))
+            throw new AltoError("INVALID_ARGUMENT", "invalid GC path");
+        const parts = path.split("/");
+        const name = parts.pop();
+        try {
+            await (await this.dir(parts, false)).removeEntry(name);
+        }
+        catch (e) {
+            if (e?.name !== "NotFoundError")
+                throw new AltoError("STORAGE", String(e));
+        }
+    }
+    /** @internal */
+    async putUnlocked(entries) {
         let written = 0, skipped = 0;
         for (const e of entries) {
             if (await this.exists(e.path))
@@ -135,6 +185,18 @@ export class FileSystemDirectoryProvider {
             }
         }
         return { written, skipped };
+    }
+    /** @internal */
+    async writeRefUnlocked(name, data, expectHash) {
+        if (expectHash !== undefined) {
+            const cur = await this.readUnlocked(name);
+            if ((cur ? await sha256Hex(cur) : "") !== expectHash)
+                throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
+        }
+        await this.write(name, data);
+    }
+    putObjects(entries) {
+        return this.participate(() => this.putUnlocked(entries));
     }
     async exists(path) {
         try {
@@ -157,7 +219,7 @@ export class FileSystemDirectoryProvider {
         }
         const walk = async (d, base) => {
             for await (const [name, h] of d.entries()) {
-                if (name.startsWith("."))
+                if (name.startsWith(".") || name.endsWith(SWAP_SUFFIX))
                     continue;
                 if (h.kind === "directory")
                     await walk(h, base + name + "/");
@@ -169,14 +231,93 @@ export class FileSystemDirectoryProvider {
         return out.sort();
     }
     async readRef(name) { return this.getObject(name); }
-    async writeRef(name, data, expectHash) {
-        if (expectHash !== undefined) {
-            const cur = await this.getObject(name);
-            if ((cur ? await sha256Hex(cur) : "") !== expectHash)
-                throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
-        }
-        await this.write(name, data);
+    writeRef(name, data, expectHash) {
+        return this.participate(() => this.writeRefUnlocked(name, data, expectHash));
     }
+}
+/**
+ * A folder inside the origin private file system, with garbage collection.
+ *
+ * Only code of this origin can reach OPFS, and every context of an origin shares its Web
+ * Locks, so one lock per folder excludes all SDK writers: other tabs, workers and
+ * {@link FileSystemDirectoryProvider} on the same directory. The browser releases the
+ * lock if its holder dies, and a dead context writes nothing. A script that edits the
+ * directory without the SDK is outside this guarantee.
+ */
+export class OpfsFolderProvider extends FileSystemDirectoryProvider {
+    kind = "opfs-dir";
+    gcCapabilities = { exclusive: true, atomicManifest: true, deleteObjects: true };
+    #name;
+    #waitMs;
+    constructor(handle, name, waitMs) {
+        super(handle);
+        this.#name = name;
+        this.#waitMs = waitMs;
+    }
+    /** Refuses a directory outside OPFS, where this provider's guarantee would not hold. */
+    static async open(handle, options = {}) {
+        const name = await opfsLockName(handle);
+        if (!name)
+            throw new AltoError("UNSUPPORTED", "the directory is not inside the origin private file system");
+        return new OpfsFolderProvider(handle, name, options.waitMs ?? LOCK_WAIT_MS);
+    }
+    exclusive(run) {
+        return withFolderLock(this.#name, this.#waitMs, async () => {
+            let active = true;
+            const guard = () => { if (!active)
+                throw new AltoError("CONFLICT", "storage lease expired"); };
+            const view = {
+                kind: this.kind,
+                getObject: async (path) => { guard(); return this.readUnlocked(path); },
+                readRef: async (path) => { guard(); return this.readUnlocked(path); },
+                list: async (prefix) => { guard(); return super.list(prefix); },
+                putObjects: async (entries) => {
+                    guard();
+                    let written = 0, skipped = 0;
+                    for (const { path, data } of entries) {
+                        if (!validPath(path) || !immutable(path))
+                            throw new AltoError("INVALID_ARGUMENT", "invalid object path " + path);
+                        const previous = await this.readUnlocked(path);
+                        if (previous) {
+                            if (previous.length !== data.length || previous.some((b, i) => b !== data[i]))
+                                throw new AltoError("CORRUPT_DATA", "immutable bytes differ: " + path);
+                            skipped++;
+                        }
+                        else {
+                            guard();
+                            await this.write(path, data);
+                            written++;
+                        }
+                    }
+                    return { written, skipped };
+                },
+                writeRef: async (name, data, expectHash) => {
+                    guard();
+                    if (!validPath(name) || immutable(name))
+                        throw new AltoError("INVALID_ARGUMENT", "invalid reference path");
+                    await this.writeRefUnlocked(name, data, expectHash);
+                },
+                deleteObjects: async (paths) => {
+                    guard();
+                    for (const path of paths) {
+                        guard();
+                        await this.remove(path);
+                    }
+                },
+            };
+            try {
+                return await run(view);
+            }
+            finally {
+                active = false;
+            }
+        });
+    }
+    getObject(path) { return this.exclusive((s) => s.getObject(path)); }
+    readRef(name) { return this.exclusive((s) => s.readRef(name)); }
+    list(prefix) { return this.exclusive((s) => s.list(prefix)); }
+    putObjects(entries) { return this.exclusive((s) => s.putObjects(entries)); }
+    writeRef(name, data, expectHash) { return this.exclusive((s) => s.writeRef(name, data, expectHash)); }
 }
 /** @internal Worker <-> main framing for package entries. */
 export function frameEntries(entries) {
