@@ -89,9 +89,10 @@ async function opfsLockName(handle) {
     return path ? `alto-engine-folder:${path.join("/")}` : null;
 }
 function withFolderLock(name, waitMs, run) {
-    return navigator.locks.request(name, { signal: AbortSignal.timeout(waitMs) }, run).catch((e) => {
-        const n = e?.name;
-        if (n === "TimeoutError" || n === "AbortError")
+    const signal = AbortSignal.timeout(waitMs);
+    return navigator.locks.request(name, { signal }, run).catch((e) => {
+        // Only the wait: an error from `run` itself keeps its own meaning.
+        if (e === signal.reason)
             throw new AltoError("BUSY", "the folder is in use elsewhere");
         throw e;
     });

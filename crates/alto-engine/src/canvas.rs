@@ -587,6 +587,13 @@ impl Engine {
                 },
             });
         }
+        // The renderer takes transforms in fixed point. Refuse now what it could not draw.
+        if FixedAffine::from_affine(map.concat(doc.node(root)?.props.transform)).is_none() {
+            return Err(err(
+                "RESOURCE_LIMIT",
+                "the canvas transform is out of range",
+            ));
+        }
         let mut ops = vec![];
         let nodes: Vec<Node> = doc.nodes.values().cloned().collect();
         let selection = doc.selection.clone();
@@ -1550,6 +1557,18 @@ mod tests {
         assert!(Engine::new().open_package(&saved).is_ok());
         e.undo(h).unwrap();
 
+        // Many large dabs are refused up front rather than run for minutes.
+        let refused = e.prepare_image_edit(
+            h,
+            ImageEdit::CloneStamp {
+                node: id,
+                source: [0.0, 0.0],
+                stroke: stroke(vec![[0.0, 0.0], [100000.0, 0.0]], 1024.0),
+                opacity: 1.0,
+                selection: SelectionMode::Ignore,
+            },
+        );
+        assert_eq!(code(refused.err().unwrap()), "RESOURCE_LIMIT");
         let refused = e.prepare_image_edit(
             h,
             ImageEdit::CloneStamp {

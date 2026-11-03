@@ -625,10 +625,10 @@ fn branches_and_merges_keep_their_shape_in_git() {
     let (fresh, d) = open_tree(&root, "alto/feature", "art.altoproj");
     assert_eq!(fresh.log(d).unwrap()[0].hash, f.feature);
     let refs = fresh.version_refs(d).unwrap();
-    assert_eq!(refs.current_branch.as_deref(), Some("feature"));
+    assert_eq!(refs.current_branch, None, "not the head when imported");
     assert!(
-        !refs.branches.contains_key("main"),
-        "main is not in this ancestry"
+        refs.branches.is_empty(),
+        "no branch name that could go stale"
     );
 
     // Reading through Git follows both parents.
@@ -760,6 +760,12 @@ fn a_damaged_commit_table_is_refused() {
     write_state(&serde_json::to_string(&state).unwrap());
     let err = alto_git::sync(&folder, None).unwrap_err();
     assert!(err.starts_with("UNSUPPORTED"), "{err}");
+    // An edited table cannot point a sync at some other ref.
+    let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
+    state["branches"]["feature"]["git_ref"] = serde_json::json!("refs/heads/release");
+    write_state(&serde_json::to_string(&state).unwrap());
+    let err = alto_git::sync(&folder, None).unwrap_err();
+    assert!(err.contains("unexpected entry"), "{err}");
     let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
     state["extra"] = serde_json::json!(1);
     write_state(&serde_json::to_string(&state).unwrap());
@@ -921,4 +927,58 @@ fn a_detached_head_and_pins_stay_reachable() {
     assert!(keep.contains(&f.feature.hex()), "{keep}");
     git(&root, &["fsck", "--strict", "--no-progress"]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_checked_out_branch_is_not_deleted_and_a_pruned_commit_is_imported_again() {
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("alto-git-unborn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["config", "user.name", "Alto Test"]);
+    git(&dir, &["config", "user.email", "alto@example.invalid"]);
+    let folder = dir.join("art.altoproj");
+    let mut f = forked();
+    save(&f.engine, f.doc, &folder);
+    alto_git::sync(&folder, None).unwrap();
+
+    // main was created by the sync and Git has it checked out.
+    f.engine.protect_branch(f.doc, "main", false).unwrap();
+    f.engine.checkout(f.doc, "feature").unwrap();
+    f.engine.delete_branch(f.doc, "main", true).unwrap();
+    save(&f.engine, f.doc, &folder);
+    let done = alto_git::sync(&folder, None).unwrap();
+    assert!(
+        done.warnings.iter().any(|w| w.contains("checked out")),
+        "{done:?}"
+    );
+    git(&dir, &["rev-parse", "--verify", "HEAD"]);
+
+    // A branch that left Alto, pruned from Git, and then back.
+    f.engine.create_branch(f.doc, "side", None, true).unwrap();
+    let side = commit_on(
+        &mut f.engine,
+        f.doc,
+        f.layer,
+        TileKey { tx: 1, ty: 1 },
+        30,
+        "side",
+    );
+    save(&f.engine, f.doc, &folder);
+    alto_git::sync(&folder, None).unwrap();
+    f.engine.checkout(f.doc, "feature").unwrap();
+    f.engine.delete_branch(f.doc, "side", true).unwrap();
+    save(&f.engine, f.doc, &folder);
+    alto_git::sync(&folder, None).unwrap();
+    git(&dir, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&dir, &["gc", "-q", "--prune=now"]);
+    f.engine
+        .create_branch(f.doc, "side", Some(side), false)
+        .unwrap();
+    save(&f.engine, f.doc, &folder);
+    let again = alto_git::sync(&folder, None).unwrap();
+    assert_eq!(again.created.len(), 1);
+    git(&dir, &["fsck", "--strict", "--no-progress"]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

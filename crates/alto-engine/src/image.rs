@@ -127,7 +127,7 @@ pub struct Stroke {
 }
 const MAX_STROKE_POINTS: usize = 4096;
 const MAX_STROKE_RADIUS: f64 = 1024.0;
-/// Pixels touched across all dabs of one smudge.
+/// Pixels touched across all dabs of one stroke.
 const SMUDGE_OPS: u64 = 64 * 1024 * 1024;
 impl Stroke {
     fn validate(&self) -> Result<Vec<[i32; 2]>, EngineError> {
@@ -1149,7 +1149,12 @@ impl Engine {
                 // Each pixel takes its largest coverage once, so overlapping dabs do not
                 // build up a semi-transparent source.
                 let mut coverage: BTreeMap<(i32, i32), u8> = BTreeMap::new();
-                for dab in stroke.dabs(&points)? {
+                let dabs = stroke.dabs(&points)?;
+                let span = (2 * r + 1) as u64;
+                if dabs.len() as u64 * span * span > SMUDGE_OPS {
+                    return Err(err("RESOURCE_LIMIT", "stamp touches too many pixels"));
+                }
+                for dab in dabs {
                     for y in i64::from(dab[1]) - r..=i64::from(dab[1]) + r {
                         for x in i64::from(dab[0]) - r..=i64::from(dab[0]) + r {
                             let (Ok(px), Ok(py)) = (i32::try_from(x), i32::try_from(y)) else {
@@ -1165,7 +1170,8 @@ impl Engine {
                             }
                         }
                     }
-                    if coverage.len() as u64 > 16 * 1024 * 1024 {
+                    // The map costs far more per pixel than a tile does.
+                    if coverage.len() as u64 > 4 * 1024 * 1024 {
                         return Err(err("RESOURCE_LIMIT", "stroke covers too many pixels"));
                     }
                 }
