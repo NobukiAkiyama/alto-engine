@@ -135,8 +135,15 @@ function square() {
 async function measureAtlasRead(r8 = false) {
   const format = r8 ? "R8Unorm" : "Rgba8Unorm";
   const channels = r8 ? 1 : 4;
+  let adapterAttempts = 1;
   try {
-    const adapter = await navigator.gpu.requestAdapter();
+    let adapter = await navigator.gpu.requestAdapter();
+    // Chrome answers null while its GPU process restarts. In CI the very next call succeeded.
+    if (!adapter) {
+      adapterAttempts = 2;
+      adapter = await navigator.gpu.requestAdapter();
+    }
+    if (!adapter) throw Error("requestAdapter returned null twice");
     const device = await adapter.requestDevice();
     const texel = (i) => [i, 255 - i, i ^ 0x55, (i + 128) & 255];
     const data = new Uint8Array(256 * channels);
@@ -180,9 +187,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         if (got[i * 4 + ch] !== want[ch]) mismatches.push({ texel: i, channel: ch, byte: want[ch], read: got[i * 4 + ch] });
       }
     }
-    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
+    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, adapterAttempts, status: mismatches.length ? "mismatch" : "exact", mismatchedChannels: mismatches.length, mismatches };
   } catch (error) {
-    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
+    return { label: "enforced", format, read: "textureLoad + unorm_byte", values: 256, adapterAttempts, status: "error", error: String(error), mismatchedChannels: 0, mismatches: [] };
   }
 }
 
@@ -250,6 +257,28 @@ export async function runParityTests(engine, log) {
       log(`atlas-read (enforced): ${detail}`);
       assert(atlasRead.status === "exact" && atlasRead.r8Unorm.status === "exact", `atlas-read ${detail}`);
       return detail;
+    });
+    // The Worker's navigator.gpu is a separate object, so only this page's reads see the nulls.
+    const withNullAdapters = async (nulls, fn) => {
+      let calls = 0;
+      navigator.gpu.requestAdapter = function (...args) {
+        return ++calls <= nulls ? Promise.resolve(null) : GPU.prototype.requestAdapter.apply(this, args);
+      };
+      try {
+        return { result: await fn(), calls: () => calls };
+      } finally {
+        delete navigator.gpu.requestAdapter;
+      }
+    };
+    await test("atlas-read retries one null adapter", async () => {
+      const { result, calls } = await withNullAdapters(1, () => measureAtlasRead());
+      assert(result.status === "exact", `atlas-read after one null adapter: ${result.status} ${result.error ?? ""}`);
+      assert(calls() === 2 && result.adapterAttempts === 2, `${calls()} requestAdapter calls, ${result.adapterAttempts} recorded`);
+    });
+    await test("atlas-read fails after two null adapters", async () => {
+      const { result, calls } = await withNullAdapters(2, () => measureAtlasRead());
+      assert(result.status === "error", `atlas-read after two null adapters: ${result.status}`);
+      assert(calls() === 2 && result.adapterAttempts === 2, `${calls()} requestAdapter calls, ${result.adapterAttempts} recorded`);
     });
     await test("alpha-measure layers are distinct", async () => {
       assertDistinctAlphaLayers();

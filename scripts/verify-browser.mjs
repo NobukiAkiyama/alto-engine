@@ -12,6 +12,8 @@
 // Every run saves Chrome stderr and CDP GPU/process/console diagnostics. An explicit
 // ALTO_BROWSER_EXPECTED_VERSION refuses a changed browser; watchdogs stay on unless
 // ALTO_BROWSER_DISABLE_GPU_WATCHDOG=1 is set for a controlled comparison.
+// A GPU process crash in Chrome's stderr is logged and added to summary.json as an
+// advisory row. It does not fail the job by itself.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, createReadStream, existsSync } from "node:fs";
@@ -20,6 +22,7 @@ import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createGpuCrashScanner, gpuCrashRow, jobFailed } from "./gpu-process-crash.mjs";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const functionalOnly = process.argv.includes("--functional");
@@ -221,6 +224,13 @@ let server, chrome, client, browserClient, profile;
 const summary = [];
 const diagnostics = { startedAt: new Date().toISOString(), expectedVersion: expectedVersion ?? null, watchdogDisabled: disableGpuWatchdog, graphiteBackend, surfaceRecording, resizeBarrier, verboseGpu, presentTiming, embedTest: embedTest ?? null, browser: null, executable: null, args: [], events: [], system: [] };
 let stderr = "", traceStream = null, traceStarted = false, unexpectedSurfaceFault = false;
+// What was running when a GPU process crash reached stderr.
+let phase = vectorOnly ? "vector optimization" : lifecycleOnly ? "gpu-lifecycle" : behindOnly ? "behind-resize" : "startup";
+const gpuCrashes = [];
+const gpuCrashScanner = createGpuCrashScanner((crash) => {
+  gpuCrashes.push({ at: new Date().toISOString(), suite: phase, ...crash });
+  console.error(`Unexpected GPU process crash during ${phase}: ${crash.line}`);
+});
 const recordEvent = ({ method, params }) => {
   if (method === "Tracing.tracingComplete") traceStream = params.stream;
   if (!["Log.entryAdded", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Target.targetCrashed"].includes(method)) return;
@@ -281,6 +291,7 @@ try {
   chrome.stderr.on("data", (chunk) => {
     stderr = (stderr + chunk).slice(-2 * 1024 * 1024);
     if (surfaceRecording && stderr.includes('"SURFACE-FAILURE ')) unexpectedSurfaceFault = true;
+    gpuCrashScanner.push(chunk);
     // Keep the evidence even if a hung test is killed before finally runs.
     appendFileSync(join(reportDir, "chrome-stderr.log"), chunk);
   });
@@ -427,6 +438,7 @@ try {
   } else if (examplesOnly) {
     for (const name of ["minimal-embed", "react-embed"]) {
       console.log("RUN example", name);
+      phase = "example " + name;
       const url = `http://127.0.0.1:${address.port}/examples/${name}/dist/index.html`;
       const nav = await send("Page.navigate", { url });
       if (nav.result?.errorText) throw Error(nav.result.errorText);
@@ -503,6 +515,7 @@ try {
         if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
       }
       console.log("RUN", name);
+      phase = name;
       await evaluate("document.querySelector('#test-results').dataset.report = ''");
       let suiteError = null;
       try {
@@ -571,6 +584,15 @@ try {
       ...(unexpectedSurfaceFault ? { error: "Unexpected GPU validation/loss was recorded; later automatic recovery does not make this run clean. See SURFACE-FAILURE in chrome-stderr.log." } : {}) });
   }
   await sampleSystem("shutdown");
+  gpuCrashScanner.flush();
+  // Always present, so an empty list says the run was watched and no crash was seen.
+  diagnostics.gpuProcessCrashes = gpuCrashes;
+  if (gpuCrashes.length) {
+    summary.push(gpuCrashRow(gpuCrashes));
+    if (process.env.GITHUB_ACTIONS === "true")
+      for (const { suite, line } of gpuCrashes)
+        console.log(`::warning title=Unexpected GPU process crash::During ${suite}. Not a test failure; see summary.json. ${line}`);
+  }
   await writeFile(join(reportDir, "browser-diagnostics.json"), JSON.stringify(diagnostics, null, 2) + "\n");
   if (externalReports) await writeFile(join(reportDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
   if (summary.some((suite) => !suite.ok))
@@ -588,4 +610,4 @@ try {
   if (profile) await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 console.log(JSON.stringify(summary, null, 2));
-if (!summary.length || summary.some((suite) => !suite.ok)) process.exitCode = 1;
+if (jobFailed(summary)) process.exitCode = 1;
