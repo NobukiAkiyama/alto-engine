@@ -131,7 +131,8 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
     return (await this.dir(parts, create)).getFileHandle(name, { create });
   }
   private async participate<T>(run: () => Promise<T>): Promise<T> {
-    const name = await (this.#lock ??= opfsLockName(this.handle));
+    // A failed lookup is not kept, so a transient failure does not last.
+    const name = await (this.#lock ??= opfsLockName(this.handle).catch((e: unknown) => { this.#lock = null; throw e; }));
     return name ? withFolderLock(name, LOCK_WAIT_MS, run) : run();
   }
   getObject(path: string): Promise<Uint8Array | null> { return this.readUnlocked(path); }
@@ -256,7 +257,11 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
         },
         writeRef: async (name, data, expectHash) => {
           guard(); if (!validPath(name) || immutable(name)) throw new AltoError("INVALID_ARGUMENT", "invalid reference path");
-          await this.writeRefUnlocked(name, data, expectHash);
+          if (expectHash !== undefined) {
+            const current = await this.readUnlocked(name);
+            if ((current ? await sha256Hex(current) : "") !== expectHash) throw new AltoError("CONFLICT", name + " changed elsewhere", { reason: "folder-changed" });
+          }
+          guard(); await this.write(name, data);
         },
         deleteObjects: async (paths) => {
           guard();
