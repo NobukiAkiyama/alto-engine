@@ -14,7 +14,7 @@ Alto は未リリースである。旧ファイルの読み込み、旧 SDK API�
 | 文書スナップショット | format 4 | format 5。ラスターの編集範囲を必須化 |
 | パッケージ manifest | `format: 1` | `format: 2`。参照・世代を追加 |
 | コミット | 明示的な形式番号なし | `format: 2`。親は最大二つ |
-| SDK / Worker / WASM 通信 | protocol 5 | protocol 6。同一番号だけ接続 |
+| SDK / Worker / WASM 通信 | protocol 5 | protocol 7。同一番号だけ接続（6 はブランチ・GC、7 でキャンバス・結合を追加） |
 | レンダリング | render v3 | v3 の画素演算を維持。ラスター範囲のクリップを追加 |
 
 RGBA8・R8、256 px タイル、BLAKE3 の内容アドレス、CPU 正本と再構築可能な GPU
@@ -36,8 +36,7 @@ RGBA8・R8、256 px タイル、BLAKE3 の内容アドレス、CPU 正本と再�
 ### 対象と対象外
 
 対象は Engine/WASM、SDK、保存・復旧と、それらを呼ぶ Playground の操作面。
-最初の画像幾何操作はレイヤー単位とする。キャンバス全体の切り抜き・拡縮は
-今回含めず、別の文書操作として設計する。
+`image` の幾何操作はレイヤー単位。キャンバス全体の操作は別の `canvas` API（第 6.7 節）。
 
 分散編集、履歴の書き換え・打ち切り、画素の自動合成マージ、テキスト範囲の
 自動マージ、HDR / 16 bit、高度な非破壊フィルタ、SVG 完全互換は対象外。
@@ -490,6 +489,53 @@ pickComposite は別 API とし、文書整数画素を zoom/pan/背景チェッ
 scale 1 の合成結果から読む。読み戻しの unpremultiply/量子化規則を固定し、文書
 revision と render 完了を確認する。キャンバス外は `NOT_FOUND`。
 
+### 6.6 スタンプ、指先、ヒストグラム
+
+`image.cloneStamp(id, source, stroke, { opacity, selection })` と
+`image.smudge(id, stroke, { strength, selection })` は同じ NodeId への一つの Transaction。
+stroke はノードローカルの折れ線（1〜4096 点）と丸い先端（半径 1〜1024、hardness 0〜1）。
+点の間は半径の 1/4 間隔（最小 1 画素）で補う。bounds を拡張せず、bounds 外は読み書きしない。
+どちらも gradient と同じ selection 規則に従い、選択と重ならなければ `EMPTY_SELECTION`。
+
+スタンプの参照元は編集前の画素で固定する。自分の出力を再度写さず、重なった dab は画素ごとの
+最大被覆率で一度だけ normal source-over する。指先は先頭の dab の画素を持ち運び、
+dab ごとに premultiplied で補間して、持ち運ぶ色も結果へ更新する。処理量の上限は
+dab 数 × 先端の画素数で合計 64M、スタンプの被覆は 4M 画素、作業メモリは `EDIT_BUDGET`。超過は全体を `RESOURCE_LIMIT` にする。
+
+`image.histogram(id, range?)` は読み取り専用。range は bounds 内に限り、既定は bounds 全体。
+効果・マスク・opacity を適用する前の格納値を数える。範囲内の透明画素はタイルの有無に
+かかわらず 0 として数え、`pixels` は常に範囲の画素数と一致する。
+
+### 6.7 キャンバス全体の操作
+
+`canvas.crop(rect)`、`canvas.resize(w, h)`、`canvas.rotate(q)`、`canvas.flip(axis)` は
+レイヤー単位の `image` とは別の文書操作で、一つの Undo になる。旧座標から新座標への
+affine H をルートノードの transform に左から掛け、`meta` の幅と高さを更新する。
+
+- 全ノードは祖先として H に従う。タイル、bounds、ローカルのベクター、テキスト、linked mask、
+  効果の R8 は変更しない。hash も変わらないので作業メモリを使わない。
+- crop の矩形はキャンバスの外へ出てもよく、範囲外の内容は失わず見えなくなるだけ。
+- 文書座標で持つものだけを書き換える。選択範囲は再配置（resize は v3 と同じ Q8 の
+  bilinear で再標本化、4096 タイル上限）。unlinked mask は `mask_transform` に H を掛ける。
+- resize で Gaussian の半径（文書 px）を同じ倍率にする。非等倍、または半径 64 超は
+  `UNSUPPORTED` で全体を拒否する。
+- 画素は表示時に v3 のサンプラで変形する。resize は確定リサンプルではなく、繰り返しても劣化しない。
+  幅高さ 1〜65536 の範囲外と不正な回転数は `INVALID_ARGUMENT`。
+- 旧 `edit.rs` の実装（タイル再配置）は、テキスト位置の喪失、タイルの無い場所への描き込みの欠落、
+  マスクの未対応があり、呼び出し元も無かったため置き換えた。
+
+### 6.8 下レイヤーとの結合とラスタライズ
+
+`image.mergeDown(id)` は下の兄弟ラスターへ確定する。`image.rasterize(id)` はラスターの
+整数平行移動を画素へ確定し、ラスターだけのグループを同じ NodeId の一枚へ置き換える。
+どちらも CPU の Q14 normal source-over で一つの Transaction。
+
+見た目を保てない構造は部分適用せず `UNSUPPORTED`：マスク・ベクターマスク・クリッピングパス・
+効果、クリッピングの基底になる層、非表示の層、Normal 以外の合成モード、整数画素でない
+相対位置、ラスター以外の子、opacity か合成モードを持つ pass-through グループ。
+結合で下層の opacity は画素へ焼き込み、結果の opacity は 1。グループの置換では
+グループ自身の属性（opacity、合成モード、マスク、効果、変形）を保持する。
+
 ## 7. SVG 限定インポート
 
 SVG は型付きの vector/group を追加する一つの Transaction。XML 全体を検証し、
@@ -522,7 +568,7 @@ vector のラスタライズは自動で行わない。現行 rasterize の範�
 ## 8. SDK、UI、Git の境界
 
 `DocumentHandle.versions` に履歴操作、`image` に画像操作を置く。
-protocol 6 は明示的 handshake を持つ。provider の GC 能力は `gcCapabilities`
+protocol は明示的 handshake を持つ。provider の GC 能力は `gcCapabilities`
 で返す。画像編集は CPU 正本であり、任意の GPU 高速化を導入する場合は別途 capability
 を追加する。Engine と SDK で型とエラーコードを共有し、
 SDK だけの検証で成功扱いにしない。新形式から旧形式への fallback はしない。
@@ -646,6 +692,6 @@ Playground が同じ生成物を使うことを確認する。GPU 試験は直�
 - SVG の非対応入力は部分 import せず、位置付きエラーで拒否する。
 - API check、保存/復旧試験、該当ブラウザ試験を通し、Playground 上で操作を確認する。
 
-将来の別設計：キャンバス全体の幾何操作、履歴打ち切り、stash、分散同期、
+将来の別設計：履歴打ち切り、stash、分散同期、
 複数baseの仮想マージ、画素/文字範囲の自動マージ、面積縮小/Catmull-Rom、
 高度なフィルタ、非破壊gradient、vectorラスタライズ、SVGのCSS/画像/文字。

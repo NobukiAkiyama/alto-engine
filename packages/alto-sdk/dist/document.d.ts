@@ -1,4 +1,4 @@
-import type { ImageBounds, ImageColor, ImageFilter, ImageSelection, GradientOptions, ImageEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
+import type { CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
 import { type Intent } from "./intents.js";
 import { type DocumentChange, type DocumentSnapshot } from "./snapshot.js";
 import { type ArchiveTarget, type ObjectStorageProvider } from "./storage.js";
@@ -116,6 +116,8 @@ export declare class DocumentHandle {
         }) => Promise<void>;
     };
     private imageCommand;
+    private canvasCommand;
+    private layerCommand;
     private historyCommand;
     /** Pixel edits use node-local coordinates; each successful edit is one Undo step. */
     readonly image: {
@@ -134,8 +136,35 @@ export declare class DocumentHandle {
             tolerance?: number;
             selection?: ImageSelection;
         }) => Promise<ImageEditResult>;
+        /** Copies the layer's own pixels along a stroke. `source` is sampled for the first point. */
+        cloneStamp: (node: NodeId, source: [number, number], stroke: ImageStroke, options?: {
+            opacity?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        /** Carries the pixels under the tip along a stroke. */
+        smudge: (node: NodeId, stroke: ImageStroke, options?: {
+            strength?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        /** Merges a raster into the raster below it. Refused when the result could not look the same. */
+        mergeDown: (node: NodeId) => Promise<LayerEditResult>;
+        /** Bakes a whole-pixel offset into a raster, or flattens a group of rasters. */
+        rasterize: (node: NodeId) => Promise<LayerEditResult>;
+        histogram: (node: NodeId, range?: ImageBounds) => Promise<ImageHistogram>;
         pickColor: (node: NodeId, point: [number, number]) => Promise<import("./image-types.js").PickedColor>;
         pickComposite: (point: [number, number]) => Promise<import("./image-types.js").PickedColor>;
+    };
+    /**
+     * Whole-document geometry, separate from the layer-local `image` edits. Each is one Undo
+     * step that moves the document's root transform, so layer pixels stay as they are.
+     */
+    readonly canvas: {
+        /** The rectangle becomes the canvas. Content outside it is kept, only no longer visible. */
+        crop: (rect: ImageBounds) => Promise<CanvasEditResult>;
+        /** Scales the whole document to the new canvas size. */
+        resize: (width: number, height: number) => Promise<CanvasEditResult>;
+        rotate: (quarterTurns: 1 | 2 | 3) => Promise<CanvasEditResult>;
+        flip: (axis: "horizontal" | "vertical") => Promise<CanvasEditResult>;
     };
     /** Version commits, diffs and restores. */
     readonly versions: {

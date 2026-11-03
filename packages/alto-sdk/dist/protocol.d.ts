@@ -1,7 +1,7 @@
-import type { BranchView, MergePlan, MergeResult, ImageEditResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
 import type { ImportedImage, WireOp } from "./transaction.js";
 import type { CommitView, FontInfo, PathData, Rect, TextCaret, TextInfo, TextMotion, TileRef, VersionDiff } from "./types.js";
-export declare const PROTOCOL = 6;
+export declare const PROTOCOL = 7;
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
     code: string;
@@ -210,6 +210,22 @@ export interface Requests {
         state: WireState;
         result: ImageEditResult;
     }>;
+    canvasEdit: Q<{
+        edit: Record<string, unknown>;
+    }, {
+        state: WireState;
+        result: CanvasEditResult;
+    }>;
+    layerEdit: Q<{
+        edit: Record<string, unknown>;
+    }, {
+        state: WireState;
+        result: LayerEditResult;
+    }>;
+    imageHistogram: Q<{
+        node: string;
+        range?: ImageBounds;
+    }, ImageHistogram>;
     pickColor: Q<{
         node: string;
         x: number;

@@ -213,6 +213,12 @@ export class DocumentHandle {
     imageCommand(edit) {
         return this.edit(async () => { const r = await this.request("imageEdit", { edit }); this.apply(r.state); return r.result; });
     }
+    canvasCommand(edit) {
+        return this.edit(async () => { const r = await this.request("canvasEdit", { edit }); this.apply(r.state); return r.result; });
+    }
+    layerCommand(edit) {
+        return this.edit(async () => { const r = await this.request("layerEdit", { edit }); this.apply(r.state); return r.result; });
+    }
     historyCommand(command) {
         return this.edit(async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; });
     }
@@ -233,8 +239,29 @@ export class DocumentHandle {
         flip: (node, axis) => this.imageCommand({ type: "flip", node, axis }),
         gradient: (node, options) => this.imageCommand({ type: "gradient", node, options }),
         fill: (node, point, color, options = {}) => this.imageCommand({ type: "fill", node, point, color, tolerance: options.tolerance ?? 0, selection: options.selection ?? "current" }),
+        /** Copies the layer's own pixels along a stroke. `source` is sampled for the first point. */
+        cloneStamp: (node, source, stroke, options = {}) => this.imageCommand({ type: "clone_stamp", node, source, stroke: { hardness: 1, ...stroke }, opacity: options.opacity ?? 1, selection: options.selection ?? "current" }),
+        /** Carries the pixels under the tip along a stroke. */
+        smudge: (node, stroke, options = {}) => this.imageCommand({ type: "smudge", node, stroke: { hardness: 1, ...stroke }, strength: options.strength ?? 0.5, selection: options.selection ?? "current" }),
+        /** Merges a raster into the raster below it. Refused when the result could not look the same. */
+        mergeDown: (node) => this.layerCommand({ type: "merge_down", node }),
+        /** Bakes a whole-pixel offset into a raster, or flattens a group of rasters. */
+        rasterize: (node) => this.layerCommand({ type: "rasterize", node }),
+        histogram: (node, range) => this.request("imageHistogram", range ? { node, range } : { node }),
         pickColor: (node, point) => this.request("pickColor", { node, x: point[0], y: point[1] }),
         pickComposite: (point) => this.request("pickComposite", { x: point[0], y: point[1] }),
+    };
+    /**
+     * Whole-document geometry, separate from the layer-local `image` edits. Each is one Undo
+     * step that moves the document's root transform, so layer pixels stay as they are.
+     */
+    canvas = {
+        /** The rectangle becomes the canvas. Content outside it is kept, only no longer visible. */
+        crop: (rect) => this.canvasCommand({ type: "crop", ...rect }),
+        /** Scales the whole document to the new canvas size. */
+        resize: (width, height) => this.canvasCommand({ type: "resize", width, height }),
+        rotate: (quarterTurns) => this.canvasCommand({ type: "rotate", quarter_turns: quarterTurns }),
+        flip: (axis) => this.canvasCommand({ type: "flip", axis }),
     };
     /** Version commits, diffs and restores. */
     versions = {
