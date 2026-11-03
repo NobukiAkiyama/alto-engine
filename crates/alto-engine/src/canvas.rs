@@ -157,7 +157,8 @@ fn budget(tiles: usize) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Composites `source` (at `offset`, with `opacity`) over `out` inside `bounds`.
+/// Composites `source` (at `offset`, with `opacity`) over `out`. Stored tiles are already
+/// zero outside their image range, so the result stays inside the union of the ranges.
 fn composite_into(
     engine: &Engine,
     out: &mut BTreeMap<TileKey, Vec<u8>>,
@@ -276,11 +277,10 @@ fn scaled_selection(
     let up = |v: i64, to: u32, from: u32| {
         (v * i64::from(to) + i64::from(from) - 1).div_euclid(i64::from(from))
     };
-    // One source pixel of margin: bilinear reads reach the next pixel.
-    let dx0 = down(i64::from(x0) * 256 - 1, new.0, old.0);
-    let dy0 = down(i64::from(y0) * 256 - 1, new.1, old.1);
-    let dx1 = up((i64::from(x1) + 1) * 256 + 1, new.0, old.0);
-    let dy1 = up((i64::from(y1) + 1) * 256 + 1, new.1, old.1);
+    let dx0 = down(i64::from(x0) * 256, new.0, old.0);
+    let dy0 = down(i64::from(y0) * 256, new.1, old.1);
+    let dx1 = up((i64::from(x1) + 1) * 256, new.0, old.0);
+    let dy1 = up((i64::from(y1) + 1) * 256, new.1, old.1);
     let tiles = ((dx1 - 1).div_euclid(256) - dx0.div_euclid(256) + 1)
         * ((dy1 - 1).div_euclid(256) - dy0.div_euclid(256) + 1);
     if tiles > MAX_SELECTION_TILES as i64 {
@@ -492,7 +492,14 @@ impl Engine {
             }
             // An unlinked mask is placed in document coordinates, outside the node chain.
             if !node.props.mask_linked && node.props.mask.is_some() {
-                patch.mask_transform = Some(map.concat(node.props.mask_transform));
+                let moved = map.concat(node.props.mask_transform);
+                if FixedAffine::from_affine(moved).is_none() {
+                    return Err(err(
+                        "RESOURCE_LIMIT",
+                        "a mask transform would be out of range",
+                    ));
+                }
+                patch.mask_transform = Some(moved);
             }
             if let CanvasEdit::Resize { .. } = edit {
                 patch.effects = scale_effects(&node.props.effects, map.0[0], map.0[3])?;
