@@ -6,7 +6,8 @@ use std::path::Path;
 const USAGE: &str = "alto-git — Alto の版管理を Git へ写すツール
 
 使い方:
-  alto-git sync <folder.altoproj> [--branch <name>]   Alto のコミットを git コミットへ写す
+  alto-git sync <folder.altoproj> [--branch <name>] [--ref-prefix <name>]
+                                                       Alto の履歴とブランチ・タグを git へ写す
   alto-git log <package>                               Alto のコミット履歴と変更をレイヤー単位で表示
   alto-git diff <a> <b>                                2つの版をレイヤー単位で比較
   alto-git diff <folder.altoproj>                      作業中の文書と最新コミットを比較
@@ -26,22 +27,35 @@ fn run(args: &[String]) -> alto_git::Result<String> {
     };
     match args.first().map(String::as_str) {
         Some("sync") => {
-            let branch = args
-                .iter()
-                .position(|a| a == "--branch")
-                .and_then(|i| args.get(i + 1))
-                .map(String::as_str);
-            let r = alto_git::sync(Path::new(arg(1)?), branch)?;
-            if r.created.is_empty() {
-                return Ok(format!("{} は最新です\n", r.branch));
-            }
-            let mut s = format!(
-                "{} に {} 件のコミットを作成しました\n",
-                r.branch,
-                r.created.len()
-            );
+            let option = |name: &str| {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .map(String::as_str)
+            };
+            let r = alto_git::sync_with(
+                Path::new(arg(1)?),
+                alto_git::SyncOptions {
+                    branch: option("--branch"),
+                    ref_prefix: option("--ref-prefix"),
+                },
+            )?;
+            let mut s = if r.created.is_empty() && r.refs.is_empty() {
+                format!("{} は最新です\n", r.branch)
+            } else {
+                format!("{} 件のコミットを作成しました\n", r.created.len())
+            };
             for (h, m) in r.created {
                 s += &format!("  {}  {m}\n", &h.hex()[..10]);
+            }
+            for u in r.refs {
+                match u.commit {
+                    Some(c) => s += &format!("  {} -> {}\n", u.git_ref, &c[..10]),
+                    None => s += &format!("  {} を削除\n", u.git_ref),
+                }
+            }
+            for w in r.warnings {
+                s += &format!("警告: {w}\n");
             }
             Ok(s)
         }

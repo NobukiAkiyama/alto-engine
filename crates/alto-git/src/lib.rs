@@ -9,10 +9,12 @@ use alto_doc::{Commit, DiffItem, Document, NodeKind, version::ContentDetail};
 use alto_store::{Package, folder};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    path::Path,
+    process::Command,
 };
+
+mod mirror;
+pub use mirror::{RefUpdate, SyncOptions, SyncReport, sync, sync_with};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -32,7 +34,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
-fn git_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -113,32 +115,38 @@ impl Opened {
         let snap = alto_store::snapshot_path(&m.snapshot);
         entries.insert(snap.clone(), show(&snap)?);
         // History: commits and their snapshots; objects are not needed for diffs.
-        let mut next = m.head;
-        while let Some(h) = next {
+        let mut stack: Vec<ContentHash> = m.head.into_iter().collect();
+        while let Some(h) = stack.pop() {
             let path = alto_store::commit_path(&h);
-            let Ok(bytes) = show(&path) else { break };
-            let c = Commit::parse(&bytes)?;
+            if entries.contains_key(&path) {
+                continue;
+            }
+            let Ok(bytes) = show(&path) else { continue };
+            let (c, _) = Commit::parse_history(&bytes)?;
             if let Ok(s) = show(&alto_store::snapshot_path(&c.snapshot)) {
                 entries.insert(alto_store::snapshot_path(&c.snapshot), s);
             }
             entries.insert(path, bytes);
-            next = c.parents.first().copied();
+            stack.extend(c.parents.iter().copied());
         }
         Self::from_entries(entries)
     }
-    /// First-parent chain from the head, oldest first.
-    pub fn chain(&self) -> Vec<ContentHash> {
+    /// Every commit reachable from the head through all parents, parents first.
+    pub fn history(&self) -> Vec<ContentHash> {
         let mut out = vec![];
-        let mut next = self.package.head;
-        while let Some(h) = next {
-            if out.contains(&h) {
-                break;
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<(ContentHash, bool)> =
+            self.package.head.into_iter().map(|h| (h, false)).collect();
+        while let Some((h, expanded)) = stack.pop() {
+            if expanded {
+                out.push(h);
+            } else if seen.insert(h)
+                && let Some(c) = self.commits.get(&h)
+            {
+                stack.push((h, true));
+                stack.extend(c.parents.iter().rev().map(|p| (*p, false)));
             }
-            let Some(c) = self.commits.get(&h) else { break };
-            out.push(h);
-            next = c.parents.first().copied();
         }
-        out.reverse();
         out
     }
     pub fn snapshot_doc(&self, snapshot: &ContentHash) -> Result<Document> {
@@ -158,7 +166,7 @@ impl Opened {
 fn tail(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
 }
-fn short(h: &ContentHash) -> String {
+pub(crate) fn short(h: &ContentHash) -> String {
     h.hex()[..10].to_string()
 }
 fn node_label(doc: &Document, id: &alto_core::NodeId) -> String {
@@ -278,7 +286,7 @@ fn describe(detail: &ContentDetail) -> String {
     }
 }
 
-fn intent_lines(doc: &Document, c: &Commit) -> Vec<String> {
+pub(crate) fn intent_lines(doc: &Document, c: &Commit) -> Vec<String> {
     c.intents
         .iter()
         .map(|i| {
@@ -323,8 +331,8 @@ pub fn empty_like(doc: &Document) -> Document {
 /// `alto-git log`: Alto commits with their intents and per-layer changes.
 pub fn log_text(p: &Opened) -> Result<String> {
     let mut s = String::new();
-    let chain = p.chain();
-    for (i, h) in chain.iter().enumerate().rev() {
+    let history = p.history();
+    for h in history.iter().rev() {
         let c = &p.commits[h];
         let doc = p.snapshot_doc(&c.snapshot)?;
         s += &format!(
@@ -332,23 +340,25 @@ pub fn log_text(p: &Opened) -> Result<String> {
             short(h),
             c.message.lines().next().unwrap_or("")
         );
+        if let [ours, theirs] = c.parents.as_slice() {
+            s += &format!("マージ {} {}\n", short(ours), short(theirs));
+        }
         if let Some(a) = &c.author {
             s += &format!("作成者 {a}\n");
         }
         for l in intent_lines(&doc, c) {
             s += &format!("  {l}\n");
         }
-        let parent = if i == 0 {
-            empty_like(&doc)
-        } else {
-            p.snapshot_doc(&p.commits[&chain[i - 1]].snapshot)?
+        let parent = match c.parents.first().and_then(|ph| p.commits.get(ph)) {
+            Some(pc) => p.snapshot_doc(&pc.snapshot)?,
+            None => empty_like(&doc),
         };
         for l in render_diff(&parent, &doc, &alto_doc::diff(&parent, &doc)) {
             s += &format!("    {l}\n");
         }
         s.push('\n');
     }
-    if chain.is_empty() {
+    if history.is_empty() {
         s += "コミットはまだありません\n";
     }
     Ok(s)
@@ -435,7 +445,7 @@ pub fn textconv(snapshot: &[u8]) -> Result<String> {
 }
 
 /// Object hashes referenced by a snapshot (any 64-hex value naming an existing object).
-fn referenced(snapshot: &[u8], available: &BTreeSet<String>) -> BTreeSet<String> {
+pub(crate) fn referenced(snapshot: &[u8], available: &BTreeSet<String>) -> BTreeSet<String> {
     fn walk(v: &serde_json::Value, out: &mut BTreeSet<String>) {
         match v {
             serde_json::Value::String(s)
@@ -458,316 +468,6 @@ fn referenced(snapshot: &[u8], available: &BTreeSet<String>) -> BTreeSet<String>
         .map(|h| alto_store::object_path(&h))
         .filter(|p| available.contains(p))
         .collect()
-}
-
-fn path_token(label: &str, value: &str) -> Result<()> {
-    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(format!("{label} must not contain whitespace"));
-    }
-    Ok(())
-}
-fn reject_damaged_commits(entries: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    for (name, bytes) in entries {
-        if let Some(rest) = name.strip_prefix("commits/")
-            && let Some(stem) = rest.strip_suffix(".json")
-            && !stem.contains('/')
-            && let Err(e) = Commit::parse_history(bytes)
-        {
-            return Err(format!("damaged commit {name}: {e}"));
-        }
-    }
-    Ok(())
-}
-
-/// A name that can sit in `author {name} <email>` without becoming another field.
-fn git_person(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .filter(|c| *c != '<' && *c != '>' && !c.is_control())
-        .collect();
-    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
-        "Alto".into()
-    } else {
-        cleaned
-    }
-}
-fn identity(label: &str, value: &str, email: bool) -> Result<()> {
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|c| c.is_control() || c == '<' || c == '>')
-        || (email && value.contains(' '))
-    {
-        return Err(format!("{label} must be a single line"));
-    }
-    Ok(())
-}
-
-/// A branch name that can be placed after `refs/heads/` without becoming another command.
-fn check_branch_name(name: &str) -> Result<()> {
-    let component =
-        |part: &str| part.is_empty() || part.starts_with('.') || part.ends_with(".lock");
-    if name.is_empty()
-        || name == "@"
-        || name.starts_with('/')
-        || name.ends_with('/')
-        || name.ends_with('.')
-        || name.contains("//")
-        || name.contains("..")
-        || name.contains("@{")
-        || name.split('/').any(component)
-        || name.chars().any(|c| {
-            c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\u{7f}')
-        })
-    {
-        return Err(format!("branch name is not a single git ref: {name}"));
-    }
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct SyncReport {
-    pub created: Vec<(ContentHash, String)>,
-    pub branch: String,
-}
-
-/// Git Adapter: mirrors Alto commits that are not yet on the branch, oldest first.
-/// Each Git commit's tree is the folder as it was at that Alto commit; objects are
-/// only ever added, so later commits reuse earlier blobs.
-pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
-    if let Some(name) = branch {
-        check_branch_name(name)?;
-    }
-    let p = Opened::from_entries(folder::read(folder_dir).map_err(|e| e.to_string())?)?;
-    reject_damaged_commits(&p.entries)?;
-    let chain: BTreeSet<_> = p.chain().into_iter().collect();
-    if p.commits.values().any(|c| c.parents.len() > 1)
-        || p.package.refs.branches.len() > 1
-        || p.package.refs.roots().any(|h| !chain.contains(&h))
-    {
-        return Err(
-            "UNSUPPORTED: Git branch/merge mirroring is a separate implementation phase".into(),
-        );
-    }
-    // A commit that does not parse is not imported. Angle brackets in a stored
-    // author are a warning, and the fast-import line uses `git_person`.
-    let prefix = git(folder_dir, &["rev-parse", "--show-prefix"])?
-        .trim()
-        .to_string();
-    let root = PathBuf::from(git(folder_dir, &["rev-parse", "--show-toplevel"])?.trim());
-    let current = git(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
-    let branch = branch
-        .map(str::to_string)
-        .or_else(|| current.as_ref().map(|s| s.trim().to_string()))
-        .unwrap_or_else(|| "main".into());
-    check_branch_name(&branch)?;
-    let reference = format!("refs/heads/{branch}");
-    let tip = git(&root, &["rev-parse", "--verify", "--quiet", &reference])
-        .ok()
-        .map(|s| s.trim().to_string());
-    let mirrored: BTreeSet<String> = match &tip {
-        Some(t) => git(
-            &root,
-            &["log", "--format=%(trailers:key=Alto-Commit,valueonly)", t],
-        )?
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect(),
-        None => BTreeSet::new(),
-    };
-    let todo: Vec<ContentHash> = p
-        .chain()
-        .into_iter()
-        .filter(|h| !mirrored.contains(&h.hex()))
-        .collect();
-    if todo.is_empty() {
-        return Ok(SyncReport {
-            created: vec![],
-            branch,
-        });
-    }
-    let mut present: BTreeSet<String> = match &tip {
-        Some(t) => git(&root, &["ls-tree", "-r", "--name-only", t, "--", &prefix])?
-            .lines()
-            .filter_map(|l| l.strip_prefix(&prefix).map(str::to_string))
-            .collect(),
-        None => BTreeSet::new(),
-    };
-    let available: BTreeSet<String> = p
-        .entries
-        .keys()
-        .filter(|k| k.starts_with("objects/"))
-        .cloned()
-        .collect();
-    path_token("path", &prefix)?;
-    let name = git(&root, &["config", "user.name"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "Alto".into());
-    let email = git(&root, &["config", "user.email"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "alto@localhost".into());
-    identity("committer", &name, false)?;
-    identity("email", &email, true)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let mut stream: Vec<u8> = vec![];
-    let mut created = vec![];
-    let file = |stream: &mut Vec<u8>, path: &str, data: &[u8]| {
-        let _ = write!(
-            stream,
-            "M 100644 inline {prefix}{path}\ndata {}\n",
-            data.len()
-        );
-        stream.extend_from_slice(data);
-        stream.push(b'\n');
-    };
-    for (n, h) in todo.iter().enumerate() {
-        let c = &p.commits[h];
-        let snap_bytes = if c.snapshot == ContentHash::of(&p.package.snapshot) {
-            p.package.snapshot.clone()
-        } else {
-            p.package
-                .snapshots
-                .get(&c.snapshot)
-                .cloned()
-                .ok_or_else(|| format!("commit {} の snapshot がフォルダにありません", short(h)))?
-        };
-        let doc = Document::from_snapshot_bytes(&snap_bytes).map_err(|e| e.to_string())?;
-        let mut message = c.message.trim().to_string();
-        if message.is_empty() {
-            message = "（メッセージなし）".into();
-        }
-        let intents = intent_lines(&doc, c);
-        if !intents.is_empty() {
-            message += &format!("\n\n{}", intents.join("\n"));
-        }
-        let parent_doc = match c.parents.first() {
-            None => Some(empty_like(&doc)),
-            Some(ph) => p
-                .commits
-                .get(ph)
-                .and_then(|pc| p.snapshot_doc(&pc.snapshot).ok()),
-        };
-        if let Some(parent) = parent_doc {
-            let lines = render_diff(&parent, &doc, &alto_doc::diff(&parent, &doc));
-            if !lines.is_empty() {
-                message += &format!(
-                    "\n\n{}",
-                    lines.into_iter().take(200).collect::<Vec<_>>().join("\n")
-                );
-            }
-        }
-        message += &format!("\n\nAlto-Commit: {h}\nAlto-Snapshot: {}\n", c.snapshot);
-        let who = git_person(&c.author.clone().unwrap_or_else(|| name.clone()));
-        identity("author", &who, false)?;
-        let _ = write!(stream, "commit {reference}\nmark :{}\n", n + 1);
-        let _ = writeln!(
-            stream,
-            "author {who} <{email}> {} +0000",
-            c.created_at.div_euclid(1000)
-        );
-        let _ = writeln!(stream, "committer {name} <{email}> {now} +0000");
-        let _ = write!(stream, "data {}\n{message}\n", message.len());
-        if n == 0
-            && let Some(t) = &tip
-        {
-            let _ = writeln!(stream, "from {t}");
-        }
-        let mut files: Vec<(String, Vec<u8>)> = vec![];
-        for o in referenced(&snap_bytes, &available) {
-            if !present.contains(&o) {
-                files.push((o.clone(), p.entries[&o].clone()));
-            }
-        }
-        let mut needed = BTreeSet::new();
-        for n in doc.nodes.values() {
-            if let NodeKind::Raster { tiles, .. } = &n.kind {
-                needed.extend(tiles.tiles.values().copied());
-            }
-            if let Some(m) = &n.props.mask {
-                needed.extend(m.tiles.values().copied());
-            }
-        }
-        needed.extend(doc.assets.values().map(|a| a.hash));
-        if let Some(missing) = needed
-            .iter()
-            .map(alto_store::object_path)
-            .find(|o| !available.contains(o))
-        {
-            return Err(format!(
-                "commit {} のデータがフォルダにありません: {missing}",
-                short(h)
-            ));
-        }
-        files.push((alto_store::snapshot_path(&c.snapshot), snap_bytes.clone()));
-        files.push((alto_store::commit_path(h), p.package.commits[h].clone()));
-        files.push((
-            "manifest.json".into(),
-            if Some(*h) == p.package.head {
-                alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), p.package.refs.clone())
-            } else {
-                alto_store::manifest_bytes(c.snapshot, Some(*h))
-            },
-        ));
-        files.push(("document.json".into(), snap_bytes.clone()));
-        files.push((
-            ".gitattributes".into(),
-            alto_store::GITATTRIBUTES.as_bytes().to_vec(),
-        ));
-        files.push((
-            ".gitignore".into(),
-            b".alto.lock\n.alto-gc.json\n.*.tmp\n".to_vec(),
-        ));
-        for (path, data) in files {
-            if alto_store::is_immutable(&path) && present.contains(&path) {
-                continue;
-            }
-            path_token("path", &path)?;
-            if alto_store::is_immutable(&path) && !alto_store::bytes_match_name(&path, &data) {
-                return Err(format!("content does not match {path}"));
-            }
-            file(&mut stream, &path, &data);
-            present.insert(path);
-        }
-        stream.push(b'\n');
-        created.push((*h, c.message.lines().next().unwrap_or("").to_string()));
-    }
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["fast-import", "--quiet", "--done"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    stream.extend_from_slice(b"done\n");
-    child
-        .stdin
-        .take()
-        .ok_or("git fast-import stdin")?
-        .write_all(&stream)
-        .map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "git fast-import: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    // The checked-out branch moved under the index: re-read only the package folder.
-    if current.as_deref().map(str::trim) == Some(branch.as_str()) {
-        let path = if prefix.is_empty() {
-            "."
-        } else {
-            prefix.as_str()
-        };
-        git(&root, &["reset", "-q", "--", path])?;
-    }
-    Ok(SyncReport { created, branch })
 }
 
 /// Registers the textconv diff driver used by `.gitattributes` (`document.json diff=alto`).

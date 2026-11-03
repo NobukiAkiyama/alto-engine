@@ -1,7 +1,7 @@
 # 版管理の拡張と最低限の画像編集
 
 作成日：2026-11-03／設計改訂：2026-11-03
-状態：Phase A〜Cを実装。Phase Dは後続。検証範囲と制約は[実装検証記録](../verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照。
+状態：Phase A〜Dを実装。検証範囲と制約は[実装検証記録](../verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照。
 
 ## 1. 前提と決定事項
 
@@ -542,9 +542,48 @@ Playground は「保存」「版を記録」「過去版の内容を復元」「
 切替時の未コミット拒否と Undo クリアを事前表示する。merge は競合一覧と全解決後の
 確定操作を持つ。GC は dry-run 結果と明示的な実行を分ける。
 
-`alto-git` は後続 Phase D。二親を同じ順序の Git parents へ、ブランチを Git refs へ
-写像する。既存対応表・expected ref を検証し、予期しない Git ref は上書きしない。
-Git import/rebase/cherry-pick は含めない。Phase A〜C の完了条件に混ぜない。
+`alto-git` の写像は第 8.1 節（Phase D）。Git import/rebase/cherry-pick は含めない。
+
+### 8.1 Git Adapter の写像（Phase D）
+
+`alto-git sync <folder> [--branch <name>] [--ref-prefix <name>]` は、ブランチ・タグ・pin・
+head から到達する全コミットを親から順に一つずつ Git コミットへ写す。
+
+| Alto | Git |
+|---|---|
+| コミット | 1 コミット。parents は同じ順序。ルートの親は初回同期時の対象ブランチ先端（無ければなし） |
+| 最初に対応付けるブランチ（現在ブランチ、無ければ `main`、無ければ名前順の先頭） | `--branch` または checkout 中のブランチ（無ければ `main`） |
+| その他のブランチ `x` | `refs/heads/<prefix>/x`（`prefix` の既定は `alto`） |
+| タグ `x` | `refs/tags/<prefix>/x`（軽量タグ） |
+| pin、detached の head | `refs/alto/<文書ID>/keep/<Altoコミット>` |
+| 対応表 | `refs/alto/<文書ID>/state` が指す blob（JSON、`format: 1`） |
+
+文書 ID は root NodeId。対応表は Alto コミット→Git コミット、各 ref の最後の値、基点、
+フォルダの位置を持つ。一度決めたブランチ先と prefix は固定で、別の指定は `CONFLICT`。
+
+同期は読み取りだけの検証→import→ref の一括更新の順に進む。
+
+1. 対応表の全コミットについて、`Alto-Commit` トレーラ、parents の順序、ツリー内の
+   コミットファイルの内容ハッシュを確認する。不一致は `CONFLICT`、未知の形式は
+   `UNSUPPORTED`。対応表が無いのに同じ版が既に Git にあれば、再 import せず `CONFLICT`。
+2. 各 ref が記録値のままか確認する。手動のコミット・移動・削除はすべて `CONFLICT` で、
+   上書きも先端への積み増しもしない。未対応の ref が既にあれば同じく拒否する（初回の
+   対象ブランチだけは基点として受け入れる）。Alto 側のブランチが記録値の子孫でない場合も
+   `CONFLICT`。Git ref を巻き戻さない。
+3. 他の文書が使う ref、大文字小文字だけが異なる ref は拒否する。
+4. `git fast-import` は `refs/alto/<文書ID>/staging` にだけ書く。その後
+   `git update-ref --stdin` で全 ref を期待値付きで一括更新し、staging を消して対応表を
+   置き換える。途中で失敗しても公開 ref と対応表は元のまま。再実行で同じ結果になる。
+
+各 Git コミットのツリーはその Alto コミットの祖先だけを含む。マージは第一親のツリーに
+第二親側の履歴を足す。これにより任意の Git リビジョンのフォルダが単体で有効な
+パッケージになる。manifest はブランチ先端と head ならその祖先内の参照だけを持ち、それ
+以外は detached で開く。未統合ブランチがある間、作業フォルダのその分のファイルは
+checkout 中の Git ブランチから見て未追跡になり、manifest も差分になる。これは
+作業フォルダが全ブランチを持つことの結果で、同期は作業フォルダを変更しない。
+
+Alto で削除したブランチ・タグの ref は、記録値のままで同期が作ったものだけ削除する。
+初回より前からあった Git ブランチと、外部で動いた ref は残し、警告を返す。
 
 ## 9. 実装順序と検証ゲート
 
@@ -571,7 +610,7 @@ Git import/rebase/cherry-pick は含めない。Phase A〜C の完了条件に�
 
 ### Phase D：Git Adapter
 
-参照と二親出力の対応、Git ref 競合、再 sync の冪等性を独立検証する。
+参照と二親出力の対応、Git ref 競合、再 sync の冪等性を独立検証する（第 8.1 節、`crates/alto-git/tests/git.rs`）。
 
 各段階で `cargo test --workspace --locked -- --test-threads=1`、SDK API check、Node tests、該当する
 ブラウザ機能試験を通す。WASM export 変更時は両配布 pkg を再生成し、SDK と
