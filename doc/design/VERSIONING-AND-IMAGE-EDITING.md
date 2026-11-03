@@ -450,11 +450,16 @@ bytes 一致が確認できた操作だけ。GPU readback 後に hash を確定�
 幾何操作は transform/opacity/effect 自体を焼き込まず、画素だけを確定変換する。
 crop は残した画素の文書上の位置を変えない。キャンバス bounds も変更しない。
 
-resize は nearest と bilinear を初期対象とし、bilinear が既定。v3 の整数 sampler
-の座標量子化・丸めを CPU と共有する。premultiplied で補間し、出力は既存の
+resize の filter は nearest、bilinear（既定）、catmull_rom、area。未対応は `UNSUPPORTED`。
+v3 の整数 sampler の座標量子化・丸めを CPU と共有する。premultiplied で補間し、出力は既存の
 straight RGBA8 へ戻す。端は旧 bounds 内の最端画素へ clamp。alpha=0 の RGB は 0。
-Catmull-Rom と縮小用の面積フィルタは後続。初期 bilinear は大幅縮小で alias が
-出ることを API 文書に明記し、未対応 filter は `UNSUPPORTED`。
+
+- catmull_rom：Q8 の小数位置から得る整数重み（軸ごとの和 `2 * 256^3`）の 4×4 畳み込み。
+  overshoot は alpha を 0〜1 に、色を 0〜alpha に clamp する。
+- area：新しい画素の下にある元画素の面積を厳密な有理数の重みで平均する。大幅縮小の alias を
+  避ける。bilinear の大幅縮小は alias が出る。
+
+どちらも浮動小数を使わないので、環境に依存しない。GPU を通らず画素基準には関わらない。
 
 幾何操作は文書の選択範囲を使わず画像全体へ適用する。既存の選択は文書座標の
 まま保持する。マスクは次のように扱う。
@@ -577,8 +582,20 @@ gradient、image、text、ネストした svg、%/em 等の単位、未知要素
 入力 UTF-8 は最大4 MiB、要素は最大10000、XML深さは最大64。さらに既存 M6 の
 ノード/path/命令/座標/線幅/ツリー深さ上限を変換後に適用し、厳しい方を採る。
 
-vector のラスタライズは自動で行わない。現行 rasterize の範囲を勝手に拡大せず、
-必要になった段階で vector/group の描画、bounds、readback を別設計・別試験にする。
+vector のラスタライズは `image.rasterize` の明示操作だけで行う（第 7.1 節）。
+
+### 7.1 ベクターからの画素確定
+
+| 項目 | 定義 |
+|---|---|
+| 対象 | Vector ノード、および第 6.8 節の条件を満たすラスターとベクターのグループ |
+| 計算 | renderer が v3 で使う CPU 整数コード（`vector_pixels_q14`：map_path、rasterize、rasterize_stroke、source_over_q14）。GPU を読み戻さない |
+| 解像度・変形 | ノードのローカル画素に 1:1。world が整数平行移動のときだけ受け付け、それ以外は `UNSUPPORTED`。拡縮や回転の下で確定すると見た目が変わるため |
+| 範囲 | 全パスの制御点と線幅（miter 分を含む）を覆う bounds。キャンバス外の形も失わない |
+| 透明度・合成・マスク・効果 | 単体の Vector では焼き込まず同じノードの属性として残す。意味は同じ。グループの子は第 6.8 節のとおり拒否 |
+| 出力 | premultiplied Q14 から straight RGBA8。不透明部は一致。半透明部は量子化を一度余分に通るため ±1 の差があり得る |
+| メモリ | タイル数 × 256 KiB が `EDIT_BUDGET` を超えると `RESOURCE_LIMIT` |
+| 座標範囲外 | 表示は透明で終わるが、形を失わないよう `UNSUPPORTED` |
 
 ## 8. SDK、UI、Git の境界
 

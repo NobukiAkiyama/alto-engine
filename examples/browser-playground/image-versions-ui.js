@@ -16,7 +16,7 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
       <label>幅<input id="image-width" type="number" min="1" max="65536" step="1" value="256"></label>
       <label>高さ<input id="image-height" type="number" min="1" max="65536" step="1" value="256"></label>
       <button id="image-crop">指定範囲で切り抜く</button>
-      <label>拡縮の補間<select id="image-filter"><option value="bilinear">なめらか</option><option value="nearest">最近傍（ドットを維持）</option></select></label>
+      <label>拡縮の補間<select id="image-filter"><option value="bilinear">なめらか</option><option value="catmull_rom">シャープ（Catmull-Rom）</option><option value="area">大幅な縮小（面積平均）</option><option value="nearest">最近傍（ドットを維持）</option></select></label>
       <button id="image-resize">指定サイズへ拡縮</button>
       <div class="tools"><button id="image-rotate">右へ90度回転</button><button id="image-flip-h">左右反転</button><button id="image-flip-v">上下反転</button></div>
       <label>始点・塗り始め X<input id="image-start-x" type="number" value="0"></label>
@@ -41,7 +41,7 @@ export function installImageVersions({ engine, getDocument, getSelected, select,
       <button id="image-histogram">ヒストグラムを表示</button>
       <p id="image-histogram-result" class="meta" aria-live="polite"></p>
       <p class="meta">結合とラスタライズは、見た目を保てない構造（マスク・効果・合成モードなど）では何も変更しません。</p>
-      <button id="image-merge-down">下のレイヤーと結合</button><button id="layer-rasterize">位置を画素へ確定 / グループを1枚に</button>
+      <button id="image-merge-down">下のレイヤーと結合</button><button id="layer-rasterize">画像へ変換（ベクター・グループ・位置）</button>
     </fieldset>
     <fieldset><legend>キャンバス全体</legend>
       <p class="meta">全レイヤーと選択範囲が一緒に動きます。レイヤーの画素は書き換えません。</p>

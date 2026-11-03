@@ -3,11 +3,12 @@
 //! A canvas edit moves the root node's transform and resizes the canvas, so every
 //! raster, mask, vector and text follows without touching a pixel and one Undo restores
 //! it. Only what is stored in document coordinates has to be rewritten.
-use crate::image::{EDIT_BUDGET, FlipAxis, err, over, read};
+use crate::image::{EDIT_BUDGET, FlipAxis, err, over, read, world};
 use crate::{DocHandle, Engine, EngineError};
-use alto_core::{Affine2, NodeId, PixelFormat, TILE, TileKey};
+use alto_core::{Affine2, FixedAffine, NodeId, PixelFormat, TILE, TileKey};
 use alto_doc::{Effect, ImageBounds, Isolation, Node, NodeKind, Op, PropPatch};
 use alto_raster::{TileData, TileMap};
+use alto_vector::{PathCommand, StyledPath};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -111,10 +112,7 @@ fn whole_translation(m: Affine2) -> Option<(i32, i32)> {
 }
 
 /// Nothing that would be lost or change meaning when the pixels are baked into one layer.
-fn plain_raster(node: &Node) -> Result<(ImageBounds, TileMap), EngineError> {
-    let NodeKind::Raster { bounds, tiles } = &node.kind else {
-        return Err(unsupported("only raster layers can be baked"));
-    };
+fn plain_props(node: &Node) -> Result<(), EngineError> {
     let p = &node.props;
     if p.mask.is_some() || p.vector_mask.is_some() || p.clip_path.is_some() {
         return Err(unsupported("bake does not apply masks or clipping paths"));
@@ -131,7 +129,122 @@ fn plain_raster(node: &Node) -> Result<(ImageBounds, TileMap), EngineError> {
     if p.blend != alto_doc::BlendMode::Normal {
         return Err(unsupported("bake supports the Normal blend mode"));
     }
+    Ok(())
+}
+fn plain_raster(node: &Node) -> Result<(ImageBounds, TileMap), EngineError> {
+    let NodeKind::Raster { bounds, tiles } = &node.kind else {
+        return Err(unsupported("only raster and vector layers can be baked"));
+    };
+    plain_props(node)?;
     Ok((*bounds, tiles.clone()))
+}
+
+/// Premultiplied Q14 pixels of vector paths in a world-pixel window `[x, y, w, h]`.
+/// The renderer's v3 CPU reference, supplied by the caller because this crate has no GPU.
+pub type VectorRasterizer<'a> =
+    &'a dyn Fn(&[StyledPath], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>;
+
+/// The pixels a vector can touch, in node-local coordinates. Generous by design: the
+/// result's image range only has to contain them.
+fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for path in paths {
+        let margin = path.stroke.as_ref().map_or(1.0, |s| {
+            f64::from(s.width) * 0.5 * f64::from(s.miter_limit).max(1.5) + 1.0
+        });
+        let mut add = |x: f64, y: f64| {
+            x0 = x0.min(x - margin);
+            y0 = y0.min(y - margin);
+            x1 = x1.max(x + margin);
+            y1 = y1.max(y + margin);
+        };
+        for command in &path.data.commands {
+            match *command {
+                PathCommand::Move { x, y } | PathCommand::Line { x, y } => add(x, y),
+                PathCommand::Quad { cx, cy, x, y } => {
+                    add(cx, cy);
+                    add(x, y);
+                }
+                PathCommand::Cubic {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    add(c1x, c1y);
+                    add(c2x, c2y);
+                    add(x, y);
+                }
+                PathCommand::Close => {}
+            }
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return Err(err("INVALID_ARGUMENT", "the vector layer is empty"));
+    }
+    let (left, top) = (x0.floor(), y0.floor());
+    let bounds = ImageBounds {
+        x: left as i32,
+        y: top as i32,
+        width: (x1.ceil() - left) as u32,
+        height: (y1.ceil() - top) as u32,
+    };
+    bounds
+        .validate()
+        .map_err(|e| err("RESOURCE_LIMIT", &e.to_string()))?;
+    Ok(bounds)
+}
+
+/// Straight RGBA8 tiles of a vector, on the node's local pixel grid.
+fn vector_tiles(
+    paths: &[StyledPath],
+    bounds: ImageBounds,
+    matrix: FixedAffine,
+    offset: (i32, i32),
+    rasterizer: VectorRasterizer,
+) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
+    let (tx0, ty0) = (bounds.x.div_euclid(T), bounds.y.div_euclid(T));
+    let (tx1, ty1) = (
+        (bounds.right() - 1).div_euclid(T),
+        (bounds.bottom() - 1).div_euclid(T),
+    );
+    budget(((tx1 - tx0 + 1) as usize).saturating_mul((ty1 - ty0 + 1) as usize))?;
+    let mut out = BTreeMap::new();
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            let window = [
+                i64::from(tx * T) + i64::from(offset.0),
+                i64::from(ty * T) + i64::from(offset.1),
+                i64::from(T),
+                i64::from(T),
+            ];
+            let pixels = rasterizer(paths, matrix, window).map_err(|e| unsupported(&e))?;
+            if pixels.iter().all(|p| p[3] == 0) {
+                continue;
+            }
+            let mut tile = vec![0u8; 262144];
+            for (i, p) in pixels.iter().enumerate() {
+                let a = u32::from(p[3]);
+                if a == 0 {
+                    continue;
+                }
+                let x = tx * T + (i % 256) as i32;
+                let y = ty * T + (i / 256) as i32;
+                if !bounds.contains(x, y) {
+                    continue;
+                }
+                let j = i * 4;
+                for c in 0..3 {
+                    tile[j + c] = ((u32::from(p[c]) * 255 + a / 2) / a).min(255) as u8;
+                }
+                tile[j + 3] = ((a * 255 + 8192) / 16384) as u8;
+            }
+            out.insert(TileKey { tx, ty }, tile);
+        }
+    }
+    Ok(out)
 }
 
 fn unlocked(engine: &Engine, h: DocHandle, id: NodeId) -> Result<(), EngineError> {
@@ -555,11 +668,12 @@ impl Engine {
         &mut self,
         h: DocHandle,
         edit: LayerEdit,
+        rasterizer: VectorRasterizer,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         let stage = self.begin_tile_stage();
         let result = match edit {
             LayerEdit::MergeDown { node } => self.prepare_merge_down(h, node, stage),
-            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage),
+            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizer),
         };
         if result.is_err() {
             self.release_staged_tiles(stage);
@@ -639,11 +753,33 @@ impl Engine {
         })
     }
 
+    /// The fixed-point world of a node that sits on the document's pixel grid. Anywhere
+    /// else, a local-grid raster would look different from the vector it replaces.
+    fn pixel_aligned_world(
+        &self,
+        h: DocHandle,
+        id: NodeId,
+    ) -> Result<(FixedAffine, (i32, i32)), EngineError> {
+        let doc = self.document(h)?;
+        let mut m = Affine2::default();
+        let mut next = Some(id);
+        while let Some(n) = next {
+            let node = doc.node(n)?;
+            m = node.props.transform.concat(m);
+            next = node.parent;
+        }
+        let offset = whole_translation(m).ok_or_else(|| {
+            unsupported("a vector can be rasterized only at a whole-pixel position at scale 1")
+        })?;
+        Ok((world(self, h, id)?, offset))
+    }
+
     fn prepare_rasterize(
         &mut self,
         h: DocHandle,
         id: NodeId,
         stage: u64,
+        rasterizer: VectorRasterizer,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         unlocked(self, h, id)?;
         let doc = self.document(h)?;
@@ -652,6 +788,25 @@ impl Engine {
             return Err(err("INVALID_ARGUMENT", "the root cannot be rasterized"));
         }
         match &node.kind {
+            NodeKind::Vector { paths } => {
+                // Only the content changes kind. Opacity, blend, masks, effects and the
+                // transform stay on the node and mean the same on the new pixels.
+                let (matrix, offset) = self.pixel_aligned_world(h, id)?;
+                let bounds = vector_extent(paths)?;
+                let out = vector_tiles(paths, bounds, matrix, offset, rasterizer)?;
+                let tiles = stage_map(self, stage, out)?;
+                let mut next = node.clone();
+                next.kind = NodeKind::Raster { bounds, tiles };
+                Ok(PreparedOps {
+                    stage,
+                    ops: vec![Op::ReplaceNode { id, node: next }],
+                    result: LayerEditResult {
+                        node: id,
+                        bounds,
+                        no_op: false,
+                    },
+                })
+            }
             NodeKind::Raster { bounds, tiles } => {
                 let p = &node.props;
                 if p.mask.is_some() || p.vector_mask.is_some() || p.clip_path.is_some() {
@@ -711,13 +866,23 @@ impl Engine {
                 let mut layers = vec![];
                 let mut bounds: Option<ImageBounds> = None;
                 for child in children {
-                    let child = doc.node(*child)?;
+                    let child = self.document(h)?.node(*child)?.clone();
+                    let child = &child;
                     if child.props.locked {
                         return Err(err("INVALID_ARGUMENT", "a child layer is locked"));
                     }
-                    let (b, tiles) = plain_raster(child)?;
                     let (dx, dy) = whole_translation(child.props.transform)
                         .ok_or_else(|| unsupported("a child is not at a whole-pixel offset"))?;
+                    let (b, tiles) = match &child.kind {
+                        NodeKind::Vector { paths } => {
+                            plain_props(child)?;
+                            let (matrix, offset) = self.pixel_aligned_world(h, child.id)?;
+                            let b = vector_extent(paths)?;
+                            let out = vector_tiles(paths, b, matrix, offset, rasterizer)?;
+                            (b, stage_map(self, stage, out)?)
+                        }
+                        _ => plain_raster(child)?,
+                    };
                     let moved = shifted(b, dx, dy)?;
                     bounds = Some(match bounds {
                         Some(a) => a
@@ -923,7 +1088,7 @@ mod tests {
         edit: LayerEdit,
     ) -> Result<LayerEditResult, EngineError> {
         let intent = edit.intent();
-        let p = e.prepare_layer_edit(h, edit)?;
+        let p = e.prepare_layer_edit(h, edit, &|_, _, _| Err("no rasterizer".into()))?;
         let revision = e.document(h).unwrap().revision;
         if !p.ops.is_empty() {
             e.transact(h, intent, p.ops, revision).unwrap();
@@ -1288,10 +1453,11 @@ mod tests {
             revision,
         )
         .unwrap();
+        // An empty vector is not converted, and a group holding one is refused whole.
         let refused = layer_edit(&mut e, h, LayerEdit::Rasterize { node: gid });
-        assert_eq!(code(refused.err().unwrap()), "UNSUPPORTED");
+        assert_eq!(code(refused.err().unwrap()), "INVALID_ARGUMENT");
         let refused = layer_edit(&mut e, h, LayerEdit::Rasterize { node: vid });
-        assert_eq!(code(refused.err().unwrap()), "UNSUPPORTED");
+        assert_eq!(code(refused.err().unwrap()), "INVALID_ARGUMENT");
     }
 
     #[test]

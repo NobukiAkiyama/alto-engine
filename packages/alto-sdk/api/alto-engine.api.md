@@ -775,8 +775,8 @@ export interface ImageEditResult {
     node: NodeId;
 }
 
-// @public (undocumented)
-export type ImageFilter = "nearest" | "bilinear";
+// @public
+export type ImageFilter = "nearest" | "bilinear" | "catmull_rom" | "area";
 
 // @public
 export interface ImageHistogram {

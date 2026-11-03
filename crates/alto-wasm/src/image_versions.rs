@@ -134,7 +134,10 @@ impl Runtime {
         let intent = edit.intent();
         let p = self
             .engine
-            .prepare_layer_edit(self.doc, edit)
+            .prepare_layer_edit(self.doc, edit, &|paths, world, window| {
+                alto_gpu::raster_q8::vector_pixels_q14(paths, world, window)
+                    .map_err(|_| "the vector is outside the renderer's coordinate range".into())
+            })
             .map_err(error)?;
         self.apply_prepared(intent, p)
     }

@@ -8,7 +8,8 @@ export interface ImageBounds {
 }
 /** Straight sRGB channels, each between zero and one. */
 export type ImageColor = [number, number, number, number];
-export type ImageFilter = "nearest" | "bilinear";
+/** `catmull_rom` is sharper when enlarging. `area` averages the source under each pixel, for large reductions. */
+export type ImageFilter = "nearest" | "bilinear" | "catmull_rom" | "area";
 export type ImageSelection = "current" | "ignore";
 export interface GradientOptions {
     kind: "linear" | "radial";
