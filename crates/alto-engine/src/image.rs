@@ -279,6 +279,84 @@ fn write(out: &mut BTreeMap<TileKey, Vec<u8>>, x: i32, y: i32, p: [u8; 4]) {
     let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize) * 4;
     tile[i..i + 4].copy_from_slice(&p);
 }
+/// Reads one map, keeping the tile of the last read. Neighboring pixels nearly always
+/// share it, and a map lookup per pixel was most of the cost of a large edit.
+struct Reader<'a> {
+    engine: &'a Engine,
+    map: &'a TileMap,
+    last: Option<(TileKey, Option<std::sync::Arc<TileData>>)>,
+}
+impl<'a> Reader<'a> {
+    fn new(engine: &'a Engine, map: &'a TileMap) -> Self {
+        Self {
+            engine,
+            map,
+            last: None,
+        }
+    }
+    fn get(&mut self, x: i32, y: i32) -> Result<[u8; 4], EngineError> {
+        let key = TileKey {
+            tx: x.div_euclid(256),
+            ty: y.div_euclid(256),
+        };
+        if self.last.as_ref().is_none_or(|(k, _)| *k != key) {
+            let tile = match self.map.tiles.get(&key) {
+                Some(hash) => {
+                    let tile = self.engine.require_tile(hash)?;
+                    if tile.format != self.map.format {
+                        return Err(err("CORRUPT_DATA", "tile format mismatch"));
+                    }
+                    Some(tile)
+                }
+                None => None,
+            };
+            self.last = Some((key, tile));
+        }
+        let Some((_, Some(tile))) = &self.last else {
+            return Ok([0; 4]);
+        };
+        let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize)
+            * self.map.format.bytes_per_pixel();
+        Ok(if self.map.format == PixelFormat::R8 {
+            [0, 0, 0, tile.pixels[i]]
+        } else {
+            tile.pixels[i..i + 4].try_into().unwrap()
+        })
+    }
+}
+/// Writes pixels, keeping the tile of the last write out of the map.
+#[derive(Default)]
+struct Writer {
+    tiles: BTreeMap<TileKey, Vec<u8>>,
+    current: Option<(TileKey, Vec<u8>)>,
+}
+impl Writer {
+    fn put(&mut self, x: i32, y: i32, p: [u8; 4]) {
+        if p == [0; 4] {
+            return;
+        }
+        let key = TileKey {
+            tx: x.div_euclid(256),
+            ty: y.div_euclid(256),
+        };
+        if self.current.as_ref().is_none_or(|(k, _)| *k != key) {
+            if let Some((k, tile)) = self.current.take() {
+                self.tiles.insert(k, tile);
+            }
+            let tile = self.tiles.remove(&key).unwrap_or_else(|| vec![0; 262144]);
+            self.current = Some((key, tile));
+        }
+        let (_, tile) = self.current.as_mut().expect("just set");
+        let i = (y.rem_euclid(256) as usize * 256 + x.rem_euclid(256) as usize) * 4;
+        tile[i..i + 4].copy_from_slice(&p);
+    }
+    fn finish(mut self) -> BTreeMap<TileKey, Vec<u8>> {
+        if let Some((k, tile)) = self.current.take() {
+            self.tiles.insert(k, tile);
+        }
+        self.tiles
+    }
+}
 fn rounded(n: i128, d: i128) -> i64 {
     let a = n.unsigned_abs();
     let d = d as u128;
@@ -425,8 +503,7 @@ fn gradient(options: &GradientOptions, p: [f64; 2]) -> [f64; 4] {
     c
 }
 fn resize_pixel(
-    engine: &Engine,
-    map: &TileMap,
+    reader: &mut Reader,
     b: ImageBounds,
     dst: ImageBounds,
     x: i32,
@@ -436,15 +513,13 @@ fn resize_pixel(
     let u = i128::from(x) - i128::from(dst.x);
     let v = i128::from(y) - i128::from(dst.y);
     if matches!(filter, ImageFilter::Nearest) {
-        return read(
-            engine,
-            map,
+        return reader.get(
             b.x + (((2 * u + 1) * i128::from(b.width)) / (2 * i128::from(dst.width))) as i32,
             b.y + (((2 * v + 1) * i128::from(b.height)) / (2 * i128::from(dst.height))) as i32,
         );
     }
     if matches!(filter, ImageFilter::Area) {
-        return area_pixel(engine, map, b, dst, u, v);
+        return area_pixel(reader, b, dst, u, v);
     }
     let coordinate = |origin: i32, u: i128, old: u32, new: u32| {
         rounded(
@@ -460,7 +535,7 @@ fn resize_pixel(
     let fx = qx.rem_euclid(256) as u64;
     let fy = qy.rem_euclid(256) as u64;
     if matches!(filter, ImageFilter::CatmullRom) {
-        return catmull_rom_pixel(engine, map, b, [ix, iy], [fx as i128, fy as i128]);
+        return catmull_rom_pixel(reader, b, [ix, iy], [fx as i128, fy as i128]);
     }
     let mut acc = [0u64; 4];
     for (dx, dy, w) in [
@@ -469,9 +544,7 @@ fn resize_pixel(
         (0, 1, (256 - fx) * fy),
         (1, 1, fx * fy),
     ] {
-        let p = read(
-            engine,
-            map,
+        let p = reader.get(
             (ix + dx).clamp(b.x, b.right() - 1),
             (iy + dy).clamp(b.y, b.bottom() - 1),
         )?;
@@ -513,8 +586,7 @@ fn straight_from_q14(p: [i128; 4]) -> [u8; 4] {
 /// Catmull-Rom in exact integers: the weights of `t = f / 256` over `2 * 256^3`,
 /// premultiplied, clamped to the source range at the edges.
 fn catmull_rom_pixel(
-    engine: &Engine,
-    map: &TileMap,
+    reader: &mut Reader,
     b: ImageBounds,
     at: [i32; 2],
     f: [i128; 2],
@@ -538,9 +610,7 @@ fn catmull_rom_pixel(
             if *wi == 0 {
                 continue;
             }
-            let p = premultiplied_q14(read(
-                engine,
-                map,
+            let p = premultiplied_q14(reader.get(
                 (at[0] + i as i32 - 1).clamp(b.x, b.right() - 1),
                 (at[1] + j as i32 - 1).clamp(b.y, b.bottom() - 1),
             )?);
@@ -554,8 +624,7 @@ fn catmull_rom_pixel(
 }
 /// One new pixel's source area, in exact rational weights.
 fn area_pixel(
-    engine: &Engine,
-    map: &TileMap,
+    reader: &mut Reader,
     b: ImageBounds,
     dst: ImageBounds,
     u: i128,
@@ -574,7 +643,7 @@ fn area_pixel(
     let mut acc = [0i128; 4];
     for (sy, wy) in spans(v, b.height, dst.height) {
         for (sx, wx) in spans(u, b.width, dst.width) {
-            let p = premultiplied_q14(read(engine, map, b.x + sx, b.y + sy)?);
+            let p = premultiplied_q14(reader.get(b.x + sx, b.y + sy)?);
             for c in 0..4 {
                 acc[c] += p[c] * wx * wy;
             }
@@ -948,14 +1017,16 @@ impl Engine {
                 }
             }
         } else {
+            let mut reader = Reader::new(self, &map);
+            let mut writer = Writer::default();
             for y in bounds.y..bounds.bottom() {
                 for x in bounds.x..bounds.right() {
                     let u = x - bounds.x;
                     let v = y - bounds.y;
                     let p = match &edit {
-                        ImageEdit::Crop { .. } => read(self, &map, x, y)?,
+                        ImageEdit::Crop { .. } => reader.get(x, y)?,
                         ImageEdit::Resize { filter, .. } => {
-                            resize_pixel(self, &map, old, bounds, x, y, *filter)?
+                            resize_pixel(&mut reader, old, bounds, x, y, *filter)?
                         }
                         ImageEdit::Rotate {
                             quarter_turns: q, ..
@@ -965,20 +1036,20 @@ impl Engine {
                                 2 => (old.width as i32 - 1 - u, old.height as i32 - 1 - v),
                                 _ => (old.width as i32 - 1 - v, u),
                             };
-                            read(self, &map, old.x + a, old.y + b)?
+                            reader.get(old.x + a, old.y + b)?
                         }
                         ImageEdit::Flip { axis, .. } => {
                             let (a, b) = match axis {
                                 FlipAxis::Horizontal => (old.width as i32 - 1 - u, v),
                                 FlipAxis::Vertical => (u, old.height as i32 - 1 - v),
                             };
-                            read(self, &map, old.x + a, old.y + b)?
+                            reader.get(old.x + a, old.y + b)?
                         }
                         ImageEdit::Gradient { options, .. } => {
                             let coverage = selection(self, mask.as_ref(), m, x, y)?;
                             selected_pixel |= coverage > 0;
                             over(
-                                read(self, &map, x, y)?,
+                                reader.get(x, y)?,
                                 gradient(options, [x as f64 + 0.5, y as f64 + 0.5]),
                                 coverage,
                             )
@@ -987,9 +1058,10 @@ impl Engine {
                         | ImageEdit::CloneStamp { .. }
                         | ImageEdit::Smudge { .. } => unreachable!(),
                     };
-                    write(&mut out, x, y, p);
+                    writer.put(x, y, p);
                 }
             }
+            out = writer.finish();
         }
         if matches!(&edit, ImageEdit::Gradient { .. }) && !selected_pixel {
             return Err(err("EMPTY_SELECTION", "selection does not cover the image"));
