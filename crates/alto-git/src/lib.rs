@@ -121,11 +121,11 @@ impl Opened {
             if entries.contains_key(&path) {
                 continue;
             }
-            let Ok(bytes) = show(&path) else { continue };
+            let bytes = show(&path).map_err(|e| format!("{rev}: {path}: {e}"))?;
             let (c, _) = Commit::parse_history(&bytes)?;
-            if let Ok(s) = show(&alto_store::snapshot_path(&c.snapshot)) {
-                entries.insert(alto_store::snapshot_path(&c.snapshot), s);
-            }
+            let snapshot = alto_store::snapshot_path(&c.snapshot);
+            let data = show(&snapshot).map_err(|e| format!("{rev}: {snapshot}: {e}"))?;
+            entries.insert(snapshot, data);
             entries.insert(path, bytes);
             stack.extend(c.parents.iter().copied());
         }

@@ -280,28 +280,19 @@ fn own_files(
     Ok(files)
 }
 
-/// The manifest stored in a mirrored commit. A Git tree holds only that commit's
-/// ancestry, so a checked-out tree stays a valid package: a branch tip names the
-/// references inside its ancestry, and any other commit opens detached.
+/// The manifest stored in a mirrored commit. It is a record from when the commit was
+/// imported, and Git refs are the current mapping. The commit that was the Alto head names
+/// the references inside its ancestry, so a checked-out tree stays a valid package. Any
+/// other commit opens detached, because naming a branch there would go stale.
 fn mirror_manifest(p: &Opened, h: &ContentHash, c: &Commit) -> Vec<u8> {
-    let refs = &p.package.refs;
-    let is_head = p.package.head == Some(*h);
-    let tip_of = refs
-        .branches
-        .iter()
-        .find(|(_, b)| b.head == *h)
-        .map(|(name, _)| name.clone());
-    if !is_head && tip_of.is_none() {
+    if p.package.head != Some(*h) {
         return alto_store::manifest_bytes(c.snapshot, Some(*h));
     }
     let inside = ancestors(p, *h);
-    let mut view = refs.clone();
+    let mut view = p.package.refs.clone();
     view.branches.retain(|_, b| inside.contains(&b.head));
     view.tags.retain(|_, t| inside.contains(t));
     view.pinned.retain(|t| inside.contains(t));
-    if !is_head {
-        view.current_branch = tip_of;
-    }
     alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), view)
 }
 
@@ -321,7 +312,6 @@ fn tree_files(root: &Path, commit: &str, prefix: &str) -> Result<BTreeSet<String
 /// Checks the recorded table against the Git objects it names: the trailer, the
 /// parents in order, and the commit file inside the tree.
 fn verify_table(p: &Opened, root: &Path, state: &SyncState, order: &[ContentHash]) -> Result<()> {
-    // Only reachable versions matter. Git may prune the commit of a deleted branch.
     let table: Vec<(&ContentHash, &String)> = order
         .iter()
         .filter_map(|h| Some((h, state.commits.get(h)?)))
@@ -398,7 +388,37 @@ fn load_state(root: &Path, state_ref: &str) -> Result<Option<(String, SyncState)
     if state.format != STATE_FORMAT {
         return Err(format!("UNSUPPORTED: {state_ref} format {}", state.format));
     }
+    validate_state(&state).map_err(|why| conflict(format!("{state_ref}: {why}")))?;
     Ok(Some((oid, state)))
+}
+
+/// The state only ever names refs this adapter's rules produce, so an edited blob
+/// cannot make a sync move or delete some other ref.
+fn validate_state(state: &SyncState) -> std::result::Result<(), String> {
+    let oid = |v: &str| v.len() >= 40 && v.bytes().all(|b| b.is_ascii_hexdigit());
+    let short = state
+        .trunk_ref
+        .strip_prefix("refs/heads/")
+        .ok_or("the first-mapped ref is not a branch")?;
+    check_branch_name(short)?;
+    check_branch_name(&state.ref_prefix)?;
+    for (name, e) in &state.branches {
+        let side = format!("refs/heads/{}/{name}", state.ref_prefix);
+        let trunk = state.trunk_alto.as_deref() == Some(name) && e.git_ref == state.trunk_ref;
+        if (e.git_ref != side && !trunk) || !oid(&e.git) {
+            return Err(format!("unexpected entry for branch {name}"));
+        }
+    }
+    for (name, e) in &state.tags {
+        if e.git_ref != format!("refs/tags/{}/{name}", state.ref_prefix) || !oid(&e.git) {
+            return Err(format!("unexpected entry for tag {name}"));
+        }
+    }
+    let oids = state.commits.values().chain(state.keep.values());
+    if oids.chain(state.base.iter()).any(|v| !oid(v)) {
+        return Err("a recorded Git commit is not an object name".into());
+    }
+    Ok(())
 }
 
 /// Refs that another package in this repository already maps.
@@ -709,6 +729,7 @@ pub fn sync_with(folder_dir: &Path, options: SyncOptions) -> Result<SyncReport> 
             ));
         }
     }
+    let checked_out = current.as_ref().map(|c| format!("refs/heads/{c}"));
     let mut deletions: Vec<(String, String)> = vec![];
     for (kind, old, kept) in [
         (
@@ -732,17 +753,22 @@ pub fn sync_with(folder_dir: &Path, options: SyncOptions) -> Result<SyncReport> 
                     "{} existed before the first sync and stays after Alto {kind} {name} was removed",
                     e.git_ref
                 )),
+                Some(_) if checked_out.as_deref() == Some(e.git_ref.as_str()) => {
+                    warnings.push(format!(
+                        "{} is checked out and stays after Alto {kind} {name} was removed",
+                        e.git_ref
+                    ));
+                }
                 Some(found) => deletions.push((e.git_ref.clone(), found)),
             }
         }
     }
 
-    // A version that left the package after Alto GC leaves the table too.
-    let mut table: BTreeMap<ContentHash, String> = old_state
-        .into_iter()
-        .flat_map(|s| &s.commits)
-        .filter(|(h, _)| p.commits.contains_key(h))
-        .map(|(h, oid)| (*h, oid.clone()))
+    // A version no reference reaches leaves the table. Git may prune its commit, and
+    // if a reference reaches it again it is imported again.
+    let mut table: BTreeMap<ContentHash, String> = order
+        .iter()
+        .filter_map(|h| Some((*h, old_state?.commits.get(h)?.clone())))
         .collect();
     let todo: Vec<ContentHash> = order
         .iter()
@@ -879,18 +905,20 @@ pub fn sync_with(folder_dir: &Path, options: SyncOptions) -> Result<SyncReport> 
         return Err(conflict(e));
     }
     // The checked-out branch moved under the index: re-read only the package folder.
-    if let Some(checked_out) = &current {
-        let checked_out = format!("refs/heads/{checked_out}");
-        if updates
-            .iter()
-            .any(|u| u.git_ref == checked_out && u.commit.is_some())
-        {
-            let path = if prefix.is_empty() {
-                "."
-            } else {
-                prefix.as_str()
-            };
-            git(&root, &["reset", "-q", "--", path])?;
+    // The refs have landed by now, so a failure here is reported without failing the sync.
+    if updates
+        .iter()
+        .any(|u| checked_out.as_deref() == Some(u.git_ref.as_str()) && u.commit.is_some())
+    {
+        let path = if prefix.is_empty() {
+            "."
+        } else {
+            prefix.as_str()
+        };
+        if let Err(e) = git(&root, &["reset", "-q", "--", path]) {
+            warnings.push(format!(
+                "the refs moved but the index was not refreshed; run git reset: {e}"
+            ));
         }
     }
     Ok(SyncReport {
@@ -1073,7 +1101,11 @@ fn run_fast_import(root: &Path, stream: &[u8], staging: &str) -> Result<BTreeMap
     // A sync that stopped before its transaction leaves only this ref behind.
     let _ = git(root, &["update-ref", "-d", staging]);
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let marks_path = git_dir.join(format!("alto-marks-{}", std::process::id()));
+    let marks_path = git_dir.join(format!(
+        "alto-marks-{}-{}",
+        std::process::id(),
+        staging.replace('/', "-")
+    ));
     let marks_arg = format!("--export-marks={}", marks_path.display());
     let result = git_stdin(
         root,
