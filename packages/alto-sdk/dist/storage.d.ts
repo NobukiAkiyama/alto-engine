@@ -14,6 +14,13 @@ export interface ArchiveSource {
  */
 export interface ObjectStorageProvider {
     readonly kind: string;
+    /** True only when all clients of this storage participate in the same lock. */
+    readonly gcCapabilities?: {
+        exclusive: true;
+        atomicManifest: true;
+        deleteObjects: true;
+    };
+    exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     getObject(path: string): Promise<Uint8Array | null>;
     /** Idempotent: existing paths are skipped. */
     putObjects(entries: {
@@ -27,11 +34,23 @@ export interface ObjectStorageProvider {
     readRef(name: string): Promise<Uint8Array | null>;
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }
+/** A storage view valid only for the duration of its exclusive callback. */
+export interface ExclusiveObjectStorage extends ObjectStorageProvider {
+    deleteObjects(paths: string[]): Promise<void>;
+}
 export declare function sha256Hex(data: Uint8Array): Promise<string>;
 export declare class MemoryObjectProvider implements ObjectStorageProvider {
+    #private;
     readonly kind = "memory";
-    readonly files: Map<string, Uint8Array<ArrayBufferLike>>;
-    getObject(path: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    readonly gcCapabilities: {
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
+    };
+    exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    list(prefix: string): Promise<string[]>;
     putObjects(entries: {
         path: string;
         data: Uint8Array;
@@ -39,8 +58,6 @@ export declare class MemoryObjectProvider implements ObjectStorageProvider {
         written: number;
         skipped: number;
     }>;
-    list(prefix: string): Promise<string[]>;
-    readRef(name: string): Promise<Uint8Array<ArrayBuffer> | null>;
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }
 /** A directory from the File System Access API or OPFS. Writes replace atomically on close. */

@@ -6,6 +6,8 @@ use alto_raster::TileMap;
 use alto_text::TextContent;
 use alto_vector::{ClipPath, StyledPath, VectorMask, validate_paths};
 
+mod image_bounds;
+pub use image_bounds::{ImageBounds, MAX_IMAGE_PIXELS};
 pub mod digest;
 pub mod version;
 use serde::{Deserialize, Serialize};
@@ -13,12 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use version::{Commit, DiffItem, IntentSummary, diff, restore_ops};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentMeta {
     pub width: u32,
     pub height: u32,
     pub color: ColorSpace,
     pub depth: BitDepth,
-    /// File format 4. Earlier formats held render versions 1 and 2, which are
+    /// File format 5. Earlier formats held render versions 1 and 2, which are
     /// not supported.
     pub format_version: u32,
     /// Which compositor samples this document: always
@@ -34,7 +37,7 @@ impl DocumentMeta {
             depth: BitDepth::U8,
             // The live value matches the snapshot so a journal digest survives
             // save and replay.
-            format_version: 4,
+            format_version: 5,
             render_version: alto_core::RENDER_VERSION_EXACT,
         }
     }
@@ -44,11 +47,11 @@ impl DocumentMeta {
                 "Canvas dimensions must be positive".into(),
             ));
         }
-        if self.format_version != 4 {
-            return Err(DocError::Invalid("Unsupported document format".into()));
+        if self.format_version != 5 {
+            return Err(DocError::Unsupported("Unsupported document format".into()));
         }
         if self.render_version != alto_core::RENDER_VERSION_EXACT {
-            return Err(DocError::Invalid("Unsupported render version".into()));
+            return Err(DocError::Unsupported("Unsupported render version".into()));
         }
         if self.color != ColorSpace::Srgb || self.depth != BitDepth::U8 {
             return Err(DocError::Invalid(
@@ -89,6 +92,7 @@ pub enum Isolation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerProps {
     pub visible: bool,
     pub locked: bool,
@@ -179,6 +183,7 @@ pub enum CurveChannel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     pub x: f64,
     pub y: f64,
@@ -186,8 +191,7 @@ pub struct CurvePoint {
 
 /// A layer or adjustment effect. The JSON shape is the document format:
 /// `{"type":"gaussian_blur","radius":12}`. Unknown types do not parse. Fields
-/// this version does not know are kept and written back, so a document that
-/// opened before effects were typed still round-trips.
+/// this version does not know are rejected by validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     GaussianBlur {
@@ -425,6 +429,17 @@ impl Effect {
         }
     }
     pub fn validate(&self) -> Result<(), DocError> {
+        let extra = match self {
+            Self::GaussianBlur { extra, .. }
+            | Self::ColorAdjust { extra, .. }
+            | Self::Levels { extra, .. }
+            | Self::HueSaturation { extra, .. }
+            | Self::Invert { extra, .. }
+            | Self::Curves { extra, .. } => extra,
+        };
+        if !extra.is_empty() {
+            return Err(DocError::Unsupported("unknown effect fields".into()));
+        }
         let finite = |name: &str, n: f64, min: f64, max: f64| {
             if n.is_finite() && (min..=max).contains(&n) {
                 Ok(())
@@ -506,6 +521,7 @@ pub enum NodeKind {
         isolation: Isolation,
     },
     Raster {
+        bounds: ImageBounds,
         tiles: TileMap,
     },
     Vector {
@@ -526,6 +542,22 @@ pub enum NodeKind {
     },
 }
 
+impl NodeKind {
+    pub fn raster(tiles: TileMap) -> Result<Self, DocError> {
+        let mut bounds: Option<ImageBounds> = None;
+        for key in tiles.tiles.keys() {
+            let b = ImageBounds::tile(*key)?;
+            bounds = Some(match bounds {
+                Some(a) => a.union(b)?,
+                None => b,
+            });
+        }
+        Ok(Self::Raster {
+            bounds: bounds.unwrap_or_default(),
+            tiles,
+        })
+    }
+}
 impl Serialize for NodeKind {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let value = match self {
@@ -533,7 +565,9 @@ impl Serialize for NodeKind {
                 children,
                 isolation,
             } => serde_json::json!({"kind":"group","children":children,"isolation":isolation}),
-            Self::Raster { tiles } => serde_json::json!({"kind":"raster","tiles":tiles}),
+            Self::Raster { tiles, bounds } => {
+                serde_json::json!({"kind":"raster","bounds":bounds,"tiles":tiles})
+            }
             Self::Vector { paths } => serde_json::json!({"kind":"vector","paths":paths}),
             Self::Text {
                 content,
@@ -561,6 +595,19 @@ impl<'de> Deserialize<'de> for NodeKind {
             serde_json::from_value(v.get(k).ok_or_else(|| format!("missing {k}"))?.clone())
                 .map_err(|e| e.to_string())
         }
+        let allowed: &[&str] = match v.get("kind").and_then(|k| k.as_str()) {
+            Some("group") => &["kind", "children", "isolation"],
+            Some("raster") => &["kind", "bounds", "tiles"],
+            Some("vector") => &["kind", "paths"],
+            Some("text") => &["kind", "content", "bake"],
+            Some("adjustment") => &["kind", "adjustment"],
+            _ => &[],
+        };
+        if v.as_object()
+            .is_some_and(|m| m.keys().any(|key| !allowed.contains(&key.as_str())))
+        {
+            return Err(serde::de::Error::custom("UNSUPPORTED: node field or kind"));
+        }
         let result: Result<Self, String> = match v.get("kind").and_then(|k| k.as_str()) {
             Some("group") => field(&v, "children").and_then(|children| {
                 field(&v, "isolation").map(|isolation| Self::Group {
@@ -568,7 +615,8 @@ impl<'de> Deserialize<'de> for NodeKind {
                     isolation,
                 })
             }),
-            Some("raster") => field(&v, "tiles").map(|tiles| Self::Raster { tiles }),
+            Some("raster") => field(&v, "tiles")
+                .and_then(|tiles| field(&v, "bounds").map(|bounds| Self::Raster { tiles, bounds })),
             Some("vector") => field(&v, "paths").map(|paths| Self::Vector { paths }),
             Some("text") => field(&v, "content").and_then(|content| {
                 let bake = match v.get("bake") {
@@ -580,7 +628,7 @@ impl<'de> Deserialize<'de> for NodeKind {
             Some("adjustment") => {
                 field(&v, "adjustment").map(|adjustment| Self::Adjustment { adjustment })
             }
-            Some(_) => Ok(Self::Unsupported { raw: v }),
+            Some(_) => Err("UNSUPPORTED: node kind".into()),
             None => Err("missing node kind".into()),
         };
         result.map_err(serde::de::Error::custom)
@@ -588,6 +636,7 @@ impl<'de> Deserialize<'de> for NodeKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Node {
     pub id: NodeId,
     pub parent: Option<NodeId>,
@@ -615,6 +664,7 @@ impl Node {
             name: name.into(),
             props: LayerProps::default(),
             kind: NodeKind::Raster {
+                bounds: ImageBounds::default(),
                 tiles: TileMap::new(PixelFormat::Rgba8),
             },
         }
@@ -660,6 +710,7 @@ impl Node {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetRecord {
     pub id: AssetId,
     pub hash: ContentHash,
@@ -668,7 +719,7 @@ pub struct AssetRecord {
     pub dims: Option<(u32, u32)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AssetKind {
     EncodedImage {
         mime: String,
@@ -686,6 +737,7 @@ pub enum AssetKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Document {
     pub meta: DocumentMeta,
     pub nodes: BTreeMap<NodeId, Node>,
@@ -696,6 +748,7 @@ pub struct Document {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Snapshot {
     meta: DocumentMeta,
     root: NodeId,
@@ -705,6 +758,7 @@ struct Snapshot {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PropPatch {
     pub name: Option<String>,
     pub visible: Option<bool>,
@@ -736,6 +790,7 @@ impl PropPatch {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TileChange {
     pub key: TileKey,
     pub before: Option<ContentHash>,
@@ -743,7 +798,7 @@ pub struct TileChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
     InsertNode {
         node: Node,
@@ -840,6 +895,8 @@ impl ChangeSet {
 #[derive(Debug, thiserror::Error, PartialEq)]
 /// Messages start with the code the SDK reports (`CODE: detail`).
 pub enum DocError {
+    #[error("UNSUPPORTED: {0}")]
+    Unsupported(String),
     #[error("INVALID_ARGUMENT: invalid operation: {0}")]
     Invalid(String),
     #[error("NOT_FOUND: node not found: {0:?}")]
@@ -1230,9 +1287,17 @@ impl Document {
             }
             Op::SetTiles { layer, changes } => {
                 let node = self.node(layer)?;
-                let NodeKind::Raster { tiles } = &node.kind else {
+                let NodeKind::Raster { tiles, .. } = &node.kind else {
                     return Err(DocError::Invalid("Target must be raster".into()));
                 };
+                let old_node = node.clone();
+                let NodeKind::Raster {
+                    bounds: old_bounds, ..
+                } = node.kind
+                else {
+                    unreachable!()
+                };
+                let mut new_bounds = old_bounds;
                 let mut seen = BTreeSet::new();
                 for item in &changes {
                     if !seen.insert(item.key) || tiles.tiles.get(&item.key).copied() != item.before
@@ -1240,9 +1305,15 @@ impl Document {
                         return Err(DocError::Invalid("Tile precondition failed".into()));
                     }
                 }
-                let NodeKind::Raster { tiles } = &mut self.node_mut(layer)?.kind else {
+                for item in &changes {
+                    if item.after.is_some() {
+                        new_bounds = new_bounds.union(ImageBounds::tile(item.key)?)?;
+                    }
+                }
+                let NodeKind::Raster { tiles, bounds } = &mut self.node_mut(layer)?.kind else {
                     unreachable!()
                 };
+                *bounds = new_bounds;
                 for item in &changes {
                     match item.after {
                         Some(hash) => {
@@ -1266,16 +1337,9 @@ impl Document {
                     ));
                 }
                 change.nodes.insert(layer);
-                Op::SetTiles {
-                    layer,
-                    changes: changes
-                        .into_iter()
-                        .map(|item| TileChange {
-                            key: item.key,
-                            before: item.after,
-                            after: item.before,
-                        })
-                        .collect(),
+                Op::ReplaceNode {
+                    id: layer,
+                    node: old_node,
                 }
             }
             Op::SetVectorMask { id, mask } => {
@@ -1410,15 +1474,14 @@ impl Document {
         };
         // Pretty, tree-ordered JSON: identical documents give identical bytes, and the
         // folder format produces line-oriented Git diffs.
-        let mut bytes = serde_json::to_vec_pretty(&snapshot)
-            .map_err(|error| DocError::Serialization(error.to_string()))?;
-        bytes.push(b'\n');
-        Ok(bytes)
+        alto_core::json::canonical_bytes(&snapshot)
+            .map_err(|error| DocError::Serialization(error.to_string()))
     }
     pub fn from_snapshot_bytes(bytes: &[u8]) -> Result<Self, DocError> {
-        let snapshot: Snapshot = serde_json::from_slice(bytes)
+        let snapshot: Snapshot = alto_core::json::from_slice(bytes)
             .map_err(|error| DocError::Serialization(error.to_string()))?;
         snapshot.meta.validate()?;
+        let asset_count = snapshot.assets.len();
         let count = snapshot.nodes.len();
         let nodes: BTreeMap<_, _> = snapshot
             .nodes
@@ -1440,10 +1503,20 @@ impl Document {
             selection: snapshot.selection,
             revision: 0,
         };
+        if doc.assets.len() != asset_count {
+            return Err(DocError::Invalid("Duplicate asset ID".into()));
+        }
         doc.validate_graph()?;
         Ok(doc)
     }
     pub fn validate_graph(&self) -> Result<(), DocError> {
+        self.meta.validate()?;
+        if self.assets.iter().any(|(id, a)| *id != a.id) {
+            return Err(DocError::Invalid("asset map key/id mismatch".into()));
+        }
+        if self.nodes.iter().any(|(id, n)| *id != n.id) {
+            return Err(DocError::Invalid("node map key/id mismatch".into()));
+        }
         if let Some(selection) = &self.selection {
             validate_mask(selection)?;
         }
@@ -1470,6 +1543,24 @@ impl Document {
             }
             let node = doc.node(id)?;
             node.props.validate()?;
+            if let NodeKind::Raster { bounds, tiles } = &node.kind {
+                bounds.validate()?;
+                if tiles.format != PixelFormat::Rgba8 {
+                    return Err(DocError::Invalid("raster requires RGBA8".into()));
+                }
+                for key in tiles.tiles.keys() {
+                    let tile = ImageBounds::tile(*key)?;
+                    if tile.x >= bounds.right()
+                        || tile.y >= bounds.bottom()
+                        || tile.right() <= bounds.x
+                        || tile.bottom() <= bounds.y
+                    {
+                        return Err(DocError::Invalid(
+                            "raster tile does not intersect image bounds".into(),
+                        ));
+                    }
+                }
+            }
             let drawn = drawn && node.props.visible && node.props.opacity > 0.0;
             let isolate = drawn
                 && match &node.kind {
@@ -1527,6 +1618,7 @@ impl Document {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppliedOp {
     pub op: Op,
     pub inverse: Op,
@@ -1535,6 +1627,7 @@ pub struct AppliedOp {
 /// give for display. History and commit summaries keep both; neither is shown text the
 /// engine chose.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Intent {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1563,6 +1656,7 @@ impl From<String> for Intent {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Transaction {
     pub intent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1575,6 +1669,7 @@ pub struct Transaction {
 
 /// Undo and redo stacks and the commit intent log, as a recovery checkpoint keeps them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct History {
     pub undo: Vec<Transaction>,
     pub redo: Vec<Transaction>,
@@ -1584,6 +1679,7 @@ pub struct History {
 
 /// Edits since the last version commit, summarised into the commit's intents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntentLogEntry {
     pub seq: u64,
     pub intent: String,
@@ -2059,7 +2155,7 @@ mod tests {
         assert!(editor.undo().unwrap().is_some());
         assert_eq!(content(editor.doc.clone()), content(base));
         assert!(editor.redo().unwrap().is_some());
-        let NodeKind::Raster { tiles } = &editor.doc.node(id).unwrap().kind else {
+        let NodeKind::Raster { tiles, .. } = &editor.doc.node(id).unwrap().kind else {
             panic!("raster expected")
         };
         assert_eq!(tiles.tiles.get(&key), Some(&hash));
@@ -2496,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn old_effect_shapes_open_and_round_trip() {
+    fn known_effect_defaults_parse_but_unknown_fields_are_rejected() {
         let shapes = [
             r#"{"type":"gaussian_blur","radius":12}"#,
             r#"{"type":"gaussian_blur"}"#,
@@ -2512,6 +2608,10 @@ mod tests {
         ];
         for raw in shapes {
             let effect: Effect = serde_json::from_str(raw).unwrap();
+            if raw.contains("legacy") || raw.contains("note") {
+                assert!(effect.validate().is_err());
+                continue;
+            }
             effect.validate().unwrap();
             let again: Effect =
                 serde_json::from_str(&serde_json::to_string(&effect).unwrap()).unwrap();
@@ -2563,30 +2663,9 @@ mod tests {
         let nodes = value["nodes"].as_array_mut().unwrap();
         let layer_json = nodes.iter_mut().find(|node| node["name"] == "Old").unwrap();
         layer_json["props"]["effects"][0]["vendor"] = serde_json::json!("alto-0.3");
-        let opened = Document::from_snapshot_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
-        let opened_layer = opened
-            .nodes
-            .values()
-            .find(|node| node.name == "Old")
-            .unwrap();
-        let Effect::GaussianBlur {
-            radius,
-            selection,
-            extra,
-        } = &opened_layer.props.effects[0]
-        else {
-            panic!("gaussian blur");
-        };
-        assert_eq!(*radius, 12.0);
-        assert!(selection.is_none());
-        assert_eq!(
-            extra.get("vendor").and_then(|v| v.as_str()),
-            Some("alto-0.3")
-        );
-        let written = serde_json::to_value(&opened_layer.props.effects[0]).unwrap();
-        assert_eq!(written["vendor"], "alto-0.3");
-        assert_eq!(written["radius"], 12.0);
-        assert_eq!(written["type"], "gaussian_blur");
+        let error =
+            Document::from_snapshot_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("unknown effect fields"));
     }
 
     proptest! {
@@ -2610,11 +2689,14 @@ mod tests {
 mod compatibility_tests {
     use super::*;
     #[test]
-    fn future_node_payload_is_preserved() {
-        let raw = serde_json::json!({"kind":"future_plugin_node","custom":{"strength":3},"asset":"opaque"});
-        let kind: NodeKind = serde_json::from_value(raw.clone()).unwrap();
-        assert!(matches!(kind, NodeKind::Unsupported { .. }));
-        assert_eq!(serde_json::to_value(kind).unwrap(), raw);
+    fn future_node_payload_is_rejected() {
+        let raw = serde_json::json!({"kind":"future_plugin_node","custom":{"strength":3}});
+        assert!(
+            serde_json::from_value::<NodeKind>(raw)
+                .unwrap_err()
+                .to_string()
+                .contains("UNSUPPORTED")
+        );
     }
     #[test]
     fn invalid_known_node_is_not_silently_accepted() {
@@ -2625,7 +2707,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn only_render_version_three_and_format_four_load() {
+    fn only_render_version_three_and_format_five_load() {
         let bytes = Document::new(DocumentMeta::srgb_u8(8, 8))
             .unwrap()
             .snapshot_bytes()
@@ -2645,10 +2727,10 @@ mod compatibility_tests {
         assert!(load(meta).contains("render_version"));
         for (format, render, message) in [
             (3, 2, "Unsupported document format"),
-            (4, 2, "Unsupported render version"),
-            (4, 1, "Unsupported render version"),
-            (5, 3, "Unsupported document format"),
-            (4, 4, "Unsupported render version"),
+            (5, 2, "Unsupported render version"),
+            (5, 1, "Unsupported render version"),
+            (4, 3, "Unsupported document format"),
+            (5, 4, "Unsupported render version"),
         ] {
             let mut meta = value["meta"].clone();
             meta["format_version"] = serde_json::json!(format);
@@ -2659,15 +2741,15 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn render_version_three_saves_format_four_and_reloads() {
+    fn render_version_three_saves_format_five_and_reloads() {
         let doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
         let bytes = doc.snapshot_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["meta"]["format_version"], 4);
+        assert_eq!(value["meta"]["format_version"], 5);
         assert_eq!(value["meta"]["render_version"], 3);
         let loaded = Document::from_snapshot_bytes(&bytes).unwrap();
         assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION_EXACT);
-        assert_eq!(loaded.meta.format_version, 4);
+        assert_eq!(loaded.meta.format_version, 5);
         assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
     }
 }

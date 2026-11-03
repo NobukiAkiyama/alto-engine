@@ -1,8 +1,10 @@
-# Alto Engine — render v3 / format 4（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 4）
+# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 6）
+
+未リリースの開発版です。旧ファイル・旧通信との互換性はありません。
 
 Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Playgroundです。**M7：テキスト（横組み・日本語縦組み・フォントフォールバック・OpenType機能・テキスト選択）**と、**M8：版管理（コミット・意味的差分・フォルダ形式・Git Adapter）**を追加しました。M6までのベクター・選択範囲・ラスター編集・調整・非破壊ぼかしも使えます。文書・Undo/Redo・`.alto`保存・OPFSジャーナル復旧につながっています。
 
-[ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [リリース手順とバージョン方針](RELEASING.md) / [最終検証結果](doc/verification/RESULTS.md) / [M7/M8サンプル文書（format 4）](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
+[ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [リリース手順とバージョン方針](RELEASING.md) / [追加実装の検証](doc/verification/VERSIONING-IMAGE-EDITING-2026-11-03.md) / [既存の検証記録](doc/verification/RESULTS.md) / [M7/M8サンプル文書（format 5）](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
 
 [コールド表示の実装・測定結果](doc/verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](doc/design/COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
@@ -10,15 +12,12 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-WASMバイナリはGitに入れません。SHA-256は [`wasm/SHA256SUMS`](wasm/SHA256SUMS) にあり、バイナリはGitHub Releaseの資産です。`sh scripts/fetch-wasm.sh` は新しい順にReleaseを見て、先にそのReleaseの `SHA256SUMS` を落とします。`alto_wasm_bg.wasm` と `alto_decode_bg.wasm` の値が出荷ハッシュと一致したReleaseだけ、WASM本体を落とします。一覧はGitHub APIを100件ずつ取り、一致したページで止めます。`GITHUB_TOKEN` または `GH_TOKEN` があればそのリクエストに付けます。`wasm/RELEASE` の `tag` は参照しません。`tag=none` のままでも、一致するReleaseがあればRustなしで取得できます。一致するReleaseが一つも無いときだけ失敗し、そのときは手元で作ります。Python 3でPlaygroundを開けます。
+この開発版は Protocol 6 / format 5 を使います。WASM バイナリは Git に入れないため、現在のソースからビルドしてください。公開済みバイナリを取得する `fetch-wasm.sh` は本ブランチ用のビルドを代替しません。
 
 ```sh
-cd alto-engine
-sh scripts/fetch-wasm.sh          # ハッシュが一致する最新Release。無ければ失敗する
-sh scripts/fetch-wasm.sh v0.1.0   # そのタグだけを調べ、一致しなければ失敗する
-# 取得できないときは:
 sh scripts/build-m0.sh
-sh scripts/build-vector-comparison.sh   # 比較ページを使うとき
+pnpm --dir packages/alto-sdk build
+sh scripts/build-vector-comparison.sh   # 比較ページを使う場合
 sh scripts/run.sh
 ```
 
@@ -35,11 +34,21 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 - 「保存 .alto」で保存。「開く」で復元。File System Access API対応環境ではファイルへ書き込み、それ以外ではダウンロードします。
 - 異常終了後、同じオリジンで開き直すと「編集を復旧」が表示されます。OPFSの記録はブラウザのサイトデータに保存されます。
 
-「検証と計測」から機能テスト32件、M5テスト8件、M6テスト10件、M7テスト9件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+「検証と計測」から画像編集・版管理テスト6件、機能テスト36件、M5テスト9件、M6テスト10件、M7テスト8件、M8テスト6件、4K・半透明20レイヤーのB1〜B7計測、GPUデバイス喪失テストを実行できます。機能テストと計測は専用のテスト文書に切り替わり、現在の作業用ジャーナルも置き換えます。編集中の文書は先に保存してください。「結果を保存 JSON」で測定条件と結果を書き出せます。
+
+## 確定画像編集とブランチ
+
+Playground の「レイヤーの画像編集」で切り抜き・拡縮・90度回転・反転・グラデーション・連結塗りつぶし・スポイトを使えます。画像範囲と引数はレイヤー内の画素です。透明な画像にも幅・高さが残り、各確定操作は1回のUndoで戻せます。「SVGファイル」から、対応する図形だけを含むSVGを編集可能なvector/groupとして取り込めます。
+
+「ブランチと統合」で分岐・切替・保護・削除と、競合を選択してから確定する3-wayマージを扱います。未コミットの切替は拒否します。保存・版の記録・過去版の内容復元は別操作です。履歴表示は第一親・統合元を含むDAG・全ブランチを切り替えられます。
+
+GCは確認（dry-run）が既定です。SDKのメモリ保存先とネイティブのフォルダ/ZIPは実削除に対応します。File System Access/OPFSフォルダは共有排他を保証しないため確認のみです。SDKの単一ファイル整理は、新しいZIPの出力で行います。`alto-git` のブランチ・二親出力は後続段階で、現在はその履歴のsyncを明示的に拒否します。
+
+詳細は[設計書](doc/design/VERSIONING-AND-IMAGE-EDITING.md)と[実装・検証記録](doc/verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照してください。
 
 ## M7の使い方（テキスト・縦組み）
 
-「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 4に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜3 / render v1・v2の文書は現行エンジンでは開けません。
+「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 5に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜4 / render v1・v2の文書は現行エンジンでは開けません。
 
 ### フォント
 
@@ -227,7 +236,7 @@ await doc.undo();
 | `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
-| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル4）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
+| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル6）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
 | `examples/browser-playground` | 編集UIとビルド済みWASM |
 | `tests/e2e` | 実ブラウザで実行する画素検証・性能測定 |
 | `tests/fonts` | テスト・デモ用フォント（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1） |

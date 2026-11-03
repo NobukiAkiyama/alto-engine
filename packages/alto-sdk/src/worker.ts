@@ -305,6 +305,7 @@ function structured(error: unknown): WireError {
   const message = error instanceof Error ? error.message : String(error);
   const code =
     [
+      "UNSUPPORTED", "BUSY", "NO_COMMIT", "RESOURCE_LIMIT", "EMPTY_SELECTION", "BRANCH_NOT_MERGED", "STALE_MERGE", "UNRELATED_HISTORY", "MULTIPLE_MERGE_BASES", "INVALID_MERGE_RESULT",
       "INVALID_ARGUMENT",
       "NOT_FOUND",
       "CONFLICT",
@@ -784,14 +785,37 @@ async function execute(m: Queued): Promise<unknown> {
         runtime.commit(m.message, m.time, m.author, !!m.allowEmpty),
       );
       const state = JSON.parse(runtime.view());
-      // Commits are not journaled operations: checkpoint so a crash keeps them.
+      // Journal the history transition, then compact it into an incremental checkpoint.
       queueJournal();
       queueCheckpoint();
       postMessage({ t: "patch", value: state });
       return { commit, state };
     }
+    case "gcPlan": return runtime.gcPlan(new Uint8Array(m.bytes), m.dryRun);
+    case "compactArchive": return runtime.compactArchive(new Uint8Array(m.bytes));
+    case "importSvg": {
+      if (!Number.isSafeInteger(m.index) || m.index < 0 || m.index > 4294967295) throw Error("INVALID_ARGUMENT: insertion index");
+      const r = JSON.parse(runtime.importSvg(m.svg, m.parent, m.index)); queueJournal(); postMessage({ t: "patch", value: r.state }); return r;
+    }
+    case "imageEdit": {
+      const r = JSON.parse(runtime.imageEdit(JSON.stringify(m.edit)));
+      queueJournal(); postMessage({ t: "patch", value: r.state }); return r;
+    }
+    case "pickColor": return JSON.parse(runtime.pickColor(m.node, m.x, m.y));
+    case "pickComposite": {
+      if (!Number.isSafeInteger(m.x) || !Number.isSafeInteger(m.y) || m.x < -2147483648 || m.x > 2147483647 || m.y < -2147483648 || m.y > 2147483647)
+        throw Error("INVALID_ARGUMENT: pixel coordinates");
+      return JSON.parse(await runtime.pickComposite(m.x, m.y));
+    }
+    case "listBranches": return JSON.parse(runtime.listBranches());
+    case "prepareMerge": return JSON.parse(runtime.prepareMerge(m.name));
+    case "cancelMerge": runtime.cancelMerge(); return true;
+    case "historyCommand": {
+      const r = JSON.parse(runtime.historyCommand(JSON.stringify(m.command)));
+      queueJournal(); postMessage({ t: "patch", value: r.state }); return r;
+    }
     case "versionLog":
-      return JSON.parse(runtime.versionLog());
+      return JSON.parse(runtime.versionLog(!!m.dag, !!m.allBranches));
     case "versionDiff":
       return JSON.parse(runtime.versionDiff(m.from, m.to));
     case "restoreVersion": {

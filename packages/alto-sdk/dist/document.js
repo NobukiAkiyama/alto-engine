@@ -1,7 +1,7 @@
 import { AltoError } from "./errors.js";
 import { intentRecord } from "./intents.js";
 import { SnapshotStore } from "./snapshot.js";
-import { immutable, sha256Hex, unframeEntries, } from "./storage.js";
+import { immutable, frameEntries, sha256Hex, unframeEntries, } from "./storage.js";
 import { applyTextStyle, replaceText } from "./text-edit.js";
 import { ToolSession } from "./tools.js";
 import { Transaction } from "./transaction.js";
@@ -210,8 +210,63 @@ export class DocumentHandle {
         /** Replaces a layer's effects. With `useSelection` (default) each is limited to the selection. */
         set: (layer, effects, options = {}) => this.command("setEffects", { layer, effects, useSelection: options.useSelection ?? true }),
     };
+    imageCommand(edit) {
+        return this.edit(async () => { const r = await this.request("imageEdit", { edit }); this.apply(r.state); return r.result; });
+    }
+    historyCommand(command) {
+        return this.edit(async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; });
+    }
+    /** Pixel edits use node-local coordinates; each successful edit is one Undo step. */
+    image = {
+        importSvg: (svg, options = {}) => this.edit(async () => {
+            const snapshot = this.getSnapshot();
+            const parent = options.parent ?? snapshot.root;
+            const group = snapshot.nodes.get(parent);
+            const index = options.index ?? (group?.type === "group" ? group.children.length : 0);
+            const r = await this.request("importSvg", { svg, parent, index });
+            this.apply(r.state);
+            return r.result;
+        }),
+        crop: (node, bounds) => this.imageCommand({ type: "crop", node, bounds }),
+        resize: (node, width, height, options = {}) => this.imageCommand({ type: "resize", node, width, height, filter: options.filter ?? "bilinear" }),
+        rotate: (node, quarterTurns) => this.imageCommand({ type: "rotate", node, quarter_turns: quarterTurns }),
+        flip: (node, axis) => this.imageCommand({ type: "flip", node, axis }),
+        gradient: (node, options) => this.imageCommand({ type: "gradient", node, options }),
+        fill: (node, point, color, options = {}) => this.imageCommand({ type: "fill", node, point, color, tolerance: options.tolerance ?? 0, selection: options.selection ?? "current" }),
+        pickColor: (node, point) => this.request("pickColor", { node, x: point[0], y: point[1] }),
+        pickComposite: (point) => this.request("pickComposite", { x: point[0], y: point[1] }),
+    };
     /** Version commits, diffs and restores. */
     versions = {
+        gc: (options = {}) => this.gcFolder(options),
+        /** Returns a new compact archive. Does not overwrite an existing file. */
+        compactArchive: (archive) => this.edit(async () => {
+            const bytes = await archive.arrayBuffer();
+            const framed = await this.request("compactArchive", { bytes }, [bytes]);
+            const entries = unframeEntries(framed);
+            const result = entries.get("archive.alto");
+            if (!result)
+                throw new AltoError("INTERNAL", "missing compact archive");
+            const report = JSON.parse(new TextDecoder().decode(entries.get("report.json")));
+            return { bytes: result, report };
+        }),
+        createBranch: (name, options = {}) => this.historyCommand({ type: "create_branch", name, from: options.from ?? null, checkout: options.checkout ?? false }).then(() => { }),
+        checkout: (name) => this.historyCommand({ type: "checkout", name }).then(() => { }),
+        detach: (hash) => this.historyCommand({ type: "detach", hash }).then(() => { }),
+        deleteBranch: (name, options = {}) => this.historyCommand({ type: "delete_branch", name, force: options.force ?? false }).then(() => { }),
+        setBranchProtection: (name, protectedState) => this.historyCommand({ type: "protect_branch", name, protected: protectedState }).then(() => { }),
+        listBranches: () => this.request("listBranches"),
+        createTag: (name, hash) => this.historyCommand({ type: "create_tag", name, hash }).then(() => { }),
+        deleteTag: (name) => this.historyCommand({ type: "delete_tag", name }).then(() => { }),
+        pin: (hash) => this.historyCommand({ type: "pin", hash, pin: true }).then(() => { }),
+        unpin: (hash) => this.historyCommand({ type: "pin", hash, pin: false }).then(() => { }),
+        prepareMerge: (name) => this.edit(() => this.request("prepareMerge", { name })),
+        cancelMerge: () => this.edit(() => this.request("cancelMerge").then(() => { })),
+        finishMerge: (token, resolutions, options = {}) => this.historyCommand({ type: "finish_merge", token, resolutions, message: options.message ?? "Merge", author: options.author ?? null, created_at: Date.now() }).then((r) => {
+            if (!r)
+                throw new AltoError("INTERNAL", "merge returned no result");
+            return r;
+        }),
         /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
         commit: (message, options = {}) => this.edit(async () => {
             const r = await this.request("commit", {
@@ -223,7 +278,7 @@ export class DocumentHandle {
             this.apply(r.state);
             return r.commit;
         }),
-        log: () => this.request("versionLog", {}),
+        log: (options = {}) => this.request("versionLog", { dag: options.mode === "dag", allBranches: options.allBranches ?? false }),
         /** Semantic, layer-level diff. Use "working" for the current document. */
         diff: (from, to = "working") => this.request("versionDiff", { from, to }),
         status: () => this.getSnapshot().versions,
@@ -276,18 +331,105 @@ export class DocumentHandle {
             throw e;
         }
     }
+    gcFolder(options) {
+        return this.edit(async () => {
+            const owner = this.savedFolder?.provider;
+            if (!owner)
+                throw new AltoError("UNSUPPORTED", "save or open a folder before collecting it");
+            const dryRun = options.dryRun ?? true;
+            const capabilities = owner.gcCapabilities;
+            if (!dryRun && (typeof owner.exclusive !== "function" || capabilities?.exclusive !== true || capabilities.atomicManifest !== true || capabilities.deleteObjects !== true))
+                throw new AltoError("UNSUPPORTED", "storage does not guarantee exclusive GC and atomic manifest replacement");
+            const run = async (storage) => {
+                if (!dryRun && typeof storage.deleteObjects !== "function")
+                    throw new AltoError("UNSUPPORTED", "exclusive storage view does not support deletion");
+                const readAll = async () => {
+                    const manifest = await storage.readRef("manifest.json");
+                    if (!manifest)
+                        throw new AltoError("CORRUPT_DATA", "missing manifest");
+                    const entries = new Map([["manifest.json", manifest]]);
+                    for (const prefix of ["objects/", "snapshots/", "commits/"])
+                        for (const path of await storage.list(prefix)) {
+                            const bytes = await storage.getObject(path);
+                            if (!bytes)
+                                throw new AltoError("CONFLICT", "object changed during GC");
+                            entries.set(path, bytes);
+                        }
+                    const after = await storage.readRef("manifest.json");
+                    if (!after || await sha256Hex(after) !== await sha256Hex(manifest))
+                        throw new AltoError("CONFLICT", "manifest changed during GC");
+                    return entries;
+                };
+                const stored = await readAll();
+                const framed = frameEntries(stored);
+                const output = await this.request("gcPlan", { bytes: framed.buffer, dryRun }, [framed.buffer]);
+                const entries = unframeEntries(output);
+                const plan = JSON.parse(new TextDecoder().decode(entries.get(".gc-plan.json")));
+                entries.delete(".gc-plan.json");
+                if (options.expectedBaseline !== undefined && options.expectedBaseline !== plan.report.baseline)
+                    throw new AltoError("CONFLICT", "GC preview expired");
+                if (dryRun)
+                    return plan.report;
+                const manifest = entries.get("manifest.json");
+                await storage.writeRef(".alto-gc.json", new TextEncoder().encode(JSON.stringify({ phase: "prepared", baseline: plan.report.baseline, remove: plan.remove })));
+                await storage.putObjects([...entries].filter(([path]) => immutable(path)).map(([path, data]) => ({ path, data })));
+                const adopt = async () => {
+                    const r = await this.request("historyCommand", { command: { type: "adopt_gc", manifest: new TextDecoder().decode(manifest) } });
+                    this.apply(r.state);
+                    this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
+                };
+                try {
+                    await storage.writeRef("manifest.json", manifest, plan.report.baseline);
+                }
+                catch (error) {
+                    const after = await storage.readRef("manifest.json");
+                    if (after && await sha256Hex(after) === await sha256Hex(manifest))
+                        await adopt();
+                    throw error;
+                }
+                await adopt();
+                let removed = 0;
+                try {
+                    for (const path of plan.remove) {
+                        await storage.deleteObjects([path]);
+                        removed++;
+                    }
+                }
+                catch (error) {
+                    throw new AltoError("STORAGE", `GC stopped after ${removed} deletions: ${String(error)}`);
+                }
+                const check = frameEntries(await readAll());
+                await this.request("gcPlan", { bytes: check.buffer, dryRun: true }, [check.buffer]);
+                for (const [path, data] of entries)
+                    if (!immutable(path) && path !== "manifest.json") {
+                        try {
+                            await storage.writeRef(path, data);
+                        }
+                        catch {
+                            plan.report.warnings.push(`比較用ファイル ${path} を更新できませんでした。正本は保持されています。`);
+                        }
+                    }
+                await storage.writeRef(".alto-gc.json", new TextEncoder().encode(JSON.stringify({ phase: "complete", baseline: plan.report.baseline })));
+                return plan.report;
+            };
+            return owner.exclusive ? owner.exclusive(run) : run(owner);
+        });
+    }
     /**
      * Saves the folder form. Content-addressed files are written once; manifest.json
      * last. A folder holding another document is refused unless `overwrite`.
      */
     async saveFolder(provider, options = {}) {
         await this.endTool();
+        return provider.exclusive ? provider.exclusive((storage) => this.saveFolderLocked(provider, storage, options)) : this.saveFolderLocked(provider, provider, options);
+    }
+    async saveFolderLocked(owner, provider, options) {
         this.core.emit("saveState", "saving");
         let token;
         try {
             const current = await provider.readRef("manifest.json");
             const currentHash = current ? await sha256Hex(current) : "";
-            const base = this.savedFolder?.provider === provider ? this.savedFolder.manifest : undefined;
+            const base = this.savedFolder?.provider === owner ? this.savedFolder.manifest : undefined;
             if (current && base === undefined && !options.overwrite)
                 throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
             if (base !== undefined && base !== currentHash)
@@ -301,17 +443,27 @@ export class DocumentHandle {
             const objects = [...entries].filter(([p]) => immutable(p)).map(([path, data]) => ({ path, data }));
             const report = await provider.putObjects(objects);
             for (const [p, d] of entries)
-                if (!immutable(p) && p !== "manifest.json")
+                if (!immutable(p) && p !== "manifest.json" && p !== "document.json")
                     await provider.writeRef(p, d);
             await provider.writeRef("manifest.json", manifest, base ?? currentHash);
             const check = await provider.readRef("manifest.json");
             if (!check || check.length !== manifest.length || check.some((b, i) => b !== manifest[i]))
                 throw new AltoError("STORAGE", "manifest.json did not read back as written");
-            this.savedFolder = { provider, manifest: await sha256Hex(manifest) };
+            const warnings = [];
+            const mirror = entries.get("document.json");
+            if (mirror) {
+                try {
+                    await provider.writeRef("document.json", mirror);
+                }
+                catch {
+                    warnings.push("比較用の文書コピーを更新できませんでした。正本の保存は完了しています。");
+                }
+            }
+            this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
             this.apply(await this.request("saved", { token }));
             token = undefined;
             this.core.emit("saveState", "saved");
-            return report;
+            return { ...report, warnings };
         }
         catch (e) {
             this.releaseSave(token);

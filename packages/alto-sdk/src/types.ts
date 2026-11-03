@@ -1,3 +1,4 @@
+import type { ImageBounds, VersionRefs } from "./image-types.js";
 /** Data the engine and host exchange: document nodes, text, vectors, versions, assets. */
 
 export type NodeId = string;
@@ -220,7 +221,7 @@ export type PropPatch = Partial<
 export interface RasterTilesSummary {
   format: "rgba8" | "r8";
   count: number;
-  /** Union of tile rectangles in layer pixels, `[x0, y0, x1, y1]`; null when empty. */
+  /** Image extent in layer pixels, `[x0, y0, x1, y1]`, including transparent pixels. */
   bounds: [number, number, number, number] | null;
 }
 /** Fields every node has. */
@@ -238,6 +239,7 @@ export interface GroupNode extends NodeBase {
 /** A raster layer's tile map itself comes from `DocumentHandle.nodeTiles`. */
 export interface RasterNode extends NodeBase {
   readonly type: "raster";
+  readonly bounds: ImageBounds;
   readonly tiles: RasterTilesSummary;
 }
 export interface TextNode extends NodeBase {
@@ -365,6 +367,7 @@ export interface VersionDiff {
   names: Record<string, string>;
 }
 export interface VersionStatus {
+  readonly refs: VersionRefs;
   head: string | null;
   commits: number;
   changed: boolean;

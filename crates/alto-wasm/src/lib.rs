@@ -111,18 +111,11 @@ fn state_hash(digest: ContentHash, head: Option<ContentHash>) -> ContentHash {
 /// map itself comes from `nodeTiles`, since a 4K layer's map is ~13 KB of JSON.
 fn node_view(node: &alto_doc::Node) -> Result<serde_json::Value, JsValue> {
     let mut value = serde_json::to_value(node).map_err(error)?;
-    if let NodeKind::Raster { tiles } = &node.kind {
-        let bounds = tiles.tiles.keys().fold(None, |b: Option<[i32; 4]>, k| {
-            let r = [k.tx * 256, k.ty * 256, (k.tx + 1) * 256, (k.ty + 1) * 256];
-            Some(b.map_or(r, |b| {
-                [
-                    b[0].min(r[0]),
-                    b[1].min(r[1]),
-                    b[2].max(r[2]),
-                    b[3].max(r[3]),
-                ]
-            }))
-        });
+    if let NodeKind::Raster { tiles, .. } = &node.kind {
+        let NodeKind::Raster { bounds: b, .. } = node.kind else {
+            unreachable!()
+        };
+        let bounds = Some([b.x, b.y, b.right(), b.bottom()]);
         value["kind"]["tiles"] = json!({
             "format": tiles.format,
             "count": tiles.tiles.len(),
@@ -178,7 +171,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        5
+        6
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
@@ -277,7 +270,7 @@ impl Runtime {
     pub fn node_tiles(&self, id: &str) -> Result<String, JsValue> {
         let id: NodeId = serde_json::from_value(json!(id)).map_err(error)?;
         let doc = self.engine.document(self.doc).map_err(error)?;
-        let NodeKind::Raster { tiles } = &doc.node(id).map_err(error)?.kind else {
+        let NodeKind::Raster { tiles, .. } = &doc.node(id).map_err(error)?.kind else {
             return Err(error("INVALID_ARGUMENT: raster layer required"));
         };
         serde_json::to_string(tiles).map_err(error)
@@ -292,7 +285,7 @@ impl Runtime {
         let versions = self.engine.version_status(self.doc).map_err(error)?;
         let state = state_hash(
             self.engine.state_digest(self.doc).map_err(error)?,
-            versions.head,
+            Some(self.engine.versions_digest(self.doc).map_err(error)?),
         );
         Ok(json!({
             "history": {"undo": undo, "redo": redo},
@@ -784,7 +777,7 @@ impl Runtime {
                 .as_ref()
                 .ok_or_else(|| error("INVALID_ARGUMENT: no mask"))?
         } else {
-            let NodeKind::Raster { tiles } = &node.kind else {
+            let NodeKind::Raster { tiles, .. } = &node.kind else {
                 return Err(error("INVALID_ARGUMENT: raster"));
             };
             tiles
@@ -1257,7 +1250,7 @@ impl Runtime {
     }
     /// Identity of what a save writes: the document content and the version head.
     pub(crate) fn state_hash(&self) -> Result<ContentHash, JsValue> {
-        let head = self.engine.version_status(self.doc).map_err(error)?.head;
+        let head = Some(self.engine.versions_digest(self.doc).map_err(error)?);
         Ok(state_hash(
             self.engine.state_digest(self.doc).map_err(error)?,
             head,
@@ -1389,6 +1382,7 @@ impl Runtime {
     }
 }
 
+mod image_versions;
 mod m78;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;

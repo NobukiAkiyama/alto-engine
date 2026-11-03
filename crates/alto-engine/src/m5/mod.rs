@@ -188,7 +188,7 @@ fn generated_selection(
     let (map, offset) = {
         let doc = engine.document(handle)?;
         let node = doc.node(layer)?;
-        let NodeKind::Raster { tiles } = &node.kind else {
+        let NodeKind::Raster { tiles, .. } = &node.kind else {
             return Err(invalid("Color selection requires a raster layer"));
         };
         if tiles.tiles.len() > MAX_SELECTION_SOURCE_TILES {
@@ -760,8 +760,14 @@ mod tests {
         let d = e.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
         let mut n = Node::raster("L");
         let id = n.id;
-        let NodeKind::Raster { tiles } = &mut n.kind else {
+        let NodeKind::Raster { tiles, bounds } = &mut n.kind else {
             panic!()
+        };
+        *bounds = alto_doc::ImageBounds {
+            x: 0,
+            y: 0,
+            width: w.div_ceil(256) * 256,
+            height: h.div_ceil(256) * 256,
         };
         for ty in 0..h.div_ceil(256) as i32 {
             for tx in 0..w.div_ceil(256) as i32 {

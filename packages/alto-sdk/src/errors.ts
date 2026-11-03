@@ -1,5 +1,7 @@
 /** What kind of failure an `AltoError` reports. Hosts branch on this, not on `message`. */
 export type ErrorCode =
+  | "UNSUPPORTED" | "BUSY" | "NO_COMMIT" | "RESOURCE_LIMIT" | "EMPTY_SELECTION"
+  | "BRANCH_NOT_MERGED" | "STALE_MERGE" | "UNRELATED_HISTORY" | "MULTIPLE_MERGE_BASES" | "INVALID_MERGE_RESULT"
   | "INVALID_ARGUMENT"
   | "CONFLICT"
   | "NOT_FOUND"
@@ -36,6 +38,7 @@ export interface ErrorDetails {
 }
 
 const CODES: readonly ErrorCode[] = [
+  "UNSUPPORTED", "BUSY", "NO_COMMIT", "RESOURCE_LIMIT", "EMPTY_SELECTION", "BRANCH_NOT_MERGED", "STALE_MERGE", "UNRELATED_HISTORY", "MULTIPLE_MERGE_BASES", "INVALID_MERGE_RESULT",
   "INVALID_ARGUMENT",
   "CONFLICT",
   "NOT_FOUND",

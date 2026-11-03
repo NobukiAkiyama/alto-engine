@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub mod archive;
 use alto_core::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,6 +9,8 @@ use std::{
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("UNSUPPORTED: {0}")]
+    Unsupported(String),
     #[error("CORRUPT_DATA: {0}")]
     Corrupt(String),
     #[error("STORAGE: {0}")]
@@ -14,13 +18,62 @@ pub enum StoreError {
 }
 type Result<T> = std::result::Result<T, StoreError>;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: u32,
+    pub document_format: u32,
     pub snapshot: ContentHash,
     pub creator: String,
     /// Latest version commit (M8). Absent for documents without history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<ContentHash>,
+    #[serde(flatten)]
+    pub refs: VersionRefs,
+}
+/// Mutable references shared by archives, folders, and recovery checkpoints.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionRefs {
+    pub current_branch: Option<String>,
+    pub branches: BTreeMap<String, Branch>,
+    pub tags: BTreeMap<String, ContentHash>,
+    pub pinned: std::collections::BTreeSet<ContentHash>,
+    pub generation: u64,
+    pub gc_generation: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Branch {
+    pub head: ContentHash,
+    pub protected: bool,
+}
+impl VersionRefs {
+    pub fn roots(&self) -> impl Iterator<Item = ContentHash> + '_ {
+        self.branches
+            .values()
+            .map(|b| b.head)
+            .chain(self.tags.values().copied())
+            .chain(self.pinned.iter().copied())
+    }
+    pub fn validate(&self, head: Option<ContentHash>) -> Result<()> {
+        if let Some(name) = &self.current_branch
+            && (self.branches.get(name).map(|b| b.head) != head || head.is_none())
+        {
+            return Err(StoreError::Corrupt(
+                "current branch does not match head".into(),
+            ));
+        }
+        if head.is_none() && (self.current_branch.is_some() || self.roots().next().is_some()) {
+            return Err(StoreError::Corrupt("references without a head".into()));
+        }
+        Ok(())
+    }
+}
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 pub const CREATOR: &str = "Alto Engine 0.4.0";
 pub struct Package {
@@ -33,6 +86,7 @@ pub struct Package {
     /// Commit bytes, verified against their names.
     pub commits: BTreeMap<ContentHash, Vec<u8>>,
     pub head: Option<ContentHash>,
+    pub refs: VersionRefs,
 }
 /// Everything a package contains, before choosing the single-file or folder form.
 #[derive(Default)]
@@ -42,6 +96,7 @@ pub struct PackageParts {
     pub snapshots: BTreeMap<ContentHash, Vec<u8>>,
     pub commits: BTreeMap<ContentHash, Vec<u8>>,
     pub head: Option<ContentHash>,
+    pub refs: VersionRefs,
 }
 pub fn object_path(h: &ContentHash) -> String {
     format!("objects/{}/{}", &h.hex()[..2], h)
@@ -59,7 +114,6 @@ pub fn is_immutable(path: &str) -> bool {
 /// True when `data` is the bytes named by a content-addressed path.
 /// The object shard has to be the first two hex digits of that hash.
 /// Native only: wasm32 does not save folders or run `git fast-import`.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn bytes_match_name(name: &str, data: &[u8]) -> bool {
     if let Some(rest) = name.strip_prefix("objects/") {
         let mut parts = rest.split('/');
@@ -103,13 +157,26 @@ pub fn package_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>
     for (h, data) in &parts.objects {
         entries.insert(object_path(h), data.clone());
     }
-    entries.insert("manifest.json".into(), manifest_bytes(hash, parts.head));
+    parts.refs.validate(parts.head)?;
+    entries.insert(
+        "manifest.json".into(),
+        manifest_bytes_with_refs(hash, parts.head, parts.refs.clone()),
+    );
     Ok(entries)
 }
 /// Canonical manifest bytes for a snapshot and head commit.
 pub fn manifest_bytes(snapshot: ContentHash, head: Option<ContentHash>) -> Vec<u8> {
+    manifest_bytes_with_refs(snapshot, head, VersionRefs::default())
+}
+pub fn manifest_bytes_with_refs(
+    snapshot: ContentHash,
+    head: Option<ContentHash>,
+    refs: VersionRefs,
+) -> Vec<u8> {
     let manifest = Manifest {
-        format: 1,
+        format: 2,
+        document_format: 5,
+        refs,
         snapshot,
         creator: CREATOR.into(),
         head,
@@ -123,6 +190,10 @@ pub fn folder_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>>
     let mut e = package_entries(parts)?;
     e.insert("document.json".into(), parts.snapshot.clone());
     e.insert(".gitattributes".into(), GITATTRIBUTES.as_bytes().to_vec());
+    e.insert(
+        ".gitignore".into(),
+        b".alto.lock\n.alto-gc.json\n.*.tmp\n".to_vec(),
+    );
     Ok(e)
 }
 pub fn encode_parts(parts: &PackageParts) -> Result<Vec<u8>> {
@@ -168,6 +239,11 @@ pub fn object_hash(tag: u8, data: &[u8]) -> ContentHash {
     }
 }
 pub fn write_entries(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
+    if entries.values().map(|b| b.len() as u64).sum::<u64>() > MAX_PACKAGE_BYTES {
+        return Err(StoreError::Io(
+            "RESOURCE_LIMIT: package exceeds 512 MiB".into(),
+        ));
+    }
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (name, data) in entries {
@@ -270,10 +346,28 @@ fn decode_entries_impl(
     trusted_opaque: Option<&std::collections::BTreeSet<ContentHash>>,
 ) -> Result<Package> {
     let mut warnings = Vec::new();
-    let manifest = entries
-        .get("manifest.json")
-        .and_then(|b| serde_json::from_slice::<Manifest>(b).ok())
-        .filter(|m| m.format == 1);
+    if let Some(bytes) = entries.get("manifest.json")
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+        && (value.get("format").and_then(|v| v.as_u64()) != Some(2)
+            || value.get("document_format").and_then(|v| v.as_u64()) != Some(5))
+    {
+        return Err(StoreError::Unsupported("package format".into()));
+    }
+    let manifest = Some(
+        alto_core::json::from_slice::<Manifest>(
+            entries
+                .get("manifest.json")
+                .ok_or_else(|| StoreError::Corrupt("manifest missing".into()))?,
+        )
+        .map_err(|e| StoreError::Corrupt(format!("manifest: {e}")))?,
+    );
+    if let Some(m) = &manifest {
+        m.refs.validate(m.head)?;
+    }
+    let refs = manifest
+        .as_ref()
+        .map(|m| m.refs.clone())
+        .unwrap_or_default();
     let mut snapshots = named(&entries, "snapshots/");
     let commits = named(&entries, "commits/");
     let damaged = |dir: &str, ok: &BTreeMap<ContentHash, Vec<u8>>| {
@@ -285,26 +379,14 @@ fn decode_entries_impl(
     };
     warnings.extend(damaged("snapshots/", &snapshots));
     warnings.extend(damaged("commits/", &commits));
-    let mut head = manifest.as_ref().and_then(|m| m.head);
-    let mut snapshot = manifest
+    let head = manifest.as_ref().and_then(|m| m.head);
+    let snapshot = manifest
         .as_ref()
         .and_then(|m| snapshots.get(&m.snapshot).cloned());
     if snapshot.is_none() {
-        warnings.push("manifest damaged; recovered a valid snapshot".into());
-        // Prefer the newest commit whose snapshot survived, then any valid snapshot.
-        let newest = commits
-            .iter()
-            .filter_map(|(h, b)| {
-                let v: serde_json::Value = serde_json::from_slice(b).ok()?;
-                let s: ContentHash = v.get("snapshot")?.as_str()?.parse().ok()?;
-                let t = v.get("created_at")?.as_i64()?;
-                snapshots.contains_key(&s).then_some((t, *h, s))
-            })
-            .max();
-        head = newest.map(|n| n.1);
-        snapshot = newest
-            .and_then(|n| snapshots.get(&n.2).cloned())
-            .or_else(|| snapshots.values().next_back().cloned());
+        return Err(StoreError::Corrupt(
+            "manifest snapshot missing or corrupt".into(),
+        ));
     }
     if let Some(h) = head
         && !commits.contains_key(&h)
@@ -356,6 +438,9 @@ fn decode_entries_impl(
             "recovery opaque index contains missing objects".into(),
         ));
     }
+    if !warnings.is_empty() {
+        return Err(StoreError::Corrupt(warnings.join("; ")));
+    }
     Ok(Package {
         snapshot,
         objects,
@@ -364,6 +449,7 @@ fn decode_entries_impl(
         snapshots,
         commits,
         head,
+        refs,
     })
 }
 /// The folder form (`.altoproj/`) on a native file system. Content-addressed files stay
@@ -378,22 +464,111 @@ pub mod folder {
     pub struct FolderReport {
         pub written: usize,
         pub skipped: usize,
+        pub warnings: Vec<String>,
     }
     fn io(e: impl std::fmt::Display) -> StoreError {
         StoreError::Io(e.to_string())
     }
     fn replace(dir: &Path, name: &str, data: &[u8]) -> Result<()> {
+        if !valid_name(name) {
+            return Err(io("invalid package path"));
+        }
         let path = dir.join(name);
+        let mut component = dir.to_path_buf();
+        for part in name.split('/') {
+            component.push(part);
+            if std::fs::symlink_metadata(&component).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(io("symlink inside package"));
+            }
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io)?;
         }
-        let tmp = dir.join(format!(".{}.tmp", name.replace('/', "_")));
+        let tmp = dir.join(format!(
+            ".{}.{}.tmp",
+            name.replace('/', "_"),
+            alto_core::NodeId::new().0
+        ));
         {
-            let mut f = std::fs::File::create(&tmp).map_err(io)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(io)?;
             f.write_all(data).map_err(io)?;
             f.sync_all().map_err(io)?;
         }
-        std::fs::rename(&tmp, &path).map_err(io)
+        std::fs::rename(&tmp, &path).map_err(io)?;
+        std::fs::File::open(path.parent().unwrap_or(dir))
+            .and_then(|f| f.sync_all())
+            .map_err(io)
+    }
+    /// An OS-held lease. All native package reads, writes and GC use this lock.
+    pub struct LockedFolder {
+        dir: std::path::PathBuf,
+        _lock: std::fs::File,
+    }
+    pub fn lock(dir: &Path) -> Result<LockedFolder> {
+        std::fs::create_dir_all(dir).map_err(io)?;
+        let path = dir.join(".alto.lock");
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(io("symlink lock"));
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(io)?;
+        file.try_lock()
+            .map_err(|e| io(format!("BUSY: package lease: {e}")))?;
+        Ok(LockedFolder {
+            dir: dir.to_path_buf(),
+            _lock: file,
+        })
+    }
+    impl LockedFolder {
+        pub fn read(&self) -> Result<BTreeMap<String, Vec<u8>>> {
+            read_unlocked(&self.dir)
+        }
+        pub fn write(
+            &self,
+            entries: &BTreeMap<String, Vec<u8>>,
+            expect: Option<ContentHash>,
+        ) -> Result<FolderReport> {
+            write_unlocked(&self.dir, entries, expect)
+        }
+        pub fn write_gc_record(&self, record: &[u8]) -> Result<()> {
+            replace(&self.dir, ".alto-gc.json", record)
+        }
+        pub fn delete_immutable(&self, path: &str) -> Result<()> {
+            if !valid_name(path) || !is_immutable(path) {
+                return Err(io("invalid GC path"));
+            }
+            let p = self.dir.join(path);
+            match std::fs::remove_file(&p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io(e)),
+            }
+            if let Some(parent) = p.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|f| f.sync_all())
+                    .map_err(io)?;
+            }
+            Ok(())
+        }
+    }
+    pub fn write(
+        dir: &Path,
+        entries: &BTreeMap<String, Vec<u8>>,
+        expect: Option<ContentHash>,
+    ) -> Result<FolderReport> {
+        lock(dir)?.write(entries, expect)
+    }
+    pub fn read(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+        lock(dir)?.read()
     }
     fn valid_name(name: &str) -> bool {
         !name.is_empty()
@@ -404,7 +579,7 @@ pub mod folder {
     }
     /// Writes entries. `expect` is the hash of the manifest this save was based on
     /// (optimistic lock); a different manifest on disk is a conflict.
-    pub fn write(
+    fn write_unlocked(
         dir: &Path,
         entries: &BTreeMap<String, Vec<u8>>,
         expect: Option<ContentHash>,
@@ -424,7 +599,7 @@ pub mod folder {
         let mut report = FolderReport::default();
         for (name, data) in entries
             .iter()
-            .filter(|(n, _)| n.as_str() != "manifest.json")
+            .filter(|(n, _)| n.as_str() != "manifest.json" && n.as_str() != "document.json")
         {
             if !valid_name(name) {
                 return Err(StoreError::Io(format!("invalid path {name}")));
@@ -454,22 +629,37 @@ pub mod folder {
         if std::fs::read(dir.join("manifest.json")).map_err(io)? != *manifest {
             return Err(StoreError::Io("manifest verification failed".into()));
         }
+        if let Some(mirror) = entries.get("document.json") {
+            match replace(dir, "document.json", mirror) {
+                Ok(()) => report.written += 1,
+                Err(e) => report
+                    .warnings
+                    .push(format!("document.json mirror needs repair: {e}")),
+            }
+        }
         Ok(report)
     }
     /// Reads the package files (manifest, snapshots, commits, objects).
-    pub fn read(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    fn read_unlocked(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut out = BTreeMap::new();
         let manifest = std::fs::read(dir.join("manifest.json")).map_err(io)?;
         out.insert("manifest.json".to_string(), manifest);
         for sub in ["snapshots", "commits", "objects"] {
             let root = dir.join(sub);
+            if std::fs::symlink_metadata(&root).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(io("symlink inside package"));
+            }
             if !root.is_dir() {
                 continue;
             }
             let mut stack = vec![root];
             while let Some(d) = stack.pop() {
                 for e in std::fs::read_dir(&d).map_err(io)? {
-                    let p = e.map_err(io)?.path();
+                    let entry = e.map_err(io)?;
+                    if entry.file_type().map_err(io)?.is_symlink() {
+                        return Err(io("symlink inside package"));
+                    }
+                    let p = entry.path();
                     if p.is_dir() {
                         stack.push(p);
                     } else if let Ok(rel) = p.strip_prefix(dir) {
@@ -508,6 +698,7 @@ mod tests {
             snapshots: BTreeMap::from([(ContentHash::of(&old), old.clone())]),
             commits: BTreeMap::from([(ch, commit.clone())]),
             head: Some(ch),
+            refs: VersionRefs::default(),
         };
         let zip = decode_package(&encode_parts(&parts).unwrap()).unwrap();
         assert_eq!(zip.head, Some(ch));
@@ -534,10 +725,9 @@ mod tests {
         assert_eq!(read.snapshot, parts.snapshot);
         assert_eq!(read.head, Some(ch));
         assert_eq!(decode_object(&read.objects[&h]).unwrap().1, pixels);
-        // A damaged manifest falls back to the newest commit's snapshot when it exists.
+        // A damaged manifest must not discard branch/tag roots through implicit recovery.
         std::fs::write(dir.join("manifest.json"), b"{").unwrap();
-        let read = decode_entries(folder::read(&dir).unwrap()).unwrap();
-        assert!(read.warnings.iter().any(|w| w.contains("manifest damaged")));
+        assert!(decode_entries(folder::read(&dir).unwrap()).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
@@ -551,6 +741,7 @@ mod tests {
             objects: BTreeMap::from([(h, encode_object(4, &pixels))]),
             commits: BTreeMap::from([(ch, commit)]),
             head: Some(ch),
+            refs: VersionRefs::default(),
             ..Default::default()
         };
         let dir = std::env::temp_dir().join(format!("alto-folder-repair-{}", std::process::id()));
@@ -617,7 +808,7 @@ mod tests {
         assert!(decode_recovery_entries(entries, &missing).is_err());
     }
     #[test]
-    fn bad_object_is_reported_without_losing_document() {
+    fn corrupt_object_is_rejected_without_implicit_repair() {
         let mut e = BTreeMap::new();
         let snapshot = b"{}";
         let h = ContentHash::of(snapshot);
@@ -627,14 +818,32 @@ mod tests {
             format!("objects/{}/{bad}", &bad.hex()[..2]),
             b"damaged".to_vec(),
         );
-        let p = decode_package(&write_entries(&e).unwrap()).unwrap();
-        assert_eq!(p.snapshot, snapshot);
-        assert_eq!(p.warnings.len(), 2);
+        e.insert("manifest.json".into(), manifest_bytes(h, None));
+        assert!(decode_package(&write_entries(&e).unwrap()).is_err());
     }
     #[test]
     fn read_limited_stops_before_buffering_the_cap() {
         let mut reader = std::io::repeat(1u8).take(10_000);
         let err = read_limited(&mut reader, 100).unwrap_err();
         assert!(err.to_string().contains("512 MiB"), "{err}");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod mirror_tests {
+    use super::*;
+    #[test]
+    fn a_mirror_failure_does_not_undo_a_published_manifest() {
+        let dir = std::env::temp_dir().join(format!("alto-mirror-{}", alto_core::NodeId::new().0));
+        std::fs::create_dir_all(dir.join("document.json")).unwrap();
+        let parts = PackageParts {
+            snapshot: b"{}".to_vec(),
+            ..Default::default()
+        };
+        let report = folder::write(&dir, &folder_entries(&parts).unwrap(), None).unwrap();
+        assert_eq!(report.warnings.len(), 1);
+        let opened = decode_entries(folder::read(&dir).unwrap()).unwrap();
+        assert_eq!(opened.snapshot, parts.snapshot);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

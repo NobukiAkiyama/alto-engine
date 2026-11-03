@@ -1,1 +1,1 @@
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;

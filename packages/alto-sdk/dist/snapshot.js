@@ -22,7 +22,7 @@ export function toNode(wire) {
             isolation: k.isolation,
         };
     else if (k.kind === "raster")
-        node = { ...base, type: "raster", tiles: k.tiles };
+        node = { ...base, type: "raster", bounds: k.bounds, tiles: k.tiles };
     else if (k.kind === "text")
         node = { ...base, type: "text", content: k.content };
     else if (k.kind === "vector")

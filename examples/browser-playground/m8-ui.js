@@ -16,6 +16,7 @@ function detail(d) {
       if (d.tate_chu_yoko) parts.push("縦中横");
       return parts.join("、");
     }
+    case "geometry": return "画像の範囲・サイズ";
     case "adjustment": return "調整値";
     case "unsupported": return "未対応ノードの内容";
     case "kind_changed": return `${d.from} → ${d.to}`;
@@ -58,7 +59,8 @@ export function installM8({ engine, getDocument, attach, run }) {
       ? `${s.commits}版 · 最新 ${short(s.head)} · ${s.changed ? `作業中の変更 ${s.changes}件` : "最新の版と同じ"}`
       : "コミットはまだありません";
     $("#version-working").disabled = !s.head;
-    log = await d.versions.log();
+    const mode = $("#version-log-mode").value;
+    log = await d.versions.log({ mode: mode === "first_parent" ? "first_parent" : "dag", allBranches: mode === "all" });
     if (seq !== ticket) return;
     if (chosen && !log.some((c) => c.hash === chosen)) chosen = null;
     $("#version-list").replaceChildren(...log.map((c) => {
@@ -100,7 +102,7 @@ export function installM8({ engine, getDocument, attach, run }) {
     const d = getDocument();
     folder = d.folder || folder || (await pickFolder());
     const r = await d.saveFolder(folder, { overwrite: !d.folder });
-    $("#version-state").textContent += ` · フォルダへ保存（新規 ${r.written} / 既存 ${r.skipped}）`;
+    $("#version-state").textContent += ` · フォルダへ保存（新規 ${r.written} / 既存 ${r.skipped}）${r.warnings.length ? " · " + r.warnings.join("、") : ""}`;
   });
   $("#open-folder").onclick = () => run(async () => {
     const provider = await pickFolder();
@@ -112,6 +114,7 @@ export function installM8({ engine, getDocument, attach, run }) {
     try { const { runM8Tests } = await import("../../tests/e2e/m8-tests.js"); await runM8Tests(engine, (l) => ($("#test-results").textContent += "\n" + l)); attach(engine.document); }
     finally { b.disabled = false; }
   });
+  $("#version-log-mode").onchange = () => run(refresh);
   void refresh();
   return { refresh: () => void refresh().catch(() => {}) };
 }

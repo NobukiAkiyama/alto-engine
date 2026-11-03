@@ -201,6 +201,7 @@ async function connect(url, onEvent = () => {}) {
 }
 
 const suites = [
+  ["image-versions", `const { runImageVersionTests } = await import('../../tests/e2e/image-version-tests.js'); await runImageVersionTests(window.altoEngine, (line) => console.log(line));`],
   ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line));`],
   ["m5", `const { runM5Tests } = await import('../../tests/e2e/m5-tests.js'); await runM5Tests(window.altoEngine, (line) => console.log(line));`],
   ["m6", `const { runM6Tests } = await import('../../tests/e2e/m6-tests.js'); await runM6Tests(window.altoEngine, (line) => console.log(line));`],

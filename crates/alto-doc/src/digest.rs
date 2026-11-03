@@ -16,7 +16,10 @@ pub struct StateDigest {
 
 fn json_hash<T: serde::Serialize>(value: &T) -> ContentHash {
     // Serializing these document types cannot fail: keys are strings or ids.
-    ContentHash::of(&serde_json::to_vec(value).unwrap_or_default())
+    ContentHash::of(
+        &serde_json::to_vec(&alto_core::json::canonical_value(value).expect("valid document JSON"))
+            .expect("valid document JSON"),
+    )
 }
 fn node_hash(node: &Node) -> ContentHash {
     json_hash(node)

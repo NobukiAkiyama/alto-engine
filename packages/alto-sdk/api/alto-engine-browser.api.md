@@ -38,6 +38,15 @@ export function isSupported(): Promise<{
 
 // @public
 export interface ObjectStorageProvider {
+    // Warning: (ae-forgotten-export) The symbol "ExclusiveObjectStorage" needs to be exported by the entry point browser.d.ts
+    //
+    // (undocumented)
+    exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    readonly gcCapabilities?: {
+        exclusive: true;
+        atomicManifest: true;
+        deleteObjects: true;
+    };
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
     // (undocumented)

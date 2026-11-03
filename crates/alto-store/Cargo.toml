@@ -10,3 +10,4 @@ serde_json = "1"
 lz4_flex = "0.13"
 zip = { version = "4", default-features = false }
 thiserror = "2"
+sha2 = "0.10"

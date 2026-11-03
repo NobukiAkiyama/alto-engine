@@ -16,6 +16,7 @@ export class Runtime {
     beginBrush(layer: string, config: string, color: Float32Array, erase: boolean, mask: boolean): void;
     brushInput(samples: Float32Array): void;
     cancelBrush(): void;
+    cancelMerge(): void;
     /**
      * The canonical .alto bytes for a folder, used as the recovery checkpoint.
      */
@@ -28,6 +29,7 @@ export class Runtime {
      */
     checkpointParts(): Uint8Array;
     commit(message: string, created_at: number, author: string, allow_empty: boolean): string;
+    compactArchive(bytes: Uint8Array): Uint8Array;
     cpuBrushReference(config: string, color: Float32Array, samples: Float32Array): Uint8Array;
     createDocument(w: number, h: number, render_version?: number | null): string;
     static create(canvas: OffscreenCanvas, budget: number): Promise<Runtime>;
@@ -42,11 +44,16 @@ export class Runtime {
      */
     forgetStoredObjects(): void;
     frameFields(): string[];
+    gcPlan(framed: Uint8Array, dry_run: boolean): Uint8Array;
     gpuIdle(): Promise<void>;
+    historyCommand(request: string): string;
+    imageEdit(request: string): string;
     importFont(bytes: Uint8Array, face_index: number): string;
     importRgba(w: number, h: number, pixels: Uint8Array, encoded: Uint8Array, mime: string): string;
+    importSvg(svg: string, parent: string, index: number): string;
     injectFinishJournalFailure(): void;
     injectReadbackFailure(n: number): void;
+    listBranches(): string;
     markSaved(hash: string): string;
     /**
      * A raster layer's full tile map; views carry only its size and bounds.
@@ -67,7 +74,10 @@ export class Runtime {
      */
     openRecoveryPackage(bytes: Uint8Array, opaque: string): string;
     parseVectorPath(svg: string): string;
+    pickColor(node: string, x: number, y: number): string;
+    pickComposite(x: number, y: number): Promise<string>;
     prefetchStep(): string;
+    prepareMerge(name: string): string;
     protocolVersion(): number;
     /**
      * Decode results: u32 count, then per tile a 32-byte hash, status (0 ok,
@@ -159,7 +169,7 @@ export class Runtime {
     vectorPathSvg(data: string): string;
     vectorStats(): string;
     versionDiff(from: string, to: string): string;
-    versionLog(): string;
+    versionLog(dag: boolean, all_branches: boolean): string;
     view(): string;
     viewport(x: number, y: number, zoom: number, rotation: number): void;
 }
@@ -196,9 +206,11 @@ export interface InitOutput {
     readonly runtime_beginBrush: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly runtime_brushInput: (a: number, b: number, c: number) => [number, number];
     readonly runtime_cancelBrush: (a: number) => void;
+    readonly runtime_cancelMerge: (a: number) => [number, number];
     readonly runtime_checkpointBytes: (a: number) => [number, number, number, number];
     readonly runtime_checkpointParts: (a: number) => [number, number, number, number];
     readonly runtime_commit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly runtime_compactArchive: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_cpuBrushReference: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runtime_create: (a: any, b: number) => any;
     readonly runtime_createDocument: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -209,11 +221,16 @@ export interface InitOutput {
     readonly runtime_folderPlan: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_forgetStoredObjects: (a: number) => void;
     readonly runtime_frameFields: (a: number) => [number, number];
+    readonly runtime_gcPlan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_gpuIdle: (a: number) => any;
+    readonly runtime_historyCommand: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_imageEdit: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_importFont: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_importRgba: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly runtime_importSvg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly runtime_injectFinishJournalFailure: (a: number) => void;
     readonly runtime_injectReadbackFailure: (a: number, b: number) => void;
+    readonly runtime_listBranches: (a: number) => [number, number, number, number];
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_nodeTiles: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_noteStoredObjects: (a: number, b: number, c: number) => [number, number];
@@ -222,7 +239,10 @@ export interface InitOutput {
     readonly runtime_openRecoveryEntries: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_parseVectorPath: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_pickColor: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly runtime_pickComposite: (a: number, b: number, c: number) => any;
     readonly runtime_prefetchStep: (a: number) => [number, number, number, number];
+    readonly runtime_prepareMerge: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
     readonly runtime_provideDecoded: (a: number, b: number, c: number) => [number, number];
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
@@ -268,7 +288,7 @@ export interface InitOutput {
     readonly runtime_vectorPathSvg: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_vectorStats: (a: number) => [number, number];
     readonly runtime_versionDiff: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly runtime_versionLog: (a: number) => [number, number, number, number];
+    readonly runtime_versionLog: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_view: (a: number) => [number, number, number, number];
     readonly runtime_viewport: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly spike_canRedo: (a: number) => number;
@@ -284,10 +304,10 @@ export interface InitOutput {
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__96: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__97: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__106: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__107: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__95: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__105: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

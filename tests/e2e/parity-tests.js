@@ -511,7 +511,7 @@ export async function runParityTests(engine, log) {
         // This case opens an explicit v3 fixture for integer color adjustment.
         const doc = await engine.open(new Blob([packageBytes]));
         const opened = doc.getSnapshot().meta;
-        if (opened.render_version !== 3 || opened.format_version !== 4) {
+        if (opened.render_version !== 3 || opened.format_version !== 5) {
           failures.push(`${name}: opened render ${opened.render_version} format ${opened.format_version}`);
         }
         const asset = await imported(engine, image);
@@ -1060,14 +1060,14 @@ export async function runParityTests(engine, log) {
       assert(same(cpu, cold), `cold readback level 4: ${diff(cpu, cold)}`);
       return `${steps} steps, ${frame.diagnosticTicks} diagnostic ticks`;
     });
-    await test("new documents default to render version 3 and save format 4", async () => {
+    await test("new documents default to render version 3 and save format 5", async () => {
       const doc = await engine.createDocument({ width: 256, height: 256 });
       const fresh = doc.getSnapshot().meta;
-      assert(fresh.render_version === 3 && fresh.format_version === 4, `new document ${fresh.render_version}/${fresh.format_version}`);
+      assert(fresh.render_version === 3 && fresh.format_version === 5, `new document ${fresh.render_version}/${fresh.format_version}`);
       const saved = await testing(engine).saveBytes();
       const reopened = await engine.open(new Blob([saved]));
       const meta = reopened.getSnapshot().meta;
-      assert(meta.render_version === 3 && meta.format_version === 4, `saved document ${meta.render_version}/${meta.format_version}`);
+      assert(meta.render_version === 3 && meta.format_version === 5, `saved document ${meta.render_version}/${meta.format_version}`);
     });
     await test("deferred present stops instead of waiting forever", async () => {
       await engine.createDocument({ width: 64, height: 64 });

@@ -1,5 +1,13 @@
-//! M8: version commits, history, semantic diff, restore, and the package parts that
-//! carry history in both the single-file and folder forms.
+mod gc;
+pub use gc::{GcCounts, GcPlan, GcReport};
+mod journal;
+pub use journal::VersionCheckpoint;
+mod merge;
+pub use merge::{MergeConflict, MergePlan, MergeResolution, MergeResult, MergeValue};
+mod branches;
+pub use branches::BranchView;
+// M8: version commits, history, semantic diff, restore, and the package parts that
+// carry history in both the single-file and folder forms.
 use crate::{DocHandle, Engine, EngineError, Warning, node_hashes};
 use alto_core::{ContentHash, NodeId};
 use alto_doc::{Commit, DiffItem, DocError, Document, version::summarize};
@@ -10,14 +18,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default, Clone)]
 pub struct VersionStore {
+    merge: Option<merge::MergeSession>,
     pub(crate) commits: BTreeMap<ContentHash, Commit>,
     pub(crate) commit_bytes: BTreeMap<ContentHash, Vec<u8>>,
     pub(crate) snapshots: BTreeMap<ContentHash, Vec<u8>>,
     pub(crate) head: Option<ContentHash>,
+    pub(crate) refs: alto_store::VersionRefs,
     /// Tiles and blobs referenced by committed snapshots (GC roots).
     pub(crate) retained: BTreeSet<ContentHash>,
     /// The head commit's document, parsed once. Version status diffs against it
     /// after every edit; parsing the snapshot each time cost ten times the diff.
+    head_digest: Option<ContentHash>,
     head_doc: Option<(ContentHash, std::sync::Arc<Document>)>,
 }
 impl VersionStore {
@@ -28,6 +39,10 @@ impl VersionStore {
             let doc = Document::from_snapshot_bytes(self.snapshots.get(&commit.snapshot)?).ok()?;
             Some((c, std::sync::Arc::new(doc)))
         });
+        self.head_digest = self
+            .head_doc
+            .as_ref()
+            .map(|(_, doc)| alto_doc::digest::StateDigest::of(doc).value());
     }
 }
 
@@ -67,6 +82,7 @@ pub struct CommitView {
 #[derive(Clone, Debug, Serialize)]
 pub struct VersionStatus {
     pub head: Option<ContentHash>,
+    pub refs: alto_store::VersionRefs,
     pub commits: usize,
     /// Whether the working document differs from the head commit.
     pub changed: bool,
@@ -107,7 +123,7 @@ impl VersionStore {
     /// Only `Engine::prune_versions` calls this. Commit and open keep every version.
     pub(crate) fn gc_unreachable(&mut self) {
         let mut keep = BTreeSet::new();
-        let mut stack: Vec<ContentHash> = self.head.into_iter().collect();
+        let mut stack: Vec<ContentHash> = self.root_commits().into_iter().collect();
         while let Some(hash) = stack.pop() {
             if !keep.insert(hash) {
                 continue;
@@ -129,34 +145,16 @@ impl VersionStore {
     }
 }
 
-fn kept_commits(store: &VersionStore, ancestors: u32) -> BTreeSet<ContentHash> {
-    let Some(mut cursor) = store.head else {
-        return BTreeSet::new();
-    };
-    let mut kept = BTreeSet::new();
-    kept.insert(cursor);
-    for _ in 0..ancestors {
-        let Some(parent) = store
-            .commits
-            .get(&cursor)
-            .and_then(|c| c.parents.first())
-            .copied()
-        else {
-            break;
-        };
-        if !kept.insert(parent) {
-            break;
-        }
-        cursor = parent;
-    }
-    kept
-}
-
 fn invalid(s: impl Into<String>) -> EngineError {
     DocError::Invalid(s.into()).into()
 }
 
 impl Engine {
+    pub(crate) fn invalidate_merge(&mut self, h: DocHandle) {
+        if let Some(s) = self.versions.get_mut(&h) {
+            s.merge = None;
+        }
+    }
     fn versions(&self, h: DocHandle) -> Result<&VersionStore, EngineError> {
         self.document(h)?;
         Ok(self.versions.get(&h).unwrap_or(&self.empty_versions))
@@ -171,6 +169,13 @@ impl Engine {
         author: Option<String>,
         allow_empty: bool,
     ) -> Result<CommitView, EngineError> {
+        self.document(h)?;
+        if self.versions(h)?.head.is_some() && self.versions(h)?.refs.current_branch.is_none() {
+            return Err(branches::fail(
+                "CONFLICT",
+                "create a branch before committing in detached state",
+            ));
+        }
         let snapshot = self.snapshot(h)?;
         let sh = ContentHash::of(&snapshot);
         let store = self.versions.entry(h).or_default();
@@ -184,6 +189,8 @@ impl Engine {
         }
         let editor = self.documents.get(&h).ok_or(EngineError::NotFound(h))?;
         let commit = Commit {
+            format: 2,
+            merge_base: None,
             parents: head.into_iter().collect(),
             snapshot: sh,
             message: message.trim_end().to_string(),
@@ -195,7 +202,29 @@ impl Engine {
         let bytes = commit.bytes();
         let hash = ContentHash::of(&bytes);
         let store = self.versions.entry(h).or_default();
+        let generation = store
+            .refs
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| branches::fail("RESOURCE_LIMIT", "generation overflow"))?;
         store.insert(hash, commit, bytes, snapshot)?;
+        store.refs.generation = generation;
+        store.merge = None;
+        let name = store
+            .refs
+            .current_branch
+            .clone()
+            .unwrap_or_else(|| "main".into());
+        store
+            .refs
+            .branches
+            .entry(name.clone())
+            .and_modify(|b| b.head = hash)
+            .or_insert(alto_store::Branch {
+                head: hash,
+                protected: true,
+            });
+        store.refs.current_branch = Some(name);
         store.set_head(Some(hash));
         if let Some(editor) = self.documents.get_mut(&h) {
             editor.take_intent_log();
@@ -267,6 +296,48 @@ impl Engine {
         Ok(out)
     }
 
+    /// Reverse topological history: every child precedes its parents, with stable timestamp/hash ties.
+    pub fn log_dag(
+        &self,
+        h: DocHandle,
+        all_branches: bool,
+    ) -> Result<Vec<CommitView>, EngineError> {
+        let s = self.versions(h)?;
+        s.validate_graph()?;
+        let roots: Vec<_> = if all_branches {
+            s.refs.roots().chain(s.head).collect()
+        } else {
+            s.head.into_iter().collect()
+        };
+        let mut keep = BTreeSet::new();
+        for root in roots {
+            keep.extend(s.ancestors(root)?);
+        }
+        let mut children: BTreeMap<_, usize> = keep.iter().map(|h| (*h, 0)).collect();
+        for h in &keep {
+            for p in &s.commits[h].parents {
+                *children.get_mut(p).unwrap() += 1;
+            }
+        }
+        let mut ready: BTreeSet<_> = children
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(h, _)| (std::cmp::Reverse(s.commits[h].created_at), *h))
+            .collect();
+        let mut out = vec![];
+        while let Some((_, hash)) = ready.pop_first() {
+            out.push(self.commit_view(h, hash)?);
+            for p in &s.commits[&hash].parents {
+                let n = children.get_mut(p).unwrap();
+                *n -= 1;
+                if *n == 0 {
+                    ready.insert((std::cmp::Reverse(s.commits[p].created_at), *p));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn resolve(&self, h: DocHandle, r: VersionRef) -> Result<Document, EngineError> {
         match r {
             VersionRef::Working => Ok(self.document(h)?.clone()),
@@ -319,12 +390,17 @@ impl Engine {
             (Some(c), _) => self
                 .diff_versions(h, VersionRef::Commit(c), VersionRef::Working)?
                 .len(),
-            (None, _) => usize::from(self.document(h)?.nodes.len() > 1),
+            (None, _) => 1,
         };
         Ok(VersionStatus {
             head: store.head,
+            refs: store.refs.clone(),
             commits: store.commits.len(),
-            changed: changes > 0,
+            changed: store
+                .head_digest
+                .map(|d| self.state_digest(h).map(|current| d != current))
+                .transpose()?
+                .unwrap_or(true),
             changes,
             pending_intents: self.documents.get(&h).map_or(0, |e| e.intent_log().len()),
         })
@@ -337,6 +413,7 @@ impl Engine {
         let Some(store) = self.versions.get_mut(&h) else {
             return Ok(0);
         };
+        store.validate_graph()?;
         let before = store.commits.len();
         store.gc_unreachable();
         let removed = before - store.commits.len();
@@ -399,6 +476,7 @@ impl Engine {
             snapshots: store.snapshots.clone(),
             commits: store.commit_bytes.clone(),
             head: store.head,
+            refs: store.refs.clone(),
         };
         Ok((parts, hashes))
     }
@@ -460,40 +538,11 @@ impl Engine {
         h: DocHandle,
         ancestors: u32,
     ) -> Result<Vec<u8>, EngineError> {
-        let doc = self.document(h)?;
-        let current = doc.snapshot_bytes()?;
-        let current_hash = ContentHash::of(&current);
-        let store = self.versions(h)?;
-        let kept = kept_commits(store, ancestors);
-        let mut hashes = doc_hashes(doc);
-        let mut snapshots = BTreeMap::new();
-        let mut commits = BTreeMap::new();
-        for hash in &kept {
-            let Some(commit) = store.commits.get(hash) else {
-                continue;
-            };
-            if let Some(bytes) = store.snapshots.get(&commit.snapshot) {
-                hashes.extend(doc_hashes(&Document::from_snapshot_bytes(bytes)?));
-                if commit.snapshot != current_hash {
-                    snapshots.insert(commit.snapshot, bytes.clone());
-                }
-            }
-            if let Some(bytes) = store.commit_bytes.get(hash) {
-                commits.insert(*hash, bytes.clone());
-            }
-        }
-        let mut objects = BTreeMap::new();
-        for hash in hashes {
-            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
-            objects.insert(hash, bytes);
-        }
-        Ok(alto_store::encode_parts(&PackageParts {
-            snapshot: current,
-            objects,
-            snapshots,
-            commits,
-            head: store.head.filter(|h| kept.contains(h)),
-        })?)
+        let _ = (h, ancestors);
+        Err(branches::fail(
+            "UNSUPPORTED",
+            "history truncation is not supported; use reference-based GC",
+        ))
     }
 
     /// Object paths a folder needs, given its manifest, snapshots and commits.
@@ -551,59 +600,115 @@ impl Engine {
         deferred_verify: bool,
         history: Option<alto_doc::History>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        let package = p
-            .warnings
-            .iter()
-            .map(|w| Warning::new("PACKAGE_DAMAGED").with("detail", w))
-            .collect();
-        let (handle, mut warnings) =
-            self.install_package(p.objects, p.opaque, &p.snapshot, package, deferred_verify)?;
+        let current_doc = Document::from_snapshot_bytes(&p.snapshot)?;
         let current = ContentHash::of(&p.snapshot);
-        let mut store = VersionStore::default();
+        let mut parsed = BTreeMap::new();
         for (hash, bytes) in &p.commits {
-            let commit = match Commit::parse_history(bytes) {
-                Ok((c, warning)) => {
-                    if let Some(w) = warning {
-                        warnings.push(
-                            Warning::new("COMMIT_DAMAGED")
-                                .with("commit", hash)
-                                .with("detail", w),
-                        );
-                    }
-                    c
-                }
-                Err(e) => {
-                    warnings.push(
-                        Warning::new("COMMIT_DAMAGED")
-                            .with("commit", hash)
-                            .with("detail", e),
-                    );
-                    continue;
-                }
-            };
-            let snapshot = if commit.snapshot == current {
-                Some(p.snapshot.clone())
-            } else {
-                p.snapshots.get(&commit.snapshot).cloned()
-            };
-            match snapshot {
-                Some(s) => {
-                    if let Err(e) = store.insert(*hash, commit, bytes.clone(), s) {
-                        warnings.push(
-                            Warning::new("COMMIT_DAMAGED")
-                                .with("commit", hash)
-                                .with("detail", e),
-                        );
-                    }
-                }
-                None => warnings.push(Warning::new("COMMIT_SNAPSHOT_MISSING").with("commit", hash)),
+            parsed.insert(
+                *hash,
+                Commit::parse(bytes).map_err(|e| branches::fail("CORRUPT_DATA", e))?,
+            );
+        }
+        let mut required = BTreeSet::new();
+        let mut stack: Vec<_> = p.refs.roots().chain(p.head).collect();
+        while let Some(hash) = stack.pop() {
+            if required.insert(hash) {
+                let c = parsed.get(&hash).ok_or_else(|| {
+                    branches::fail("CORRUPT_DATA", "referenced commit is missing")
+                })?;
+                stack.extend(c.parents.iter().copied());
             }
         }
-        let head = p.head.filter(|h| store.commits.contains_key(h));
-        store.set_head(head);
+        let mut store = VersionStore::default();
+        for (hash, commit) in parsed {
+            let snapshot = if commit.snapshot == current {
+                Some(&p.snapshot)
+            } else {
+                p.snapshots.get(&commit.snapshot)
+            };
+            let Some(snapshot) = snapshot else {
+                if required.contains(&hash) {
+                    return Err(branches::fail(
+                        "CORRUPT_DATA",
+                        "referenced commit snapshot is missing",
+                    ));
+                }
+                continue; // An interrupted GC can leave unreferenced fragments.
+            };
+            let doc = Document::from_snapshot_bytes(snapshot)?;
+            if doc.root != current_doc.root {
+                return Err(branches::fail(
+                    "CORRUPT_DATA",
+                    "history belongs to another document",
+                ));
+            }
+            store.insert(hash, commit, p.commits[&hash].clone(), snapshot.clone())?;
+        }
+        loop {
+            let incomplete: Vec<_> = store
+                .commits
+                .iter()
+                .filter(|(_, c)| c.parents.iter().any(|p| !store.commits.contains_key(p)))
+                .map(|(h, _)| *h)
+                .collect();
+            if incomplete.is_empty() {
+                break;
+            }
+            for hash in incomplete {
+                if required.contains(&hash) {
+                    return Err(branches::fail(
+                        "CORRUPT_DATA",
+                        "referenced parent is missing",
+                    ));
+                }
+                store.commits.remove(&hash);
+                store.commit_bytes.remove(&hash);
+            }
+        }
+        let needed: BTreeSet<_> = store.commits.values().map(|c| c.snapshot).collect();
+        store.snapshots.retain(|h, _| needed.contains(h));
+        store.retained.clear();
+        for bytes in store.snapshots.values() {
+            store
+                .retained
+                .extend(doc_hashes(&Document::from_snapshot_bytes(bytes)?));
+        }
+        store.refs = p.refs;
+        store.set_head(p.head);
+        store.validate_graph()?;
+        let (handle, mut warnings) =
+            self.install_package(p.objects, p.opaque, &p.snapshot, vec![], deferred_verify)?;
         for hash in &store.retained {
             if !self.tiles.contains(hash) && !self.blobs.contains_key(hash) {
-                warnings.push(Warning::new("HISTORY_OBJECT_MISSING").with("hash", hash));
+                self.documents.remove(&handle);
+                return Err(branches::fail(
+                    "CORRUPT_DATA",
+                    format!("history object missing: {hash}"),
+                ));
+            }
+        }
+        {
+            let validation = (|| -> Result<(), EngineError> {
+                if let Some(selection) = &self.document(handle)?.selection {
+                    self.validate_mask_plane_impl(selection, deferred_verify)?;
+                }
+                for node in self.document(handle)?.nodes.values() {
+                    self.validate_node_content_impl(node, deferred_verify)?;
+                }
+                for bytes in store.snapshots.values() {
+                    let doc = Document::from_snapshot_bytes(bytes)?;
+                    if let Some(selection) = &doc.selection {
+                        self.validate_mask_plane_impl(selection, deferred_verify)?;
+                    }
+                    for node in doc.nodes.values() {
+                        self.validate_node_content_impl(node, deferred_verify)?;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = validation {
+                self.documents.remove(&handle);
+                return Err(error);
             }
         }
         warnings.dedup();

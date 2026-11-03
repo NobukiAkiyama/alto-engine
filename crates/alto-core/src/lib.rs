@@ -1,3 +1,4 @@
+pub mod json;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, str::FromStr};
 
@@ -176,10 +177,14 @@ impl FromStr for TileKey {
         let (x, y) = s
             .split_once(',')
             .ok_or_else(|| "Invalid tile key".to_string())?;
-        Ok(Self {
+        let out = Self {
             tx: x.parse().map_err(|_| "Invalid tile X".to_string())?,
             ty: y.parse().map_err(|_| "Invalid tile Y".to_string())?,
-        })
+        };
+        if out.to_string() != s {
+            return Err("Noncanonical tile key".into());
+        }
+        Ok(out)
     }
 }
 impl Serialize for TileKey {

@@ -455,6 +455,7 @@
         <p class="meta" id="version-state">コミットはまだありません</p>
         <label class="path-data-label">メッセージ<textarea id="commit-message" rows="2" placeholder="例：線画を追加"></textarea></label>
         <div class="tools"><button id="version-commit">コミット</button><button id="version-working">作業中の変更</button></div>
+        <label>履歴の範囲<select id="version-log-mode"><option value="first_parent">現在のブランチ</option><option value="dag">統合元の履歴を含む</option><option value="all">全ブランチと保護した版</option></select></label>
         <ul id="version-list" class="version-list"></ul>
         <div class="tools"><button id="version-diff">選択した版と比較</button><button id="version-restore">この版に戻す</button></div>
         <ul id="version-diff-list" class="diff-list"></ul>
@@ -544,6 +545,7 @@
         <button id="test-m5">M5を自動検証</button
         ><button id="sample-m5">M5サンプルを開く</button>
         <button id="test-m6">M6を自動検証</button><button id="sample-m6">M6サンプルを開く</button>
+        <button id="test-image-versions">画像編集・分岐・統合を検証</button>
         <button id="test-m7">M7を自動検証</button><button id="test-m8">M8を自動検証</button><button id="sample-m78">M7/M8サンプルを開く</button>
         <pre id="test-results"></pre>
       </details>

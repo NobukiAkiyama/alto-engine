@@ -240,6 +240,7 @@ pub fn diff_text(a: &Document, b: &Document) -> String {
 /// The engine reports what changed as data; this command line words it.
 fn describe(detail: &ContentDetail) -> String {
     match detail {
+        ContentDetail::Geometry => "image bounds".into(),
         ContentDetail::Vector { paths, commands } => format!(
             "パス {}本/{}命令 → {}本/{}命令",
             paths[0], commands[0], paths[1], commands[1]
@@ -389,7 +390,7 @@ pub fn textconv(snapshot: &[u8]) -> Result<String> {
             },
         );
         match &n.kind {
-            NodeKind::Raster { tiles } => {
+            NodeKind::Raster { tiles, .. } => {
                 for (k, h) in &tiles.tiles {
                     *s += &format!("{pad}  tile {k} {}\n", short(h));
                 }
@@ -535,10 +536,22 @@ pub struct SyncReport {
 /// Each Git commit's tree is the folder as it was at that Alto commit; objects are
 /// only ever added, so later commits reuse earlier blobs.
 pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
+    if let Some(name) = branch {
+        check_branch_name(name)?;
+    }
     let p = Opened::from_entries(folder::read(folder_dir).map_err(|e| e.to_string())?)?;
+    reject_damaged_commits(&p.entries)?;
+    let chain: BTreeSet<_> = p.chain().into_iter().collect();
+    if p.commits.values().any(|c| c.parents.len() > 1)
+        || p.package.refs.branches.len() > 1
+        || p.package.refs.roots().any(|h| !chain.contains(&h))
+    {
+        return Err(
+            "UNSUPPORTED: Git branch/merge mirroring is a separate implementation phase".into(),
+        );
+    }
     // A commit that does not parse is not imported. Angle brackets in a stored
     // author are a warning, and the fast-import line uses `git_person`.
-    reject_damaged_commits(&p.entries)?;
     let prefix = git(folder_dir, &["rev-parse", "--show-prefix"])?
         .trim()
         .to_string();
@@ -671,7 +684,7 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         }
         let mut needed = BTreeSet::new();
         for n in doc.nodes.values() {
-            if let NodeKind::Raster { tiles } = &n.kind {
+            if let NodeKind::Raster { tiles, .. } = &n.kind {
                 needed.extend(tiles.tiles.values().copied());
             }
             if let Some(m) = &n.props.mask {
@@ -693,12 +706,20 @@ pub fn sync(folder_dir: &Path, branch: Option<&str>) -> Result<SyncReport> {
         files.push((alto_store::commit_path(h), p.package.commits[h].clone()));
         files.push((
             "manifest.json".into(),
-            alto_store::manifest_bytes(c.snapshot, Some(*h)),
+            if Some(*h) == p.package.head {
+                alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), p.package.refs.clone())
+            } else {
+                alto_store::manifest_bytes(c.snapshot, Some(*h))
+            },
         ));
         files.push(("document.json".into(), snap_bytes.clone()));
         files.push((
             ".gitattributes".into(),
             alto_store::GITATTRIBUTES.as_bytes().to_vec(),
+        ));
+        files.push((
+            ".gitignore".into(),
+            b".alto.lock\n.alto-gc.json\n.*.tmp\n".to_vec(),
         ));
         for (path, data) in files {
             if alto_store::is_immutable(&path) && present.contains(&path) {
@@ -792,9 +813,14 @@ pub fn pack(dir: &Path, file: &Path) -> Result<()> {
         .objects
         .retain(|h, _| keep.contains(&alto_store::object_path(h)));
     let bytes = alto_store::encode_parts(&parts).map_err(|e| e.to_string())?;
-    let tmp = file.with_extension("alto.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, file).map_err(|e| e.to_string())
+    let target = alto_store::archive::lock(file).map_err(|e| e.to_string())?;
+    let expected = target
+        .read()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|b| alto_store::sha256_hex(b))
+        .unwrap_or_default();
+    target.replace(&bytes, &expected).map_err(|e| e.to_string())
 }
 fn parts(p: &Package) -> alto_store::PackageParts {
     alto_store::PackageParts {
@@ -803,5 +829,6 @@ fn parts(p: &Package) -> alto_store::PackageParts {
         snapshots: p.snapshots.clone(),
         commits: p.commits.clone(),
         head: p.head,
+        refs: p.refs.clone(),
     }
 }

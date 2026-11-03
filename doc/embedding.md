@@ -93,7 +93,7 @@ container.addEventListener("pointerdown", event => {
 
 公開済みの `presentedViewport` / `presentedViewVersion` と要求中の version を別々に読めます。Snapshot と内部の center は読み取り専用です。GPU 完了による論理的な確認で、OS の scanout 時刻を表しません。`viewport.get()`・座標変換は従来通り要求中の view を同期的に使います。付属 pointer adapter は未準備の画面入力をエラーにし、ストローク中の viewport 送信を終了まで保留します。文書座標の `InputSample` やプログラマティックな編集 API は表示準備を待つ必要がありません。
 
-確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 5 になり、必ず同じ配布物を組み合わせます。
+確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 6 になり、必ず同じ配布物を組み合わせます。
 
 ## 5. エンジンの状態
 
@@ -210,3 +210,25 @@ const [x, y] = engine.viewport.screenToDocument(e.clientX, e.clientY);
 - 版番号は semver に従います。`1.0.0` までは、互換を壊す変更が `0.x` の版で入ることがあります。
 - `1.0.0` の後は、何かをなくす前に、少なくとも 1 つの版で `@deprecated` にします。
 - `.alto`、フォルダ形式、復旧記録には、それぞれ形式の番号があります。新しい SDK は、古い形式のものも開けます。
+
+## 画像編集と分岐
+
+```ts
+const layer = await doc.transact("layer.add", tx => tx.addRaster({
+  bounds: { x: 0, y: 0, width: 512, height: 256 },
+}));
+await doc.image.fill(layer, [0, 0], [0.2, 0.4, 0.8, 1]);
+await doc.versions.commit("下地");
+await doc.versions.createBranch("別案", { checkout: true });
+await doc.image.rotate(layer, 1);
+await doc.versions.commit("回転案");
+await doc.versions.checkout("main");
+const plan = await doc.versions.prepareMerge("別案");
+// この例は競合なし。競合があれば各 conflict_id に対する解決案を渡す。
+await doc.versions.finishMerge(plan.token, [], { message: "別案を統合" });
+await doc.durable();
+```
+
+画像座標はノードローカルで、cropの矩形は整数です。pickColorは効果適用前のレイヤー画素、pickCompositeは文書座標でscale 1の合成色を返します。履歴操作は編集Undoに積まず、切替・内容を変えるmerge成功時に編集Undo/Redoをクリアします。
+
+`versions.gc()` は開いた/保存したフォルダのdry-runです。実削除は `gc({ dryRun: false, expectedBaseline: preview.baseline })` で明示し、保存先の `exclusive` と `gcCapabilities` が必要です。FileSystemDirectoryProviderは実削除を拒否します。保存後の比較用ミラー更新に失敗した場合は、正本の保存成功と `warnings` を返します。

@@ -68,6 +68,22 @@ export type AssetKind = {
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color_dodge" | "color_burn" | "hard_light" | "soft_light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity" | "add";
 
 // @public (undocumented)
+export interface BranchView {
+    // (undocumented)
+    ahead: number;
+    // (undocumented)
+    behind: number;
+    // (undocumented)
+    current: boolean;
+    // (undocumented)
+    head: string;
+    // (undocumented)
+    name: string;
+    // (undocumented)
+    protected: boolean;
+}
+
+// @public (undocumented)
 export interface BrushOptions {
     // (undocumented)
     color?: Color;
@@ -257,6 +273,25 @@ export class DocumentHandle {
     exportImage(options?: ExportImageOptions): Promise<Blob>;
     get folder(): ObjectStorageProvider | null;
     getSnapshot(): DocumentSnapshot;
+    readonly image: {
+        importSvg: (svg: string, options?: {
+            parent?: NodeId;
+            index?: number;
+        }) => Promise<SvgImportResult>;
+        crop: (node: NodeId, bounds: ImageBounds) => Promise<ImageEditResult>;
+        resize: (node: NodeId, width: number, height: number, options?: {
+            filter?: ImageFilter;
+        }) => Promise<ImageEditResult>;
+        rotate: (node: NodeId, quarterTurns: 1 | 2 | 3) => Promise<ImageEditResult>;
+        flip: (node: NodeId, axis: "horizontal" | "vertical") => Promise<ImageEditResult>;
+        gradient: (node: NodeId, options: GradientOptions) => Promise<ImageEditResult>;
+        fill: (node: NodeId, point: [number, number], color: ImageColor, options?: {
+            tolerance?: number;
+            selection?: ImageSelection;
+        }) => Promise<ImageEditResult>;
+        pickColor: (node: NodeId, point: [number, number]) => Promise<PickedColor>;
+        pickComposite: (point: [number, number]) => Promise<PickedColor>;
+    };
     readonly masks: {
         fromSelection: (layer: NodeId) => Promise<void>;
         addWhite: (layer: NodeId) => Promise<void>;
@@ -270,6 +305,7 @@ export class DocumentHandle {
     }): Promise<{
         written: number;
         skipped: number;
+        warnings: string[];
     }>;
     readonly selection: {
         apply: (spec: SelectionSpec) => Promise<void>;
@@ -302,11 +338,40 @@ export class DocumentHandle {
         setClipPath: (id: NodeId, path: ClipPath | null) => Promise<void>;
     };
     readonly versions: {
+        gc: (options?: GcOptions) => Promise<GcReport>;
+        compactArchive: (archive: Blob) => Promise<{
+            bytes: Uint8Array<ArrayBufferLike>;
+            report: GcReport;
+        }>;
+        createBranch: (name: string, options?: {
+            from?: string;
+            checkout?: boolean;
+        }) => Promise<void>;
+        checkout: (name: string) => Promise<void>;
+        detach: (hash: string) => Promise<void>;
+        deleteBranch: (name: string, options?: {
+            force?: boolean;
+        }) => Promise<void>;
+        setBranchProtection: (name: string, protectedState: boolean) => Promise<void>;
+        listBranches: () => Promise<BranchView[]>;
+        createTag: (name: string, hash: string) => Promise<void>;
+        deleteTag: (name: string) => Promise<void>;
+        pin: (hash: string) => Promise<void>;
+        unpin: (hash: string) => Promise<void>;
+        prepareMerge: (name: string) => Promise<MergePlan>;
+        cancelMerge: () => Promise<void>;
+        finishMerge: (token: string, resolutions: MergeResolution[], options?: {
+            message?: string;
+            author?: string;
+        }) => Promise<MergeResult>;
         commit: (message: string, options?: {
             author?: string;
             allowEmpty?: boolean;
         }) => Promise<CommitView>;
-        log: () => Promise<CommitView[]>;
+        log: (options?: {
+            mode?: "first_parent" | "dag";
+            allBranches?: boolean;
+        }) => Promise<CommitView[]>;
         diff: (from: string, to?: string) => Promise<VersionDiff>;
         status: () => VersionStatus;
         restore: (hash: string) => Promise<void>;
@@ -481,7 +546,7 @@ export interface EngineStatus {
 }
 
 // @public
-export type ErrorCode = "INVALID_ARGUMENT" | "CONFLICT" | "NOT_FOUND" | "CORRUPT_DATA" | "GPU_LOST" | "GPU_UNSUPPORTED" | "STORAGE" | "INTERNAL" | "WORKER_CRASHED" | "WORKER_UNAVAILABLE" | "WORKER_TIMEOUT";
+export type ErrorCode = "UNSUPPORTED" | "BUSY" | "NO_COMMIT" | "RESOURCE_LIMIT" | "EMPTY_SELECTION" | "BRANCH_NOT_MERGED" | "STALE_MERGE" | "UNRELATED_HISTORY" | "MULTIPLE_MERGE_BASES" | "INVALID_MERGE_RESULT" | "INVALID_ARGUMENT" | "CONFLICT" | "NOT_FOUND" | "CORRUPT_DATA" | "GPU_LOST" | "GPU_UNSUPPORTED" | "STORAGE" | "INTERNAL" | "WORKER_CRASHED" | "WORKER_UNAVAILABLE" | "WORKER_TIMEOUT";
 
 // @public
 export interface ErrorDetails {
@@ -491,6 +556,12 @@ export interface ErrorDetails {
     node?: string;
     // (undocumented)
     reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale";
+}
+
+// @public
+export interface ExclusiveObjectStorage extends ObjectStorageProvider {
+    // (undocumented)
+    deleteObjects(paths: string[]): Promise<void>;
 }
 
 // @public (undocumented)
@@ -575,6 +646,61 @@ export interface FontInfo {
 }
 
 // @public (undocumented)
+export interface GcCounts {
+    // (undocumented)
+    kept: number;
+    // (undocumented)
+    kept_bytes: number;
+    // (undocumented)
+    removed: number;
+    // (undocumented)
+    removed_bytes: number;
+}
+
+// @public (undocumented)
+export interface GcOptions {
+    // (undocumented)
+    dryRun?: boolean;
+    // (undocumented)
+    expectedBaseline?: string;
+}
+
+// @public (undocumented)
+export interface GcReport {
+    // (undocumented)
+    baseline: string;
+    // (undocumented)
+    by_kind: Record<string, GcCounts>;
+    // (undocumented)
+    complete: boolean;
+    // (undocumented)
+    dry_run: boolean;
+    // (undocumented)
+    roots: number;
+    // (undocumented)
+    warnings: string[];
+}
+
+// @public (undocumented)
+export interface GradientOptions {
+    // (undocumented)
+    end: [number, number];
+    // (undocumented)
+    kind: "linear" | "radial";
+    // (undocumented)
+    opacity?: number;
+    // (undocumented)
+    selection?: ImageSelection;
+    // (undocumented)
+    start: [number, number];
+    // (undocumented)
+    stops: {
+        offset: number;
+        color: ImageColor;
+    }[];
+}
+
+// @public (undocumented)
 export interface GroupNode extends NodeBase {
     // (undocumented)
     readonly children: readonly NodeId[];
@@ -594,6 +720,39 @@ export interface ImageAsset {
     // (undocumented)
     readonly width: number;
 }
+
+// @public
+export interface ImageBounds {
+    // (undocumented)
+    height: number;
+    // (undocumented)
+    width: number;
+    // (undocumented)
+    x: number;
+    // (undocumented)
+    y: number;
+}
+
+// @public
+export type ImageColor = [number, number, number, number];
+
+// @public (undocumented)
+export interface ImageEditResult {
+    // (undocumented)
+    bounds: ImageBounds;
+    // (undocumented)
+    changed_tiles: number;
+    // (undocumented)
+    no_op: boolean;
+    // (undocumented)
+    node: NodeId;
+}
+
+// @public (undocumented)
+export type ImageFilter = "nearest" | "bilinear";
+
+// @public (undocumented)
+export type ImageSelection = "current" | "ignore";
 
 // @public
 export interface InputSample {
@@ -657,9 +816,15 @@ export function listRecoveryNamespaces(): Promise<{
 // @public (undocumented)
 export class MemoryObjectProvider implements ObjectStorageProvider {
     // (undocumented)
-    readonly files: Map<string, Uint8Array<ArrayBufferLike>>;
+    exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     // (undocumented)
-    getObject(path: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    readonly gcCapabilities: {
+        readonly exclusive: true;
+        readonly atomicManifest: true;
+        readonly deleteObjects: true;
+    };
+    // (undocumented)
+    getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     // (undocumented)
     readonly kind = "memory";
     // (undocumented)
@@ -673,9 +838,69 @@ export class MemoryObjectProvider implements ObjectStorageProvider {
         skipped: number;
     }>;
     // (undocumented)
-    readRef(name: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
+}
+
+// @public (undocumented)
+export interface MergeConflict {
+    // (undocumented)
+    base: MergeValue;
+    // (undocumented)
+    id: string;
+    // (undocumented)
+    kind: string;
+    // (undocumented)
+    ours: MergeValue;
+    // (undocumented)
+    path: string[];
+    // (undocumented)
+    theirs: MergeValue;
+}
+
+// @public
+export interface MergePlan {
+    // (undocumented)
+    base: string | null;
+    // (undocumented)
+    conflicts: MergeConflict[];
+    // (undocumented)
+    kind: "no_op" | "fast_forward" | "three_way";
+    // (undocumented)
+    ours: string;
+    // (undocumented)
+    theirs: string;
+    // (undocumented)
+    token: string;
+}
+
+// @public (undocumented)
+export interface MergeResolution {
+    // (undocumented)
+    choice: "ours" | "theirs" | "explicit";
+    // (undocumented)
+    conflict_id: string;
+    // (undocumented)
+    value?: MergeValue;
+}
+
+// @public (undocumented)
+export interface MergeResult {
+    // (undocumented)
+    base: string | null;
+    // (undocumented)
+    head: string;
+    // (undocumented)
+    kind: "no_op" | "fast_forward" | "committed";
+}
+
+// @public (undocumented)
+export interface MergeValue {
+    // (undocumented)
+    present: boolean;
+    // (undocumented)
+    value: unknown;
 }
 
 // @public
@@ -726,6 +951,13 @@ export interface NodeProps {
 // @public
 export interface ObjectStorageProvider {
     // (undocumented)
+    exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    readonly gcCapabilities?: {
+        exclusive: true;
+        atomicManifest: true;
+        deleteObjects: true;
+    };
+    // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
     // (undocumented)
     readonly kind: string;
@@ -773,6 +1005,14 @@ export interface PathData {
     commands: PathCommand[];
 }
 
+// @public (undocumented)
+export interface PickedColor {
+    // (undocumented)
+    bytes: [number, number, number, number];
+    // (undocumented)
+    color: ImageColor;
+}
+
 // @public
 export interface PresentationSnapshot {
     // (undocumented)
@@ -816,6 +1056,8 @@ export type PropPatch = Partial<Pick<NodeProps, "visible" | "locked" | "opacity"
 
 // @public
 export interface RasterNode extends NodeBase {
+    // (undocumented)
+    readonly bounds: ImageBounds;
     // (undocumented)
     readonly tiles: RasterTilesSummary;
     // (undocumented)
@@ -893,6 +1135,14 @@ export interface StyledPath {
 
 // @public (undocumented)
 export type StylePatch = Partial<Omit<TextStyle, "line_height">>;
+
+// @public (undocumented)
+export interface SvgImportResult {
+    // (undocumented)
+    node: NodeId;
+    // (undocumented)
+    nodes: number;
+}
 
 // @public (undocumented)
 export interface TextCaret {
@@ -1027,7 +1277,9 @@ export class Transaction {
         isolated?: boolean;
     }): NodeId;
     // (undocumented)
-    addRaster(options?: InsertOptions): NodeId;
+    addRaster(options?: InsertOptions & {
+        bounds?: ImageBounds;
+    }): NodeId;
     addRasterFromAsset(asset: ImageAsset, options?: InsertOptions): NodeId;
     // (undocumented)
     addText(content: TextContent, options?: InsertOptions): NodeId;
@@ -1112,6 +1364,25 @@ export interface VersionDiff {
 }
 
 // @public (undocumented)
+export interface VersionRefs {
+    // (undocumented)
+    branches: Record<string, {
+        head: string;
+        protected: boolean;
+    }>;
+    // (undocumented)
+    current_branch: string | null;
+    // (undocumented)
+    gc_generation: number;
+    // (undocumented)
+    generation: number;
+    // (undocumented)
+    pinned: string[];
+    // (undocumented)
+    tags: Record<string, string>;
+}
+
+// @public (undocumented)
 export interface VersionStatus {
     // (undocumented)
     changed: boolean;
@@ -1123,6 +1394,8 @@ export interface VersionStatus {
     head: string | null;
     // (undocumented)
     pending_intents: number;
+    // (undocumented)
+    readonly refs: VersionRefs;
 }
 
 // @public
