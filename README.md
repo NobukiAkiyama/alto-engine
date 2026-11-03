@@ -236,7 +236,7 @@ await doc.undo();
 | `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
-| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル7）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
+| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル8）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
 | `examples/browser-playground` | 編集UIとビルド済みWASM |
 | `tests/e2e` | 実ブラウザで実行する画素検証・性能測定 |
 | `tests/fonts` | テスト・デモ用フォント（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1） |
@@ -311,7 +311,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル7）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、明るさ・コントラスト・彩度、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル8）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 

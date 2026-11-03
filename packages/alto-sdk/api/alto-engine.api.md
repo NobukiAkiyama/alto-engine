@@ -326,7 +326,9 @@ export class DocumentHandle {
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
     redo(): Promise<void>;
-    save(target: ArchiveTarget): Promise<void>;
+    save(target: ArchiveTarget, options?: {
+        history?: "all" | "omit";
+    }): Promise<void>;
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
     }): Promise<{
@@ -366,6 +368,8 @@ export class DocumentHandle {
     };
     readonly versions: {
         gc: (options?: GcOptions) => Promise<GcReport>;
+        externalObjects: () => Promise<number>;
+        attachFolder: (provider: ObjectStorageProvider) => Promise<void>;
         compactArchive: (archive: Blob) => Promise<{
             bytes: Uint8Array<ArrayBufferLike>;
             report: GcReport;
@@ -506,7 +510,9 @@ export interface Engine {
     readonly element: HTMLCanvasElement;
     on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
     open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
-    openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
+    openFolder(provider: ObjectStorageProvider, options?: {
+        history?: "all" | "on-demand";
+    }): Promise<DocumentHandle>;
     // (undocumented)
     readonly presentation: PresentationSnapshot;
     // (undocumented)
@@ -582,7 +588,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "objects-unavailable";
 }
 
 // @public
@@ -1020,6 +1026,7 @@ export interface ObjectStorageProvider {
     };
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
+    holdObjects?(): Promise<() => Promise<void>>;
     // (undocumented)
     readonly kind: string;
     // (undocumented)
@@ -1033,6 +1040,7 @@ export interface ObjectStorageProvider {
     }>;
     // (undocumented)
     readRef(name: string): Promise<Uint8Array | null>;
+    whileNotHeld?<T>(run: () => Promise<T>): Promise<T>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }
@@ -1050,6 +1058,8 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
     // (undocumented)
     getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     // (undocumented)
+    holdObjects(): Promise<() => Promise<void>>;
+    // (undocumented)
     readonly kind: string;
     // (undocumented)
     list(prefix: string): Promise<string[]>;
@@ -1066,6 +1076,8 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
     }>;
     // (undocumented)
     readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    // (undocumented)
+    whileNotHeld<T>(run: () => Promise<T>): Promise<T>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }

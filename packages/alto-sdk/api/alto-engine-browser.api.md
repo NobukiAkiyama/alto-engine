@@ -49,6 +49,7 @@ export interface ObjectStorageProvider {
     };
     // (undocumented)
     getObject(path: string): Promise<Uint8Array | null>;
+    holdObjects?(): Promise<() => Promise<void>>;
     // (undocumented)
     readonly kind: string;
     // (undocumented)
@@ -62,6 +63,7 @@ export interface ObjectStorageProvider {
     }>;
     // (undocumented)
     readRef(name: string): Promise<Uint8Array | null>;
+    whileNotHeld?<T>(run: () => Promise<T>): Promise<T>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
 }

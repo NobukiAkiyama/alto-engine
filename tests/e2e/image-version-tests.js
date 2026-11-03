@@ -227,6 +227,70 @@ export async function runImageVersionTests(engine, log) {
       assert((await d.versions.log())[0].hash === base.hash, "head after GC"); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes.slice(3), [255]), "pixels after GC");
       await d.versions.commit("after GC"); await root.removeEntry(name, { recursive: true });
     });
+    await test("on-demand history: reads only what is needed / checkout / restore / Undo / saves", async () => {
+      d = await engine.createDocument({ width: 512, height: 512 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 512, height: 512 } }); });
+      const versions = [];
+      for (let i = 0; i < 6; i++) { await d.image.fill(layer, [0, 0], [i / 8, 0.5, 1 - i / 8, 1], { tolerance: 255 }); versions.push((await d.versions.commit("v" + i)).hash); }
+      const store = new MemoryObjectProvider(); let bytesRead = 0, objectReads = 0, unavailable = false;
+      const folder = new Proxy(store, { get(target, key) {
+        const count = (view) => ({ ...view, getObject: async (path) => { if (unavailable && path.startsWith("objects/")) return null; const data = await view.getObject(path); if (path.startsWith("objects/") && data) { bytesRead += data.length; objectReads++; } return data; } });
+        if (key === "exclusive") return (run) => target.exclusive((view) => run(count(view)));
+        const value = target[key]; return typeof value === "function" ? value.bind(target) : value;
+      } });
+      await d.saveFolder(folder); const workingHash = await d.snapshotHash();
+      await engine.openFolder(folder); const allBytes = bytesRead, allReads = objectReads; bytesRead = objectReads = 0;
+      d = await engine.openFolder(folder, { history: "on-demand" }); const lazyBytes = bytesRead, lazyReads = objectReads;
+      assert(await d.snapshotHash() === workingHash, "working document");
+      assert(lazyReads > 0 && lazyReads * 4 <= allReads, `read ${lazyReads} of ${allReads} objects`); log(`on-demand open: ${lazyReads}/${allReads} objects, ${lazyBytes}/${allBytes} bytes`);
+      assert(await d.versions.externalObjects() > 0, "history left in the folder");
+      bytesRead = 0; assert((await d.versions.log()).length === 6, "log"); await d.versions.diff(versions[0], versions[5]); assert(bytesRead === 0, "log and diff read pixels");
+      const color = async () => (await d.image.pickColor(layer, [0, 0])).bytes.join();
+      const current = await color();
+      // A restore reads that version, one Undo step away.
+      await d.versions.restore(versions[0]); assert(bytesRead > 0, "restore read nothing"); const old = await color(); assert(old !== current, "restored pixels");
+      await d.undo(); assert(await color() === current, "Undo after release"); await d.redo(); assert(await color() === old, "Redo"); await d.undo();
+      // Switching reads the branch's version; the one left behind goes back to the folder.
+      await d.versions.createBranch("old", { from: versions[1], checkout: true }); assert(d.versions.status().refs.current_branch === "old", "branch checkout");
+      await d.versions.checkout("main"); assert(await color() === current, "checkout back");
+      // Merging reads both sides.
+      await d.versions.createBranch("side", { checkout: true }); await d.transact("layer.props", (tx) => tx.setProps(layer, { name: "side" })); await d.versions.commit("side");
+      await d.versions.checkout("main"); await d.transact("layer.props", (tx) => tx.setProps(layer, { opacity: 0.5 })); await d.versions.commit("main");
+      const plan = await d.versions.prepareMerge("side"); const merged = await d.versions.finishMerge(plan.token, []); assert(merged.kind === "committed", "merge");
+      // Saving to the same folder reads no history and leaves it there.
+      bytesRead = 0; await d.saveFolder(folder); assert(bytesRead === 0, "same-folder save read objects"); assert(await d.versions.externalObjects() > 0, "still external");
+      // A missing object is reported and changes nothing, and a normal save refuses to drop history.
+      unavailable = true; const before = await d.snapshotHash(); const status = d.versions.status().head;
+      await reject(d.versions.detach(versions[2]), "STORAGE"); const saveTarget = blobTarget(); await reject(d.save(saveTarget), "STORAGE");
+      assert(await d.snapshotHash() === before && d.versions.status().head === status, "failed read changed the document");
+      const working = blobTarget(); await d.save(working, { history: "omit" });  unavailable = false;
+      // A folder can be attached only if it holds this document's history.
+      await reject(d.versions.attachFolder(new MemoryObjectProvider()), "CONFLICT"); await d.versions.attachFolder(folder); assert(d.folder === folder, "attached");
+      // A full save reads everything, and that archive stands alone.
+      const full = blobTarget(); await d.save(full); const hash = await d.snapshotHash(); const count = (await d.versions.log({ mode: "dag" })).length;
+      // Worker restart: the same handle reads on.
+      await d.durable(); await testing(engine).crash(); d = engine.document; assert(await d.snapshotHash() === hash, "recovered working document");
+      await d.versions.detach(versions[3]); assert((await color()) !== current, "read after a Worker restart"); await d.versions.checkout("main");
+      // Without its folder: a reload recovers the document, and attachFolder brings history back.
+      d = await engine.open(full.blob); assert(await d.snapshotHash() === hash && (await d.versions.log({ mode: "dag" })).length === count, "full archive");
+      d = await engine.open(working.blob); assert((await d.versions.log()).length === 0, "working-only archive has no history");
+    });
+    await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
+      const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
+      d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1]); const first = await d.versions.commit("first");
+      await d.versions.createBranch("drop", { checkout: true }); await d.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 }); const dropped = await d.versions.commit("drop");
+      await d.versions.checkout("main"); await d.versions.deleteBranch("drop", { force: true });
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1], { tolerance: 255 }); await d.versions.commit("second"); await d.saveFolder(folder);
+      d = await engine.openFolder(folder, { history: "on-demand" }); assert(await d.versions.externalObjects() > 0, "external");
+      // A second session on the folder is refused while another holds it.
+      const other = await folder.holdObjects(); const preview = await d.versions.gc();
+      await reject(d.versions.gc({ dryRun: false, expectedBaseline: preview.baseline }), "BUSY"); assert(await folder.getObject(`commits/${dropped.hash}.json`), "GC ran under a hold"); await other();
+      // Alone, its own hold steps aside: garbage goes, and its history stays readable.
+      const done = await d.versions.gc({ dryRun: false, expectedBaseline: preview.baseline }); assert(!done.dry_run, "GC ran");
+      assert(!await folder.getObject(`commits/${dropped.hash}.json`), "garbage kept");
+      await d.versions.detach(first.hash); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 0, 255]), "history after GC");
+      await d.versions.checkout("main"); await root.removeEntry(name, { recursive: true });
+    });
     await test("history and images survive Worker restart and GPU device loss", async () => {
       await d.versions.createBranch("recovery", { checkout: true }); await d.image.fill(layer, [0, 0], [1, 0, 1, 1]); const commit = await d.versions.commit("recover");
       await d.durable(); await testing(engine).crash(); d = engine.document;

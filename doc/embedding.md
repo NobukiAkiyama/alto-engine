@@ -93,7 +93,7 @@ container.addEventListener("pointerdown", event => {
 
 公開済みの `presentedViewport` / `presentedViewVersion` と要求中の version を別々に読めます。Snapshot と内部の center は読み取り専用です。GPU 完了による論理的な確認で、OS の scanout 時刻を表しません。`viewport.get()`・座標変換は従来通り要求中の view を同期的に使います。付属 pointer adapter は未準備の画面入力をエラーにし、ストローク中の viewport 送信を終了まで保留します。文書座標の `InputSample` やプログラマティックな編集 API は表示準備を待つ必要がありません。
 
-確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 7 になり、必ず同じ配布物を組み合わせます。
+確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 8 になり、必ず同じ配布物を組み合わせます。
 
 ## 5. エンジンの状態
 

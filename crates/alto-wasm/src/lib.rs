@@ -171,7 +171,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        7
+        8
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
@@ -1124,6 +1124,7 @@ impl Runtime {
             }
             rest = next;
         }
+        self.engine.release_objects(self.doc);
         self.refresh()?;
         self.view()
     }

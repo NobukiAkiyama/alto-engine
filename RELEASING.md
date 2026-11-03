@@ -4,7 +4,7 @@ Release-binary hashes are updated once before tagging; they are independent of r
 
 ## Version policy
 
-The Rust workspace / WASM engine and the TypeScript SDK are separate distribution packages and use independent Semantic Versioning. The unreleased working implementation uses Engine/WASM `0.4.0`, TypeScript SDK `0.5.0`, wire protocol `7`, document format `5`, package manifest format `2`, and commit format `2`. Package version numbers will be selected when preparing a release; these source changes do not publish one.
+The Rust workspace / WASM engine and the TypeScript SDK are separate distribution packages and use independent Semantic Versioning. The unreleased working implementation uses Engine/WASM `0.4.0`, TypeScript SDK `0.5.0`, wire protocol `8`, document format `5`, package manifest format `2`, and commit format `2`. Package version numbers will be selected when preparing a release; these source changes do not publish one.
 
 - Git tags and GitHub Release names follow the Engine/WASM version: `vX.Y.Z`.
 - Record the Engine/WASM version, SDK version, and protocol version together in the GitHub Release notes. The GitHub Release publishes the WASM assets; it does not publish the SDK to npm.

@@ -21,6 +21,10 @@ export interface ObjectStorageProvider {
         readonly deleteObjects: true;
     };
     exclusive?<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
+    /** Keeps real GC from running until the returned function's promise settles. */
+    holdObjects?(): Promise<() => Promise<void>>;
+    /** Runs `run` only if no other document holds this storage's objects, else `BUSY`. */
+    whileNotHeld?<T>(run: () => Promise<T>): Promise<T>;
     getObject(path: string): Promise<Uint8Array | null>;
     /** Idempotent: existing paths are skipped. */
     putObjects(entries: {
@@ -111,6 +115,8 @@ export declare class OpfsFolderProvider extends FileSystemDirectoryProvider {
     static open(handle: FileSystemDirectoryHandle, options?: {
         waitMs?: number;
     }): Promise<OpfsFolderProvider>;
+    holdObjects(): Promise<() => Promise<void>>;
+    whileNotHeld<T>(run: () => Promise<T>): Promise<T>;
     exclusive<T>(run: (storage: ExclusiveObjectStorage) => Promise<T>): Promise<T>;
     getObject(path: string): Promise<Uint8Array<ArrayBufferLike> | null>;
     readRef(name: string): Promise<Uint8Array<ArrayBufferLike> | null>;

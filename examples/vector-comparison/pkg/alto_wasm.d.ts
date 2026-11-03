@@ -36,8 +36,14 @@ export class Runtime {
     static create(canvas: OffscreenCanvas, budget: number): Promise<Runtime>;
     destroyGpu(): void;
     endBrush(): Promise<string>;
+    externalObjects(): number;
     finishAbortHandle(): FinishAbort;
+    /**
+     * Entries for the folder the document came from, without reading what stays there.
+     */
+    folderEntriesKeepingExternal(): Uint8Array;
     folderEntries(): Uint8Array;
+    folderPlanOnDemand(framed: Uint8Array): string;
     folderPlan(framed: Uint8Array): string;
     /**
      * The recovery store was emptied (its journal discarded); the next checkpoint
@@ -57,7 +63,9 @@ export class Runtime {
     injectReadbackFailure(n: number): void;
     layerEdit(request: string): string;
     listBranches(): string;
+    markFolderSaved(): void;
     markSaved(hash: string): string;
+    missingObjects(target: string): string;
     /**
      * A raster layer's full tile map; views carry only its size and bounds.
      */
@@ -66,6 +74,10 @@ export class Runtime {
      * Object paths (`objects/ab/<hash>`) the recovery store already holds.
      */
     noteStoredObjects(paths: string): void;
+    /**
+     * `known` is a JSON list of the object paths in the folder.
+     */
+    openFolderOnDemand(framed: Uint8Array, known: string): string;
     openFolder(framed: Uint8Array): string;
     openPackage(bytes: Uint8Array): string;
     /**
@@ -87,6 +99,7 @@ export class Runtime {
      * 1 ok and content checked, 2 damaged), u32 length and the pixels.
      */
     provideDecoded(framed: Uint8Array): void;
+    provideObjects(framed: Uint8Array, target: string): void;
     pruneVersions(): string;
     readTileLevel(level: number, tx: number, ty: number): Promise<Uint8Array>;
     readTile(tx: number, ty: number): Promise<Uint8Array>;
@@ -100,6 +113,7 @@ export class Runtime {
     recoveryOpaque(): string;
     redo(): string;
     releaseImport(hash: string): boolean;
+    releaseObjects(): void;
     /**
      * Replays `[u32 little-endian length][record]...` and redraws once at the end.
      */
@@ -108,6 +122,10 @@ export class Runtime {
     resize(w: number, h: number): void;
     restoreVersion(hash: string): string;
     savePackage(): Uint8Array;
+    /**
+     * The working document alone. A normal save fails rather than dropping history.
+     */
+    saveWithoutHistory(): Uint8Array;
     select(spec: string): string;
     selectionOutline(): string;
     /**
@@ -220,9 +238,12 @@ export interface InitOutput {
     readonly runtime_createDocument: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly runtime_destroyGpu: (a: number) => void;
     readonly runtime_endBrush: (a: number) => any;
+    readonly runtime_externalObjects: (a: number) => [number, number, number];
     readonly runtime_finishAbortHandle: (a: number) => number;
     readonly runtime_folderEntries: (a: number) => [number, number, number, number];
+    readonly runtime_folderEntriesKeepingExternal: (a: number) => [number, number, number, number];
     readonly runtime_folderPlan: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_folderPlanOnDemand: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_forgetStoredObjects: (a: number) => void;
     readonly runtime_frameFields: (a: number) => [number, number];
     readonly runtime_gcPlan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -237,10 +258,13 @@ export interface InitOutput {
     readonly runtime_injectReadbackFailure: (a: number, b: number) => void;
     readonly runtime_layerEdit: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_listBranches: (a: number) => [number, number, number, number];
+    readonly runtime_markFolderSaved: (a: number) => [number, number];
     readonly runtime_markSaved: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_missingObjects: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_nodeTiles: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_noteStoredObjects: (a: number, b: number, c: number) => [number, number];
     readonly runtime_openFolder: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly runtime_openFolderOnDemand: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_openPackage: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_openRecoveryEntries: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runtime_openRecoveryPackage: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -251,6 +275,7 @@ export interface InitOutput {
     readonly runtime_prepareMerge: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_protocolVersion: (a: number) => number;
     readonly runtime_provideDecoded: (a: number, b: number, c: number) => [number, number];
+    readonly runtime_provideObjects: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly runtime_pruneVersions: (a: number) => [number, number, number, number];
     readonly runtime_readTile: (a: number, b: number, c: number) => any;
     readonly runtime_readTileLevel: (a: number, b: number, c: number, d: number) => any;
@@ -260,11 +285,13 @@ export interface InitOutput {
     readonly runtime_recoveryOpaque: (a: number) => [number, number, number, number];
     readonly runtime_redo: (a: number) => [number, number, number, number];
     readonly runtime_releaseImport: (a: number, b: number, c: number) => [number, number, number];
+    readonly runtime_releaseObjects: (a: number) => void;
     readonly runtime_replayRecords: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_resetRenderCache: (a: number, b: number) => void;
     readonly runtime_resize: (a: number, b: number, c: number) => void;
     readonly runtime_restoreVersion: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_savePackage: (a: number) => [number, number, number, number];
+    readonly runtime_saveWithoutHistory: (a: number) => [number, number, number, number];
     readonly runtime_select: (a: number, b: number, c: number) => [number, number, number, number];
     readonly runtime_selectionOutline: (a: number) => [number, number, number, number];
     readonly runtime_setDecodeWorkers: (a: number, b: number) => void;
@@ -310,10 +337,10 @@ export interface InitOutput {
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined___js_sys_b2345361b76f1e41___Function_fn_wasm_bindgen_3fb11b5a5c803c91___JsValue_____wasm_bindgen_3fb11b5a5c803c91___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__109: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__110: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__118: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wasm_bindgen_3fb11b5a5c803c91___sys__JsNullable_wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuError__GpuError___core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_3fb11b5a5c803c91___JsError___true__119: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__108: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke___wgpu_5fdd43681f941adc___backend__webgpu__webgpu_sys__gen_GpuDeviceLostInfo__GpuDeviceLostInfo______true__117: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen_3fb11b5a5c803c91___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

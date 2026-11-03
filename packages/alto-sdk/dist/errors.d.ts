@@ -7,7 +7,7 @@ export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied
  * the code: `reason` for `CONFLICT` and `INVALID_ARGUMENT`, `node` for `NOT_FOUND`.
  */
 export interface ErrorDetails {
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "objects-unavailable";
     node?: string;
     namespace?: string;
 }

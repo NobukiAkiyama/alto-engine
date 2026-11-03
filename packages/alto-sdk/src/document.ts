@@ -1,4 +1,4 @@
-import type { CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
+import type { ObjectTarget, CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
 import { intentRecord, type Intent } from "./intents.js";
@@ -64,6 +64,7 @@ export class DocumentHandle {
   private readonly listeners = new Set<(change: DocumentChange) => void>();
   private tool: ToolSession | null = null;
   private savedFolder: { provider: ObjectStorageProvider; manifest: string } | null = null;
+  private releaseHold: (() => Promise<void>) | undefined;
 
   /** @internal */
   constructor(
@@ -124,6 +125,8 @@ export class DocumentHandle {
   /** @internal The engine opened another document; this handle refuses further calls. */
   close(): void {
     this.closed = true;
+    void this.releaseHold?.();
+    this.releaseHold = undefined;
     this.abortTool(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     this.listeners.clear();
   }
@@ -280,8 +283,39 @@ export class DocumentHandle {
   private layerCommand(edit: Record<string, unknown>): Promise<LayerEditResult> {
     return this.edit(async () => { const r = await this.request("layerEdit", { edit }); this.apply(r.state); return r.result; });
   }
-  private historyCommand(command: Record<string, unknown>): Promise<MergeResult | null> {
-    return this.edit(async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; });
+  private historyCommand(command: Record<string, unknown>, target?: ObjectTarget): Promise<MergeResult | null> {
+    const run = async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; };
+    return this.edit(() => (target ? this.withObjects(target, run) : run()));
+  }
+  /**
+   * @internal Runs `run` with the target's objects in memory, reading any the document left in
+   * its folder. They are verified and checkpointed first, so a failure here changes nothing.
+   */
+  async withObjects<T>(target: ObjectTarget, run: () => Promise<T>): Promise<T> {
+    const missing = await this.request("missingObjects", { target });
+    let provided: Promise<unknown> | undefined;
+    if (missing.length) {
+      const owner = this.savedFolder?.provider;
+      const unavailable = (why: string) => new AltoError("STORAGE", why, { reason: "objects-unavailable" });
+      if (!owner) throw unavailable("this version's pixels are in a folder that is not attached; use versions.attachFolder");
+      const read = async (storage: ObjectStorageProvider) => {
+        const entries = new Map<string, Uint8Array>();
+        for (const path of missing) {
+          const bytes = await storage.getObject(path);
+          if (!bytes) throw unavailable("the folder no longer has " + path);
+          entries.set(path, bytes);
+        }
+        return entries;
+      };
+      const framed = frameEntries(await (owner.exclusive ? owner.exclusive(read) : read(owner)));
+      provided = this.request("provideObjects", { bytes: framed.buffer as ArrayBuffer, target }, [framed.buffer]);
+    }
+    try {
+      await provided;
+      return await run();
+    } finally {
+      if (missing.length) await this.request("releaseObjects").catch(() => {});
+    }
   }
   /** Pixel edits use node-local coordinates; each successful edit is one Undo step. */
   readonly image = {
@@ -331,18 +365,37 @@ export class DocumentHandle {
   /** Version commits, diffs and restores. */
   readonly versions = {
     gc: (options: GcOptions = {}) => this.gcFolder(options),
+    /** How many objects this document references are only in its folder. */
+    externalObjects: () => this.request("externalObjects"),
+    /**
+     * Connects the folder holding this document's history, after a page reload recovered the
+     * document without it. Refused if the folder lacks an object the document needs.
+     */
+    attachFolder: (provider: ObjectStorageProvider) => this.edit(async () => {
+      const missing = await this.request("missingObjects", { target: { type: "all" } });
+      const hold = await provider.holdObjects?.();
+      try {
+        const load = async (storage: ObjectStorageProvider) => {
+          const present = new Set(await storage.list("objects/"));
+          if (missing.some((path) => !present.has(path))) throw new AltoError("CONFLICT", "this folder does not hold the document's history", { reason: "folder-occupied" });
+          const manifest = await storage.readRef("manifest.json");
+          return manifest ? sha256Hex(manifest) : "";
+        };
+        this.setFolder(provider, await (provider.exclusive ? provider.exclusive(load) : load(provider)), hold);
+      } catch (e) { void hold?.(); throw e; }
+    }),
     /** Returns a new compact archive. Does not overwrite an existing file. */
     compactArchive: (archive: Blob) => this.edit(async () => {
       const bytes = await archive.arrayBuffer();
-      const framed = await this.request("compactArchive", { bytes }, [bytes]);
+      const framed = await this.withObjects({ type: "all" }, () => this.request("compactArchive", { bytes }, [bytes]));
       const entries = unframeEntries(framed); const result = entries.get("archive.alto");
       if (!result) throw new AltoError("INTERNAL", "missing compact archive");
       const report = JSON.parse(new TextDecoder().decode(entries.get("report.json"))) as GcReport;
       return { bytes: result, report };
     }),
-    createBranch: (name: string, options: { from?: string; checkout?: boolean } = {}) => this.historyCommand({ type: "create_branch", name, from: options.from ?? null, checkout: options.checkout ?? false }).then(() => {}),
-    checkout: (name: string) => this.historyCommand({ type: "checkout", name }).then(() => {}),
-    detach: (hash: string) => this.historyCommand({ type: "detach", hash }).then(() => {}),
+    createBranch: (name: string, options: { from?: string; checkout?: boolean } = {}) => this.historyCommand({ type: "create_branch", name, from: options.from ?? null, checkout: options.checkout ?? false }, options.checkout && options.from ? { type: "commit", hash: options.from } : undefined).then(() => {}),
+    checkout: (name: string) => this.historyCommand({ type: "checkout", name }, { type: "branch", name }).then(() => {}),
+    detach: (hash: string) => this.historyCommand({ type: "detach", hash }, { type: "commit", hash }).then(() => {}),
     deleteBranch: (name: string, options: { force?: boolean } = {}) => this.historyCommand({ type: "delete_branch", name, force: options.force ?? false }).then(() => {}),
     setBranchProtection: (name: string, protectedState: boolean) => this.historyCommand({ type: "protect_branch", name, protected: protectedState }).then(() => {}),
     listBranches: () => this.request("listBranches"),
@@ -350,10 +403,10 @@ export class DocumentHandle {
     deleteTag: (name: string) => this.historyCommand({ type: "delete_tag", name }).then(() => {}),
     pin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: true }).then(() => {}),
     unpin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: false }).then(() => {}),
-    prepareMerge: (name: string) => this.edit(() => this.request("prepareMerge", { name })),
+    prepareMerge: (name: string) => this.edit(() => this.withObjects({ type: "merge", name }, () => this.request("prepareMerge", { name }))),
     cancelMerge: () => this.edit(() => this.request("cancelMerge").then(() => {})),
     finishMerge: (token: string, resolutions: MergeResolution[], options: { message?: string; author?: string } = {}) =>
-      this.historyCommand({ type: "finish_merge", token, resolutions, message: options.message ?? "Merge", author: options.author ?? null, created_at: Date.now() }).then((r) => {
+      this.historyCommand({ type: "finish_merge", token, resolutions, message: options.message ?? "Merge", author: options.author ?? null, created_at: Date.now() }, { type: "merge_plan" }).then((r) => {
         if (!r) throw new AltoError("INTERNAL", "merge returned no result"); return r;
       }),
     /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
@@ -373,7 +426,7 @@ export class DocumentHandle {
     diff: (from: string, to = "working") => this.request("versionDiff", { from, to }),
     status: (): VersionStatus => this.getSnapshot().versions,
     /** Restores a version as one undoable edit; history is kept. */
-    restore: (hash: string) => this.command("restoreVersion", { hash }),
+    restore: (hash: string) => this.edit(() => this.withObjects({ type: "commit", hash }, async () => { this.apply(await this.request("restoreVersion", { hash })); })),
     /** Drops versions that cannot be reached from the head. Returns how many. */
     prune: (): Promise<number> =>
       this.edit(async () => {
@@ -404,13 +457,23 @@ export class DocumentHandle {
     await this.endTool();
     return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
   }
-  /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-  async save(target: ArchiveTarget): Promise<void> {
+  /**
+   * Writes the document as a `.alto` archive. On success the document is no longer dirty.
+   * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
+   * history that lives in an unreachable folder would otherwise make the save fail.
+   */
+  async save(target: ArchiveTarget, options: { history?: "all" | "omit" } = {}): Promise<void> {
     await this.endTool();
+    if (options.history === "omit") {
+      const bytes = await this.request("saveWithoutHistory");
+      await target.write(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream());
+      return;
+    }
     this.core.emit("saveState", "saving");
     let token: number | undefined;
     try {
-      const saved = await this.request("save");
+      // In the edit queue: an operation in progress may be holding objects of its own.
+      const saved = await this.edit(() => this.withObjects({ type: "all" }, () => this.request("save")));
       token = saved.token;
       await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
       this.apply(await this.request("saved", { token }));
@@ -455,6 +518,7 @@ export class DocumentHandle {
         const adopt = async () => {
           const r = await this.request("historyCommand", { command: { type: "adopt_gc", manifest: new TextDecoder().decode(manifest) } });
           this.apply(r.state); this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
+          await this.request("markFolderSaved");
         };
         try { await storage.writeRef("manifest.json", manifest, plan.report.baseline); }
         catch (error) {
@@ -473,7 +537,13 @@ export class DocumentHandle {
         await storage.writeRef(".alto-gc.json", new TextEncoder().encode(JSON.stringify({ phase: "complete", baseline: plan.report.baseline })));
         return plan.report;
       };
-      return owner.exclusive ? owner.exclusive(run) : run(owner);
+      const collect = () => (owner.exclusive ? owner.exclusive(run) : run(owner));
+      if (dryRun || !owner.whileNotHeld) return collect();
+      // This document's hold steps aside: GC keeps everything it references.
+      const held = !!this.releaseHold;
+      await this.releaseHold?.(); this.releaseHold = undefined;
+      try { return await owner.whileNotHeld(collect); }
+      finally { if (held) this.releaseHold = await owner.holdObjects?.(); }
     });
   }
   /**
@@ -485,7 +555,9 @@ export class DocumentHandle {
     options: { overwrite?: boolean } = {},
   ): Promise<{ written: number; skipped: number; warnings: string[] }> {
     await this.endTool();
-    return provider.exclusive ? provider.exclusive((storage) => this.saveFolderLocked(provider, storage, options)) : this.saveFolderLocked(provider, provider, options);
+    const save = () => (provider.exclusive ? provider.exclusive((storage) => this.saveFolderLocked(provider, storage, options)) : this.saveFolderLocked(provider, provider, options));
+    // Before the target's lock: reading from another folder takes that folder's lock.
+    return this.savedFolder?.provider === provider ? save() : this.edit(() => this.withObjects({ type: "all" }, save));
   }
   private async saveFolderLocked(owner: ObjectStorageProvider, provider: ObjectStorageProvider, options: { overwrite?: boolean }): Promise<{ written: number; skipped: number; warnings: string[] }> {
     this.core.emit("saveState", "saving");
@@ -498,7 +570,7 @@ export class DocumentHandle {
         throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
-      const saved = await this.request("folderEntries");
+      const saved = await this.request("folderEntries", { keepExternal: base !== undefined });
       token = saved.token;
       const entries = unframeEntries(new Uint8Array(saved.bytes));
       const manifest = entries.get("manifest.json");
@@ -513,8 +585,11 @@ export class DocumentHandle {
       const warnings: string[] = [];
       const mirror = entries.get("document.json");
       if (mirror) { try { await provider.writeRef("document.json", mirror); } catch { warnings.push("比較用の文書コピーを更新できませんでした。正本の保存は完了しています。"); } }
+      const movedFolder = this.savedFolder?.provider !== owner;
       this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
+      if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
       this.apply(await this.request("saved", { token }));
+      await this.request("markFolderSaved");
       token = undefined;
       this.core.emit("saveState", "saved");
       return { ...report, warnings };
@@ -525,7 +600,9 @@ export class DocumentHandle {
     }
   }
   /** @internal */
-  setFolder(provider: ObjectStorageProvider, manifest: string): void {
+  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {
+    void this.releaseHold?.();
+    this.releaseHold = releaseHold;
     this.savedFolder = { provider, manifest };
   }
   /** A cancelled or failed save no longer needs the Worker's copy of the package. */

@@ -110,11 +110,15 @@ impl Engine {
         hashes.extend(direct_objects.iter().copied());
         let mut objects = BTreeMap::new();
         for hash in &hashes {
-            objects.insert(
-                *hash,
-                self.encoded(*hash)?
-                    .ok_or(EngineError::MissingTile(*hash))?,
-            );
+            // A history object may be only in the folder, which was just read and verified.
+            let bytes = match self.encoded(*hash)? {
+                Some(bytes) => Some(bytes),
+                None if self.external_objects(h)?.contains(hash) => {
+                    stored.get(&alto_store::object_path(hash)).cloned()
+                }
+                None => None,
+            };
+            objects.insert(*hash, bytes.ok_or(EngineError::MissingTile(*hash))?);
         }
         let mut refs = s.refs.clone();
         if !dry_run {

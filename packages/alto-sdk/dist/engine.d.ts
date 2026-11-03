@@ -119,7 +119,13 @@ export interface Engine {
     /** Opens a `.alto` archive. Refused while a recovery journal waits. */
     open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
     /** Opens the folder form, reading only objects reachable from the document and its history. */
-    openFolder(provider: ObjectStorageProvider): Promise<DocumentHandle>;
+    /**
+     * Opens a folder. With `history: "on-demand"`, only the working document's pixels are read;
+     * a version's are read when an operation needs them, so a damaged one shows up then.
+     */
+    openFolder(provider: ObjectStorageProvider, options?: {
+        history?: "all" | "on-demand";
+    }): Promise<DocumentHandle>;
     /** Retries a failed Worker without discarding the confirmed journal. */
     retry(): Promise<void>;
     /** Waits briefly for journal writes, then stops the Worker and removes the canvas. */

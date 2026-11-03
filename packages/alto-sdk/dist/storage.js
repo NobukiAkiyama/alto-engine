@@ -263,6 +263,24 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
             throw new AltoError("UNSUPPORTED", "the directory is not inside the origin private file system");
         return new OpfsFolderProvider(handle, name, options.waitMs ?? LOCK_WAIT_MS);
     }
+    holdObjects() {
+        return new Promise((resolve, reject) => {
+            let end = () => { };
+            const held = new Promise((done) => { end = done; });
+            // The lock is free once this promise settles, a task after `end` runs.
+            const lock = navigator.locks.request(this.#name + ":hold", { mode: "shared" }, () => {
+                resolve(() => { end(); return lock; });
+                return held;
+            });
+            lock.catch(reject);
+        });
+    }
+    async whileNotHeld(run) {
+        const outcome = await navigator.locks.request(this.#name + ":hold", { ifAvailable: true }, async (lock) => (lock ? { value: await run() } : null));
+        if (!outcome)
+            throw new AltoError("BUSY", "another document has this folder open");
+        return outcome.value;
+    }
     exclusive(run) {
         return withFolderLock(this.#name, this.#waitMs, async () => {
             let active = true;

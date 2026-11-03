@@ -35,6 +35,7 @@ export declare class DocumentHandle {
     private readonly listeners;
     private tool;
     private savedFolder;
+    private releaseHold;
     /** The current state. Unchanged until the next edit, so it is safe to keep. */
     getSnapshot(): DocumentSnapshot;
     /** Calls `listener` after each change with what changed. Returns an unsubscribe function. */
@@ -172,6 +173,13 @@ export declare class DocumentHandle {
     /** Version commits, diffs and restores. */
     readonly versions: {
         gc: (options?: GcOptions) => Promise<GcReport>;
+        /** How many objects this document references are only in its folder. */
+        externalObjects: () => Promise<number>;
+        /**
+         * Connects the folder holding this document's history, after a page reload recovered the
+         * document without it. Refused if the folder lacks an object the document needs.
+         */
+        attachFolder: (provider: ObjectStorageProvider) => Promise<void>;
         /** Returns a new compact archive. Does not overwrite an existing file. */
         compactArchive: (archive: Blob) => Promise<{
             bytes: Uint8Array<ArrayBufferLike>;
@@ -220,8 +228,14 @@ export declare class DocumentHandle {
      * shows, at `scale` (greater than 0, at most 1). Allowed while storage has failed.
      */
     exportImage(options?: ExportImageOptions): Promise<Blob>;
-    /** Writes the document as a `.alto` archive. On success the document is no longer dirty. */
-    save(target: ArchiveTarget): Promise<void>;
+    /**
+     * Writes the document as a `.alto` archive. On success the document is no longer dirty.
+     * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
+     * history that lives in an unreachable folder would otherwise make the save fail.
+     */
+    save(target: ArchiveTarget, options?: {
+        history?: "all" | "omit";
+    }): Promise<void>;
     private gcFolder;
     /**
      * Saves the folder form. Content-addressed files are written once; manifest.json

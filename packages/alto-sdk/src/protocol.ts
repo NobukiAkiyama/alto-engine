@@ -1,4 +1,4 @@
-import type { BranchView, CanvasEditResult, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
 /**
  * @internal The messages between the SDK and its engine Worker, written once. The SDK's
  * `request` and the Worker's `execute` are both checked against `Requests`. Not part
@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 7;
+export const PROTOCOL = 8;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -103,9 +103,15 @@ export interface Requests {
   import: Q<{ width: number; height: number; pixels: ArrayBuffer; encoded: ArrayBuffer; mime: string }, ImportedImage>;
   emergencyExport: Q<None, Uint8Array>;
   save: Q<None, { bytes: Uint8Array; token: number }>;
-  folderEntries: Q<None, { bytes: Uint8Array; token: number }>;
-  folderPlan: Q<{ bytes: ArrayBuffer }, string[]>;
-  openFolder: Q<{ bytes: ArrayBuffer }, WireState>;
+  folderEntries: Q<{ keepExternal?: boolean }, { bytes: Uint8Array; token: number }>;
+  folderPlan: Q<{ bytes: ArrayBuffer; onDemand?: boolean }, string[]>;
+  openFolder: Q<{ bytes: ArrayBuffer; known?: string[] }, WireState>;
+  missingObjects: Q<{ target: ObjectTarget }, string[]>;
+  provideObjects: Q<{ bytes: ArrayBuffer; target: ObjectTarget }, true>;
+  releaseObjects: Q<None, true>;
+  markFolderSaved: Q<None, true>;
+  externalObjects: Q<None, number>;
+  saveWithoutHistory: Q<None, Uint8Array>;
   importFont: Q<{ bytes: ArrayBuffer; faceIndex: number }, ImportedFontRecord>;
   releaseImport: Q<{ hash: string }, boolean>;
   pruneVersions: Q<None, WireState & { removed?: number }>;

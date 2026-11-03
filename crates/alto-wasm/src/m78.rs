@@ -1,6 +1,7 @@
 //! M7 text / fonts and M8 versions / folder packages at the WASM boundary.
 use crate::{Runtime, error};
 use alto_core::{ContentHash, NodeId};
+use alto_engine::versions::ObjectTarget;
 use alto_engine::{Engine, JournalKind, VersionRef};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -229,6 +230,75 @@ impl Runtime {
         }
         Ok(frame(&self.engine.folder_entries(self.doc).map_err(error)?))
     }
+    /// Entries for the folder the document came from, without reading what stays there.
+    #[wasm_bindgen(js_name=folderEntriesKeepingExternal)]
+    pub fn folder_entries_keeping_external(&self) -> Result<Vec<u8>, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("CONFLICT: active tool must be flushed"));
+        }
+        Ok(frame(
+            &self
+                .engine
+                .folder_entries_keeping_external(self.doc)
+                .map_err(error)?,
+        ))
+    }
+    #[wasm_bindgen(js_name=folderPlanOnDemand)]
+    pub fn folder_plan_on_demand(&self, framed: &[u8]) -> Result<String, JsValue> {
+        serde_json::to_string(&Engine::folder_plan_on_demand(unframe(framed)?).map_err(error)?)
+            .map_err(error)
+    }
+    /// `known` is a JSON list of the object paths in the folder.
+    #[wasm_bindgen(js_name=openFolderOnDemand)]
+    pub fn open_folder_on_demand(&mut self, framed: &[u8], known: &str) -> Result<String, JsValue> {
+        let paths: Vec<String> = serde_json::from_str(known).map_err(error)?;
+        let known = paths
+            .iter()
+            .filter_map(|p| p.rsplit('/').next()?.parse().ok())
+            .collect();
+        let mut engine = Engine::new();
+        let (doc, warnings) = engine
+            .open_entries_on_demand(unframe(framed)?, known)
+            .map_err(error)?;
+        self.install(engine, doc, warnings)
+    }
+    #[wasm_bindgen(js_name=missingObjects)]
+    pub fn missing_objects(&self, target: &str) -> Result<String, JsValue> {
+        let target: ObjectTarget =
+            serde_json::from_str(target).map_err(|e| error(format!("INVALID_ARGUMENT: {e}")))?;
+        serde_json::to_string(
+            &self
+                .engine
+                .missing_objects(self.doc, &target)
+                .map_err(error)?,
+        )
+        .map_err(error)
+    }
+    #[wasm_bindgen(js_name=provideObjects)]
+    pub fn provide_objects(&mut self, framed: &[u8], target: &str) -> Result<(), JsValue> {
+        let target: ObjectTarget =
+            serde_json::from_str(target).map_err(|e| error(format!("INVALID_ARGUMENT: {e}")))?;
+        self.engine
+            .provide_objects(self.doc, unframe(framed)?, &target)
+            .map_err(error)
+    }
+    #[wasm_bindgen(js_name=releaseObjects)]
+    pub fn release_objects(&mut self) {
+        self.engine.release_objects(self.doc);
+    }
+    #[wasm_bindgen(js_name=markFolderSaved)]
+    pub fn mark_folder_saved(&mut self) -> Result<(), JsValue> {
+        self.engine.mark_folder_saved(self.doc).map_err(error)
+    }
+    #[wasm_bindgen(js_name=externalObjects)]
+    pub fn external_objects(&self) -> Result<u32, JsValue> {
+        Ok(self.engine.external_objects(self.doc).map_err(error)?.len() as u32)
+    }
+    /// The working document alone. A normal save fails rather than dropping history.
+    #[wasm_bindgen(js_name=saveWithoutHistory)]
+    pub fn save_without_history(&self) -> Result<Vec<u8>, JsValue> {
+        self.engine.save_without_history(self.doc).map_err(error)
+    }
     #[wasm_bindgen(js_name=folderPlan)]
     pub fn folder_plan(&self, framed: &[u8]) -> Result<String, JsValue> {
         serde_json::to_string(&Engine::folder_plan(unframe(framed)?).map_err(error)?).map_err(error)
@@ -250,6 +320,9 @@ impl Runtime {
             .recovery_checkpoint(self.doc, &self.stored_objects)
             .map_err(error)?;
         self.stored_objects.extend(checkpoint.written);
+        // The store may drop what this checkpoint no longer lists.
+        self.stored_objects
+            .retain(|hash| !checkpoint.external.contains(hash));
         Ok(frame(&checkpoint.entries))
     }
     /// Object paths (`objects/ab/<hash>`) the recovery store already holds.

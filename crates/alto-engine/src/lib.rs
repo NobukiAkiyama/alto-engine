@@ -78,6 +78,8 @@ pub struct Engine {
     text: text::TextCache,
     /// Set once a package has been saved or opened, so history tiles can leave RAM.
     backed: bool,
+    /// Documents whose history objects stay in their folder until needed.
+    lazy: std::collections::BTreeMap<DocHandle, versions::LazyObjects>,
 }
 
 impl Default for Engine {
@@ -105,6 +107,7 @@ impl Engine {
             empty_versions: Default::default(),
             text: Default::default(),
             backed: false,
+            lazy: Default::default(),
         }
     }
 
@@ -700,6 +703,7 @@ impl Engine {
             return Err(EngineError::NotFound(handle));
         }
         self.versions.remove(&handle);
+        self.lazy.remove(&handle);
         if self.documents.is_empty() {
             let referenced = self.rooted_hashes();
             let pending = std::mem::take(&mut self.pending_blobs);
@@ -1053,6 +1057,25 @@ impl Engine {
             reachable.extend(stage.iter().copied());
             current.extend(stage.iter().copied());
         }
+        // Objects a document can read back from its folder need no copy here, unless an
+        // operation pinned them or a document without a folder uses them too.
+        let mut in_folder = std::collections::BTreeSet::new();
+        for lazy in self.lazy.values() {
+            in_folder.extend(lazy.known.iter().copied());
+        }
+        for lazy in self.lazy.values() {
+            for hash in &lazy.pinned {
+                in_folder.remove(hash);
+            }
+        }
+        // Each document can only read back from its own folder.
+        for (handle, v) in &self.versions {
+            let known = self.lazy.get(handle).map(|lazy| &lazy.known);
+            in_folder.retain(|hash| {
+                !v.retained.contains(hash) || known.is_some_and(|known| known.contains(hash))
+            });
+        }
+        reachable.retain(|hash| !in_folder.contains(hash) || current.contains(hash));
         if self.backed {
             self.tiles.separate(&current, &reachable);
             self.decoded.get_mut().retain(|h| current.contains(h));
