@@ -18,7 +18,7 @@ fn main() {
     for ty in 0..(size / 256) as i32 {
         for tx in 0..(size / 256) as i32 {
             let mut pixels = vec![0u8; 262144];
-            for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+            for (i, p) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 p.copy_from_slice(&[
                     (i + tx as usize) as u8,
                     (i / 256 + ty as usize) as u8,
