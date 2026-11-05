@@ -49,6 +49,11 @@ fi
 pkg_out=$(mktemp -d)
 trap 'rm -rf "$pkg_out"' EXIT
 sh scripts/build-wasm-pkg.sh "$pkg_out"
+# The vello-probe comparison exports belong only to the vector-comparison package.
+if grep -nE 'compareVectorBackends|verifyVectorOptimization' "$pkg_out/alto_wasm.d.ts"; then
+  echo "the release package must not export the vello-probe comparison code" >&2
+  exit 1
+fi
 if [ "$phase" = wasm-release ] || [ "$phase" = wasm-report ]; then
   sh scripts/build-vector-comparison.sh "$pkg_out/vector"
   if [ "$phase" = wasm-report ]; then
