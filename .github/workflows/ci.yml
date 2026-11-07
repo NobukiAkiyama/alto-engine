@@ -458,7 +458,7 @@ jobs:
         run: |
           log="$RUNNER_TEMP/alto-gpu-parity/parity.log"
           set +e
-          cargo test -p alto-gpu --locked --lib cpu_composite::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1 >"$log" 2>&1
+          cargo test -p alto-gpu --locked --lib cpu_composite::gpu_parity_tests::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1 >"$log" 2>&1
           status=$?
           set -e
           cat "$log"
@@ -493,9 +493,10 @@ jobs:
           ALTO_REQUIRE_GPU_PARITY: "1"
         run: |
           cargo test -p alto-gpu --locked --lib -- --test-threads=1 \
-            cpu_composite::v3_vector_ cpu_composite::v3_blur_ cpu_composite::v3_raster_blur_ \
-            cpu_composite::v3_backdrop_blur_ cpu_composite::v3_feathered_vector_mask_ \
-            cpu_composite::v3_adjustment_vector_mask_ cpu_composite::v3_text_
+            cpu_composite::v3_tests::v3_vector_ cpu_composite::v3_tests::v3_blur_ \
+            cpu_composite::v3_tests::v3_raster_blur_ cpu_composite::v3_tests::v3_backdrop_blur_ \
+            cpu_composite::v3_tests::v3_feathered_vector_mask_ \
+            cpu_composite::v3_tests::v3_adjustment_vector_mask_ cpu_composite::text_tests::v3_text_
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -1,4 +1,4 @@
-// The Q16 rounding in JavaScript, for `cpu_composite::q16_rust_and_js_references_agree`.
+// The Q16 rounding in JavaScript, for `cpu_composite::reference_tests::q16_rust_and_js_references_agree`.
 // argv[2] is a JSON list of f64 bit patterns (16 hex digits) from the Rust test.
 // Output: one line per value, "<version 3 Q16> <version 2 Q16>".
 import { quantizeQ16, quantizeQ16V2 } from "./cpu-composite.js";

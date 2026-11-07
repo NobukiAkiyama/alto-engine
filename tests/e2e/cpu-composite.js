@@ -1,6 +1,6 @@
 /**
  * Port of composite.wgsl and the Rust CPU reference in
- * crates/alto-gpu/src/cpu_composite.rs.
+ * crates/alto-gpu/src/cpu_composite/.
  *
  * Render version 1 keeps the f32 path: world matrices stay f64, each inverse
  * component is Math.fround, and bilinear is the f32 mix. Render version 2
@@ -246,7 +246,7 @@ const ALPHA_SWEEP = [0, 1, 128, 254];
 
 /**
  * Straight RGBA for one layer in paint order. Matches `alpha_sweep` in
- * crates/alto-gpu/src/cpu_composite.rs. Layer 0 is R = x&255, G = y&255,
+ * crates/alto-gpu/src/cpu_composite/cases.rs. Layer 0 is R = x&255, G = y&255,
  * B = (3x+5y)&255. Layer i rotates those channels by i%3 and adds 17*i.
  * Even layers step alpha with x+y; odd layers step with x. Both add the
  * layer index. Layers 0 and 1 cover all 16 pairs of {0, 1, 128, 254}.
