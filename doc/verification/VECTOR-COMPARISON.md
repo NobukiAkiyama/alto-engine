@@ -40,6 +40,8 @@ M6本体は、既存のタイルROI・RGBA16F中間値・M5のマスクとぼか
 ## 再現
 
 ```sh
+sh scripts/build.sh
+sh scripts/build-vector-comparison.sh
 sh scripts/run.sh
 # http://localhost:8765/examples/vector-comparison/ で「比較を実行」
 ```

@@ -1,19 +1,18 @@
 #!/bin/sh
 # Compare a built WASM package to the hashes in wasm/SHA256SUMS.
-# Usage: verify-wasm-sums.sh GROUP DIR [exact|subset|committed]
+# Usage: verify-wasm-sums.sh GROUP DIR [exact|subset]
 #   exact     DIR has exactly the GROUP files, each byte matching (default)
 #   subset    every file in DIR matches GROUP; missing GROUP files are allowed
-#   committed tracked files in DIR match GROUP; gitignored binaries may be absent
 set -eu
 cd "$(dirname "$0")/.."
-group=${1:?usage: verify-wasm-sums.sh GROUP DIR [exact|subset|committed]}
+group=${1:?usage: verify-wasm-sums.sh GROUP DIR [exact|subset]}
 dir=${2:?}
 mode=${3:-exact}
 sums=wasm/SHA256SUMS
 case "$mode" in
-  exact|subset|committed) ;;
+  exact|subset) ;;
   *)
-    echo "mode must be exact, subset, or committed" >&2
+    echo "mode must be exact or subset" >&2
     exit 1
     ;;
 esac
@@ -72,14 +71,8 @@ while IFS= read -r row; do
     if [ "$mode" = subset ]; then
       continue
     fi
-    if [ "$mode" = committed ] && git check-ignore -q -- "$path"; then
-      continue
-    fi
     echo "missing $group/$rel" >&2
     note_drift
-    continue
-  fi
-  if [ "$mode" = committed ] && git check-ignore -q -- "$path"; then
     continue
   fi
   actual=$(hash_file "$path")
@@ -94,9 +87,6 @@ done < "$list"
 for path in "$dir"/*; do
   [ -f "$path" ] || continue
   rel=$(basename "$path")
-  if [ "$mode" = committed ] && git check-ignore -q -- "$path"; then
-    continue
-  fi
   if ! awk -v rel="$rel" '$2 == rel { found = 1 } END { exit !found }' "$list"; then
     echo "unexpected file in $group package: $rel" >&2
     note_drift
