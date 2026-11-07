@@ -42,7 +42,7 @@ export function describe(item, names) {
     default: return JSON.stringify(item);
   }
 }
-export function installM8({ engine, getDocument, attach, run }) {
+export function installVersions({ engine, getDocument, attach, run }) {
   let chosen = null, log = [], folder = null, ticket = 0;
   const intents = (c) => c.intents.map((i) => `${describeIntent(i)}${i.count > 1 ? " ×" + i.count : ""}${i.target_names.length ? "（" + i.target_names.map((n) => n ?? "削除済み").join("、") + "）" : ""}`).join(" / ");
   function showDiff(diff, empty) {

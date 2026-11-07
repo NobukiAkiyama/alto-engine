@@ -1,4 +1,4 @@
-//! General M5 tile renderer. Back-propagated ROIs provide the halo for every blur stage.
+//! General tile renderer for effects, masks and clipping. Back-propagated ROIs provide the halo for every blur stage.
 //! Temporary targets are pooled and reused in queue order, including between display tiles.
 //! Render version 3 uses `effects-q14.wgsl`: every target is premultiplied Q14 in
 //! `rgba16uint` and the resolve writes `rgba8uint` bytes. The host has already
@@ -2485,7 +2485,7 @@ enum VectorContent<'a> {
     Text(&'a [alto_vector::TextRun]),
 }
 impl Renderer {
-    pub(super) fn compose_m5(
+    pub(super) fn compose_tiles(
         &mut self,
         scene: &RenderScene,
         key: CacheKey,
@@ -2493,7 +2493,7 @@ impl Renderer {
         store: &dyn TileStore,
     ) -> Result<()> {
         let exact = scene.render_version >= alto_core::RENDER_VERSION_EXACT;
-        let mut resources = match self.m5.take() {
+        let mut resources = match self.tile_renderer.take() {
             Some(r) if r.exact() == exact => r,
             other => {
                 if let Some(old) = other {
@@ -2627,7 +2627,7 @@ impl Renderer {
             }
             self.release_retired();
         }
-        self.m5 = Some(resources);
+        self.tile_renderer = Some(resources);
         result
     }
 }

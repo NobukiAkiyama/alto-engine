@@ -163,7 +163,7 @@ impl Runtime {
         }
         let plan = self
             .engine
-            .prepare_gc(self.doc, &crate::m78::unframe(framed)?, dry_run)
+            .prepare_gc(self.doc, &crate::versions::unframe(framed)?, dry_run)
             .map_err(error)?;
         let mut entries = plan.entries;
         entries.insert(
@@ -171,7 +171,7 @@ impl Runtime {
             serde_json::to_vec(&json!({"report":plan.report,"remove":plan.remove}))
                 .map_err(error)?,
         );
-        Ok(crate::m78::frame(&entries))
+        Ok(crate::versions::frame(&entries))
     }
     #[wasm_bindgen(js_name=compactArchive)]
     pub fn compact_archive(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
@@ -182,7 +182,7 @@ impl Runtime {
             .engine
             .compact_archive(self.doc, bytes)
             .map_err(error)?;
-        Ok(crate::m78::frame(&std::collections::BTreeMap::from([
+        Ok(crate::versions::frame(&std::collections::BTreeMap::from([
             ("archive.alto".into(), bytes),
             (
                 "report.json".into(),

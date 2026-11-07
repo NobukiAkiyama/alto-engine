@@ -1383,9 +1383,10 @@ impl Runtime {
 }
 
 mod image_versions;
-mod m78;
+mod text;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;
+mod versions;
 
 #[wasm_bindgen]
 pub struct FinishAbort {

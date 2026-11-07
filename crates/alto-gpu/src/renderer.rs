@@ -12,7 +12,7 @@ use std::{
 };
 
 mod cache;
-mod m5;
+mod tile_renderer;
 use cache::overview_level;
 mod memory;
 mod presentation;
@@ -409,7 +409,7 @@ pub struct Renderer {
     pub stroke: Option<GpuStroke>,
     pub adapter_name: String,
     budget_bytes: u64,
-    m5: Option<m5::Resources>,
+    tile_renderer: Option<tile_renderer::Resources>,
     vector: Option<vector::VectorResources>,
     /// Small text through the glyph atlas (true) or always through the vector path.
     glyph_atlas: bool,
@@ -1726,7 +1726,7 @@ impl Renderer {
             stroke: None,
             adapter_name: adapter.get_info().name,
             budget_bytes: budget_mb as u64 * 1048576,
-            m5: None,
+            tile_renderer: None,
             vector: None,
             glyph_atlas: true,
             profiling: false,
@@ -2583,7 +2583,7 @@ impl Renderer {
             return Ok(false);
         };
         if !crate::damage::plain_scene(scene) {
-            self.compose_m5(scene, key, slot as u32, store)?;
+            self.compose_tiles(scene, key, slot as u32, store)?;
             self.cache_slots[slot] = Some(key);
             self.cache_map.insert(
                 key,
@@ -2596,8 +2596,8 @@ impl Renderer {
             return Ok(true);
         }
         // A plain scene needs neither; their GPU objects are destroyed, not dropped.
-        if let Some(m5) = self.m5.take() {
-            m5.retire(&mut self.retired);
+        if let Some(tiles) = self.tile_renderer.take() {
+            tiles.retire(&mut self.retired);
         }
         if let Some(vector) = self.vector.take() {
             vector.retire(&mut self.retired);
@@ -3234,8 +3234,8 @@ impl Renderer {
             self.presentation.acknowledge();
         }
         self.frame += 1;
-        if let Some(m5) = &mut self.m5 {
-            m5.expire(self.frame, &mut self.retired);
+        if let Some(tiles) = &mut self.tile_renderer {
+            tiles.expire(self.frame, &mut self.retired);
         }
         // Expiration has no unsubmitted consumers: render entry owns no encoder.
         self.release_retired();
@@ -3675,8 +3675,8 @@ impl Renderer {
             .iter()
             .filter(|k| self.cache_map.contains_key(k))
             .count() as u64;
-        gpu.effects_allocations = self.m5.as_ref().map_or(0, |m| m.allocations);
-        gpu.effects_reuses = self.m5.as_ref().map_or(0, |m| m.reuses);
+        gpu.effects_allocations = self.tile_renderer.as_ref().map_or(0, |m| m.allocations);
+        gpu.effects_reuses = self.tile_renderer.as_ref().map_or(0, |m| m.reuses);
         gpu
     }
     /// Called after submit or after discarding an encoder; never while a consumer is unsubmitted.

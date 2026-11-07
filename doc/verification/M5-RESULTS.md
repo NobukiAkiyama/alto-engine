@@ -53,7 +53,7 @@ WASM：2,073,545 bytes、gzip：481,754 bytes（wasm-opt未適用）。SDK v0.2.
 
 SHA-256：`da78f8df464f45a64b0ff53dffb2fe5db6e707d5d01e18ac8e61d26a44bb135b`
 
-[`sample-m5.alto`](../../verification/sample-m5.alto) は768×512、選択範囲、ぼかし付きグループ、クリップしたストライプ、マスク付きペイント、右半分の色調整のサンプルです。新しいネイティブEngineで保存→読込のスナップショット一致を確認し、Playgroundの「M5サンプルを開く」でも表示を確認しました。生成元は `crates/alto-engine/examples/create-m5-sample.rs` です。
+[`sample-m5.alto`](../../verification/sample-m5.alto) は768×512、選択範囲、ぼかし付きグループ、クリップしたストライプ、マスク付きペイント、右半分の色調整のサンプルです。新しいネイティブEngineで保存→読込のスナップショット一致を確認し、Playgroundの「M5サンプルを開く」でも表示を確認しました。生成元は `crates/alto-engine/examples/create-masks-sample.rs` です。
 
 ![M5 Playground](../../verification/playground-m5.png)
 

@@ -2,7 +2,7 @@ const $=(s)=>document.querySelector(s);
 const color=(hex,alpha=1)=>[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255).concat(alpha);
 const hex=(c)=>'#'+c.slice(0,3).map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('');
 const clone=(v)=>structuredClone(v);
-export function installM6({engine,getDocument,getSelected,select,attach,run,fail}) {
+export function installVector({engine,getDocument,getSelected,select,attach,run,fail}) {
   let editing=false,drag=null,selectedPath=0,lastKey='',ticket=0;
   const current=()=>{const d=getDocument(),id=getSelected();return {d,id,n:d&&id?d.getSnapshot().nodes.get(id)??null:null};};
   const style=(data)=>({data,fill:$('#vector-fill-on').checked?color($('#vector-fill').value,Number($('#vector-alpha').value)):null,stroke:$('#vector-stroke-on').checked?{color:color($('#vector-stroke').value,Number($('#vector-alpha').value)),width:Number($('#vector-width').value),cap:$('#vector-cap').value,join:$('#vector-join').value,miter_limit:4}:null,fill_rule:$('#vector-rule').value});

@@ -1,6 +1,6 @@
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 const $ = (s) => document.querySelector(s);
-export function installM5({
+export function installSelection({
   engine,
   getDocument,
   getSelected,

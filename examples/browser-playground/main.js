@@ -1,8 +1,8 @@
 import { installImageVersions } from "./image-versions-ui.js";
-import { installM6 } from "./m6-ui.js";
-import { installM7 } from "./m7-ui.js";
-import { installM8 } from "./m8-ui.js";
-import { installM5 } from "./m5-ui.js";
+import { installVector } from "./vector-ui.js";
+import { installText } from "./text-ui.js";
+import { installVersions } from "./versions-ui.js";
+import { installSelection } from "./selection-ui.js";
 import { describeError, describeWarning } from "./messages.js";
 import { createEngine } from "../../packages/alto-sdk/dist/index.js";
 import { pickSaveTarget } from "../../packages/alto-sdk/dist/browser.js";
@@ -15,7 +15,7 @@ let engine,
   tool = "brush",
   gesture = null;
 let target;
-let m5UI, m6UI, m7UI, m8UI, imageVersionsUI;
+let selectionUI, vectorUI, textUI, versionsUI, imageVersionsUI;
 const status = (t) => ($("#status").textContent = t);
 function fail(e) {
   $("#error").textContent = describeError(e);
@@ -71,10 +71,10 @@ function render() {
     $("#scale").value = Math.hypot(m[0], m[1]);
     $("#rotation").value = (Math.atan2(m[1], m[0]) * 180) / Math.PI;
   }
-  m5UI?.refresh();
-  m6UI?.refresh();
-  m7UI?.refresh();
-  m8UI?.refresh();
+  selectionUI?.refresh();
+  vectorUI?.refresh();
+  textUI?.refresh();
+  versionsUI?.refresh();
   imageVersionsUI?.refresh();
 }
 function attach(d) {
@@ -109,7 +109,7 @@ function bindInput(host) {
     host.setPointerCapture(e.pointerId);
     if (tool === "text" && e.button === 0 && !e.altKey) {
       gesture = { text: true };
-      run(() => m7UI.pointer(e, "down"));
+      run(() => textUI.pointer(e, "down"));
       return;
     }
     if (tool === "pan" || e.button === 1 || e.altKey) {
@@ -139,7 +139,7 @@ function bindInput(host) {
   };
   host.onpointermove = (e) => {
     if (!gesture) return;
-    if (gesture.text) run(() => m7UI.pointer(e, "move"));
+    if (gesture.text) run(() => textUI.pointer(e, "move"));
     else if (gesture.brush) gesture.brush.input(e);
     else {
       engine.viewport.panBy(e.clientX - gesture.x, e.clientY - gesture.y);
@@ -150,7 +150,7 @@ function bindInput(host) {
   host.onpointerup = (e) => {
     const g = gesture;
     gesture = null;
-    if (g?.text) run(() => m7UI.pointer(e, "up"));
+    if (g?.text) run(() => textUI.pointer(e, "up"));
     if (g?.brush) run(() => g.brush.end());
   };
   host.onpointercancel = () => {
@@ -429,11 +429,11 @@ try {
     render();
   }
   const context = { engine, getDocument: () => doc, getSelected: () => selected, select, attach, run, fail };
-  m5UI = installM5(context);
-  m5UI.refresh();
-  m6UI = installM6(context);
-  m7UI = installM7(context);
-  m8UI = installM8(context);
+  selectionUI = installSelection(context);
+  selectionUI.refresh();
+  vectorUI = installVector(context);
+  textUI = installText(context);
+  versionsUI = installVersions(context);
   imageVersionsUI = installImageVersions(context);
   imageVersionsUI.refresh();
   window.altoEngine = engine;

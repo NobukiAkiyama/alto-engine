@@ -12,7 +12,7 @@ export function parseFeatures(s) {
 }
 export const TEST_FONTS = ["../../tests/fonts/AltoTestJP.otf", "../../tests/fonts/AltoTestLatin.ttf"];
 
-export function installM7({ engine, getDocument, getSelected, select, attach, run, fail }) {
+export function installText({ engine, getDocument, getSelected, select, attach, run, fail }) {
   // Text tool state: anchor/focus are UTF-16 offsets in the selected text layer.
   let sel = null, dragging = false, composing = false, lastKey = "";
   const current = () => {
