@@ -945,7 +945,7 @@ function rasterBytes(layer, i, x, y, frame) {
 
 /**
  * Render version 3 M5 reference for a stack at the identity transform, as
- * `renderer/tile_renderer.rs` dispatches it. `layers` is bottom first. A raster is
+ * `renderer/tile_renderer/` dispatches it. `layers` is bottom first. A raster is
  * `{ image, opacity, mode, effects, mask }` and composites with mode 19; an effect
  * is color-adjust settings, with an optional `selection` mask (mode 22). A group is
  * `{ group: layers, opacity, mode, mask }`, composited onto an empty target first.

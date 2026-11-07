@@ -1397,7 +1397,7 @@ struct Q14Stage {
     raster: Option<[f64; 6]>,
 }
 
-/// An M5 graph as `renderer/tile_renderer.rs` dispatches it for render version 3. Target 0
+/// An M5 graph as `renderer/tile_renderer/` dispatches it for render version 3. Target 0
 /// is never written, so it is the empty backdrop.
 struct Q14Program {
     name: String,
@@ -1437,7 +1437,7 @@ impl Q14Stage {
             _ => None,
         }
     }
-    /// Whether the stage reads input `a` and input `b`, as `renderer/tile_renderer.rs`
+    /// Whether the stage reads input `a` and input `b`, as `renderer/tile_renderer/`
     /// passes them to `q14_params`.
     fn reads(&self) -> [bool; 2] {
         match self.mode {
@@ -1827,7 +1827,7 @@ fn mask_images() -> Vec<Vec<u8>> {
     ]
 }
 
-/// The memo's enforced mask cases as `renderer/tile_renderer.rs` dispatches them for
+/// The memo's enforced mask cases as `renderer/tile_renderer/` dispatches them for
 /// render version 3. A masked raster: mode 18, mode 21 (mask and opacity), then
 /// mode 19 at opacity 1 onto the backdrop.
 fn mask_programs() -> Vec<Q14Program> {
@@ -2854,7 +2854,7 @@ fn renderer_cases() -> Vec<RendererCase> {
 type PreparedMask = (Vec<([i32; 2], Vec<u8>)>, alto_core::FixedAffine);
 
 /// CPU reference for a level-0 tile `key` of a [`RendererCase`], evaluated per
-/// pixel as `renderer/tile_renderer.rs` chains the stages, with the checked Q14 functions
+/// pixel as `renderer/tile_renderer/` chains the stages, with the checked Q14 functions
 /// of [`q14_program_cpu`]. Every target shares the tile's ROI. Pixels whose
 /// center is off the canvas are transparent (the exact doubled test, not
 /// `resolve_span`).
@@ -6102,7 +6102,7 @@ fn fixed_affine_rust_and_js_agree_on_ten_thousand_chains() {
 fn v3_host_transform_functions_have_no_float_arithmetic() {
     let core = include_str!("../../alto-core/src/fixed_affine.rs");
     let sample = include_str!("sample.rs");
-    let renderer = include_str!("renderer.rs");
+    let renderer = include_str!("renderer/geometry.rs");
     fn body<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source
             .find(&format!("fn {name}("))
