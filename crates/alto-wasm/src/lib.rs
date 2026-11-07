@@ -1,5 +1,4 @@
 #![cfg(target_arch = "wasm32")]
-mod spike;
 use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
