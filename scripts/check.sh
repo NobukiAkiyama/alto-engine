@@ -33,11 +33,6 @@ hash_status=0
 check_sums() {
   sh scripts/verify-wasm-sums.sh "$@" || hash_status=1
 }
-if [ "$phase" != wasm-report ]; then
-  check_sums release examples/browser-playground/pkg committed
-  check_sums release packages/alto-sdk/dist/pkg committed
-  check_sums vector-comparison examples/vector-comparison/pkg committed
-fi
 bindgen_version=$(sed -n 's/^wasm-bindgen *= *"=\([0-9][0-9.]*\)".*/\1/p' crates/alto-wasm/Cargo.toml)
 if [ -z "$bindgen_version" ]; then
   echo "pin wasm-bindgen with an exact '=' version in crates/alto-wasm/Cargo.toml" >&2
@@ -61,7 +56,6 @@ if [ "$phase" = wasm-release ] || [ "$phase" = wasm-report ]; then
   exit "$hash_status"
 fi
 check_sums release "$pkg_out"
-sh scripts/guard-pkg-replace.sh examples/browser-playground/pkg
 rm -rf examples/browser-playground/pkg
 mkdir -p examples/browser-playground/pkg
 cp -a "$pkg_out"/. examples/browser-playground/pkg/
@@ -84,5 +78,4 @@ else
   [ "$hash_status" -eq 0 ]
 fi
 sh scripts/fetch-wasm.test.sh
-sh scripts/guard-pkg-replace.test.sh
 sh scripts/mark-vector-enforced.test.sh

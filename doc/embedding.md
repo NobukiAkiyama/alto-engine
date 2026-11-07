@@ -64,7 +64,7 @@ export default defineConfig({
 
 **webpack 5：** 追加の設定は要りません。
 
-**バンドラーを使わない場合：** `packages/alto-sdk/dist/` を、そのままページと同じオリジンから配信してください。ファイルを別の場所に置くときは、`createEngine({ assets: { baseURL: "/static/alto/" } })` で場所を教えます。Worker はページと同じオリジンからしか読み込めないため、違うオリジンを渡すと `INVALID_ARGUMENT`（`reason: "cross-origin-assets"`）で失敗します。
+**バンドラーを使わない場合：** `packages/alto-sdk/dist/`（Git には入っていないので、リポジトリのルートで `sh scripts/build.sh` を実行して作ります）を、そのままページと同じオリジンから配信してください。ファイルを別の場所に置くときは、`createEngine({ assets: { baseURL: "/static/alto/" } })` で場所を教えます。Worker はページと同じオリジンからしか読み込めないため、違うオリジンを渡すと `INVALID_ARGUMENT`（`reason: "cross-origin-assets"`）で失敗します。
 
 ## 4. 配信の条件
 

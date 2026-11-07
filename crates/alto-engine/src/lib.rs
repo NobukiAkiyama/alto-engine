@@ -1,10 +1,10 @@
 pub mod canvas;
 mod edit;
 pub mod image;
-pub mod m5;
+pub mod render_v3_opt_in;
+pub mod selection;
 pub mod svg;
 pub mod text;
-pub mod unstable_render;
 pub mod versions;
 mod warning;
 use alto_core::ContentHash;
@@ -451,7 +451,7 @@ impl Engine {
                         .as_ref()
                         .filter(|_| node.props.mask_enabled)
                         .map(|m| {
-                            let mut mask = m5::render_mask(m, node.props.mask_linked);
+                            let mut mask = selection::render_mask(m, node.props.mask_linked);
                             mask.transform = node.props.mask_transform.0;
                             mask
                         }),
@@ -468,7 +468,12 @@ impl Engine {
                         .filter(|m| m.enabled)
                         .map(|m| *m),
                     clip: node.props.clip_to_below,
-                    effects: node.props.effects.iter().map(m5::render_effect).collect(),
+                    effects: node
+                        .props
+                        .effects
+                        .iter()
+                        .map(selection::render_effect)
+                        .collect(),
                 },
                 content: RContent::Unsupported,
             });
@@ -498,7 +503,7 @@ impl Engine {
                 ),
                 NodeKind::Vector { paths } => RContent::Mesh(std::sync::Arc::new(paths.clone())),
                 NodeKind::Adjustment { adjustment } => {
-                    RContent::Adjustment(m5::render_effect(adjustment))
+                    RContent::Adjustment(selection::render_effect(adjustment))
                 }
                 // Text renders per size run: large glyphs through the vector path (glyph
                 // outlines -> lyon -> 4x MSAA), small ones through the glyph atlas.
@@ -939,10 +944,10 @@ pub(crate) fn node_hashes(n: &alto_doc::Node, h: &mut std::collections::BTreeSet
         h.extend(tiles.tiles.values().copied());
     }
     for effect in &n.props.effects {
-        m5::effect_hashes(effect, h);
+        selection::effect_hashes(effect, h);
     }
     if let NodeKind::Adjustment { adjustment } = &n.kind {
-        m5::effect_hashes(adjustment, h);
+        selection::effect_hashes(adjustment, h);
     }
     if let NodeKind::Text {
         bake: Some(bake), ..
@@ -974,11 +979,11 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
         Op::SetProps { patch, .. } => {
             if let Some(effects) = &patch.effects {
                 for e in effects {
-                    m5::effect_hashes(e, h);
+                    selection::effect_hashes(e, h);
                 }
             }
         }
-        Op::SetAdjustment { adjustment, .. } => m5::effect_hashes(adjustment, h),
+        Op::SetAdjustment { adjustment, .. } => selection::effect_hashes(adjustment, h),
         Op::SetText {
             bake: Some(bake), ..
         } => {
@@ -1660,7 +1665,7 @@ mod package_tests {
 #[cfg(test)]
 mod render_v3_fixture {
     use super::*;
-    use crate::unstable_render::{
+    use crate::render_v3_opt_in::{
         allow_unstable_render_v3, set_unstable_render_v3, unstable_render_v3_enabled,
     };
     use alto_core::RENDER_VERSION_EXACT;
@@ -1787,10 +1792,13 @@ mod render_v3_fixture {
 }
 
 #[cfg(test)]
-mod m6_tests;
+mod text_tests;
 
 #[cfg(test)]
-mod m78_tests;
+mod vector_tests;
+
+#[cfg(test)]
+mod versions_tests;
 
 #[cfg(test)]
 mod text_bake_tests;

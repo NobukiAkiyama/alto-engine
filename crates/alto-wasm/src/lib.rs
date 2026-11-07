@@ -1,5 +1,4 @@
 #![cfg(target_arch = "wasm32")]
-mod spike;
 use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
@@ -1384,9 +1383,10 @@ impl Runtime {
 }
 
 mod image_versions;
-mod m78;
+mod text;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;
+mod versions;
 
 #[wasm_bindgen]
 pub struct FinishAbort {

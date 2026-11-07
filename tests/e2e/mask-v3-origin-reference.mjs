@@ -1,5 +1,5 @@
 // The v3 mask stages away from the origin in JavaScript, for
-// `cpu_composite::mask_origin_rust_and_js_references_agree`. argv[2] is a JSON
+// `cpu_composite::reference_tests::mask_origin_rust_and_js_references_agree`. argv[2] is a JSON
 // list of `[region, transform]` from the Rust test (`mask_origin_cases`), where
 // region is `[x, y, level scale]`. Output: for each case, the RGBA8 tiles of
 // `renderM5V3` for a masked layer at opacity 0.5 (mode 21), a selection-limited
