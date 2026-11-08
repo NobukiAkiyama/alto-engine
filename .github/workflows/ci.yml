@@ -347,7 +347,6 @@ jobs:
           ALTO_VECTOR_FRAMES: '1'
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/vector
         run: |
-          sh scripts/verify-wasm-sums.sh vector-comparison examples/vector-comparison/pkg committed || true
           sh scripts/build-vector-comparison.sh
           node scripts/verify-browser.mjs --vector-optimization
       - uses: actions/upload-artifact@v7
@@ -459,7 +458,7 @@ jobs:
         run: |
           log="$RUNNER_TEMP/alto-gpu-parity/parity.log"
           set +e
-          cargo test -p alto-gpu --locked --lib cpu_composite::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1 >"$log" 2>&1
+          cargo test -p alto-gpu --locked --lib cpu_composite::gpu_parity_tests::gpu_shader_matches_cpu_reference -- --exact --nocapture --test-threads=1 >"$log" 2>&1
           status=$?
           set -e
           cat "$log"
@@ -494,9 +493,10 @@ jobs:
           ALTO_REQUIRE_GPU_PARITY: "1"
         run: |
           cargo test -p alto-gpu --locked --lib -- --test-threads=1 \
-            cpu_composite::v3_vector_ cpu_composite::v3_blur_ cpu_composite::v3_raster_blur_ \
-            cpu_composite::v3_backdrop_blur_ cpu_composite::v3_feathered_vector_mask_ \
-            cpu_composite::v3_adjustment_vector_mask_ cpu_composite::v3_text_
+            cpu_composite::v3_tests::v3_vector_ cpu_composite::v3_tests::v3_blur_ \
+            cpu_composite::v3_tests::v3_raster_blur_ cpu_composite::v3_tests::v3_backdrop_blur_ \
+            cpu_composite::v3_tests::v3_feathered_vector_mask_ \
+            cpu_composite::v3_tests::v3_adjustment_vector_mask_ cpu_composite::text_tests::v3_text_
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -523,6 +523,9 @@ jobs:
       ALTO_BROWSER_EXPECTED_VERSION: ${{ inputs.chrome_version || '156.0.8078.47' }}
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -548,8 +551,8 @@ jobs:
           printf 'abi <abi/4.0>,\nprofile alto-cft "%s" flags=(unconfined) { userns, }\n' \
             "$RUNNER_TEMP/chrome/chrome-linux64/chrome" | sudo tee /etc/apparmor.d/alto-cft
           sudo apparmor_parser -r /etc/apparmor.d/alto-cft
-      # The WASM packages are not stored in git; the SDK suites and the Runtime
-      # probes need them. Built here like scripts/check.sh does, on this runner.
+      # The WASM packages and the SDK dist are not stored in git; the SDK suites
+      # and the Runtime probes need them. Built here like scripts/check.sh does.
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
@@ -567,6 +570,8 @@ jobs:
             cargo install wasm-bindgen-cli --version "$version" --locked
           fi
           sh scripts/build-m0.sh
+          pnpm --dir packages/alto-sdk install --frozen-lockfile
+          pnpm --dir packages/alto-sdk build
       - name: Probe independent surface lifetime conditions
         shell: bash
         run: |

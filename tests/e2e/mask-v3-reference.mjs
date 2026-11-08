@@ -1,4 +1,4 @@
-// The v3 mask references in JavaScript, for `cpu_composite::mask_v3_rust_and_js_references_agree`.
+// The v3 mask references in JavaScript, for `cpu_composite::reference_tests::mask_v3_rust_and_js_references_agree`.
 // argv[2] is a JSON list of mask transforms from the Rust test, so both sides
 // sample with the same f64 matrices. Output: little-endian u16 channels for modes
 // 21, 22 and 23 over the grids below, then one byte per pixel for each transform,

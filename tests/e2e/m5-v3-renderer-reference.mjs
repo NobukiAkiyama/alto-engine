@@ -1,5 +1,5 @@
 // The v3 real-renderer cases and the host's Q14 quantizers in JavaScript, for
-// `cpu_composite::renderer_rust_and_js_references_agree`. stdin is JSON from
+// `cpu_composite::reference_tests::renderer_rust_and_js_references_agree`. stdin is JSON from
 // the Rust test: `cases` (`renderer_cases` that draw, tiles as seeds, masks
 // with their document transform after linking) and `values` (f32 bit patterns).
 // Output: for each case its RGBA8 tile (`renderM5V3` at the tile's ROI, or

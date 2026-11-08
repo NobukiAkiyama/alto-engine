@@ -3,7 +3,7 @@ name = "alto-wasm"
 version = "0.4.0"
 license = "MIT OR Apache-2.0"
 edition = "2024"
-description = "Alto Engine M0 WebGPU worker spike"
+description = "Alto Engine WebAssembly bindings for the browser worker"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -26,6 +26,8 @@ futures-channel = "0.3"
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "webgpu"] }
 
 [features]
+# Lyon-vs-Vello comparison probe (src/vector_probe.rs). Off by default so the
+# release package never links it; only scripts/build-vector-comparison.sh enables it.
 vello-probe = ["dep:vello"]
 
 [dependencies.vello]
