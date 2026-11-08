@@ -749,7 +749,8 @@ export class EngineCore extends Emitter {
                     this.adopt(state, true, epoch);
                 this.emit("status", this.state);
             }
-            this.setStatus("ready", null);
+            else
+                this.setStatus("ready", null);
             this.startLoop();
         }
         catch (cause) {
@@ -769,6 +770,8 @@ export class EngineCore extends Emitter {
             }
             else {
                 this.worker?.terminate();
+                // Document listeners may have sent requests while the recovered state applied.
+                this.rejectPending(error);
                 this.setStatus("failed", error);
             }
             throw error;

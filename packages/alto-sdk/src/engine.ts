@@ -867,8 +867,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
           this.viewport.publish();
         } else this.adopt(state, true, epoch);
         this.emit("status", this.state);
-      }
-      this.setStatus("ready", null);
+      } else this.setStatus("ready", null);
       this.startLoop();
     } catch (cause) {
       if (this.disposed) throw cause;
@@ -886,6 +885,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.startLoop();
       } else {
         this.worker?.terminate();
+        // Document listeners may have sent requests while the recovered state applied.
+        this.rejectPending(error);
         this.setStatus("failed", error);
       }
       throw error;
