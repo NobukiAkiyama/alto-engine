@@ -1,0 +1,22 @@
+{
+  "author": "Alto",
+  "created_at": 1792336200000,
+  "format": 2,
+  "intents": [
+    {
+      "count": 1,
+      "intent": "テキスト追加",
+      "targets": [
+        "01a1a019-51ca-7278-9807-1ee49ec64b84",
+        "01a1a019-51ca-7278-9807-1ee501354358"
+      ],
+      "undone": false
+    }
+  ],
+  "merge_base": null,
+  "message": "本文と見出しを組む",
+  "parents": [
+    "4d94c1044d44bc4557758c9cdc7339be7a991703cddcae61b0e45236573c8f70"
+  ],
+  "snapshot": "98da19806323337474e70934ede598edcfc3dc72a588aab53b1b8950b139fe92"
+}

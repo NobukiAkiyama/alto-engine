@@ -1,0 +1,378 @@
+{
+  "assets": [
+    {
+      "byte_len": 268076,
+      "dims": null,
+      "hash": "5e2213b3dfdcc9736b3bd951f51ec58935a3bde47bc4f9521838f042c0db8981",
+      "id": "01a1a019-5186-752c-a8a5-20a218663b55",
+      "kind": {
+        "embedding": "installable",
+        "face_index": 0,
+        "family": "Noto Sans JP",
+        "kind": "font"
+      }
+    },
+    {
+      "byte_len": 36996,
+      "dims": null,
+      "hash": "cecfaa71790a6d0aa8744ddfdb3cb9fd6fbac9e2f8e0db476827710df1e0dbc3",
+      "id": "01a1a019-5187-7359-8a19-34f25204b575",
+      "kind": {
+        "embedding": "installable",
+        "face_index": 0,
+        "family": "Noto Sans",
+        "kind": "font"
+      }
+    }
+  ],
+  "meta": {
+    "color": "srgb",
+    "depth": "u8",
+    "format_version": 5,
+    "height": 800,
+    "render_version": 3,
+    "width": 1200
+  },
+  "nodes": [
+    {
+      "id": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "kind": {
+        "children": [
+          "01a1a019-5187-7359-8a19-34f37e0f9b06",
+          "01a1a019-51ca-7278-9807-1ee49ec64b84",
+          "01a1a019-51ca-7278-9807-1ee501354358",
+          "01a1a019-51ca-7278-9807-1ee6368ded05"
+        ],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "Root",
+      "parent": null,
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-5187-7359-8a19-34f37e0f9b06",
+      "kind": {
+        "bounds": {
+          "height": 1024,
+          "width": 1280,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd"
+          }
+        }
+      },
+      "name": "紙",
+      "parent": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 0.9200000166893005,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-51ca-7278-9807-1ee49ec64b84",
+      "kind": {
+        "bake": "f6bc667eae4295fdd42d5aac6f9fe2bb03cea7275cb669e0efe877907f29e510",
+        "content": {
+          "align": "justify",
+          "auto_tcy": 2,
+          "frame": {
+            "height": 600.0,
+            "kind": "area",
+            "width": 620.0
+          },
+          "spans": [
+            {
+              "end": 7,
+              "start": 0,
+              "style": {
+                "color": [
+                  0.6399999856948853,
+                  0.11999999731779099,
+                  0.10000000149011612,
+                  1.0
+                ]
+              }
+            }
+          ],
+          "style": {
+            "color": [
+              0.15000000596046448,
+              0.12999999523162842,
+              0.10999999940395355,
+              1.0
+            ],
+            "features": [],
+            "fonts": [
+              "01a1a019-5186-752c-a8a5-20a218663b55",
+              "01a1a019-5187-7359-8a19-34f25204b575"
+            ],
+            "language": "ja",
+            "letter_spacing": 0.0,
+            "line_height": 1.75,
+            "scale": 1.0,
+            "size": 34.0
+          },
+          "tcy": [],
+          "text": "吾輩は猫である。名前はまだ無い。\nどこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。\n令和8年10月19日、第12回「縦組み」の確認。Alto Engine",
+          "writing_mode": "vertical_rl"
+        },
+        "kind": "text"
+      },
+      "name": "本文（縦組み）",
+      "parent": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          520.0,
+          90.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-51ca-7278-9807-1ee501354358",
+      "kind": {
+        "bake": "30b99c62efc93633d9393e50bcf3361821ee77d014ac6fe0ea7a07d3fc885473",
+        "content": {
+          "align": "start",
+          "auto_tcy": 2,
+          "frame": {
+            "kind": "point"
+          },
+          "spans": [],
+          "style": {
+            "color": [
+              0.15000000596046448,
+              0.12999999523162842,
+              0.10999999940395355,
+              1.0
+            ],
+            "features": [
+              {
+                "tag": "palt",
+                "value": 1
+              }
+            ],
+            "fonts": [
+              "01a1a019-5186-752c-a8a5-20a218663b55",
+              "01a1a019-5187-7359-8a19-34f25204b575"
+            ],
+            "language": "ja",
+            "letter_spacing": 0.0,
+            "line_height": 1.75,
+            "scale": 1.0,
+            "size": 40.0
+          },
+          "tcy": [],
+          "text": "縦組みと横組み — Alto Engine M7",
+          "writing_mode": "horizontal_tb"
+        },
+        "kind": "text"
+      },
+      "name": "見出し（横組み）",
+      "parent": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          60.0,
+          60.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-51ca-7278-9807-1ee6368ded05",
+      "kind": {
+        "bake": "4ac907cabb540d4ffd84cfd0744ae173fd79964880f67215b7da691ec83c26bd",
+        "content": {
+          "align": "start",
+          "auto_tcy": 2,
+          "frame": {
+            "kind": "point"
+          },
+          "spans": [],
+          "style": {
+            "color": [
+              0.15000000596046448,
+              0.12999999523162842,
+              0.10999999940395355,
+              1.0
+            ],
+            "features": [],
+            "fonts": [
+              "01a1a019-5186-752c-a8a5-20a218663b55",
+              "01a1a019-5187-7359-8a19-34f25204b575"
+            ],
+            "language": "ja",
+            "letter_spacing": 0.0,
+            "line_height": 1.75,
+            "scale": 1.0,
+            "size": 30.0
+          },
+          "tcy": [
+            {
+              "end": 6,
+              "start": 2
+            }
+          ],
+          "text": "記録2026年\n約物「、。」",
+          "writing_mode": "vertical_rl"
+        },
+        "kind": "text"
+      },
+      "name": "注記",
+      "parent": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          360.0,
+          160.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    }
+  ],
+  "root": "01a1a019-517f-7377-b8d0-b5c234533b55",
+  "selection": null
+}

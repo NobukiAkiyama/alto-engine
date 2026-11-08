@@ -1,0 +1,392 @@
+{
+  "assets": [],
+  "meta": {
+    "color": "srgb",
+    "depth": "u8",
+    "format_version": 5,
+    "height": 512,
+    "render_version": 3,
+    "width": 768
+  },
+  "nodes": [
+    {
+      "id": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+      "kind": {
+        "children": [
+          "01a1a00e-c923-76c6-b1ec-67760bebd76c",
+          "01a1a019-4b41-772b-85ed-c23221b3825c",
+          "01a1a00e-c964-75bc-b29a-31c58a50451d",
+          "01a1a019-4bc1-717c-b643-ca34760c745a"
+        ],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "Root",
+      "parent": null,
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a00e-c923-76c6-b1ec-67760bebd76c",
+      "kind": {
+        "bounds": {
+          "height": 512,
+          "width": 768,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "ffd05842a808b01a8d5a04cf253c20d851ad7fcf042c6ad1273c1b8d131499e2",
+            "0,1": "ebc2a397e6f9dd03f4bee636572018252c047b64592065d09569952a85842572",
+            "1,0": "339edac61ccb7c336911bb8a94f2d733ff2d05c0e8b87a6d53adbedd3f77c29e",
+            "1,1": "f820f5f5a5f13751cf9d16827b98ce3a3f613d20e7aa27f7f8415a0ea539b420",
+            "2,0": "3c538937db4d2214d5d1acf8edb139255bea4670dd8a63a942becd7784cfa7a2",
+            "2,1": "ed0c5ecc562fd484b7212e50d3342c6ea4b21c119b818d38f7919166511ba7fd"
+          }
+        }
+      },
+      "name": "背景",
+      "parent": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4b41-772b-85ed-c23221b3825c",
+      "kind": {
+        "children": [
+          "01a1a00e-c941-758a-99a4-f1863671e4ce",
+          "01a1a019-4b41-772b-85ed-c23335d2b7a3"
+        ],
+        "isolation": "isolated",
+        "kind": "group"
+      },
+      "name": "ぼかしとクリッピング",
+      "parent": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [
+          {
+            "radius": 12.0,
+            "type": "gaussian_blur"
+          }
+        ],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a00e-c941-758a-99a4-f1863671e4ce",
+      "kind": {
+        "bounds": {
+          "height": 512,
+          "width": 768,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "ba73bb6aec79bef00bd3e1c51806f3d8b2c177a63fb838e0ffe6d520a8632646",
+            "0,1": "7ab9f55ab5e0534d96f2fd00c7dfca590ab80ea30bcbf3e77fe9ac8e7ed1750f",
+            "1,0": "ef6d6cd3376b6b8886a742c26a68fc1af710c709710aaaf77c9929b4bc5ace66",
+            "1,1": "ce495c2d8e886a68f1322d88466c7c28ec5190ddec7809b5b17251b9377e8819",
+            "2,0": "4cb851a7dcf013266f62e334beaf478b4bd999dcd117d2999377cb3dd0d43419",
+            "2,1": "aebb77d81e0c9e599f857b28dbe06399e132c7308bcec3b48f3cb0ffd8b7febd"
+          }
+        }
+      },
+      "name": "色のかたち",
+      "parent": "01a1a019-4b41-772b-85ed-c23221b3825c",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4b41-772b-85ed-c23335d2b7a3",
+      "kind": {
+        "bounds": {
+          "height": 512,
+          "width": 768,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "ca03aaeb14556001542e1d152b127ed6ef344dae14dce1faca134f8a49e01999",
+            "0,1": "6476a857595f74f9e43ebd40d67018fca9e03b7d0ffe5c039a7bf493b0b40708",
+            "1,0": "6476a857595f74f9e43ebd40d67018fca9e03b7d0ffe5c039a7bf493b0b40708",
+            "1,1": "54055aa73b5c9511e7e683b9a7470a6c3f1edeb445ad2ca1ed48bc64ec4ac000",
+            "2,0": "54055aa73b5c9511e7e683b9a7470a6c3f1edeb445ad2ca1ed48bc64ec4ac000",
+            "2,1": "d2ce1138588f8ec07acf09994c5fb2018770a613382768e7e402762ceee371ec"
+          }
+        }
+      },
+      "name": "クリップしたストライプ",
+      "parent": "01a1a019-4b41-772b-85ed-c23221b3825c",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": true,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a00e-c964-75bc-b29a-31c58a50451d",
+      "kind": {
+        "bounds": {
+          "height": 512,
+          "width": 768,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,1": "b09fc864c947bda50d802d5cf081c7a0429401a5345f1a350a304227bdb25490",
+            "1,0": "b858ef9d23051eaa6ecf956797ab1c1555c43039d799778dda02ad3e3d747184",
+            "1,1": "cca99fa38d9f152be9ff9174b60d20ab5c2db32daeaa1366b29c7d0d6a4572b8",
+            "2,0": "5cd2029cbe4f92788b94285b2425c40025de8bd539fe5bb68c72998efb4355cc",
+            "2,1": "bba77a2735ef9c4e294531730ba416e8ed36ffd30de54296e93793f729497510"
+          }
+        }
+      },
+      "name": "マスク付きペイント",
+      "parent": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": {
+          "format": "r8",
+          "tiles": {
+            "0,0": "770f2701d6daa010c38e57a68c4ffb1e742b2bb4f0b16ab70fa046f6e9c32746",
+            "0,1": "d20502bfdfd9f54794c163afbacd2fe42e68ae88b7644944f7a4e491c1c17401",
+            "1,0": "e9137e2ba66de98d7e3d45f27f88fb3a4d55be525484be259f8419ced79c1e43",
+            "1,1": "d544ecd79aba697102614464c6c760617dc08c02bfc6e0d45c14b28149ab845f",
+            "2,0": "9a45771dea8c98777f7e07c4fe7e218d4c52401fe6de0623dc275c893365fc17",
+            "2,1": "8ee2ac63806d515815891302266c1654da885896ca4cc036ce18703b7d7e3064"
+          }
+        },
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4bc1-717c-b643-ca34760c745a",
+      "kind": {
+        "adjustment": {
+          "brightness": 0.04,
+          "contrast": 1.12,
+          "saturation": 1.35,
+          "type": "color_adjust"
+        },
+        "kind": "adjustment"
+      },
+      "name": "右半分の色調整",
+      "parent": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": {
+          "format": "r8",
+          "tiles": {
+            "1,0": "fb239a84509bce303de16c015b49fcfa5723d3ff0b2fd6c0dd3ba31f99927e8f",
+            "1,1": "d3229724917f8b449515705e4921c09a63c2f465fde6391ad6ce0063d78b6aa5",
+            "2,0": "1f13d3eeb97bf6d2c094b28ecc6526d16efce9d2479cbee466d7b278e97d06d2",
+            "2,1": "56cef3e5034b359fc63640a7cde2c6313e6cec7cdbc43e0695af3961740268d2"
+          }
+        },
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    }
+  ],
+  "root": "01a1a00e-c923-76c6-b1ec-67752eccafdc",
+  "selection": {
+    "format": "r8",
+    "tiles": {
+      "0,0": "c952ca580d9880fe48f6c9443762f456373dffb2ed8e986b06e1b801ca81b1ab",
+      "0,1": "13735fbee38514687e9a25d4d5e7e34a431a3de1adb73fe49f6a5491a065d57c",
+      "1,0": "f9000211ce7647221b37cce8d16bf23e723cfbb9956256093504b31ced7967de",
+      "1,1": "0646078d3fa7f5126090728b005b5f1ac71fc72ce8fdea7bc43a1ca252c07eba",
+      "2,0": "0411b65eade94e21dcbb7f29074dfc6fcbcc5fa62f8be5483ac9c26c40295b4f",
+      "2,1": "05b8020676f5fed74959d58f527af6cececb84f2d37a52f5316474ff3e13a213"
+    }
+  }
+}

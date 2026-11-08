@@ -1,0 +1,19 @@
+{
+  "author": "Alto",
+  "created_at": 1792335600000,
+  "format": 2,
+  "intents": [
+    {
+      "count": 1,
+      "intent": "フォントと紙",
+      "targets": [
+        "01a1a019-5187-7359-8a19-34f37e0f9b06"
+      ],
+      "undone": false
+    }
+  ],
+  "merge_base": null,
+  "message": "紙とフォントを用意",
+  "parents": [],
+  "snapshot": "455052160ceddf1052608c2193d5bdf3631174d803b8441b34e72f9b4f4d51b5"
+}

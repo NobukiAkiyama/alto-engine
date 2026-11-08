@@ -78,11 +78,13 @@
 
 **Files:** Create `fuzz/Cargo.toml`、`fuzz/fuzz_targets/*.rs`、`.github/workflows/fuzz.yml`。
 
-- [ ] `package` と `svg` の2 target を作り、`cargo +nightly fuzz run package -- -max_total_time=60` が動くことを確認。
-- [ ] 残りの target を追加。
-- [ ] 検出したクラッシュごとに再現入力を `tests/fixtures/fuzz/` へ置き、試験 `fuzz_regressions_do_not_panic` を追加して修正。
-- [ ] 非テストの `unwrap` の監査結果を `doc/verification/UNWRAP-AUDIT.md` へ記録。
+- [x] `package` と `svg` の2 target を作り、`cargo +nightly fuzz run package -- -max_total_time=60` が動くことを確認。
+- [x] 残りの target を追加。
+- [x] 検出したクラッシュごとに再現入力を `tests/fixtures/fuzz/` へ置き、試験 `fuzz_regressions_do_not_panic` を追加して修正。
+- [x] 非テストの `unwrap` の監査結果を `doc/verification/UNWRAP-AUDIT.md` へ記録。
 - [ ] PR。
+
+結果：[UNWRAP-AUDIT.md](../../verification/UNWRAP-AUDIT.md)。3件を修正。
 
 ### Task QA-5: 強制終了
 

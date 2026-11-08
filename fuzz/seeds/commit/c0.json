@@ -1,0 +1,22 @@
+{
+  "author": "Alto",
+  "created_at": 1792336800000,
+  "format": 2,
+  "intents": [
+    {
+      "count": 1,
+      "intent": "注記と紙の色",
+      "targets": [
+        "01a1a019-51ca-7278-9807-1ee6368ded05",
+        "01a1a019-5187-7359-8a19-34f37e0f9b06"
+      ],
+      "undone": false
+    }
+  ],
+  "merge_base": null,
+  "message": "縦中横の注記を追加",
+  "parents": [
+    "ea963a70a9a0c8be4fc9485970f7ef3b52eaca1c2809ca722e013f0ac086ad9f"
+  ],
+  "snapshot": "0c327fb90a808963cc3c031d65ab4e07b59944d600b43d3bbdf3d45fb9bbd650"
+}
