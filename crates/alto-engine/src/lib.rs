@@ -1,5 +1,4 @@
 pub mod canvas;
-mod edit;
 pub mod image;
 pub mod render_v3_opt_in;
 pub mod selection;
@@ -1802,3 +1801,6 @@ mod versions_tests;
 
 #[cfg(test)]
 mod text_bake_tests;
+
+#[cfg(test)]
+mod scene_tests;
