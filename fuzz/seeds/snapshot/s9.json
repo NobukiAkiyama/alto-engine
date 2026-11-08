@@ -1,0 +1,149 @@
+{
+  "assets": [
+    {
+      "byte_len": 268076,
+      "dims": null,
+      "hash": "5e2213b3dfdcc9736b3bd951f51ec58935a3bde47bc4f9521838f042c0db8981",
+      "id": "01a1a019-5186-752c-a8a5-20a218663b55",
+      "kind": {
+        "embedding": "installable",
+        "face_index": 0,
+        "family": "Noto Sans JP",
+        "kind": "font"
+      }
+    },
+    {
+      "byte_len": 36996,
+      "dims": null,
+      "hash": "cecfaa71790a6d0aa8744ddfdb3cb9fd6fbac9e2f8e0db476827710df1e0dbc3",
+      "id": "01a1a019-5187-7359-8a19-34f25204b575",
+      "kind": {
+        "embedding": "installable",
+        "face_index": 0,
+        "family": "Noto Sans",
+        "kind": "font"
+      }
+    }
+  ],
+  "meta": {
+    "color": "srgb",
+    "depth": "u8",
+    "format_version": 5,
+    "height": 800,
+    "render_version": 3,
+    "width": 1200
+  },
+  "nodes": [
+    {
+      "id": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "kind": {
+        "children": [
+          "01a1a019-5187-7359-8a19-34f37e0f9b06"
+        ],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "Root",
+      "parent": null,
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-5187-7359-8a19-34f37e0f9b06",
+      "kind": {
+        "bounds": {
+          "height": 1024,
+          "width": 1280,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "0,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "1,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "2,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "3,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,0": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,1": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,2": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd",
+            "4,3": "f2a3078394f3b8521930ef94a9f68a0399db92ec7c98df2273082c5d272053dd"
+          }
+        }
+      },
+      "name": "紙",
+      "parent": "01a1a019-517f-7377-b8d0-b5c234533b55",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    }
+  ],
+  "root": "01a1a019-517f-7377-b8d0-b5c234533b55",
+  "selection": null
+}

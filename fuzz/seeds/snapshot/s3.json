@@ -1,0 +1,636 @@
+{
+  "assets": [],
+  "meta": {
+    "color": "srgb",
+    "depth": "u8",
+    "format_version": 5,
+    "height": 640,
+    "render_version": 3,
+    "width": 960
+  },
+  "nodes": [
+    {
+      "id": "01a1a019-4eca-71b5-88a5-d811123613c3",
+      "kind": {
+        "children": [
+          "01a1a019-4ecb-77ca-bcb7-6bf48ba5a1f9",
+          "01a1a019-4f0f-71f5-911d-71c040a0d327"
+        ],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "Root",
+      "parent": null,
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4ecb-77ca-bcb7-6bf48ba5a1f9",
+      "kind": {
+        "bounds": {
+          "height": 768,
+          "width": 1024,
+          "x": 0,
+          "y": 0
+        },
+        "kind": "raster",
+        "tiles": {
+          "format": "rgba8",
+          "tiles": {
+            "0,0": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "0,1": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "0,2": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "1,0": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "1,1": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "1,2": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "2,0": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "2,1": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "2,2": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "3,0": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "3,1": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4",
+            "3,2": "b0f893b7175d9cb85a54ddb56dce7893afb0952e34f1345807897b68779bede4"
+          }
+        }
+      },
+      "name": "背景",
+      "parent": "01a1a019-4eca-71b5-88a5-d811123613c3",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4f0f-71f5-911d-71c040a0d327",
+      "kind": {
+        "children": [
+          "01a1a019-4f0f-71f5-911d-71c11118e884",
+          "01a1a019-4f0f-71f5-911d-71c2839f0a56",
+          "01a1a019-4f0f-71f5-911d-71c37e7fa6fd"
+        ],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "クリッピングパスのグループ",
+      "parent": "01a1a019-4eca-71b5-88a5-d811123613c3",
+      "props": {
+        "blend": "normal",
+        "clip_path": {
+          "enabled": true,
+          "fill_rule": "non_zero",
+          "path": {
+            "commands": [
+              {
+                "op": "move",
+                "x": 85.0,
+                "y": 80.0
+              },
+              {
+                "cx": 480.0,
+                "cy": -10.0,
+                "op": "quad",
+                "x": 875.0,
+                "y": 80.0
+              },
+              {
+                "op": "line",
+                "x": 875.0,
+                "y": 520.0
+              },
+              {
+                "cx": 480.0,
+                "cy": 650.0,
+                "op": "quad",
+                "x": 85.0,
+                "y": 520.0
+              },
+              {
+                "op": "close"
+              }
+            ]
+          },
+          "transform": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4f0f-71f5-911d-71c11118e884",
+      "kind": {
+        "kind": "vector",
+        "paths": [
+          {
+            "data": {
+              "commands": [
+                {
+                  "op": "move",
+                  "x": 100.0,
+                  "y": 410.0
+                },
+                {
+                  "c1x": 170.0,
+                  "c1y": 80.0,
+                  "c2x": 370.0,
+                  "c2y": 70.0,
+                  "op": "cubic",
+                  "x": 480.0,
+                  "y": 350.0
+                },
+                {
+                  "c1x": 610.0,
+                  "c1y": 660.0,
+                  "c2x": 750.0,
+                  "c2y": 430.0,
+                  "op": "cubic",
+                  "x": 860.0,
+                  "y": 120.0
+                },
+                {
+                  "op": "line",
+                  "x": 920.0,
+                  "y": 620.0
+                },
+                {
+                  "op": "line",
+                  "x": 60.0,
+                  "y": 620.0
+                },
+                {
+                  "op": "close"
+                }
+              ]
+            },
+            "fill": [
+              0.25,
+              0.7799999713897705,
+              0.75,
+              1.0
+            ],
+            "fill_rule": "non_zero",
+            "stroke": {
+              "cap": "round",
+              "color": [
+                0.6499999761581421,
+                1.0,
+                0.9200000166893005,
+                1.0
+              ],
+              "join": "round",
+              "miter_limit": 4.0,
+              "width": 6.0
+            }
+          },
+          {
+            "data": {
+              "commands": [
+                {
+                  "op": "move",
+                  "x": 100.0,
+                  "y": 490.0
+                },
+                {
+                  "c1x": 230.0,
+                  "c1y": 210.0,
+                  "c2x": 430.0,
+                  "c2y": 190.0,
+                  "op": "cubic",
+                  "x": 510.0,
+                  "y": 390.0
+                },
+                {
+                  "c1x": 600.0,
+                  "c1y": 600.0,
+                  "c2x": 730.0,
+                  "c2y": 490.0,
+                  "op": "cubic",
+                  "x": 900.0,
+                  "y": 250.0
+                },
+                {
+                  "op": "line",
+                  "x": 920.0,
+                  "y": 640.0
+                },
+                {
+                  "op": "line",
+                  "x": 70.0,
+                  "y": 640.0
+                },
+                {
+                  "op": "close"
+                }
+              ]
+            },
+            "fill": [
+              0.4399999976158142,
+              0.3799999952316284,
+              0.8799999952316284,
+              0.8999999761581421
+            ],
+            "fill_rule": "non_zero",
+            "stroke": {
+              "cap": "round",
+              "color": [
+                0.7699999809265137,
+                0.7200000286102295,
+                1.0,
+                1.0
+              ],
+              "join": "round",
+              "miter_limit": 4.0,
+              "width": 5.0
+            }
+          }
+        ]
+      },
+      "name": "曲線・塗り・線",
+      "parent": "01a1a019-4f0f-71f5-911d-71c040a0d327",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4f0f-71f5-911d-71c2839f0a56",
+      "kind": {
+        "kind": "vector",
+        "paths": [
+          {
+            "data": {
+              "commands": [
+                {
+                  "op": "move",
+                  "x": 735.0,
+                  "y": 205.0
+                },
+                {
+                  "c1x": 735.0,
+                  "c1y": 147.0101012677667,
+                  "c2x": 687.9898987322333,
+                  "c2y": 100.0,
+                  "op": "cubic",
+                  "x": 630.0,
+                  "y": 100.0
+                },
+                {
+                  "c1x": 572.0101012677667,
+                  "c1y": 100.0,
+                  "c2x": 525.0,
+                  "c2y": 147.0101012677667,
+                  "op": "cubic",
+                  "x": 525.0,
+                  "y": 205.0
+                },
+                {
+                  "c1x": 525.0,
+                  "c1y": 262.9898987322333,
+                  "c2x": 572.0101012677667,
+                  "c2y": 310.0,
+                  "op": "cubic",
+                  "x": 630.0,
+                  "y": 310.0
+                },
+                {
+                  "c1x": 687.9898987322333,
+                  "c1y": 310.0,
+                  "c2x": 735.0,
+                  "c2y": 262.9898987322333,
+                  "op": "cubic",
+                  "x": 735.0,
+                  "y": 205.0
+                },
+                {
+                  "op": "close"
+                },
+                {
+                  "op": "move",
+                  "x": 690.0,
+                  "y": 205.0
+                },
+                {
+                  "c1x": 690.0,
+                  "c1y": 171.8629150101524,
+                  "c2x": 663.1370849898476,
+                  "c2y": 145.0,
+                  "op": "cubic",
+                  "x": 630.0,
+                  "y": 145.0
+                },
+                {
+                  "c1x": 596.8629150101524,
+                  "c1y": 145.0,
+                  "c2x": 570.0,
+                  "c2y": 171.8629150101524,
+                  "op": "cubic",
+                  "x": 570.0,
+                  "y": 205.0
+                },
+                {
+                  "c1x": 570.0,
+                  "c1y": 238.1370849898476,
+                  "c2x": 596.8629150101524,
+                  "c2y": 265.0,
+                  "op": "cubic",
+                  "x": 630.0,
+                  "y": 265.0
+                },
+                {
+                  "c1x": 663.1370849898476,
+                  "c1y": 265.0,
+                  "c2x": 690.0,
+                  "c2y": 238.1370849898476,
+                  "op": "cubic",
+                  "x": 690.0,
+                  "y": 205.0
+                },
+                {
+                  "op": "close"
+                }
+              ]
+            },
+            "fill": [
+              1.0,
+              0.699999988079071,
+              0.3400000035762787,
+              1.0
+            ],
+            "fill_rule": "even_odd",
+            "stroke": {
+              "cap": "round",
+              "color": [
+                1.0,
+                0.8799999952316284,
+                0.6200000047683716,
+                1.0
+              ],
+              "join": "round",
+              "miter_limit": 4.0,
+              "width": 3.0
+            }
+          }
+        ]
+      },
+      "name": "Even-odd リング",
+      "parent": "01a1a019-4f0f-71f5-911d-71c040a0d327",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    },
+    {
+      "id": "01a1a019-4f0f-71f5-911d-71c37e7fa6fd",
+      "kind": {
+        "kind": "vector",
+        "paths": [
+          {
+            "data": {
+              "commands": [
+                {
+                  "op": "move",
+                  "x": 30.0,
+                  "y": 330.0
+                },
+                {
+                  "c1x": 170.0,
+                  "c1y": 210.0,
+                  "c2x": 280.0,
+                  "c2y": 500.0,
+                  "op": "cubic",
+                  "x": 430.0,
+                  "y": 280.0
+                },
+                {
+                  "c1x": 580.0,
+                  "c1y": 60.0,
+                  "c2x": 690.0,
+                  "c2y": 240.0,
+                  "op": "cubic",
+                  "x": 910.0,
+                  "y": 380.0
+                }
+              ]
+            },
+            "fill": null,
+            "fill_rule": "non_zero",
+            "stroke": {
+              "cap": "round",
+              "color": [
+                0.9399999976158142,
+                0.9900000095367432,
+                1.0,
+                1.0
+              ],
+              "join": "round",
+              "miter_limit": 4.0,
+              "width": 14.0
+            }
+          }
+        ]
+      },
+      "name": "ベクターマスク付きの波",
+      "parent": "01a1a019-4f0f-71f5-911d-71c040a0d327",
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": {
+          "enabled": true,
+          "feather": 24.0,
+          "fill_rule": "non_zero",
+          "path": {
+            "commands": [
+              {
+                "op": "move",
+                "x": 120.0,
+                "y": 80.0
+              },
+              {
+                "op": "line",
+                "x": 840.0,
+                "y": 80.0
+              },
+              {
+                "op": "line",
+                "x": 840.0,
+                "y": 580.0
+              },
+              {
+                "op": "line",
+                "x": 120.0,
+                "y": 580.0
+              },
+              {
+                "op": "close"
+              }
+            ]
+          },
+          "transform": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "visible": true
+      }
+    }
+  ],
+  "root": "01a1a019-4eca-71b5-88a5-d811123613c3",
+  "selection": null
+}

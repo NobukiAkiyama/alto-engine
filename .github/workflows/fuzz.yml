@@ -1,0 +1,68 @@
+name: Fuzz
+
+# QA-1: every entry point that reads bytes from outside, fuzzed weekly.
+# Not run on pull requests. A crash fails the job and uploads the input as
+# fuzz-crash-<target>; add it to tests/fixtures/fuzz/<target>/ so the regular
+# tests replay it.
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: '600'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [package, recovery, snapshot, commit, svg, font, path, journal]
+    steps:
+      - uses: actions/checkout@v7
+      # cargo-fuzz needs nightly; the workspace stays on the pinned toolchain.
+      # A dated nightly keeps weekly results comparable; raise it deliberately.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-08
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz-${{ matrix.target }}
+      - name: Install cargo-fuzz
+        run: cargo +nightly-2026-11-08 install cargo-fuzz --version 0.13.2 --locked
+      # The corpus grows from run to run; each run saves under a new key.
+      - uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          TARGETS: ${{ matrix.target }}
+          FUZZ_TOOLCHAIN: nightly-2026-11-08
+          FUZZ_SECONDS: ${{ inputs.seconds || '600' }}
+        run: |
+          case "$FUZZ_SECONDS" in
+            '' | *[!0-9]*) echo "seconds must be a whole number" >&2; exit 1 ;;
+          esac
+          sh fuzz/run-all.sh "$FUZZ_SECONDS"
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore

@@ -1,0 +1,54 @@
+{
+  "assets": [],
+  "meta": {
+    "color": "srgb",
+    "depth": "u8",
+    "format_version": 5,
+    "height": 256,
+    "render_version": 3,
+    "width": 512
+  },
+  "nodes": [
+    {
+      "id": "00000000-0000-7000-8000-000000000001",
+      "kind": {
+        "children": [],
+        "isolation": "pass_through",
+        "kind": "group"
+      },
+      "name": "Root",
+      "parent": null,
+      "props": {
+        "blend": "normal",
+        "clip_path": null,
+        "clip_to_below": false,
+        "effects": [],
+        "locked": false,
+        "mask": null,
+        "mask_enabled": true,
+        "mask_linked": true,
+        "mask_transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "opacity": 1.0,
+        "transform": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "vector_mask": null,
+        "visible": true
+      }
+    }
+  ],
+  "root": "00000000-0000-7000-8000-000000000001",
+  "selection": null
+}

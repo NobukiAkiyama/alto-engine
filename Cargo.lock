@@ -156,6 +156,7 @@ dependencies = [
  "lyon_tessellation",
  "serde",
  "serde_json",
+ "svgtypes",
  "thiserror",
 ]
 

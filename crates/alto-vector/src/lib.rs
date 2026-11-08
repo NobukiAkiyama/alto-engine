@@ -127,7 +127,7 @@ fn invalid(s: &str) -> VectorError {
 }
 impl PathData {
     pub fn validate(&self) -> Result<()> {
-        if self.commands.len() > 4096 {
+        if self.commands.len() > MAX_PATH_COMMANDS {
             return Err(invalid("at most 4096 commands per path"));
         }
         let mut open = false;
@@ -170,6 +170,7 @@ impl PathData {
         if svg.len() > 262144 {
             return Err(invalid("SVG path data too long"));
         }
+        check_svg_arcs(svg)?;
         let p = BezPath::from_svg(svg).map_err(|e| VectorError(e.to_string()))?;
         let mut commands = vec![];
         // SVG permits a drawing command immediately after Z. Canonical data starts a new subpath.
@@ -495,6 +496,89 @@ impl LyonRasterizer {
         Ok(out)
     }
 }
+/// The command limit of [`PathData::validate`].
+const MAX_PATH_COMMANDS: usize = 4096;
+
+/// Rejects SVG path data that kurbo would flatten into more commands than
+/// [`PathData::validate`] accepts, before `BezPath::from_svg` allocates them.
+/// kurbo turns each arc into `ceil(n * sweep / 2pi)` cubics, where
+/// `n = (1.1163 * radius / 0.1)^(1/6)` (at least 4) grows with the radius kurbo
+/// uses: an arc of radius 1e107 that sweeps almost a full turn asks for 1e18 of
+/// them. kurbo scales both radii up until the ellipse reaches the endpoint, so the
+/// count is taken from the arc kurbo builds (`Arc::from_svg_arc`, which does not
+/// flatten). Arc endpoints must also be within the coordinate limit, since a far
+/// endpoint scales the radii up.
+fn check_svg_arcs(svg: &str) -> Result<()> {
+    use svgtypes::PathSegment as S;
+    let bounded = |v: f64| v.is_finite() && v.abs() <= 1_048_576.0;
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    let mut commands = 0.0f64;
+    for segment in svgtypes::PathParser::from(svg) {
+        let segment = segment.map_err(|e| VectorError(e.to_string()))?;
+        let to = |abs: bool, px: f64, py: f64| if abs { (px, py) } else { (x + px, y + py) };
+        let (nx, ny) = match segment {
+            S::MoveTo { abs, x: px, y: py } => {
+                let p = to(abs, px, py);
+                (sx, sy) = p;
+                p
+            }
+            S::LineTo { abs, x: px, y: py }
+            | S::SmoothQuadratic { abs, x: px, y: py }
+            | S::Quadratic {
+                abs, x: px, y: py, ..
+            }
+            | S::SmoothCurveTo {
+                abs, x: px, y: py, ..
+            }
+            | S::CurveTo {
+                abs, x: px, y: py, ..
+            } => to(abs, px, py),
+            S::HorizontalLineTo { abs, x: px } => (if abs { px } else { x + px }, y),
+            S::VerticalLineTo { abs, y: py } => (x, if abs { py } else { y + py }),
+            S::ClosePath { .. } => (sx, sy),
+            S::EllipticalArc {
+                abs,
+                rx,
+                ry,
+                x_axis_rotation,
+                large_arc,
+                sweep,
+                x: px,
+                y: py,
+            } => {
+                let end = to(abs, px, py);
+                if !bounded(x) || !bounded(y) || !bounded(end.0) || !bounded(end.1) {
+                    return Err(invalid("coordinates must be finite and within +/-1048576"));
+                }
+                // The same arc as kurbo's parser builds; `None` draws a line instead.
+                let arc = kurbo::SvgArc {
+                    from: kurbo::Point::new(x, y),
+                    to: kurbo::Point::new(end.0, end.1),
+                    radii: kurbo::Vec2::new(rx, ry),
+                    x_rotation: x_axis_rotation.to_radians(),
+                    large_arc,
+                    sweep,
+                };
+                if let Some(arc) = kurbo::Arc::from_svg_arc(&arc) {
+                    let radius = arc.radii.x.max(arc.radii.y) / 0.1;
+                    let n = (1.1163 * radius).powf(1.0 / 6.0).max(3.999_999);
+                    // Counted one short of kurbo's count: the bound can only be generous.
+                    commands += (n * arc.sweep_angle.abs() / std::f64::consts::TAU).ceil() - 1.0;
+                }
+                end
+            }
+        };
+        commands += 1.0;
+        // A non-finite radius makes the count NaN.
+        if commands.is_nan() || commands > MAX_PATH_COMMANDS as f64 {
+            return Err(invalid("at most 4096 commands per path"));
+        }
+        (x, y) = (nx, ny);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +594,29 @@ mod tests {
             .is_err()
         );
         assert!(PathData::from_svg("M NaN 0 L 4 3").is_err());
+    }
+    #[test]
+    fn svg_arcs_are_bounded_before_they_are_flattened() {
+        // The `path` fuzzer's input: a near-full turn of radius 1e107 asks kurbo for
+        // about 1e18 cubics.
+        let long = format!("M0 0 A 5 1{} 0 1 0 10 1", "0".repeat(107));
+        assert!(PathData::from_svg(&long).is_err());
+        assert!(PathData::from_svg("M0 0 a 1e300 1e300 0 1 1 10 10").is_err());
+        // Radii scaled up by kurbo: a small radius across the chord makes the other large.
+        assert!(PathData::from_svg("M0 0 A 1e30 0.0001 0 1 1 0 10").is_err());
+        // A far current point scales the radii up to reach it.
+        assert!(PathData::from_svg("M0 0 h 1e300 a 1 1 0 0 1 1e300 0").is_err());
+        assert!(PathData::from_svg("M0 0 h 1e308 h 1e308 a 1 1 0 0 1 1 0").is_err());
+        // Many arcs add up.
+        let many = format!("M0 0{}", " a 10 10 0 1 1 1 0".repeat(2000));
+        assert!(PathData::from_svg(&many).is_err());
+        // Ordinary and degenerate arcs keep working: a huge radius over a short sweep
+        // is one cubic, and a radius under 1e-5 is a straight line.
+        assert!(PathData::from_svg("M0 0 a 1e20 1e20 0 0 1 10 10").is_ok());
+        assert!(PathData::from_svg("M0 0 A 1000000 1e-100 0 0 1 0 10").is_ok());
+        assert!(PathData::from_svg("M10 10 h 20 a 5 5 0 1 0 10 10 A 3 4 30 0 1 0 0 z").is_ok());
+        let fits = format!("M0 0{}", " a 10 10 0 0 1 1 0".repeat(1000));
+        assert!(PathData::from_svg(&fits).is_ok());
     }
     #[test]
     fn zoom_tolerance_refines_curves_and_handles_holes_strokes() {

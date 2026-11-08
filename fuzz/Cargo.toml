@@ -1,0 +1,82 @@
+# Fuzz targets for every entry point that reads bytes from outside.
+# Kept out of the main workspace: cargo-fuzz needs nightly, and the workspace
+# toolchain stays pinned by rust-toolchain.toml. Run with `cargo +nightly fuzz`.
+[package]
+name = "alto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+alto-core = { path = "../crates/alto-core" }
+alto-store = { path = "../crates/alto-store" }
+alto-doc = { path = "../crates/alto-doc" }
+alto-engine = { path = "../crates/alto-engine" }
+alto-text = { path = "../crates/alto-text" }
+alto-vector = { path = "../crates/alto-vector" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+[[bin]]
+name = "package"
+path = "fuzz_targets/package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recovery"
+path = "fuzz_targets/recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit"
+path = "fuzz_targets/commit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svg"
+path = "fuzz_targets/svg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "font"
+path = "fuzz_targets/font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path"
+path = "fuzz_targets/path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal"
+path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+bench = false
+
