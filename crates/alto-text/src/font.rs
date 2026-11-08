@@ -36,6 +36,24 @@ pub struct FontInfo {
 #[error("Invalid font: {0}")]
 pub struct FontError(pub String);
 
+/// A collection (`ttcf`) header must hold its whole table of face offsets.
+/// ttf-parser computes that table's length from the face count before checking it
+/// against the data, which overflows its 32-bit offset for a large count.
+fn check_collection(data: &[u8]) -> Result<(), FontError> {
+    if data.starts_with(b"ttcf") {
+        let count = data
+            .get(8..12)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64)
+            .ok_or_else(|| FontError("truncated font collection header".into()))?;
+        // Also within ttf-parser's 32-bit offsets for data over 4 GiB, which only
+        // `FontData::new` could see: `inspect` caps fonts at 64 MiB.
+        if 12 + 4 * count > (data.len() as u64).min(u32::MAX as u64) {
+            return Err(FontError("font collection header exceeds the file".into()));
+        }
+    }
+    Ok(())
+}
+
 fn name(face: &ttf_parser::Face, ids: &[u16]) -> Option<String> {
     for id in ids {
         let mut fallback = None;
@@ -73,6 +91,7 @@ pub fn inspect(data: &[u8], face_index: u32) -> Result<FontInfo, FontError> {
     if data.len() > MAX_FONT_BYTES {
         return Err(FontError("font exceeds 64 MiB".into()));
     }
+    check_collection(data)?;
     let faces = ttf_parser::fonts_in_collection(data).unwrap_or(1);
     if face_index >= faces {
         return Err(FontError("face index out of range".into()));
@@ -129,11 +148,13 @@ pub struct FontData {
 }
 impl FontData {
     pub fn new(id: AssetId, bytes: Arc<Vec<u8>>, face_index: u32) -> Result<Self, FontError> {
+        check_collection(&bytes)?;
         let face =
             ttf_parser::Face::parse(&bytes, face_index).map_err(|e| FontError(e.to_string()))?;
         let upem = face.units_per_em() as f64;
         let (ascent, descent) = match (face.typographic_ascender(), face.typographic_descender()) {
-            (Some(a), Some(d)) if a > d => (a as f64, -d as f64),
+            // Negate after widening: `-d` overflows for i16::MIN.
+            (Some(a), Some(d)) if a > d => (a as f64, -(d as f64)),
             _ => (face.ascender() as f64, -(face.descender() as f64)),
         };
         let (ascent, descent) = if ascent + descent > 0.0 {
@@ -165,5 +186,21 @@ impl FontSet {
     }
     pub fn get(&self, id: &AssetId) -> Option<&FontData> {
         self.fonts.get(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn collection_header_must_fit_its_offset_table() {
+        // A 21-byte TTC header (found by the `font` fuzzer) that claims 0x6ca00000 faces.
+        let bytes = b"ttcf\x01\x08\xad\x0b\x6c\xa0\x00\x00\x16\xfe\xff\x00\x0f\x25\x42\x2d\x29";
+        assert!(inspect(bytes, 0).is_err());
+        let id = AssetId(Default::default());
+        assert!(FontData::new(id, Arc::new(bytes.to_vec()), 0).is_err());
+        let font = include_bytes!("../../../tests/fonts/AltoTestJP.otf");
+        assert_eq!(inspect(font, 0).unwrap().faces_in_file, 1);
+        assert!(FontData::new(id, Arc::new(font.to_vec()), 0).is_ok());
     }
 }
