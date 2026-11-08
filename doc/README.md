@@ -7,6 +7,7 @@
 - [版管理・画像編集の実装検証（2026-11-03）](verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)
 - [未対応機能の段階実装の検証（2026-11-03）](verification/FOLLOWUP-STAGES-2026-11-03.md)
 - [過去の版のタイルを必要時に読む](design/ON-DEMAND-HISTORY-OBJECTS.md)
+- [未実装機能の設計と実装計画](design/backlog/00-ROADMAP.md)
 - [`design/`](design/)：設計と実装計画
 - [`verification/`](verification/)：実装結果・測定・調査の記録。総まとめは [RESULTS.md](verification/RESULTS.md)
 

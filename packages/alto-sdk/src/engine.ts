@@ -858,13 +858,16 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         const state = await this.requestCore<"recover">("recover", {}, [], true, 30000, { nextDocumentEpoch: epoch });
         if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
         this.recoveryWaiting = false;
+        // Document listeners run inside apply/adopt and may call the engine, so requests
+        // are accepted from here on; the status event still follows the recovered state.
+        this.state = Object.freeze({ state: "ready", error: null });
         // The same handle carries on; the host's references stay valid.
         if (this.document) {
           this.document.apply(state);
           this.viewport.publish();
         } else this.adopt(state, true, epoch);
-      }
-      this.setStatus("ready", null);
+        this.emit("status", this.state);
+      } else this.setStatus("ready", null);
       this.startLoop();
     } catch (cause) {
       if (this.disposed) throw cause;
@@ -882,6 +885,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.startLoop();
       } else {
         this.worker?.terminate();
+        // Document listeners may have sent requests while the recovered state applied.
+        this.rejectPending(error);
         this.setStatus("failed", error);
       }
       throw error;

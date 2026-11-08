@@ -638,6 +638,24 @@ export async function runTests(engine, benchmark, log) {
         "journal recovery pixels mismatch",
       );
     });
+    await test("document listeners can call the engine while a restart applies the recovered state", async () => {
+      const replies = [];
+      const off = doc.subscribe(() => {
+        replies.push(doc.snapshotHash().then(() => "ok", (error) => error.message));
+      });
+      try {
+        await testing(engine).crash();
+      } finally {
+        off();
+      }
+      assert(engine.document === doc, "the restart replaced the document handle");
+      const settled = await Promise.all(replies);
+      assert(settled.length > 0, "the restart did not notify document listeners");
+      assert(
+        settled.every((r) => r === "ok"),
+        "a listener's request failed during the restart: " + settled.join(", "),
+      );
+    });
     await test("a checkpoint writes only the objects the recovery store lacks", async () => {
       await doc.durable();
       const start = await testing(engine).recoveryStore();
