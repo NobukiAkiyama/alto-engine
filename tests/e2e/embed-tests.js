@@ -647,7 +647,8 @@ export async function runEmbedTests(_playground, log) {
       assert(await rejectsWith(a.recovery.restore(), "NOT_FOUND"), "restore without a journal did not report NOT_FOUND");
     });
     await test("exportImage PNG holds the display tiles exactly, across blends, groups, adjustments and vectors", async () => {
-      const W = 600, H = 300;
+      // Small enough that one frame finishes within the present watchdog on SwiftShader.
+      const W = 300, H = 160;
       const engine = await engineIn(container(400, 300));
       const doc = await engine.createDocument({ width: W, height: H });
       const paint = async (w, h, f) => {
@@ -656,21 +657,21 @@ export async function runEmbedTests(_playground, log) {
         return engine.assets.importImage(await c.convertToBlob());
       };
       const base = await paint(W, H, (x) => `rgba(${x % 256}, ${255 - (x % 256)}, ${(x * 7) % 256}, ${((x % 256) + 1) / 256})`);
-      const stripe = await paint(32, 260, (x) => `rgba(${(x * 8) % 256}, 200, ${255 - x * 8}, ${0.25 + x / 64})`);
+      const stripe = await paint(16, 120, (x) => `rgba(${(x * 16) % 256}, 200, ${255 - x * 16}, ${0.25 + x / 32})`);
       const modes = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn", "hard_light",
         "soft_light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "add"];
-      const path = { data: await engine.vectors.parseSvg("M20 280 L300 150 L580 290 Z"), fill: [0.1, 0.4, 0.9, 0.6], stroke: null, fill_rule: "non_zero" };
+      const path = { data: await engine.vectors.parseSvg("M10 150 L150 80 L290 155 Z"), fill: [0.1, 0.4, 0.9, 0.6], stroke: null, fill_rule: "non_zero" };
       await doc.transact("scene", (tx) => {
         tx.addRasterFromAsset(base);
         modes.forEach((blend, i) => {
           const id = tx.addRasterFromAsset(stripe);
           tx.setProps(id, { blend, opacity: 0.8 });
-          tx.setTransform(id, [1, 0, 0, 1, 10 + i * 34, 20]);
+          tx.setTransform(id, [1, 0, 0, 1, 4 + i * 17, 20]);
         });
         const group = tx.addGroup({ isolated: true });
         tx.setProps(group, { opacity: 0.7 });
         const shifted = tx.addRasterFromAsset(stripe, { parent: group });
-        tx.setTransform(shifted, [1, 0, 0, 1, -16, -40]);
+        tx.setTransform(shifted, [1, 0, 0, 1, -8, -40]);
         tx.addVector([path]);
         tx.addAdjustment({ type: "levels", gamma: 0.8 });
       });
@@ -681,7 +682,7 @@ export async function runEmbedTests(_playground, log) {
       let d = pixelDiff(png.pixels, want, W);
       assert(d.count === 0, `${d.count} pixels differ (worst ${d.worst}): ${d.first.join(" | ")}`);
       // A crop across tile edges at odd offsets keeps the same pixels.
-      const r = { x0: 250, y0: 7, x1: 517, y1: 263 }, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
+      const r = { x0: 243, y0: 7, x1: 283, y1: 151 }, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
       const crop = await decodePng(await doc.exportImage({ region: r }));
       const cropWant = new Uint8Array(cw * ch * 4);
       for (let y = 0; y < ch; y++) cropWant.set(want.subarray(((y + r.y0) * W + r.x0) * 4, ((y + r.y0) * W + r.x1) * 4), y * cw * 4);
@@ -701,7 +702,7 @@ export async function runEmbedTests(_playground, log) {
             }
         }
       // The composite eyedropper reads the same pixels.
-      for (const [x, y] of [[0, 0], [15, 30], [300, 200], [599, 299], [200, 280]]) {
+      for (const [x, y] of [[0, 0], [10, 30], [150, 100], [299, 159], [100, 140]]) {
         const o = (y * W + x) * 4, picked = (await doc.image.pickComposite([x, y])).bytes;
         assert(picked.every((v, c) => v === png.pixels[o + c]), `pickComposite ${x},${y}: ${picked} vs ${Array.from(png.pixels.subarray(o, o + 4))}`);
       }

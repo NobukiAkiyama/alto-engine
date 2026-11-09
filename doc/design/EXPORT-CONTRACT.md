@@ -47,7 +47,7 @@
 
 `tests/e2e/embed-tests.js`：
 
-- 「exportImage PNG holds the display tiles exactly…」：600×300の文書（半透明のグラデーション、17合成モードを不透明度0.8で重ねた層、不透明度0.7の分離グループ、負の座標へずらした層、ベクター、レベル補正の調整レイヤー）を書き出す。PNGを自前でデコードし、全画素を表示タイルと比べる。タイルの境界をまたぐ奇数の範囲、1/2倍、`pickComposite` の5点も比べる。
+- 「exportImage PNG holds the display tiles exactly…」：300×160の文書（2タイル。SwiftShaderでも1フレームが描画の監視時間内に終わる大きさ）（半透明のグラデーション、17合成モードを不透明度0.8で重ねた層、不透明度0.7の分離グループ、負の座標へずらした層、ベクター、レベル補正の調整レイヤー）を書き出す。PNGを自前でデコードし、全画素を表示タイルと比べる。タイルの境界をまたぐ奇数の範囲、1/2倍、`pickComposite` の5点も比べる。
 - 「exportImage refuses NaN region coordinates…」：NaNの範囲を拒否すること、無限大の範囲で文書全体になること、空の文書が透明になること。
 - 既存の「exportImage writes the displayed pixels, scaled and cropped」：WebPの寸法と、不正な `scale` の拒否。
 
