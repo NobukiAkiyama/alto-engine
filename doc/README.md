@@ -9,6 +9,7 @@
 - [過去の版のタイルを必要時に読む](design/ON-DEMAND-HISTORY-OBJECTS.md)
 - [未実装機能の設計と実装計画](design/backlog/00-ROADMAP.md)
 - [ファジングと unwrap の監査（QA-1、2026-11-08）](verification/UNWRAP-AUDIT.md)
+- [エンジンの修正・検証計画（2026-11-09）](design/2026-11-09-engine-hardening-plan.md)。結果は [ENGINE-HARDENING-RESULTS.md](verification/ENGINE-HARDENING-RESULTS.md)
 - [`design/`](design/)：設計と実装計画
 - [`verification/`](verification/)：実装結果・測定・調査の記録。総まとめは [RESULTS.md](verification/RESULTS.md)
 
