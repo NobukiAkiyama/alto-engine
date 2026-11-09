@@ -11,6 +11,7 @@ const yieldTask = () => new Promise<void>((resolve) => {
 import init, { Runtime } from "./pkg/alto_wasm.js";
 import { PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
+import { encodePng } from "./png.js";
 /**
  * Waits for the frame in flight on the GPU, when a frame was held back for it. The
  * timer bounds the wait: a lost device may never settle its queue, and the next
@@ -529,6 +530,8 @@ async function recoverLostGpu() {
  * The document as an image file, from the same display tiles the canvas shows. A
  * reduced export reads the pyramid level at or above its scale: each level halves the
  * tiles to read. Tiles are premultiplied; image files hold straight alpha.
+ * A PNG that needs no resampling holds exactly the unpremultiplied tile bytes, so it
+ * is encoded here rather than through a canvas, which would premultiply them again.
  */
 async function exportImage({ region, scale, type }: Args<"exportImage">) {
   const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
@@ -563,14 +566,16 @@ async function exportImage({ region, scale, type }: Args<"exportImage">) {
         }
     });
   }
-  const full = new OffscreenCanvas(w, h);
-  full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
   // The region in level pixels, and the size the caller asked for.
   const sx = region.x0 / f - x0, sy = region.y0 / f - y0;
   const sw = (region.x1 - region.x0) / f, sh = (region.y1 - region.y0) / f;
   const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
   const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
-  if (sx === 0 && sy === 0 && ow === w && oh === h) return full.convertToBlob({ type });
+  const exact = sx === 0 && sy === 0 && ow === w && oh === h;
+  if (exact && type === "image/png") return encodePng(pixels, w, h);
+  const full = new OffscreenCanvas(w, h);
+  full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
+  if (exact) return full.convertToBlob({ type });
   const out = new OffscreenCanvas(ow, oh);
   const ctx = out.getContext("2d")!;
   ctx.imageSmoothingQuality = "high";

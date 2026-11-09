@@ -588,7 +588,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "objects-unavailable";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable";
 }
 
 // @public

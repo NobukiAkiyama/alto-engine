@@ -439,6 +439,11 @@ export class DocumentHandle {
   /**
    * The document, or a region of it, as a PNG or WebP image: the pixels the canvas
    * shows, at `scale` (greater than 0, at most 1). Allowed while storage has failed.
+   * The region is clamped to the document; infinite bounds reach its edge.
+   * A PNG at scale 1, or at 1/2, 1/4, … when the output size equals the pixels read
+   * from that pyramid level, holds the displayed pixels exactly as straight alpha;
+   * transparent pixels are (0, 0, 0, 0). Other scales and WebP are resampled or
+   * encoded by the browser.
    */
   async exportImage(options: ExportImageOptions = {}): Promise<Blob> {
     const scale = options.scale ?? 1;
@@ -446,6 +451,8 @@ export class DocumentHandle {
       throw new AltoError("INVALID_ARGUMENT", "scale must be greater than 0 and at most 1", { reason: "scale" });
     const { width, height } = this.getSnapshot().meta;
     const r = options.region ?? { x0: 0, y0: 0, x1: width, y1: height };
+    if ([r.x0, r.y0, r.x1, r.y1].some((v) => typeof v !== "number" || Number.isNaN(v)))
+      throw new AltoError("INVALID_ARGUMENT", "region coordinates must be numbers", { reason: "region" });
     const region = {
       x0: Math.max(0, Math.floor(r.x0)),
       y0: Math.max(0, Math.floor(r.y0)),
