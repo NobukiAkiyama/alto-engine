@@ -78,6 +78,74 @@ async function quadrants(engine, doc) {
   await doc.transact("image.import", (tx) => tx.addRasterFromAsset(image));
 }
 
+/** Decodes an 8-bit, non-interlaced RGB/RGBA PNG to straight RGBA bytes, without a canvas. */
+async function decodePng(blob) {
+  const b = new Uint8Array(await blob.arrayBuffer()), v = new DataView(b.buffer);
+  assert(b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47, "not a PNG");
+  let at = 8, width = 0, height = 0, type = 0;
+  const idat = [];
+  while (at < b.length) {
+    const len = v.getUint32(at), kind = String.fromCharCode(...b.subarray(at + 4, at + 8));
+    const body = b.subarray(at + 8, at + 8 + len);
+    if (kind === "IHDR") {
+      width = v.getUint32(at + 8); height = v.getUint32(at + 12); type = body[9];
+      assert(body[8] === 8 && (type === 2 || type === 6) && body[12] === 0, `PNG depth ${body[8]} type ${type} interlace ${body[12]}`);
+    } else if (kind === "IDAT") idat.push(body);
+    at += 12 + len;
+  }
+  const raw = new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+  const bpp = type === 6 ? 4 : 3, stride = width * bpp, out = new Uint8Array(width * height * 4);
+  let prev = new Uint8Array(stride);
+  for (let y = 0; y < height; y++) {
+    const f = raw[y * (stride + 1)], line = raw.slice(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let i = 0; i < stride; i++) {
+      const a = i >= bpp ? line[i - bpp] : 0, up = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
+      let p = 0;
+      if (f === 1) p = a;
+      else if (f === 2) p = up;
+      else if (f === 3) p = (a + up) >> 1;
+      else if (f === 4) {
+        const e = a + up - c, pa = Math.abs(e - a), pb = Math.abs(e - up), pc = Math.abs(e - c);
+        p = pa <= pb && pa <= pc ? a : pb <= pc ? up : c;
+      }
+      line[i] = (line[i] + p) & 255;
+    }
+    for (let x = 0; x < width; x++) {
+      const d = (y * width + x) * 4, s = x * bpp;
+      out[d] = line[s]; out[d + 1] = line[s + 1]; out[d + 2] = line[s + 2]; out[d + 3] = bpp === 4 ? line[s + 3] : 255;
+    }
+    prev = line;
+  }
+  return { width, height, pixels: out };
+}
+/** The display tiles of [x0, x1) × [y0, y1) at level 0, unpremultiplied as the export contract says. */
+async function displayStraight(engine, width, height) {
+  const out = new Uint8Array(width * height * 4);
+  for (let ty = 0; ty * 256 < height; ty++)
+    for (let tx = 0; tx * 256 < width; tx++) {
+      const t = await unstable(engine).readTile(tx, ty);
+      for (let y = ty * 256; y < Math.min(height, ty * 256 + 256); y++)
+        for (let x = tx * 256; x < Math.min(width, tx * 256 + 256); x++) {
+          const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, d = (y * width + x) * 4, a = t[s + 3];
+          out[d + 3] = a;
+          if (a) for (let c = 0; c < 3; c++) out[d + c] = Math.round((t[s + c] * 255) / a);
+        }
+    }
+  return out;
+}
+/** Count and first examples of differing pixels. */
+function pixelDiff(a, b, width) {
+  let count = 0, worst = 0;
+  const first = [];
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(a[i + c] - b[i + c])));
+    if (!d) continue;
+    count++; worst = Math.max(worst, d);
+    if (first.length < 4) first.push(`(${(i / 4) % width},${Math.floor(i / 4 / width)}) ${Array.from(a.subarray(i, i + 4))} vs ${Array.from(b.subarray(i, i + 4))}`);
+  }
+  return { count, worst, first };
+}
+
 /** Keep one 65-tile stroke, but let the GPU finish between groups of inputs. */
 async function inputWideStrokeInBatches(engine, stroke, count = 65) {
   for (let i = 0; i < count; i++) {
@@ -577,6 +645,75 @@ export async function runEmbedTests(_playground, log) {
       await b.createDocument({ width: 64, height: 64 });
       assert(!(await listRecoveryNamespaces()).some((n) => n.namespace === namespace), "a journal-free engine wrote a journal");
       assert(await rejectsWith(a.recovery.restore(), "NOT_FOUND"), "restore without a journal did not report NOT_FOUND");
+    });
+    await test("exportImage PNG holds the display tiles exactly, across blends, groups, adjustments and vectors", async () => {
+      const W = 600, H = 300;
+      const engine = await engineIn(container(400, 300));
+      const doc = await engine.createDocument({ width: W, height: H });
+      const paint = async (w, h, f) => {
+        const c = new OffscreenCanvas(w, h), ctx = c.getContext("2d");
+        for (let x = 0; x < w; x++) { ctx.fillStyle = f(x); ctx.fillRect(x, 0, 1, h); }
+        return engine.assets.importImage(await c.convertToBlob());
+      };
+      const base = await paint(W, H, (x) => `rgba(${x % 256}, ${255 - (x % 256)}, ${(x * 7) % 256}, ${((x % 256) + 1) / 256})`);
+      const stripe = await paint(32, 260, (x) => `rgba(${(x * 8) % 256}, 200, ${255 - x * 8}, ${0.25 + x / 64})`);
+      const modes = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn", "hard_light",
+        "soft_light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "add"];
+      const path = { data: await engine.vectors.parseSvg("M20 280 L300 150 L580 290 Z"), fill: [0.1, 0.4, 0.9, 0.6], stroke: null, fill_rule: "non_zero" };
+      await doc.transact("scene", (tx) => {
+        tx.addRasterFromAsset(base);
+        modes.forEach((blend, i) => {
+          const id = tx.addRasterFromAsset(stripe);
+          tx.setProps(id, { blend, opacity: 0.8 });
+          tx.setTransform(id, [1, 0, 0, 1, 10 + i * 34, 20]);
+        });
+        const group = tx.addGroup({ isolated: true });
+        tx.setProps(group, { opacity: 0.7 });
+        const shifted = tx.addRasterFromAsset(stripe, { parent: group });
+        tx.setTransform(shifted, [1, 0, 0, 1, -16, -40]);
+        tx.addVector([path]);
+        tx.addAdjustment({ type: "levels", gamma: 0.8 });
+      });
+      await unstable(engine).settle();
+      const want = await displayStraight(engine, W, H);
+      const png = await decodePng(await doc.exportImage());
+      assert(png.width === W && png.height === H, `size ${png.width}×${png.height}`);
+      let d = pixelDiff(png.pixels, want, W);
+      assert(d.count === 0, `${d.count} pixels differ (worst ${d.worst}): ${d.first.join(" | ")}`);
+      // A crop across tile edges at odd offsets keeps the same pixels.
+      const r = { x0: 250, y0: 7, x1: 517, y1: 263 }, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
+      const crop = await decodePng(await doc.exportImage({ region: r }));
+      const cropWant = new Uint8Array(cw * ch * 4);
+      for (let y = 0; y < ch; y++) cropWant.set(want.subarray(((y + r.y0) * W + r.x0) * 4, ((y + r.y0) * W + r.x1) * 4), y * cw * 4);
+      d = pixelDiff(crop.pixels, cropWant, cw);
+      assert(crop.width === cw && crop.height === ch && d.count === 0, `crop: ${d.count} pixels differ: ${d.first.join(" | ")}`);
+      // Half scale reads pyramid level 1 and keeps its pixels.
+      const half = await decodePng(await doc.exportImage({ scale: 0.5 }));
+      assert(half.width === W / 2 && half.height === H / 2, `half size ${half.width}×${half.height}`);
+      for (let ty = 0; ty * 256 < H / 2; ty++)
+        for (let tx = 0; tx * 256 < W / 2; tx++) {
+          const t = await unstable(engine).readTileLevel(1, tx, ty);
+          for (let y = ty * 256; y < Math.min(H / 2, ty * 256 + 256); y++)
+            for (let x = tx * 256; x < Math.min(W / 2, tx * 256 + 256); x++) {
+              const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, o = (y * (W / 2) + x) * 4, a = t[s + 3];
+              const expect = [0, 1, 2].map((c) => (a ? Math.round((t[s + c] * 255) / a) : 0)).concat(a);
+              assert(expect.every((v, c) => half.pixels[o + c] === v), `half ${x},${y}: ${Array.from(half.pixels.subarray(o, o + 4))} vs ${expect}`);
+            }
+        }
+      // The composite eyedropper reads the same pixels.
+      for (const [x, y] of [[0, 0], [15, 30], [300, 200], [599, 299], [200, 280]]) {
+        const o = (y * W + x) * 4, picked = (await doc.image.pickComposite([x, y])).bytes;
+        assert(picked.every((v, c) => v === png.pixels[o + c]), `pickComposite ${x},${y}: ${picked} vs ${Array.from(png.pixels.subarray(o, o + 4))}`);
+      }
+    });
+    await test("exportImage refuses NaN region coordinates and clamps infinite ones", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 64, height: 32 });
+      for (const region of [{ x0: Number.NaN, y0: 0, x1: 10, y1: 10 }, { x0: 0, y0: 0, x1: 10, y1: Number.NaN }])
+        assert(await rejectsWith(doc.exportImage({ region }), "INVALID_ARGUMENT", "region"), "accepted " + JSON.stringify(region));
+      const all = await decodePng(await doc.exportImage({ region: { x0: -Infinity, y0: -Infinity, x1: Infinity, y1: Infinity } }));
+      assert(all.width === 64 && all.height === 32, `infinite region gave ${all.width}×${all.height}`);
+      assert(all.pixels.every((v) => v === 0), "an empty document exported non-transparent pixels");
     });
     await test("exportImage writes the displayed pixels, scaled and cropped", async () => {
       const engine = await engineIn(container(400, 300));
