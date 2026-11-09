@@ -31,6 +31,13 @@ export function testing(engine: Engine) {
     /** Writes a format 3 checkpoint (one file per object). */
     looseCheckpoint: () => request("looseCheckpoint"),
     injectStorageFault: (position: "beforeAppend" | "afterAppend") => request("injectStorageFault", { position }),
+    /**
+     * Stops journal and checkpoint writes before the next one, which stays in memory
+     * until `holdStorage(false)`. Edits still apply; `durable()` waits.
+     */
+    holdStorage: (hold: boolean) => request("holdStorage", { hold }),
+    /** Resolves once a write waits at the hold, with its kind. */
+    storageHeld: () => request("storageHeld"),
     /** The `.alto` bytes a save would write, without marking the document saved. */
     saveBytes: async () => {
       await core.document?.endTool();

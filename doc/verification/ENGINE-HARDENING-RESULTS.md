@@ -7,7 +7,7 @@
 | A | 成功 | `0e6f491` | 下記 | [A](#a基準となる検証) |
 | B | 成功 | `1b5ed04` | 下記 | [B](#bcpu合成経路の削除) |
 | C | 成功 | 下記 | 下記 | [C](#c書き出しの契約) |
-| D | 未着手 | | | |
+| D | 実行中（1/7行） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
 | E | 未着手 | | | |
 | F | 未着手 | | | |
 
@@ -90,3 +90,55 @@ opencode（deepseek-v4.1-flash-free）のレビューの2点：
 
 - 1/2倍などで、範囲の終点が段の画素の途中にあっても完全一致の経路に入る：正しい。ただし修正前からの挙動で、奇数幅の文書を縮小したときに段の画素をそのまま出すためのもの。コードは変えず、契約とdocstringを実際の条件に合わせた。
 - `x0 = +Infinity` で負の幅になる：誤り。`x1` は文書幅に収められ、既存の `x1 <= x0` の検査で `INVALID_ARGUMENT` になる。
+
+PR #91の最初のCIで、新しい一致試験がSwiftShaderの描画の監視（`GPU_LOST: the previous frame did not finish on the GPU`）に当たって失敗した。文書を600×300から300×160に小さくして解消した（`4362d83`。CIの全項目が成功）。
+
+## D：保存・復旧の障害試験
+
+計画の表を1行ずつ進める。
+
+| 行 | 状態 | 記録 |
+|---|---|---|
+| 未確定ストローク、確定後・durable前、durable後 | 成功 | [下記](#d-1ストロークの3時点) |
+| ジャーナル追記中 | 未着手 | |
+| チェックポイント切替中 | 未着手 | |
+| `.altoproj` 保存のmanifest確定前後 | 未着手 | |
+| OPFSのGC削除中 | 未着手 | |
+| 版のマージ確定中 | 未着手 | |
+| Worker停止、GPU喪失 | 未着手 | |
+
+### D-1：ストロークの3時点
+
+仕組み：
+
+- `tests/e2e/crash-tests.js` はNode側で動き、CDPでタブを開いて終わらせる。ページ側は `tests/e2e/crash-page.html`。`scripts/verify-browser.mjs` が機能試験の後に実行する（`--suite=crash` で単独、`ALTO_CRASH_REPEAT` で反復回数）。
+- タブの終わらせ方は2つ。`Page.crash` はレンダラーを落とし、unloadを経ない。`Target.closeTarget` は利用者がタブを閉じるのと同じで、`pagehide` が走る。
+- 待機点：SDKの `testing` 入口に `holdStorage(hold)` と `storageHeld()` を足した。Workerの書き込みループが、次のジャーナル追記またはチェックポイントの直前で止まる。編集はメモリに適用され、`durable()` は待つ。本番の公開APIは変えていない。
+- 判定：同じオリジン（同じOPFS）の新しいタブで同じnamespaceを開き、`recovery.restore()` の結果を、snapshot hash、`stateHash`（内容と版の先頭）、層のタイルマップ、版履歴（DAG、全ブランチ）で比べる。復元がエラーなく終わっただけでは合格にしない。
+
+| 時点 | 作る状態 | 期待 |
+|---|---|---|
+| `stroke-open` | 版を1つ作りdurableにした後、ストロークを描き始め、終えずに入力を送る | 直前のdurableな状態 |
+| `applied` | 書き込みを止め、ストロークと層名の変更を適用する。止まった書き込みが追記であることを確かめる | 直前のdurableな状態。適用だけされた編集は戻らない |
+| `durable` | 同じ編集の後に `durable()` が解決する | 編集後の状態 |
+
+`revision` は比べない。セッション内の編集数で、パッケージを読むたびに0から数え直す（`crates/alto-doc/src/document.rs` の読み込み）。チェックポイントもパッケージなので、復旧後の値は契約に含まれない。最初の実行では比較に含めていて、6件すべてがこの差だけで失敗した。ほかの項目はすべて一致していた。
+
+試験が失敗を検出できることも確かめた。`applied` で、止めた書き込みをタブを終わらせる前に流すと、2件が「durableにならなかった編集を持っている」として失敗した。
+
+欠陥は見つからなかった。
+
+検証：
+
+2026-11-10、Aと同じ環境（Chrome 155.0.8059.84、Apple M5）で実行。
+
+| コマンド | 終了コード | 結果 |
+|---|---|---|
+| `sh scripts/check.sh wasm-fast` | 0 | SDKのビルド・API検査成功。単体テスト53件成功 |
+| `ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`（Metal） | 0 | 3時点×2方法×10回の60件成功。1件184〜492 ms |
+| 同上、`ALTO_BROWSER_GPU=swiftshader` | 0 | 60件成功。1件3.2〜3.5 s |
+| `ALTO_BROWSER_GPU=swiftshader node scripts/verify-browser.mjs --functional` | 0 | 9群・292件成功（Cの286件にcrashの6件）。予期しないGPUプロセスのクラッシュ0件 |
+
+各待機点で、2つの終わらせ方それぞれ10回連続で成功した。CIは反復1回（6件、SwiftShaderで約20秒）で実行する。Rustのコードは変えていないので、`check.sh native` は再実行していない。
+
+opencode（deepseek-v4.1-flash-free）のレビューは11点を挙げた。直したのは1点：`storageHeld()` の待ちが残ったまま保留を解くと、その待ちが解決せず、次の保留で別の書き込みの種類を受け取る。解除時に `CONFLICT` で拒否するようにした（試験専用の入口）。ほかは誤りか修正不要と判断した。`durable()` は `pendingBytes` ではなく書き込みの通し番号で待つので、保留中は解決しない。層のIDは文字列で、タブをまたいでも同じ文書の同じ層を指す。期待値の取得順・JSONの比較順・ロックの解放は、Metal・SwiftShaderの各60件で問題が出ていない。`--suite` で選ばない限り走らない動作と、ほかの群が失敗したら走らない動作は、既存の群と同じにした。
