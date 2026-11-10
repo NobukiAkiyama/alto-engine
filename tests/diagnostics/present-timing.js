@@ -71,8 +71,10 @@
     mark(label) { emit("mark", { label }); return realm; },
     begin() { frameId++; tickStart = performance.now(); submits = []; },
     end() { tickMs = performance.now() - tickStart; },
-    frame(frame, where, streak, idle) {
-      emit("frame", { frame: frameId, where, streakBefore: streak, idle, streakAfter: idle ? streak + 1 : 0,
+    // `drained` counts idle presents after a wait that found the queue empty; `gpuBusy`
+    // says the last wait ended on its timer, which only the time cap counts.
+    frame(frame, where, streak, idle, gpuBusy) {
+      emit("frame", { frame: frameId, where, drainedBefore: streak.drained, streakSince: streak.since, idle, gpuBusy: idle && gpuBusy,
         tickMs, pending: frame.pending, composed: frame.composed, deferred: frame.presentDeferred,
         profile: frame.profile, display: frame.display, submits });
     },
