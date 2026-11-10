@@ -182,6 +182,8 @@ export interface Requests {
   legacyCheckpoint: Q<None, true>;
   injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" }, true>;
   /** Test hook: journal and checkpoint writes stop before the next one until released. */
+  partialAppend: Q<{ position: "header" | "payload" | "crc" }, true>;
+  partialAppendHeld: Q<None, true>;
   holdStorage: Q<{ hold: boolean }, true>;
   /** Test hook: resolves once a write waits at the hold; returns its kind. */
   storageHeld: Q<None, "append" | "checkpoint">;

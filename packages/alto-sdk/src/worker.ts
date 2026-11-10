@@ -98,6 +98,9 @@ let diagnosticProfiles: Record<string, number>[] | null = null;
 let profilingEnabled = false;
 // Synchronous Worker time for every tick after a profiled cache reset.
 let diagnosticTickMs: number[] | null = null;
+let partialAppend: "header" | "payload" | "crc" | null = null;
+let partialAppendDone = false;
+let partialAppendWaiters: (() => void)[] = [];
 let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
 // Test hook: while set, the next journal or checkpoint write waits here, still in
 // memory, so a test can end the tab between an edit applied and the edit durable.
@@ -421,6 +424,15 @@ async function write(w: Write) {
   if (injectedStorageFault === "beforeAppend") {
     injectedStorageFault = null;
     throw Error("STORAGE: injected failure before append");
+  }
+  if (partialAppend) {
+    const partial = partialAppend;
+    await io("appendPartial", { bytes: w.bytes.buffer as ArrayBuffer, partial }, [w.bytes.buffer]);
+    partialAppend = null;
+    partialAppendDone = true;
+    for (const resolve of partialAppendWaiters.splice(0)) resolve();
+    // This destructive test hook deliberately cannot resume the write.
+    await new Promise<void>(() => {});
   }
   await io("append", { bytes: w.bytes.buffer as ArrayBuffer }, [w.bytes.buffer]);
   if (injectedStorageFault === "afterAppend") {
@@ -993,6 +1005,17 @@ async function execute(m: Queued): Promise<unknown> {
       await io("checkpointLegacy", { bytes: bytes.buffer as ArrayBuffer }, [bytes.buffer]);
       return true;
     }
+    case "partialAppend":
+      if (m.position !== "header" && m.position !== "payload" && m.position !== "crc")
+        throw Error("INVALID_ARGUMENT: partial append position");
+      if (!storageHold) throw Error("CONFLICT: storage must be held first");
+      partialAppend = m.position;
+      partialAppendDone = false;
+      return true;
+    case "partialAppendHeld":
+      if (partialAppendDone) return true;
+      if (!partialAppend) throw Error("CONFLICT: no partial append is armed");
+      return new Promise<true>((resolve) => partialAppendWaiters.push(() => resolve(true)));
     case "holdStorage":
       if (m.hold) {
         if (!storageHold) {
