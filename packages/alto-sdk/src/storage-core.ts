@@ -47,6 +47,7 @@ export interface StorageMessage {
   generation?: number;
   entries?: ArrayBuffer;
   bytes?: ArrayBuffer;
+  partial?: "header" | "payload" | "crc";
 }
 let namespace = "default",
   directory: FileSystemDirectoryHandle | null = null,
@@ -672,19 +673,28 @@ export async function handle(data: StorageMessage): Promise<unknown> {
   } else if (data.t === "checkpointLegacy") {
     await checkpointLegacy(new Uint8Array(data.bytes!));
     value = true;
-  } else if (data.t === "append") {
+  } else if (data.t === "append" || data.t === "appendPartial") {
     if (!active) throw Error("Journal has no checkpoint");
     await collectGarbage();
     const bytes = new Uint8Array(data.bytes!);
     const r = record(1, bytes);
+    // Test-only: persist a torn record, then let the caller stop before completing it.
+    // A full-length corrupt record exercises CRC rather than only length checks.
+    if (data.t === "appendPartial") {
+      if (data.partial === "crc") r[4] ^= 1;
+      else if (data.partial !== "header" && data.partial !== "payload") throw Error("Invalid partial append");
+    }
+    const prefix = data.t !== "appendPartial" || data.partial === "crc" ? r :
+      r.subarray(0, data.partial === "header" ? 3 : 8 + Math.floor((r.length - 8) / 2));
     const h = await active.file.createSyncAccessHandle();
     try {
-      const written = h.write(r, { at: offset });
-      if (written !== r.length) throw Error("Short journal write");
+      const written = h.write(prefix, { at: offset });
+      if (written !== prefix.length) throw Error("Short journal write");
       h.flush();
     } finally {
       h.close();
     }
+    if (data.t === "appendPartial") return true;
     offset += r.length;
     active.recordCount++;
     value = true;

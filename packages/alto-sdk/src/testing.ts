@@ -35,6 +35,8 @@ export function testing(engine: Engine) {
      * Stops journal and checkpoint writes before the next one, which stays in memory
      * until `holdStorage(false)`. Edits still apply; `durable()` waits.
      */
+    partialAppend: (position: "header" | "payload" | "crc") => request("partialAppend", { position }),
+    partialAppendHeld: () => request("partialAppendHeld"),
     holdStorage: (hold: boolean) => request("holdStorage", { hold }),
     /** Resolves once a write waits at the hold, with its kind. */
     storageHeld: () => request("storageHeld"),

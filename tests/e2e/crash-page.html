@@ -48,6 +48,7 @@ window.altoCrash = {
    * - "stroke-open": a stroke has drawn but not ended.
    * - "applied": a stroke and a rename are applied, and their journal write is held.
    * - "durable": the same edits, and `durable()` resolved.
+   * - "journal-*": flush a torn or CRC-damaged record, then wait for termination.
    * Returns the state recovery must give back.
    */
   async prepare(point, namespace, seed) {
@@ -67,14 +68,20 @@ window.altoCrash = {
       assert(tool.active, "the stroke ended early");
       return { layer, expected: base };
     }
-    if (point === "applied") await testing(engine).holdStorage(true);
+    const journal = point.startsWith("journal-");
+    if (point === "applied" || journal) await testing(engine).holdStorage(true);
     await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
     await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "renamed " + seed }));
     const after = await state(doc, layer);
     assert(after.hash !== base.hash, "the edits did not change the document");
-    if (point === "applied") {
+    if (point === "applied" || journal) {
       const kind = await testing(engine).storageHeld();
       assert(kind === "append", "the held write is a " + kind);
+      if (journal) {
+        await testing(engine).partialAppend(point.slice("journal-".length));
+        await testing(engine).holdStorage(false);
+        await testing(engine).partialAppendHeld();
+      }
       return { layer, expected: base, lost: after };
     }
     await doc.durable();
@@ -85,6 +92,13 @@ window.altoCrash = {
     await start(namespace);
     assert(engine.recovery.available, "no recovery journal is waiting");
     const doc = await engine.recovery.restore();
+    return state(doc, layer);
+  },
+  async editAfterRecovery(layer) {
+    const doc = engine.document;
+    assert(doc, "document is not open");
+    await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "after-recovery" }));
+    await doc.durable();
     return state(doc, layer);
   },
   async cleanUp(namespace) {

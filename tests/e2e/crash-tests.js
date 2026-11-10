@@ -3,15 +3,18 @@
 // side is tests/e2e/crash-page.html. A tab is ended two ways: `Page.crash` kills the
 // renderer without unload, and `Target.closeTarget` closes the tab as a user would.
 //
-// Wait points (plan D, first row):
+// Wait points (plan D, first two rows):
 // - stroke-open: a stroke has drawn but not ended. Recovery gives the last durable state.
 // - applied:     edits are applied and their journal write is held in memory.
 //                Recovery gives the last durable state, not the applied one.
 // - durable:     edits applied and durable() resolved. Recovery gives them back.
+// - journal-*:   persist a partial header or payload, or a record with bad CRC,
+//                then stop before confirming the append. Recovery must discard it.
+//                A second crash checks a new durable edit after tail repair.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
-const POINTS = ["stroke-open", "applied", "durable"];
+const POINTS = ["stroke-open", "applied", "durable", "journal-header", "journal-payload", "journal-crc"];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -102,6 +105,16 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
               (prepared.lost && recovered.hash === prepared.lost.hash ? " (it holds the edits that were never durable)" : "") +
               ": " + JSON.stringify({ expected: pick(prepared.expected, differs), recovered: pick(recovered, differs) }),
             );
+          if (point.startsWith("journal-")) {
+            const edited = await second.evaluate(`window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)})`);
+            await end(second, method);
+            second = await open();
+            const again = await second.evaluate(
+              `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)})`,
+            );
+            const changed = Object.keys(edited).filter((key) => again[key] !== edited[key]);
+            if (changed.length) throw Error("post-recovery durable edit differs in " + changed.join(", "));
+          }
         } catch (e) {
           error = String(e?.message || e);
         } finally {
