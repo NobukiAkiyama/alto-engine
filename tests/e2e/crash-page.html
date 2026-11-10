@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Crash fixture</title>
+<style>html, body { margin: 0; background: #fff; } #canvas { width: 256px; height: 256px; }</style>
+<div id="canvas"></div>
+<script type="module">
+// One engine per tab, driven by tests/e2e/crash-tests.js over CDP. `prepare` leaves the
+// engine at a wait point and returns what recovery must give; the runner then ends the
+// tab and calls `recover` in a new tab of the same origin, so the same OPFS store.
+import { createEngine, deleteRecovery } from "../../packages/alto-sdk/dist/index.js";
+import { testing } from "../../packages/alto-sdk/dist/testing.js";
+
+const assert = (v, m) => { if (!v) throw Error(m); };
+let engine = null;
+
+async function start(namespace) {
+  engine = await createEngine({ container: document.querySelector("#canvas"), storage: { namespace } });
+  return engine;
+}
+/**
+ * What must survive: the snapshot hash, the state hash (content and version head), the
+ * layer's tile map and the version history. `revision` is not compared: it counts edits
+ * in this session and starts at 0 whenever a package loads, a checkpoint included.
+ */
+async function state(doc, layer) {
+  return {
+    hash: await doc.snapshotHash(),
+    stateHash: doc.getSnapshot().stateHash,
+    tiles: JSON.stringify(await doc.nodeTiles(layer)),
+    log: JSON.stringify(await doc.versions.log({ mode: "dag", allBranches: true })),
+  };
+}
+function samples(seed, count = 24) {
+  const out = [];
+  for (let i = 0; i < count; i++)
+    out.push({ x: 20 + ((seed * 37 + i * 9) % 200), y: 20 + ((seed * 53 + i * 7) % 200), pressure: 0.6, time: i * 8 });
+  return out;
+}
+async function stroke(doc, layer, seed, color) {
+  const tool = doc.tools.begin("brush", { layer, color, tip: { size: 18 } });
+  for (const s of samples(seed)) tool.input(s);
+  await tool.end();
+}
+
+window.altoCrash = {
+  /**
+   * Builds a document with tiles and a version, makes it durable, then goes to `point`:
+   * - "stroke-open": a stroke has drawn but not ended.
+   * - "applied": a stroke and a rename are applied, and their journal write is held.
+   * - "durable": the same edits, and `durable()` resolved.
+   * Returns the state recovery must give back.
+   */
+  async prepare(point, namespace, seed) {
+    await start(namespace);
+    const doc = await engine.createDocument({ width: 256, height: 256 });
+    let layer;
+    await doc.transact("layer.add", (tx) => (layer = tx.addRaster({ name: "paint" })));
+    await stroke(doc, layer, seed, [0.9, 0.2, 0.1, 1]);
+    await doc.versions.commit("base");
+    await stroke(doc, layer, seed + 1, [0.1, 0.4, 0.9, 0.7]);
+    await doc.durable();
+    const base = await state(doc, layer);
+    if (point === "stroke-open") {
+      const tool = doc.tools.begin("brush", { layer, color: [0.2, 0.8, 0.2, 1], tip: { size: 30 } });
+      for (const s of samples(seed + 2)) tool.input(s);
+      await tool.flush();
+      assert(tool.active, "the stroke ended early");
+      return { layer, expected: base };
+    }
+    if (point === "applied") await testing(engine).holdStorage(true);
+    await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
+    await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "renamed " + seed }));
+    const after = await state(doc, layer);
+    assert(after.hash !== base.hash, "the edits did not change the document");
+    if (point === "applied") {
+      const kind = await testing(engine).storageHeld();
+      assert(kind === "append", "the held write is a " + kind);
+      return { layer, expected: base, lost: after };
+    }
+    await doc.durable();
+    return { layer, expected: after };
+  },
+  /** Opens the namespace again after the crash and restores its journal. */
+  async recover(namespace, layer) {
+    await start(namespace);
+    assert(engine.recovery.available, "no recovery journal is waiting");
+    const doc = await engine.recovery.restore();
+    return state(doc, layer);
+  },
+  async cleanUp(namespace) {
+    await engine?.dispose();
+    engine = null;
+    await deleteRecovery(namespace);
+  },
+};
+window.altoCrashReady = true;
+</script>

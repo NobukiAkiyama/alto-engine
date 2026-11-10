@@ -83,6 +83,11 @@ let profilingEnabled = false;
 // Synchronous Worker time for every tick after a profiled cache reset.
 let diagnosticTickMs: number[] | null = null;
 let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
+// Test hook: while set, the next journal or checkpoint write waits here, still in
+// memory, so a test can end the tab between an edit applied and the edit durable.
+let storageHold: { released: Promise<void>; release(): void } | null = null;
+let heldWrite: Write["kind"] | null = null;
+let heldWaiters: { resolve(kind: Write["kind"]): void; reject(error: Error): void }[] = [];
 const readableAfterFailure = new Set<string>([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
@@ -412,6 +417,12 @@ async function pump() {
     const size = w.bytes.length;
     pendingBytes -= size;
     try {
+      if (storageHold) {
+        heldWrite = w.kind;
+        for (const waiter of heldWaiters.splice(0)) waiter.resolve(w.kind);
+        await storageHold.released;
+        heldWrite = null;
+      }
       await write(w);
     } catch (error) {
       freezeStorage(error);
@@ -957,6 +968,24 @@ async function execute(m: Queued): Promise<unknown> {
       await io("checkpointLegacy", { bytes: bytes.buffer as ArrayBuffer }, [bytes.buffer]);
       return true;
     }
+    case "holdStorage":
+      if (m.hold) {
+        if (!storageHold) {
+          let release!: () => void;
+          const released = new Promise<void>((resolve) => (release = resolve));
+          storageHold = { released, release };
+        }
+      } else {
+        storageHold?.release();
+        storageHold = null;
+        // A waiter must not outlive its hold and be answered by a later one.
+        for (const waiter of heldWaiters.splice(0)) waiter.reject(Error("CONFLICT: storage was released before a write reached the hold"));
+      }
+      return true;
+    case "storageHeld":
+      if (!storageHold) throw Error("CONFLICT: storage is not held");
+      if (heldWrite) return heldWrite;
+      return new Promise<Write["kind"]>((resolve, reject) => heldWaiters.push({ resolve, reject }));
     case "injectStorageFault":
       if (m.position !== "beforeAppend" && m.position !== "afterAppend")
         throw Error("INVALID_ARGUMENT: storage fault position");

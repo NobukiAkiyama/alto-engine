@@ -94,6 +94,8 @@
 - [ ] CI の機能検証に組み込み、10 回の連続実行で安定を確認。
 - [ ] 結果を記録、PR。
 
+進行中：「ストローク中」を3時点に分けた行は完了（[ENGINE-HARDENING-RESULTS](../../verification/ENGINE-HARDENING-RESULTS.md#d-1ストロークの3時点)）。残りの行は計画の段階Dで1行ずつ進める。
+
 ### Task QA-2: ブラウザの分離
 
 **Files:** Modify `scripts/verify-browser.mjs`。Create `doc/verification/BROWSER-MATRIX.md`。
