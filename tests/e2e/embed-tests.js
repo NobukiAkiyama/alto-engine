@@ -647,64 +647,82 @@ export async function runEmbedTests(_playground, log) {
       assert(await rejectsWith(a.recovery.restore(), "NOT_FOUND"), "restore without a journal did not report NOT_FOUND");
     });
     await test("exportImage PNG holds the display tiles exactly, across blends, groups, adjustments and vectors", async () => {
-      // Small enough that one frame finishes within the present watchdog on SwiftShader.
+      // Two documents, so each frame stays within the present watchdog on SwiftShader:
+      // the 17 blend modes draw on the tile compositor, while the isolated group, the
+      // vector and the adjustment take the M5 compositor, where one frame of all of them
+      // together took 3.5–5 s on SwiftShader and tripped the ~2 s cap (GPU_LOST).
       const W = 300, H = 160;
       const engine = await engineIn(container(400, 300));
-      const doc = await engine.createDocument({ width: W, height: H });
       const paint = async (w, h, f) => {
         const c = new OffscreenCanvas(w, h), ctx = c.getContext("2d");
         for (let x = 0; x < w; x++) { ctx.fillStyle = f(x); ctx.fillRect(x, 0, 1, h); }
         return engine.assets.importImage(await c.convertToBlob());
       };
-      const base = await paint(W, H, (x) => `rgba(${x % 256}, ${255 - (x % 256)}, ${(x * 7) % 256}, ${((x % 256) + 1) / 256})`);
-      const stripe = await paint(16, 120, (x) => `rgba(${(x * 16) % 256}, 200, ${255 - x * 16}, ${0.25 + x / 32})`);
+      // Assets belong to the open document, so each document imports its own.
+      let base, stripe;
       const modes = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn", "hard_light",
         "soft_light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "add"];
       const path = { data: await engine.vectors.parseSvg("M10 150 L150 80 L290 155 Z"), fill: [0.1, 0.4, 0.9, 0.6], stroke: null, fill_rule: "non_zero" };
-      await doc.transact("scene", (tx) => {
-        tx.addRasterFromAsset(base);
-        modes.forEach((blend, i) => {
-          const id = tx.addRasterFromAsset(stripe);
-          tx.setProps(id, { blend, opacity: 0.8 });
-          tx.setTransform(id, [1, 0, 0, 1, 4 + i * 17, 20]);
-        });
-        const group = tx.addGroup({ isolated: true });
-        tx.setProps(group, { opacity: 0.7 });
-        const shifted = tx.addRasterFromAsset(stripe, { parent: group });
-        tx.setTransform(shifted, [1, 0, 0, 1, -8, -40]);
-        tx.addVector([path]);
-        tx.addAdjustment({ type: "levels", gamma: 0.8 });
-      });
-      await unstable(engine).settle();
-      const want = await displayStraight(engine, W, H);
-      const png = await decodePng(await doc.exportImage());
-      assert(png.width === W && png.height === H, `size ${png.width}×${png.height}`);
-      let d = pixelDiff(png.pixels, want, W);
-      assert(d.count === 0, `${d.count} pixels differ (worst ${d.worst}): ${d.first.join(" | ")}`);
-      // A crop across tile edges at odd offsets keeps the same pixels.
-      const r = { x0: 243, y0: 7, x1: 283, y1: 151 }, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
-      const crop = await decodePng(await doc.exportImage({ region: r }));
-      const cropWant = new Uint8Array(cw * ch * 4);
-      for (let y = 0; y < ch; y++) cropWant.set(want.subarray(((y + r.y0) * W + r.x0) * 4, ((y + r.y0) * W + r.x1) * 4), y * cw * 4);
-      d = pixelDiff(crop.pixels, cropWant, cw);
-      assert(crop.width === cw && crop.height === ch && d.count === 0, `crop: ${d.count} pixels differ: ${d.first.join(" | ")}`);
-      // Half scale reads pyramid level 1 and keeps its pixels.
-      const half = await decodePng(await doc.exportImage({ scale: 0.5 }));
-      assert(half.width === W / 2 && half.height === H / 2, `half size ${half.width}×${half.height}`);
-      for (let ty = 0; ty * 256 < H / 2; ty++)
-        for (let tx = 0; tx * 256 < W / 2; tx++) {
-          const t = await unstable(engine).readTileLevel(1, tx, ty);
-          for (let y = ty * 256; y < Math.min(H / 2, ty * 256 + 256); y++)
-            for (let x = tx * 256; x < Math.min(W / 2, tx * 256 + 256); x++) {
-              const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, o = (y * (W / 2) + x) * 4, a = t[s + 3];
-              const expect = [0, 1, 2].map((c) => (a ? Math.round((t[s + c] * 255) / a) : 0)).concat(a);
-              assert(expect.every((v, c) => half.pixels[o + c] === v), `half ${x},${y}: ${Array.from(half.pixels.subarray(o, o + 4))} vs ${expect}`);
-            }
+      const scenes = {
+        blends: (tx) => {
+          tx.addRasterFromAsset(base);
+          modes.forEach((blend, i) => {
+            const id = tx.addRasterFromAsset(stripe);
+            tx.setProps(id, { blend, opacity: 0.8 });
+            tx.setTransform(id, [1, 0, 0, 1, 4 + i * 17, 20]);
+          });
+          const shifted = tx.addRasterFromAsset(stripe);
+          tx.setTransform(shifted, [1, 0, 0, 1, -8, -40]);
+        },
+        "group, vector, levels": (tx) => {
+          tx.addRasterFromAsset(base);
+          const group = tx.addGroup({ isolated: true });
+          tx.setProps(group, { opacity: 0.7 });
+          const inside = tx.addRasterFromAsset(stripe, { parent: group });
+          tx.setProps(inside, { blend: "multiply" });
+          tx.setTransform(inside, [1, 0, 0, 1, 240, 30]);
+          const shifted = tx.addRasterFromAsset(stripe, { parent: group });
+          tx.setTransform(shifted, [1, 0, 0, 1, -8, -40]);
+          tx.addVector([path]);
+          tx.addAdjustment({ type: "levels", gamma: 0.8 });
+        },
+      };
+      for (const [scene, build] of Object.entries(scenes)) {
+        const doc = await engine.createDocument({ width: W, height: H });
+        base = await paint(W, H, (x) => `rgba(${x % 256}, ${255 - (x % 256)}, ${(x * 7) % 256}, ${((x % 256) + 1) / 256})`);
+        stripe = await paint(16, 120, (x) => `rgba(${(x * 16) % 256}, 200, ${255 - x * 16}, ${0.25 + x / 32})`);
+        await doc.transact("scene", build);
+        await unstable(engine).settle();
+        const want = await displayStraight(engine, W, H);
+        const png = await decodePng(await doc.exportImage());
+        assert(png.width === W && png.height === H, `${scene}: size ${png.width}×${png.height}`);
+        let d = pixelDiff(png.pixels, want, W);
+        assert(d.count === 0, `${scene}: ${d.count} pixels differ (worst ${d.worst}): ${d.first.join(" | ")}`);
+        // A crop across tile edges at odd offsets keeps the same pixels.
+        const r = { x0: 243, y0: 7, x1: 283, y1: 151 }, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
+        const crop = await decodePng(await doc.exportImage({ region: r }));
+        const cropWant = new Uint8Array(cw * ch * 4);
+        for (let y = 0; y < ch; y++) cropWant.set(want.subarray(((y + r.y0) * W + r.x0) * 4, ((y + r.y0) * W + r.x1) * 4), y * cw * 4);
+        d = pixelDiff(crop.pixels, cropWant, cw);
+        assert(crop.width === cw && crop.height === ch && d.count === 0, `${scene}: crop: ${d.count} pixels differ: ${d.first.join(" | ")}`);
+        // Half scale reads pyramid level 1 and keeps its pixels.
+        const half = await decodePng(await doc.exportImage({ scale: 0.5 }));
+        assert(half.width === W / 2 && half.height === H / 2, `${scene}: half size ${half.width}×${half.height}`);
+        for (let ty = 0; ty * 256 < H / 2; ty++)
+          for (let tx = 0; tx * 256 < W / 2; tx++) {
+            const t = await unstable(engine).readTileLevel(1, tx, ty);
+            for (let y = ty * 256; y < Math.min(H / 2, ty * 256 + 256); y++)
+              for (let x = tx * 256; x < Math.min(W / 2, tx * 256 + 256); x++) {
+                const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, o = (y * (W / 2) + x) * 4, a = t[s + 3];
+                const expect = [0, 1, 2].map((c) => (a ? Math.round((t[s + c] * 255) / a) : 0)).concat(a);
+                assert(expect.every((v, c) => half.pixels[o + c] === v), `${scene}: half ${x},${y}: ${Array.from(half.pixels.subarray(o, o + 4))} vs ${expect}`);
+              }
+          }
+        // The composite eyedropper reads the same pixels.
+        for (const [x, y] of [[0, 0], [10, 30], [150, 100], [299, 159], [100, 140]]) {
+          const o = (y * W + x) * 4, picked = (await doc.image.pickComposite([x, y])).bytes;
+          assert(picked.every((v, c) => v === png.pixels[o + c]), `${scene}: pickComposite ${x},${y}: ${picked} vs ${Array.from(png.pixels.subarray(o, o + 4))}`);
         }
-      // The composite eyedropper reads the same pixels.
-      for (const [x, y] of [[0, 0], [10, 30], [150, 100], [299, 159], [100, 140]]) {
-        const o = (y * W + x) * 4, picked = (await doc.image.pickComposite([x, y])).bytes;
-        assert(picked.every((v, c) => v === png.pixels[o + c]), `pickComposite ${x},${y}: ${picked} vs ${Array.from(png.pixels.subarray(o, o + 4))}`);
       }
     });
     await test("exportImage refuses NaN region coordinates and clamps infinite ones", async () => {

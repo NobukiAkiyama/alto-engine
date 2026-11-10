@@ -47,7 +47,7 @@
 
 `tests/e2e/embed-tests.js`：
 
-- 「exportImage PNG holds the display tiles exactly…」：300×160の文書（2タイル。SwiftShaderでも1フレームが描画の監視時間内に終わる大きさ）（半透明のグラデーション、17合成モードを不透明度0.8で重ねた層、不透明度0.7の分離グループ、負の座標へずらした層、ベクター、レベル補正の調整レイヤー）を書き出す。PNGを自前でデコードし、全画素を表示タイルと比べる。タイルの境界をまたぐ奇数の範囲、1/2倍、`pickComposite` の5点も比べる。
+- 「exportImage PNG holds the display tiles exactly…」：300×160（2タイル）の文書を2つ書き出す。1つ目は半透明のグラデーションに17合成モードを不透明度0.8で重ねた層と、負の座標へずらした層。2つ目は同じグラデーションに、不透明度0.7の分離グループ（乗算の層と負の座標へずらした層）、ベクター、レベル補正の調整レイヤー。PNGを自前でデコードし、全画素を表示タイルと比べる。タイルの境界をまたぐ奇数の範囲、1/2倍、`pickComposite` の5点も比べる。文書を分けたのは、すべてを1つにするとM5の合成器を通る1フレームがSwiftShaderで3.5〜5秒かかり、描画の監視（約2秒）が `GPU_LOST` を出すため。分けると合成モードはタイルの合成器で描かれ、M5の2フレーム目は約0.4秒になる。
 - 「exportImage refuses NaN region coordinates…」：NaNの範囲を拒否すること、無限大の範囲で文書全体になること、空の文書が透明になること。
 - 既存の「exportImage writes the displayed pixels, scaled and cropped」：WebPの寸法と、不正な `scale` の拒否。
 
