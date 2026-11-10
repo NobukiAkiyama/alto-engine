@@ -9,19 +9,27 @@ const yieldTask = () => new Promise<void>((resolve) => {
   channel.port2.postMessage(null);
 });
 import init, { Runtime } from "./pkg/alto_wasm.js";
-import { PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
+import { NO_STREAK, PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
 import { encodePng } from "./png.js";
 /**
  * Waits for the frame in flight on the GPU, when a frame was held back for it. The
  * timer bounds the wait: a lost device may never settle its queue, and the next
  * tick reports the loss. `gpuIdle` would keep the Runtime borrowed past the timer,
- * and the next tick would fail with "recursive use of an object".
+ * and the next tick would fail with "recursive use of an object". Records whether
+ * the timer won, so the watchdog can tell a slow frame from a stuck present.
  */
-const presentSettled = () => Promise.race([
-  runtime.submittedWorkDone(),
-  new Promise<void>((resolve) => setTimeout(resolve, 50)),
-]);
+const presentSettled = async () => {
+  let timer: Timer | undefined;
+  try {
+    lastWaitBusy = await Promise.race([
+      runtime.submittedWorkDone().then(() => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), 50); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 /**
  * After a tick that created pipelines, waits for the queue without the timer. A
  * software adapter compiles them before later queue work, so the present they hold
@@ -29,7 +37,15 @@ const presentSettled = () => Promise.race([
  * not compilation. A lost device still resolves the wait.
  */
 const pipelinesSettled = async () => {
-  if (runtime.takePipelinesBuilt()) await runtime.submittedWorkDone();
+  if (runtime.takePipelinesBuilt()) await queueSettled();
+};
+/**
+ * An untimed wait for the queue. Once it resolves the GPU has finished its work,
+ * so the watchdog's stall clock starts again: a long compile is not a stuck present.
+ */
+const queueSettled = async () => {
+  await runtime.submittedWorkDone();
+  deferredWaits = { ...deferredWaits, since: null };
 };
 declare const self: DedicatedWorkerGlobalScope & { altoPanic?: string };
 type Timer = ReturnType<typeof setTimeout>;
@@ -130,7 +146,9 @@ let runtime!: Runtime,
   frameSettled = false,
   forceDeferred = false,
   deferLimit = PRESENT_DEFER_LIMIT,
-  deferredWaits = 0,
+  deferredWaits = NO_STREAK,
+  // The last present wait ended on its timer with GPU work still running.
+  lastWaitBusy = false,
   prefetchTimer: Timer | null = null,
   prefetchDisabled = false,
   prefetchSpentMs = 0,
@@ -517,14 +535,21 @@ function takeFrame(budget: number, stick: boolean): FrameStats {
   }
   return frame;
 }
+/**
+ * Called before the tick's wait, so `lastWaitBusy` is the previous wait's outcome.
+ * The first idle tick of a run has no wait behind it and counts as drained.
+ */
 function noteDeferred(frame: FrameStats, where: "wait" | "drain") {
-  deferredWaits = nextDeferredStreak(deferredWaits, countsDeferredWait(frame, where), deferLimit);
+  const idle = countsDeferredWait(frame, where);
+  deferredWaits = nextDeferredStreak(deferredWaits, { idle, gpuBusy: idle && lastWaitBusy, now: performance.now() }, deferLimit);
+  if (!idle) lastWaitBusy = false;
 }
 /** Recreate the device from the document. The next tick draws it again. */
 async function recoverLostGpu() {
   forceDeferred = false;
   deferLimit = PRESENT_DEFER_LIMIT;
-  deferredWaits = 0;
+  deferredWaits = NO_STREAK;
+  lastWaitBusy = false;
   postMessage({ t: "gpuLost" });
   try {
     await runtime.recoverGpu();
@@ -1023,7 +1048,8 @@ async function execute(m: Queued): Promise<unknown> {
       const replaced = deferLimit;
       forceDeferred = enabled;
       deferLimit = enabled && m.limit !== undefined ? m.limit : PRESENT_DEFER_LIMIT;
-      deferredWaits = 0;
+      deferredWaits = NO_STREAK;
+      lastWaitBusy = false;
       return replaced;
     }
     case "setDecodeWorkers":
@@ -1069,7 +1095,7 @@ async function execute(m: Queued): Promise<unknown> {
           noteDeferred(frame, "wait");
           tickMs.push(performance.now() - tickStart);
           await pipelinesSettled();
-          if ((frame as FrameStats & { gpuWait?: boolean }).gpuWait) await runtime.submittedWorkDone();
+          if ((frame as FrameStats & { gpuWait?: boolean }).gpuWait) await queueSettled();
           if (frame.pending) await yieldTask();
           else if (frame.presentDeferred) await presentSettled();
         } while (frame.pending || frame.presentDeferred);
@@ -1157,10 +1183,11 @@ async function drain() {
             // A held-back frame with nothing new composed waits for the GPU instead of
             // spinning: on a software adapter, spinning takes the GPU's CPU time.
             // The wait is capped: a device that never settles used to loop forever.
+            // Waits on GPU work still running count toward a time cap, not the count.
             noteDeferred(value, "drain");
             if (diagnosticTickMs) diagnosticTickMs.push(performance.now() - tickStart);
             await pipelinesSettled();
-            if ((value as FrameStats & { gpuWait?: boolean }).gpuWait) await runtime.submittedWorkDone();
+            if ((value as FrameStats & { gpuWait?: boolean }).gpuWait) await queueSettled();
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {

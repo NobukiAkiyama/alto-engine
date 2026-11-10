@@ -725,6 +725,48 @@ export async function runEmbedTests(_playground, log) {
         }
       }
     });
+    await test("a frame that takes seconds on the GPU is not reported as a lost GPU", async () => {
+      // The 600×300 scene the exactness test used before it was shrunk: one frame of it
+      // takes 3–5 s on SwiftShader. A healthy device that is still working is not lost.
+      const W = 600, H = 300;
+      const engine = await engineIn(container(400, 300));
+      const events = [];
+      const off = unstable(engine).onGpu((event) => events.push(event));
+      try {
+        const doc = await engine.createDocument({ width: W, height: H });
+        const paint = async (w, h, f) => {
+          const c = new OffscreenCanvas(w, h), ctx = c.getContext("2d");
+          for (let x = 0; x < w; x++) { ctx.fillStyle = f(x); ctx.fillRect(x, 0, 1, h); }
+          return engine.assets.importImage(await c.convertToBlob());
+        };
+        const base = await paint(W, H, (x) => `rgba(${x % 256}, ${255 - (x % 256)}, ${(x * 7) % 256}, ${((x % 256) + 1) / 256})`);
+        const stripe = await paint(32, 260, (x) => `rgba(${(x * 8) % 256}, 200, ${255 - x * 8}, ${0.25 + x / 64})`);
+        const modes = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn", "hard_light",
+          "soft_light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "add"];
+        const path = { data: await engine.vectors.parseSvg("M20 280 L300 150 L580 290 Z"), fill: [0.1, 0.4, 0.9, 0.6], stroke: null, fill_rule: "non_zero" };
+        await doc.transact("scene", (tx) => {
+          tx.addRasterFromAsset(base);
+          modes.forEach((blend, i) => {
+            const id = tx.addRasterFromAsset(stripe);
+            tx.setProps(id, { blend, opacity: 0.8 });
+            tx.setTransform(id, [1, 0, 0, 1, 10 + i * 34, 20]);
+          });
+          const group = tx.addGroup({ isolated: true });
+          tx.setProps(group, { opacity: 0.7 });
+          const shifted = tx.addRasterFromAsset(stripe, { parent: group });
+          tx.setTransform(shifted, [1, 0, 0, 1, -16, -40]);
+          tx.addVector([path]);
+          tx.addAdjustment({ type: "levels", gamma: 0.8 });
+        });
+        await unstable(engine).settle();
+        const png = await decodePng(await doc.exportImage());
+        const d = pixelDiff(png.pixels, await displayStraight(engine, W, H), W);
+        assert(d.count === 0, `${d.count} pixels differ (worst ${d.worst}): ${d.first.join(" | ")}`);
+      } finally {
+        off();
+      }
+      assert(!events.includes("lost"), `GPU events ${events.join(", ")}`);
+    });
     await test("exportImage refuses NaN region coordinates and clamps infinite ones", async () => {
       const engine = await engineIn(container());
       const doc = await engine.createDocument({ width: 64, height: 32 });

@@ -133,7 +133,7 @@ async function startServer() {
             source = source.replace(before, after);
           };
           replace("const frame = decodeFrame(runtime.tick(budget));", "altoPresentTiming.begin(); const frame = decodeFrame(runtime.tick(budget)); altoPresentTiming.end();");
-          replace("function noteDeferred(frame, where) {", "function noteDeferred(frame, where) { altoPresentTiming.frame(frame, where, deferredWaits, countsDeferredWait(frame, where));");
+          replace("function noteDeferred(frame, where) {", "function noteDeferred(frame, where) { altoPresentTiming.frame(frame, where, deferredWaits, countsDeferredWait(frame, where), lastWaitBusy);");
           replace("await runtime.recoverGpu();", 'const restoreStart = performance.now(); altoPresentTiming.emit("restore-start"); await runtime.recoverGpu(); runtime.setProfiling(true); altoPresentTiming.emit("restore-done", { ms: performance.now() - restoreStart });');
           replace("async function execute(m) {", 'async function execute(m) { if (m.t === "presentTimingMark") { runtime.setProfiling(true); return altoPresentTiming.mark(m.label); }');
           source = (await readFile(join(root, "tests/diagnostics/present-timing.js"), "utf8")) + "\n" + source;
