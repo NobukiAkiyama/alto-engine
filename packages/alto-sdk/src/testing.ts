@@ -38,6 +38,14 @@ export function testing(engine: Engine) {
     partialAppend: (position: "header" | "payload" | "crc") => request("partialAppend", { position }),
     partialAppendHeld: () => request("partialAppendHeld"),
     holdStorage: (hold: boolean) => request("holdStorage", { hold }),
+    /**
+     * Ends the next checkpoint after its pack is flushed ("pack"), after a torn journal
+     * write ("journal"), or after the whole journal is flushed ("flushed"), and never
+     * reports it done. Storage must be held first.
+     */
+    stopCheckpoint: (stage: "pack" | "journal" | "flushed") => request("stopCheckpoint", { stage }),
+    /** Resolves once the armed checkpoint stop has been reached. */
+    checkpointStopped: () => request("checkpointStopped"),
     /** Resolves once a write waits at the hold, with its kind. */
     storageHeld: () => request("storageHeld"),
     /** The `.alto` bytes a save would write, without marking the document saved. */

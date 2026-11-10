@@ -185,6 +185,9 @@ export interface Requests {
   partialAppend: Q<{ position: "header" | "payload" | "crc" }, true>;
   partialAppendHeld: Q<None, true>;
   holdStorage: Q<{ hold: boolean }, true>;
+  /** Test hook: the next checkpoint ends at this stage and never completes. */
+  stopCheckpoint: Q<{ stage: "pack" | "journal" | "flushed" }, true>;
+  checkpointStopped: Q<None, true>;
   /** Test hook: resolves once a write waits at the hold; returns its kind. */
   storageHeld: Q<None, "append" | "checkpoint">;
 }

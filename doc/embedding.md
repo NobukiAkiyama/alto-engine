@@ -131,6 +131,8 @@ if (engine.recovery.available) {
 }
 ```
 
+`available` は、ファイルに保存していない作業が記録に残っているときに `true` になります。最後のチェックポイントの後に編集がある場合に加え、版の確定（`versions.commit`）のようにチェックポイントだけが書かれ、その後に編集がない場合も含みます。保存（`save`）した直後、ファイルを開いた直後、空の新規文書は `false` です。復元した文書は、復元前に保存していなければ `dirty` のままです。
+
 **記録が残っているあいだは、`createDocument`、`open`、`openFolder` は `CONFLICT`（`reason: "recovery-pending"`）で失敗します。** 新しい文書が、保存していない編集の記録を黙って上書きしないためです。先に `restore` か `discard` を呼んでください。
 
 `recovery.restore()` と `recovery.discard()` は復旧待ちの場合だけ使えます（記録を持たないエンジンの `restore()` は `NOT_FOUND`）。文書を開いているときや、復旧待ちの記録がないときは `CONFLICT`（`reason: "no-recovery"`）です。両者を同時に呼んだ場合も順番に処理するため、復元した文書の記録を、後から届いた破棄要求が消すことはありません。

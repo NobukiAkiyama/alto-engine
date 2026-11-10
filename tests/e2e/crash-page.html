@@ -19,7 +19,7 @@ async function start(namespace) {
 }
 /**
  * What must survive: the snapshot hash, the state hash (content and version head), the
- * layer's tile map and the version history. `revision` is not compared: it counts edits
+ * layer's tile map, the version history and that the work is still unsaved. `revision` is not compared: it counts edits
  * in this session and starts at 0 whenever a package loads, a checkpoint included.
  */
 async function state(doc, layer) {
@@ -28,6 +28,8 @@ async function state(doc, layer) {
     stateHash: doc.getSnapshot().stateHash,
     tiles: JSON.stringify(await doc.nodeTiles(layer)),
     log: JSON.stringify(await doc.versions.log({ mode: "dag", allBranches: true })),
+    // Never saved to a file, so recovery must not present it as saved.
+    dirty: doc.getSnapshot().dirty,
   };
 }
 function samples(seed, count = 24) {
@@ -49,6 +51,10 @@ window.altoCrash = {
    * - "applied": a stroke and a rename are applied, and their journal write is held.
    * - "durable": the same edits, and `durable()` resolved.
    * - "journal-*": flush a torn or CRC-damaged record, then wait for termination.
+   * - "checkpoint-*": with writes held, a rename (held as an append), a stroke and a
+   *   commit, whose checkpoint replaces the two queued appends. On release the rename
+   *   lands, then the checkpoint ends after its pack ("pack"), after a torn journal
+   *   ("journal") or after a flushed journal whose reply is never taken ("flushed").
    * Returns the state recovery must give back.
    */
   async prepare(point, namespace, seed) {
@@ -67,6 +73,29 @@ window.altoCrash = {
       await tool.flush();
       assert(tool.active, "the stroke ended early");
       return { layer, expected: base };
+    }
+    if (point.startsWith("checkpoint-")) {
+      const stage = point.slice("checkpoint-".length);
+      const t = testing(engine);
+      await t.holdStorage(true);
+      await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "renamed " + seed }));
+      const kind = await t.storageHeld();
+      assert(kind === "append", "the held write is a " + kind);
+      // The previous generation plus the held rename: what the old journal recovers.
+      const renamed = await state(doc, layer);
+      await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
+      await doc.versions.commit("checkpoint " + seed);
+      const committed = await state(doc, layer);
+      assert(committed.hash !== renamed.hash, "the stroke did not change the document");
+      assert(committed.log !== renamed.log, "the commit did not change the history");
+      await t.stopCheckpoint(stage);
+      await t.holdStorage(false);
+      await t.checkpointStopped();
+      // A flushed journal is a complete generation, newer than the previous one. Its
+      // previous state was durable too, so it is not reported as never durable.
+      return stage === "flushed"
+        ? { layer, expected: committed }
+        : { layer, expected: renamed, lost: committed };
     }
     const journal = point.startsWith("journal-");
     if (point === "applied" || journal) await testing(engine).holdStorage(true);
@@ -94,10 +123,12 @@ window.altoCrash = {
     const doc = await engine.recovery.restore();
     return state(doc, layer);
   },
-  async editAfterRecovery(layer) {
+  /** A durable edit after recovery; with `commit`, also a checkpoint over the old files. */
+  async editAfterRecovery(layer, commit = false) {
     const doc = engine.document;
     assert(doc, "document is not open");
     await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "after-recovery" }));
+    if (commit) await doc.versions.commit("after recovery");
     await doc.durable();
     return state(doc, layer);
   },

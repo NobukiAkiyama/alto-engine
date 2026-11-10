@@ -26,6 +26,8 @@ interface Metadata {
   opaque: string[];
   packs?: string[];
   locations?: [number, number, number][];
+  /** Format 3 and 4: the document was not saved to a file when checkpointed. */
+  dirty?: boolean;
 }
 interface Parsed {
   generation: number;
@@ -48,6 +50,10 @@ export interface StorageMessage {
   entries?: ArrayBuffer;
   bytes?: ArrayBuffer;
   partial?: "header" | "payload" | "crc";
+  /** Test-only: end a checkpoint after its pack, or after a torn journal write. */
+  stop?: "pack" | "journal";
+  /** Checkpoint: the document differs from what was last created, opened or saved. */
+  dirty?: boolean;
 }
 let namespace = "default",
   directory: FileSystemDirectoryHandle | null = null,
@@ -406,7 +412,11 @@ async function packageOf(candidate: Candidate) {
   }
   return frame(framed);
 }
-async function writeGeneration(tag: number, payload: Bytes, metadata: Metadata | null) {
+/**
+ * With `torn`, writes the header and half the record, flushes and returns without
+ * taking the generation, as an interrupted switch would leave the file.
+ */
+async function writeGeneration(tag: number, payload: Bytes, metadata: Metadata | null, torn = false) {
   const name =
     active?.name === "journal-a.bin" ? "journal-b.bin" : "journal-a.bin";
   const file = await directory!.getFileHandle(name, { create: true });
@@ -418,6 +428,13 @@ async function writeGeneration(tag: number, payload: Bytes, metadata: Metadata |
     h.truncate(0);
     h.write(header, { at: 0 });
     const r = record(tag, payload);
+    if (torn) {
+      const half = r.subarray(0, Math.floor(r.length / 2));
+      if (h.write(half, { at: 12 }) !== half.length) throw Error("Short checkpoint write");
+      h.truncate(12 + half.length);
+      h.flush();
+      return;
+    }
     if (h.write(r, { at: 12 }) !== r.length) throw Error("Short checkpoint write");
     h.truncate(12 + r.length);
     h.flush();
@@ -510,7 +527,7 @@ async function writePack(name: string, objects: Map<string, Bytes>) {
  * object it names is written as its own file instead (format 3), so tests can produce
  * a journal the previous SDK wrote.
  */
-async function checkpoint(framed: Bytes, loose = false) {
+async function checkpoint(framed: Bytes, loose = false, stop?: StorageMessage["stop"], dirty = false) {
   await init();
   await collectGarbage();
   const entries = unframe(framed);
@@ -530,6 +547,7 @@ async function checkpoint(framed: Bytes, loose = false) {
     entriesSha256: await sha256(base),
     objects: meta.objects,
     opaque: meta.opaque,
+    ...(dirty ? { dirty: true } : {}),
   };
   let moved: Map<string, Stored>;
   if (loose) {
@@ -544,6 +562,11 @@ async function checkpoint(framed: Bytes, loose = false) {
     const copied = await objectsToCopy(meta.objects.filter((path) => stored.has(path)), newBytes);
     for (const [path, bytes] of copied) added.set(path, bytes);
     const written: Map<string, Stored> = added.size ? await writePack(`${generation + 1}.pack`, added) : new Map();
+    // Test-only: the pack is flushed and no journal names it yet.
+    if (stop === "pack") {
+      if (!added.size) throw Error("the checkpoint wrote no pack to stop after");
+      return;
+    }
     moved = written;
     const at = (path: string) => (written.get(path) || stored.get(path)) as Location;
     const packs = [...new Set(meta.objects.map((path) => at(path).pack))];
@@ -553,6 +576,10 @@ async function checkpoint(framed: Bytes, loose = false) {
       const { pack, offset, length } = at(path);
       return [index.get(pack)!, offset, length];
     });
+  }
+  if (stop === "journal") {
+    await writeGeneration(metadata.format, withMetadata(metadata, base), metadata, true);
+    return;
   }
   await writeGeneration(metadata.format, withMetadata(metadata, base), metadata);
   // Only now: a failed write leaves the store as the engine was told it is.
@@ -623,7 +650,9 @@ export async function handle(data: StorageMessage): Promise<unknown> {
   let value;
   if (data.t === "inspect")
     value = {
-      available: !!active?.recordCount,
+      // Edits after the checkpoint, or a checkpoint of work never saved to a file (a
+      // commit, say). A saved, opened or new empty document has nothing to recover.
+      available: !!active?.recordCount || active?.metadata?.dirty === true,
       records: active?.recordCount || 0,
       truncated: !!active?.truncated,
       latestGeneration: generation,
@@ -644,7 +673,11 @@ export async function handle(data: StorageMessage): Promise<unknown> {
     if (!candidate) throw Error("Journal generation unavailable");
     value = {
       base: await packageOf(candidate),
-      metadata: candidate.metadata && { format: candidate.metadata.format, opaque: candidate.metadata.opaque },
+      metadata: candidate.metadata && {
+        format: candidate.metadata.format,
+        opaque: candidate.metadata.opaque,
+        dirty: candidate.metadata.dirty === true,
+      },
       records: candidate.records,
     };
   } else if (data.t === "activate") {
@@ -665,10 +698,11 @@ export async function handle(data: StorageMessage): Promise<unknown> {
     release();
     value = true;
   } else if (data.t === "checkpoint") {
-    await checkpoint(new Uint8Array(data.entries!));
+    if (data.stop !== undefined && data.stop !== "pack" && data.stop !== "journal") throw Error("Invalid checkpoint stop");
+    await checkpoint(new Uint8Array(data.entries!), false, data.stop, data.dirty === true);
     value = true;
   } else if (data.t === "checkpointLoose") {
-    await checkpoint(new Uint8Array(data.entries!), true);
+    await checkpoint(new Uint8Array(data.entries!), true, undefined, data.dirty === true);
     value = true;
   } else if (data.t === "checkpointLegacy") {
     await checkpointLegacy(new Uint8Array(data.bytes!));

@@ -11,10 +11,17 @@
 // - journal-*:   persist a partial header or payload, or a record with bad CRC,
 //                then stop before confirming the append. Recovery must discard it.
 //                A second crash checks a new durable edit after tail repair.
+// - checkpoint-*: a checkpoint ends after its pack, after a torn journal, or after a
+//                flushed journal never confirmed. The first two recover the previous
+//                generation and its appends; the third, the new generation. A second
+//                crash checks a durable commit (a new checkpoint) after recovery.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
-const POINTS = ["stroke-open", "applied", "durable", "journal-header", "journal-payload", "journal-crc"];
+const POINTS = [
+  "stroke-open", "applied", "durable", "journal-header", "journal-payload", "journal-crc",
+  "checkpoint-pack", "checkpoint-journal", "checkpoint-flushed",
+];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -105,13 +112,16 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
               (prepared.lost && recovered.hash === prepared.lost.hash ? " (it holds the edits that were never durable)" : "") +
               ": " + JSON.stringify({ expected: pick(prepared.expected, differs), recovered: pick(recovered, differs) }),
             );
-          if (point.startsWith("journal-")) {
-            const edited = await second.evaluate(`window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)})`);
+          if (point.startsWith("journal-") || point.startsWith("checkpoint-")) {
+            const commit = point.startsWith("checkpoint-");
+            const edited = await second.evaluate(
+              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit})`,
+            );
             await end(second, method);
             second = await open();
             const again = await second.evaluate(
               `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)})`,
-            );
+            ).catch((e) => { throw Error("after the second crash: " + (e?.message || e)); });
             const changed = Object.keys(edited).filter((key) => again[key] !== edited[key]);
             if (changed.length) throw Error("post-recovery durable edit differs in " + changed.join(", "));
           }
