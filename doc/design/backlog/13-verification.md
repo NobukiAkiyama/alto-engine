@@ -94,7 +94,7 @@
 - [ ] CI の機能検証に組み込み、10 回の連続実行で安定を確認。
 - [ ] 結果を記録、PR。
 
-進行中：「チェックポイント書き込み中」は3時点（pack書き込み後、ジャーナル書き込み途中、ジャーナル確定後）で完了し、版の確定後に編集がないと復旧が提示されない欠陥を直した（[D-3](../../verification/ENGINE-HARDENING-RESULTS.md#d-3チェックポイント切替中)）。「ストローク中」を3時点に分けた行は完了（[ENGINE-HARDENING-RESULTS](../../verification/ENGINE-HARDENING-RESULTS.md#d-1ストロークの3時点)）。残りの行は計画の段階Dで1行ずつ進める。
+進行中：「`.altoproj` の保存中」はmanifest確定の前・書き込み途中・後の3時点で完了（[D-4](../../verification/ENGINE-HARDENING-RESULTS.md#d-4altoproj-保存のmanifest確定前後)）。「チェックポイント書き込み中」は3時点（pack書き込み後、ジャーナル書き込み途中、ジャーナル確定後）で完了し、版の確定後に編集がないと復旧が提示されない欠陥を直した（[D-3](../../verification/ENGINE-HARDENING-RESULTS.md#d-3チェックポイント切替中)）。「ストローク中」を3時点に分けた行は完了（[ENGINE-HARDENING-RESULTS](../../verification/ENGINE-HARDENING-RESULTS.md#d-1ストロークの3時点)）。残りの行は計画の段階Dで1行ずつ進める。
 
 ### Task QA-2: ブラウザの分離
 
