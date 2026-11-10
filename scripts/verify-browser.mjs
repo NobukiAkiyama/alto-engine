@@ -5,6 +5,8 @@
 // and drives each through the public API it exposes (build them first).
 // --suite=functional (or comma-separated names) narrows a diagnostic run.
 // --embed-test=substring isolates an embed test for before/after measurements.
+// After the in-page suites, tests/e2e/crash-tests.js ends tabs at journal wait points
+// and checks recovery (--suite=crash alone; ALTO_CRASH_REPEAT=10 for a stability run).
 // ALTO_BROWSER_PRESENT_TIMING=1 records per-tick counters and GPU queue latency.
 // ALTO_WRITE_V3_BROWSER=1 rewrites tests/parity/v3-browser.txt, the locked v3 browser tiles,
 // after a parity run that passed (not ALTO_WRITE_PARITY, which cargo uses).
@@ -217,7 +219,8 @@ const suites = [
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
-if (selectedSuites?.some((name) => !suites.some(([suite]) => suite === name)))
+// "crash" is not an in-page suite: tests/e2e/crash-tests.js ends tabs over CDP.
+if (selectedSuites?.some((name) => name !== "crash" && !suites.some(([suite]) => suite === name)))
   throw Error("Unknown --suite: " + selectedSuites.join(","));
 
 let server, chrome, client, browserClient, profile;
@@ -549,6 +552,29 @@ try {
       summary.push({ name, ok, count: results.length, error: suiteError?.message });
       await sampleSystem(name);
       if (!ok) break;
+    }
+    const crashSelected = selectedSuites ? selectedSuites.includes("crash") : !embedTest;
+    if (!startupOnly && !benchmarkOnly && crashSelected && summary.every((suite) => suite.ok)) {
+      console.log("RUN crash");
+      phase = "crash";
+      const repeat = Number(process.env.ALTO_CRASH_REPEAT || 1);
+      if (!Number.isInteger(repeat) || repeat < 1 || repeat > 50) throw Error("invalid ALTO_CRASH_REPEAT");
+      const { runCrashTests } = await import("../tests/e2e/crash-tests.js");
+      let crashError = null, report = { results: [] };
+      try {
+        report = await runCrashTests(
+          { browser: browserClient.send, connect, wsOrigin: new URL(version.webSocketDebuggerUrl).origin },
+          `http://127.0.0.1:${address.port}/tests/e2e/crash-page.html`,
+          { repeat },
+        );
+      } catch (error) {
+        crashError = error;
+      }
+      await writeFile(join(reportDir, externalReports ? "crash.json" : "rebuild-crash.json"), JSON.stringify(report, null, 2) + "\n");
+      const failed = report.results.filter((result) => !result.pass);
+      console.log("crash results", report.results.length, "failed", failed.length);
+      summary.push({ name: "crash", ok: !crashError && report.results.length > 0 && !failed.length, count: report.results.length, error: crashError?.message });
+      await sampleSystem("crash");
     }
   }
 } catch (error) {

@@ -181,6 +181,10 @@ export interface Requests {
   looseCheckpoint: Q<None, true>;
   legacyCheckpoint: Q<None, true>;
   injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" }, true>;
+  /** Test hook: journal and checkpoint writes stop before the next one until released. */
+  holdStorage: Q<{ hold: boolean }, true>;
+  /** Test hook: resolves once a write waits at the hold; returns its kind. */
+  storageHeld: Q<None, "append" | "checkpoint">;
 }
 export type RequestName = keyof Requests;
 export type Args<K extends RequestName> = Requests[K]["args"];
