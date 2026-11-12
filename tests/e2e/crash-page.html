@@ -26,37 +26,56 @@ async function folderHandle(name, create = true) {
 }
 const never = () => new Promise(() => {});
 /**
- * The OPFS folder provider with its manifest replacement stopped once `arm` is called:
- * "before" never writes it; "mid" runs the provider's own write, whose close (the
- * atomic replace) never returns; "after" replaces it and then stops. `stopped`
- * resolves at the stop.
- * Stopping holds the folder lock until the tab ends, as a dying save would.
+ * The OPFS folder provider, stopped at one storage call once `arm` is called. A stop
+ * names the view method (`writeRef` or `deleteObjects`), the path for `writeRef`, which
+ * matching call stops (`nth`, from 1) and when:
+ * - "before": the call never runs;
+ * - "mid": a `writeRef` runs the provider's own write, whose close (the atomic replace)
+ *   never returns;
+ * - "after": the call completes, then never returns.
+ * `stopped` resolves at the stop. Stopping holds the folder lock until the tab ends, as
+ * a dying save or GC would.
  */
 async function stoppingFolder(name) {
   const handle = await folderHandle(name);
   const target = await OpfsFolderProvider.open(handle);
-  let stage = null, reached;
+  let stop = null, seen = 0, reached;
   const stopped = new Promise((resolve) => (reached = resolve));
+  const matches = (method, path) => {
+    if (!stop || stop.method !== method || (stop.path && stop.path !== path)) return false;
+    if (++seen < (stop.nth ?? 1)) return false;
+    return true;
+  };
+  const at = async (when, call, file) => {
+    stop = null;
+    if (when === "before") { reached(); return never(); }
+    if (when === "mid") {
+      // The provider writes through createWritable(); its close replaces the file.
+      const create = FileSystemFileHandle.prototype.createWritable;
+      FileSystemFileHandle.prototype.createWritable = async function (...args) {
+        const writable = await create.apply(this, args);
+        if (this.name !== file) return writable;
+        FileSystemFileHandle.prototype.createWritable = create;
+        writable.close = () => (reached(), never());
+        return writable;
+      };
+      return call();
+    }
+    await call();
+    reached();
+    return never();
+  };
   const wrap = (view) => ({
     ...view,
-    async writeRef(path, data, expectHash) {
-      if (!stage || path !== "manifest.json") return view.writeRef(path, data, expectHash);
-      if (stage === "before") { reached(); return never(); }
-      if (stage === "mid") {
-        // The provider writes through createWritable(); its close replaces the file.
-        const create = FileSystemFileHandle.prototype.createWritable;
-        FileSystemFileHandle.prototype.createWritable = async function (...args) {
-          const writable = await create.apply(this, args);
-          if (this.name !== "manifest.json") return writable;
-          FileSystemFileHandle.prototype.createWritable = create;
-          writable.close = () => (reached(), never());
-          return writable;
-        };
-        return view.writeRef(path, data, expectHash);
-      }
-      await view.writeRef(path, data, expectHash);
-      reached();
-      return never();
+    writeRef(path, data, expectHash) {
+      const call = () => view.writeRef(path, data, expectHash);
+      return matches("writeRef", path) ? at(stop.when, call, path.split("/").pop()) : call();
+    },
+    deleteObjects(paths) {
+      const call = () => view.deleteObjects(paths);
+      if (!matches("deleteObjects")) return call();
+      if (stop.when === "mid") throw Error("a deletion has no mid stop");
+      return at(stop.when, call);
     },
   });
   const provider = new Proxy(target, {
@@ -66,8 +85,49 @@ async function stoppingFolder(name) {
       return typeof value === "function" ? value.bind(t) : value;
     },
   });
-  return { provider, arm: (s) => (stage = s), stopped };
+  return { provider, arm: (s) => { stop = s; seen = 0; }, stopped };
 }
+/**
+ * Runs `work` until the folder's armed stop. Work that fails or finishes first fails the
+ * point instead of hanging it.
+ */
+async function untilStopped(folder, work) {
+  await Promise.race([
+    folder.stopped,
+    work.then(() => { throw Error("the work finished before its stop"); }),
+  ]);
+}
+/**
+ * Every version the document can reach, by content: for each commit in the log, the
+ * snapshot hash and tile map after restoring it. Restoring reads its objects, from the
+ * folder when the document was opened from one. Each restore is undone again.
+ */
+async function roots(doc, layer) {
+  const before = JSON.stringify(await state(doc, layer));
+  const commits = (await doc.versions.log({ mode: "dag", allBranches: true })).map((c) => c.hash).sort();
+  const out = [];
+  for (const hash of commits) {
+    await doc.versions.restore(hash);
+    out.push([hash, await doc.snapshotHash(), JSON.stringify(await doc.nodeTiles(layer))]);
+    await doc.undo();
+  }
+  assert(JSON.stringify(await state(doc, layer)) === before, "undoing the restores did not return to the same state");
+  return JSON.stringify(out);
+}
+/** The commit files of `hashes` still in the folder. */
+async function present(name, hashes) {
+  const commits = await (await folderHandle(name, false)).getDirectoryHandle("commits");
+  const out = [];
+  for (const hash of hashes) if (await commits.getFileHandle(hash + ".json").then(() => true, () => false)) out.push(hash);
+  return out;
+}
+/** GC stops: the manifest replacement (before, mid), deletions and the complete marker. */
+const GC_STOPS = {
+  "gc-before": { method: "writeRef", path: "manifest.json", when: "before" },
+  "gc-mid": { method: "writeRef", path: "manifest.json", when: "mid" },
+  "gc-delete": { method: "deleteObjects", nth: 2, when: "before" },
+  "gc-complete": { method: "writeRef", path: ".alto-gc.json", nth: 2, when: "before" },
+};
 /**
  * What must survive: the snapshot hash, the state hash (content and version head), the
  * layer's tile map, the version history and that the work is still unsaved. `revision` is not compared: it counts edits
@@ -106,6 +166,9 @@ window.altoCrash = {
    *   commit, whose checkpoint replaces the two queued appends. On release the rename
    *   lands, then the checkpoint ends after its pack ("pack"), after a torn journal
    *   ("journal") or after a flushed journal whose reply is never taken ("flushed").
+   * - "folder-*": a `.altoproj` save stops around its manifest replacement.
+   * - "gc-*": a GC over a saved folder stops before or during its manifest replacement,
+   *   after its first deletion, or before its complete marker.
    * Returns the state recovery must give back.
    */
   async prepare(point, namespace, seed) {
@@ -138,17 +201,45 @@ window.altoCrash = {
       const v2 = { ...(await state(doc, layer)), dirty: false };
       assert(v2.hash !== v1.hash && v2.log !== v1.log, "v2 did not change the document and history");
       const stage = point.slice("folder-".length);
-      folder.arm(stage);
-      // A save that fails or finishes before the stop fails the point instead of hanging.
-      const saving = doc.saveFolder(folder.provider);
-      await Promise.race([
-        folder.stopped,
-        saving.then(() => { throw Error("the save finished before its stop"); }),
-      ]);
+      folder.arm({ method: "writeRef", path: "manifest.json", when: stage });
+      await untilStopped(folder, doc.saveFolder(folder.provider));
       // The manifest is the commit point: replaced means v2, anything before means v1.
       return stage === "after"
         ? { layer, folder: name, expected: v2, lost: v1 }
         : { layer, folder: name, expected: v1, lost: v2 };
+    }
+    if (point.startsWith("gc-")) {
+      // A saved folder with garbage: two commits only on branches since deleted. GC
+      // stops partway; every root must read back the same, and a new GC must finish.
+      const name = folderName(namespace);
+      const folder = await stoppingFolder(name);
+      const garbage = [];
+      // Checkout needs a clean working state: commit the stroke made after "base".
+      await doc.versions.commit("work " + seed);
+      for (const branch of ["discard-a", "discard-b"]) {
+        await doc.versions.createBranch(branch, { checkout: true });
+        await stroke(doc, layer, seed + garbage.length + 5, [0.2, 0.9, 0.3, 1]);
+        garbage.push((await doc.versions.commit(branch)).hash);
+        await doc.versions.checkout("main");
+      }
+      await doc.versions.createBranch("kept");
+      await doc.versions.deleteBranch("discard-a", { force: true });
+      await doc.versions.deleteBranch("discard-b", { force: true });
+      await stroke(doc, layer, seed + 9, [0.9, 0.8, 0.1, 1]);
+      await doc.versions.commit("before GC " + seed);
+      await doc.saveFolder(folder.provider);
+      assert((await present(name, garbage)).length === 2, "the garbage was not saved");
+      const preview = await doc.versions.gc();
+      assert(preview.by_kind.commits.removed === 2, "GC does not see the garbage: " + JSON.stringify(preview.by_kind));
+      const before = { ...(await state(doc, layer)), dirty: false, roots: await roots(doc, layer) };
+      folder.arm(GC_STOPS[point]);
+      await untilStopped(folder, doc.versions.gc({ dryRun: false, expectedBaseline: preview.baseline }));
+      if (point === "gc-before" || point === "gc-mid") return { layer, folder: name, expected: before, garbage };
+      // The replaced manifest is the commit point: the stopped GC already adopted it,
+      // which moves the GC generation and so the state hash, and nothing else.
+      const adopted = doc.getSnapshot().stateHash;
+      assert(adopted !== before.stateHash, "adopting the GC did not move the state hash");
+      return { layer, folder: name, expected: { ...before, stateHash: adopted }, lost: before, garbage };
     }
     if (point.startsWith("checkpoint-")) {
       const stage = point.slice("checkpoint-".length);
@@ -196,22 +287,39 @@ window.altoCrash = {
    * Opens the namespace again after the crash and restores its journal. With `folder`,
    * opens that folder instead, in an engine that keeps no journal.
    */
-  async recover(namespace, layer, folder = null) {
+  async recover(namespace, layer, folder = null, gc = false) {
     if (folder) {
       await start(namespace, { recovery: false });
       openedFolder = await OpfsFolderProvider.open(await folderHandle(folder, false));
       const doc = await engine.openFolder(openedFolder);
-      return state(doc, layer);
+      const out = await state(doc, layer);
+      return gc ? { ...out, roots: await roots(doc, layer) } : out;
     }
     await start(namespace);
     assert(engine.recovery.available, "no recovery journal is waiting");
     const doc = await engine.recovery.restore();
     return state(doc, layer);
   },
-  /** A durable edit after recovery; with `commit`, also a checkpoint over the old files. */
-  async editAfterRecovery(layer, commit = false, folder = null) {
+  /**
+   * A durable edit after recovery; with `commit`, also a checkpoint over the old files.
+   * With `garbage`, a GC over the reopened folder instead, which must remove it all.
+   */
+  async editAfterRecovery(layer, commit = false, folder = null, garbage = null) {
     const doc = engine.document;
     assert(doc, "document is not open");
+    if (folder && garbage) {
+      // GC again over what the stopped one left; it must finish and remove the rest.
+      const preview = await doc.versions.gc();
+      const before = doc.getSnapshot().stateHash;
+      const report = await doc.versions.gc({ dryRun: false, expectedBaseline: preview.baseline });
+      assert(!report.dry_run && !doc.getSnapshot().dirty, "the second GC did not finish clean");
+      assert(doc.getSnapshot().stateHash !== before, "the second GC did not adopt a new manifest");
+      const marker = await (await (await folderHandle(folder, false)).getFileHandle(".alto-gc.json")).getFile();
+      assert(JSON.parse(await marker.text()).phase === "complete", "the second GC left no complete marker");
+      const left = await present(folder, garbage);
+      assert(!left.length, "GC left garbage: " + left.join(", "));
+      return { ...(await state(doc, layer)), roots: await roots(doc, layer) };
+    }
     await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "after-recovery" }));
     if (commit || folder) await doc.versions.commit("after recovery");
     // Saving into the folder the dead tab left, with its lock and any partial write.
