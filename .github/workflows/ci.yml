@@ -175,14 +175,13 @@ jobs:
           path: ${{ runner.temp }}/alto-alpha-measure
           if-no-files-found: ignore
 
-  # Clippy for wasm32, the SDK API report, Node tests and build metadata. None of it
-  # depends on the host, so it runs on Linux and leaves the macOS slots (five per
-  # account) to the GPU and browser jobs. The release-binary hash report, which
-  # is arm64-macOS specific, is in wasm-build.
+  # Clippy for wasm32, the SDK API report, Node tests and build metadata. It stays on
+  # arm64 macOS: check.sh compares the rebuilt bytes with wasm/SHA256SUMS, and a
+  # Linux host builds different bytes. The hash report artifact is in wasm-build.
   wasm:
     needs: changes
     if: ${{ !inputs.gpu_lifecycle && needs.changes.outputs.code == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       ALTO_WASM_TARGET_DIR: target/wasm-fast
@@ -295,10 +294,11 @@ jobs:
           retention-days: 3
 
   # The browser suites in balanced groups on the shared build. Every suite runs
-  # in exactly one group (CI seconds, 2026-11 macos-15: crash 347, embed 433,
-  # parity 187, functional 175, m6 136, m5 118, image-versions 68, m7 59, m8 9,
-  # examples 35, vector 320). Each verify-browser run starts its own Chrome and
-  # keeps its own GPU-process-crash scan; a failure in any group fails CI.
+  # in exactly one group (CI seconds, 2026-11 macos-15: embed 443, crash 397,
+  # vector 350, parity 226, functional 186, m6 150, m5 145, image-versions 62,
+  # m7 58, examples 33, m8 6). Each verify-browser run starts its own Chrome and
+  # keeps its own GPU-process-crash scan; a failure in any group fails CI. Five
+  # macOS jobs run at once per account, so more groups would only queue.
   wasm-browser:
     needs: [changes, wasm-build]
     if: ${{ !inputs.gpu_lifecycle && needs.changes.outputs.code == 'true' }}
@@ -309,7 +309,7 @@ jobs:
       matrix:
         include:
           - group: crash
-            suites: image-versions,m8,crash
+            suites: m8,crash
           - group: embed
             suites: m7,embed
             examples: true
@@ -317,7 +317,7 @@ jobs:
             suites: functional,m6,parity
             parity: true
           - group: vector
-            suites: m5
+            suites: image-versions,m5
             vector: true
     name: wasm-browser (${{ matrix.group }})
     env:
