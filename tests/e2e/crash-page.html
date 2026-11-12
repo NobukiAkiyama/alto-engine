@@ -7,15 +7,66 @@
 // One engine per tab, driven by tests/e2e/crash-tests.js over CDP. `prepare` leaves the
 // engine at a wait point and returns what recovery must give; the runner then ends the
 // tab and calls `recover` in a new tab of the same origin, so the same OPFS store.
-import { createEngine, deleteRecovery } from "../../packages/alto-sdk/dist/index.js";
+import { createEngine, deleteRecovery, OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 
 const assert = (v, m) => { if (!v) throw Error(m); };
 let engine = null;
+// The provider the reopened folder came from: a save goes back through the same one.
+let openedFolder = null;
 
-async function start(namespace) {
-  engine = await createEngine({ container: document.querySelector("#canvas"), storage: { namespace } });
+async function start(namespace, storage = { namespace }) {
+  engine = await createEngine({ container: document.querySelector("#canvas"), storage });
   return engine;
+}
+/** The OPFS folder a "folder-*" point saves to; one per namespace. */
+const folderName = (namespace) => "crash-folder-" + namespace.replace(/[^A-Za-z0-9.-]/g, "_");
+async function folderHandle(name, create = true) {
+  return (await navigator.storage.getDirectory()).getDirectoryHandle(name, { create });
+}
+const never = () => new Promise(() => {});
+/**
+ * The OPFS folder provider with its manifest replacement stopped once `arm` is called:
+ * "before" never writes it; "mid" runs the provider's own write, whose close (the
+ * atomic replace) never returns; "after" replaces it and then stops. `stopped`
+ * resolves at the stop.
+ * Stopping holds the folder lock until the tab ends, as a dying save would.
+ */
+async function stoppingFolder(name) {
+  const handle = await folderHandle(name);
+  const target = await OpfsFolderProvider.open(handle);
+  let stage = null, reached;
+  const stopped = new Promise((resolve) => (reached = resolve));
+  const wrap = (view) => ({
+    ...view,
+    async writeRef(path, data, expectHash) {
+      if (!stage || path !== "manifest.json") return view.writeRef(path, data, expectHash);
+      if (stage === "before") { reached(); return never(); }
+      if (stage === "mid") {
+        // The provider writes through createWritable(); its close replaces the file.
+        const create = FileSystemFileHandle.prototype.createWritable;
+        FileSystemFileHandle.prototype.createWritable = async function (...args) {
+          const writable = await create.apply(this, args);
+          if (this.name !== "manifest.json") return writable;
+          FileSystemFileHandle.prototype.createWritable = create;
+          writable.close = () => (reached(), never());
+          return writable;
+        };
+        return view.writeRef(path, data, expectHash);
+      }
+      await view.writeRef(path, data, expectHash);
+      reached();
+      return never();
+    },
+  });
+  const provider = new Proxy(target, {
+    get(t, key) {
+      if (key === "exclusive") return (run) => t.exclusive((view) => run(wrap(view)));
+      const value = t[key];
+      return typeof value === "function" ? value.bind(t) : value;
+    },
+  });
+  return { provider, arm: (s) => (stage = s), stopped };
 }
 /**
  * What must survive: the snapshot hash, the state hash (content and version head), the
@@ -74,6 +125,31 @@ window.altoCrash = {
       assert(tool.active, "the stroke ended early");
       return { layer, expected: base };
     }
+    if (point.startsWith("folder-")) {
+      // Saved once as v1, then v2's save stops around its manifest replacement.
+      const name = folderName(namespace);
+      const folder = await stoppingFolder(name);
+      await doc.saveFolder(folder.provider);
+      const v1 = { ...(await state(doc, layer)), dirty: false };
+      await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
+      await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "v2 " + seed }));
+      await doc.versions.commit("v2 " + seed);
+      // An opened folder is saved, so the reopened document is not dirty.
+      const v2 = { ...(await state(doc, layer)), dirty: false };
+      assert(v2.hash !== v1.hash && v2.log !== v1.log, "v2 did not change the document and history");
+      const stage = point.slice("folder-".length);
+      folder.arm(stage);
+      // A save that fails or finishes before the stop fails the point instead of hanging.
+      const saving = doc.saveFolder(folder.provider);
+      await Promise.race([
+        folder.stopped,
+        saving.then(() => { throw Error("the save finished before its stop"); }),
+      ]);
+      // The manifest is the commit point: replaced means v2, anything before means v1.
+      return stage === "after"
+        ? { layer, folder: name, expected: v2, lost: v1 }
+        : { layer, folder: name, expected: v1, lost: v2 };
+    }
     if (point.startsWith("checkpoint-")) {
       const stage = point.slice("checkpoint-".length);
       const t = testing(engine);
@@ -116,26 +192,41 @@ window.altoCrash = {
     await doc.durable();
     return { layer, expected: after };
   },
-  /** Opens the namespace again after the crash and restores its journal. */
-  async recover(namespace, layer) {
+  /**
+   * Opens the namespace again after the crash and restores its journal. With `folder`,
+   * opens that folder instead, in an engine that keeps no journal.
+   */
+  async recover(namespace, layer, folder = null) {
+    if (folder) {
+      await start(namespace, { recovery: false });
+      openedFolder = await OpfsFolderProvider.open(await folderHandle(folder, false));
+      const doc = await engine.openFolder(openedFolder);
+      return state(doc, layer);
+    }
     await start(namespace);
     assert(engine.recovery.available, "no recovery journal is waiting");
     const doc = await engine.recovery.restore();
     return state(doc, layer);
   },
   /** A durable edit after recovery; with `commit`, also a checkpoint over the old files. */
-  async editAfterRecovery(layer, commit = false) {
+  async editAfterRecovery(layer, commit = false, folder = null) {
     const doc = engine.document;
     assert(doc, "document is not open");
     await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "after-recovery" }));
-    if (commit) await doc.versions.commit("after recovery");
+    if (commit || folder) await doc.versions.commit("after recovery");
+    // Saving into the folder the dead tab left, with its lock and any partial write.
+    if (folder) {
+      await doc.saveFolder(openedFolder);
+      return state(doc, layer);
+    }
     await doc.durable();
     return state(doc, layer);
   },
-  async cleanUp(namespace) {
+  async cleanUp(namespace, folder = null) {
     await engine?.dispose();
     engine = null;
     await deleteRecovery(namespace);
+    if (folder) await (await navigator.storage.getDirectory()).removeEntry(folder, { recursive: true });
   },
 };
 window.altoCrashReady = true;

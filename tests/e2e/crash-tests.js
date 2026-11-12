@@ -15,12 +15,18 @@
 //                flushed journal never confirmed. The first two recover the previous
 //                generation and its appends; the third, the new generation. A second
 //                crash checks a durable commit (a new checkpoint) after recovery.
+// - folder-*:    a `.altoproj` save into an OPFS folder stops before its manifest is
+//                replaced, with the new manifest written but not closed, or after it
+//                was replaced. Reopening the folder gives the previous version for the
+//                first two and the new one for the third. A second crash checks a save
+//                into the folder the dead tab left.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
 const POINTS = [
   "stroke-open", "applied", "durable", "journal-header", "journal-payload", "journal-crc",
   "checkpoint-pack", "checkpoint-journal", "checkpoint-flushed",
+  "folder-before", "folder-mid", "folder-after",
 ];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,35 +99,36 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
         const namespace = `test-crash/${run}/${point}-${method.split(".")[1]}-${i}`;
         const started = performance.now();
         let error = null;
-        let first = null, second = null;
+        let first = null, second = null, prepared = null;
         try {
           first = await open();
-          const prepared = await first.evaluate(
+          prepared = await first.evaluate(
             `window.altoCrash.prepare(${JSON.stringify(point)}, ${JSON.stringify(namespace)}, ${i + 1})`,
           );
           await end(first, method);
           first = null;
           second = await open();
-          const recovered = await second.evaluate(
-            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)})`,
-          );
+          const folder = JSON.stringify(prepared.folder ?? null);
+          const recover = () =>
+            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder})`;
+          const recovered = await second.evaluate(recover());
           const differs = Object.keys(prepared.expected).filter((key) => recovered[key] !== prepared.expected[key]);
           if (differs.length)
             throw Error(
               "recovered state differs in " + differs.join(", ") +
-              (prepared.lost && recovered.hash === prepared.lost.hash ? " (it holds the edits that were never durable)" : "") +
+              (prepared.lost && recovered.hash === prepared.lost.hash
+              ? prepared.folder ? " (it holds the other version)" : " (it holds the edits that were never durable)"
+              : "") +
               ": " + JSON.stringify({ expected: pick(prepared.expected, differs), recovered: pick(recovered, differs) }),
             );
-          if (point.startsWith("journal-") || point.startsWith("checkpoint-")) {
+          if (!/^(stroke-open|applied|durable)$/.test(point)) {
             const commit = point.startsWith("checkpoint-");
             const edited = await second.evaluate(
-              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit})`,
+              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder})`,
             );
             await end(second, method);
             second = await open();
-            const again = await second.evaluate(
-              `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)})`,
-            ).catch((e) => { throw Error("after the second crash: " + (e?.message || e)); });
+            const again = await second.evaluate(recover()).catch((e) => { throw Error("after the second crash: " + (e?.message || e)); });
             const changed = Object.keys(edited).filter((key) => again[key] !== edited[key]);
             if (changed.length) throw Error("post-recovery durable edit differs in " + changed.join(", "));
           }
@@ -129,7 +136,9 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           error = String(e?.message || e);
         } finally {
           if (second) {
-            await second.evaluate(`window.altoCrash.cleanUp(${JSON.stringify(namespace)})`).catch(() => {});
+            await second.evaluate(
+              `window.altoCrash.cleanUp(${JSON.stringify(namespace)}, ${JSON.stringify(prepared?.folder ?? null)})`,
+            ).catch(() => {});
             await close(second).catch(() => {});
           }
           if (first) await close(first).catch(() => {});
