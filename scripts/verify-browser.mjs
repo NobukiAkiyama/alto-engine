@@ -522,7 +522,9 @@ try {
       await evaluate("document.querySelector('#test-results').dataset.report = ''");
       let suiteError = null;
       try {
-        await evaluate(`(async () => { ${body} })()`);
+        // A whole suite in one call. CI runs four SwiftShader groups at once, which
+        // stretched embed from ~430 s to 600 s; the limit only catches hangs.
+        await evaluate(`(async () => { ${body} })()`, 1200000);
       } catch (error) {
         suiteError = error;
       }
