@@ -3,7 +3,7 @@
 // side is tests/e2e/crash-page.html. A tab is ended two ways: `Page.crash` kills the
 // renderer without unload, and `Target.closeTarget` closes the tab as a user would.
 //
-// Wait points (plan D, first two rows):
+// Wait points (plan D, rows 1-5):
 // - stroke-open: a stroke has drawn but not ended. Recovery gives the last durable state.
 // - applied:     edits are applied and their journal write is held in memory.
 //                Recovery gives the last durable state, not the applied one.
@@ -20,6 +20,12 @@
 //                was replaced. Reopening the folder gives the previous version for the
 //                first two and the new one for the third. A second crash checks a save
 //                into the folder the dead tab left.
+// - gc-*:        a GC over an OPFS folder with two unreachable commits stops before its
+//                manifest is replaced, with the new manifest written but not closed,
+//                after its first deletion, or before its complete marker. Reopening
+//                gives the same document, and every commit restores to the same
+//                snapshot and tiles. A second GC must finish and leave no garbage; a
+//                second crash checks the folder it left.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
@@ -27,6 +33,7 @@ const POINTS = [
   "stroke-open", "applied", "durable", "journal-header", "journal-payload", "journal-crc",
   "checkpoint-pack", "checkpoint-journal", "checkpoint-flushed",
   "folder-before", "folder-mid", "folder-after",
+  "gc-before", "gc-mid", "gc-delete", "gc-complete",
 ];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -109,14 +116,15 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           first = null;
           second = await open();
           const folder = JSON.stringify(prepared.folder ?? null);
+          const gc = point.startsWith("gc-");
           const recover = () =>
-            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder})`;
+            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder}, ${gc})`;
           const recovered = await second.evaluate(recover());
           const differs = Object.keys(prepared.expected).filter((key) => recovered[key] !== prepared.expected[key]);
           if (differs.length)
             throw Error(
               "recovered state differs in " + differs.join(", ") +
-              (prepared.lost && recovered.hash === prepared.lost.hash
+              (prepared.lost && recovered.hash === prepared.lost.hash && recovered.stateHash === prepared.lost.stateHash
               ? prepared.folder ? " (it holds the other version)" : " (it holds the edits that were never durable)"
               : "") +
               ": " + JSON.stringify({ expected: pick(prepared.expected, differs), recovered: pick(recovered, differs) }),
@@ -124,7 +132,7 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           if (!/^(stroke-open|applied|durable)$/.test(point)) {
             const commit = point.startsWith("checkpoint-");
             const edited = await second.evaluate(
-              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder})`,
+              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder}, ${JSON.stringify(prepared.garbage ?? null)})`,
             );
             await end(second, method);
             second = await open();
