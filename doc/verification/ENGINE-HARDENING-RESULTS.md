@@ -7,7 +7,7 @@
 | A | 成功 | `0e6f491` | 下記 | [A](#a基準となる検証) |
 | B | 成功 | `1b5ed04` | 下記 | [B](#bcpu合成経路の削除) |
 | C | 成功 | 下記 | 下記 | [C](#c書き出しの契約) |
-| D | 実行中（1/7行） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
+| D | 実行中（3/7行。2行目は部分検証） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
 | E | 未着手 | | | |
 | F | 未着手 | | | |
 
@@ -103,7 +103,7 @@ PR #91の最初のCIで、新しい一致試験がSwiftShaderの描画の監視�
 |---|---|---|
 | 未確定ストローク、確定後・durable前、durable後 | 成功 | [下記](#d-1ストロークの3時点) |
 | ジャーナル追記中 | 部分検証 | [不完全な末尾と復旧後の追記](#d-2ジャーナルの不完全な末尾)。実際の書き込み命令中の強制終了は未検証 |
-| チェックポイント切替中 | 未着手 | |
+| チェックポイント切替中 | 成功（欠陥1件を修正） | [下記](#d-3チェックポイント切替中) |
 | `.altoproj` 保存のmanifest確定前後 | 未着手 | |
 | OPFSのGC削除中 | 未着手 | |
 | 版のマージ確定中 | 未着手 | |
@@ -158,3 +158,53 @@ opencode（deepseek-v4.1-flash-free）のレビューは11点を挙げた。直�
 | `sh scripts/check.sh wasm-fast` | 成功。SDKビルド・API検査・単体テスト54件成功。WASMハッシュは既存の release 基準と不一致（fastでは報告のみ） |
 | `ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`（Metal） | 120件成功。既存3条件と新規3条件、それぞれ2終了方法×10回 |
 | `ALTO_BROWSER_GPU=swiftshader ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash` | 120件成功。同じ3種類の不完全な末尾と復旧後の追記を含む |
+
+### D-3：チェックポイント切替中
+
+チェックポイントは、まだ記録にない物体を新しいpackに書いてflushし、その後に使っていない側のジャーナルファイル（`journal-a.bin` / `journal-b.bin`）を新しい世代で書き直す（`storage-core.ts` の `checkpoint` と `writeGeneration`）。この切り替えの3時点でタブを終了した。
+
+| 時点 | 止める場所 | 期待 |
+|---|---|---|
+| `checkpoint-pack` | packをflushした後、ジャーナルに書く前 | 前の世代と、その後に追記した記録 |
+| `checkpoint-journal` | 新しい世代のヘッダーと記録の前半をflushした後（壊れた世代） | 同上。壊れた世代は候補にしない |
+| `checkpoint-flushed` | 新しい世代を最後までflushした後。完了の通知は受け取らない | 新しい世代 |
+
+作る状態：durableな基準の状態から書き込みを止め、層名の変更（追記として止まる）、ストローク、版の確定（`versions.commit`）を行う。確定によるチェックポイントは、待っていた2件の追記（ストロークと確定）を置き換える。書き込みを再開すると層名の変更が追記され、その後チェックポイントが指定の時点で止まる。前2時点は「基準＋層名の変更」、`flushed` は「確定後」の状態になれば合格で、反対側の状態だった場合は失敗として報告する。復旧後には層名の変更と版の確定をdurableにし、もう一度タブを終了して、古いpackや壊れた世代が残っていても次の世代が復旧することを確かめた。
+
+待機点：`testing` 入口に `stopCheckpoint(stage)` と `checkpointStopped()` を足した。`partialAppend` と同じく、止めた後の書き込みは再開しない。本番の公開APIは変えていない。
+
+#### 見つかった欠陥：確定後に編集がないと、復旧が提示されない
+
+最初の実行で、3時点×2方法の6件が `no recovery journal is waiting` で失敗した。前2時点は1回目の復旧（前の世代）には成功し、2回目（復旧後の確定の後）で失敗した。
+
+原因：`inspect` が `available: !!active?.recordCount` としていて、最新の世代がチェックポイントだけで、その後の記録が0件だと `recovery.available` が `false` になる。チェックポイントは版の確定、版の整理、物体の取り込みでも書かれる。そのため、確定した後に編集しないままタブを閉じると、次のページは復旧を提示しない。[埋め込みの手順](../embedding.md#復旧)どおりなら `createDocument` が呼ばれ、ファイルに保存していない作業が失われる。強制終了だけでなく、`Target.closeTarget`（利用者がタブを閉じる操作）でも起きる。
+
+修正：
+
+- チェックポイントのメタデータ（形式3・4）に `dirty` を記録する。値は、作成・ファイルを開く・保存の後から文書が変わっているかどうか（WASMの `isDirty`。`dirty` と同じ比較）。
+- `available` は「最後のチェックポイントの後に記録がある」または「最新のチェックポイントが `dirty`」のとき `true`。保存直後・ファイルを開いた直後・空の新規文書は、これまでどおり `false`。`dirty` を持たない古いチェックポイントは、記録の有無だけで判定する（従来どおり）。
+- 復旧で文書を読み込むと、読み込んだ状態が「保存済み」の基準になり `dirty` が消えていた。`dirty` なチェックポイントから復旧したときは `markUnsaved` で未保存に戻す。これがないと、復旧後に確定したチェックポイントが `dirty: false` で書かれ、次の再読み込みで同じ欠陥が起きる。
+- 試験の比較に `dirty` を加えた（保存していない作業を、復旧後に保存済みとして示さないこと）。
+
+修正の2か所はそれぞれ必要なことを確かめた。`available` の判定を戻すと6件が `no recovery journal is waiting` で失敗する。`markUnsaved` を外すと6件が `dirty` の不一致で失敗する（`flushed` は1回目、前2時点は2回目の復旧）。
+
+`dirty` は記録の形式に追加したフィールドで、古い読み手は無視する。未リリースのため移行は不要（`RELEASING.md`）。
+
+#### 検証
+
+2026-11-10、`a32d9c1` を基準とする本変更。macOS 27.2 / Apple M5、Chrome 157.0.8103.39。
+
+| コマンド | 終了コード | 結果 |
+|---|---|---|
+| `sh scripts/check.sh native` | 0 | fmt・clippy成功。Rustテスト337件成功、失敗0 |
+| `sh scripts/check.sh wasm-fast` | 0 | WASM clippy、SDKのビルド・API検査成功。単体テスト54件成功。releaseハッシュは基準と不一致（fastでは報告のみ。基準値は更新していない） |
+| `ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`（Metal） | 0 | 180件成功（9時点×2方法×10回）。チェックポイントの3時点は1件376〜881 ms |
+| 同上、`ALTO_BROWSER_GPU=swiftshader` | 0 | 180件成功。チェックポイントの3時点は1件4.9〜5.5 s |
+| `node scripts/verify-browser.mjs --functional`（Metal） | 0 | 9群・305件成功（crash 18件を含む）。GPUプロセスのクラッシュ0件 |
+| 同上、`ALTO_BROWSER_GPU=swiftshader` | 0 | 9群・305件成功。GPUプロセスのクラッシュ0件 |
+
+各待機点で、2つの終わらせ方それぞれ10回連続で成功した。ブラウザ試験のWASMは `eb6fa4d9…`。CIは反復1回で、crashは18件になる。
+
+これは書き込みの間で止めて終了する試験で、OSやブラウザの書き込み命令の最中の中断、電源断、flushの順序保証は再現していない。生ログはローカルの `verification/out/d3-a32d9c1-wip/`。
+
+opencode（deepseek-v4.1-flash-free）のレビューは4点を挙げた。直したのは2点。`checkpointStopped()` は、止める設定を書き込みの開始時に消していたため、書き込みの途中で呼ぶと待たずに `CONFLICT` になる。止めた時点で消すようにした（試験専用の入口）。`flushed` で前の世代が復旧したときの失敗メッセージが「durableにならなかった編集」と誤って示すため、`flushed` では示さないようにした。修正後、`ALTO_CRASH_REPEAT=10` のMetalで180件、SwiftShaderの反復1回で18件、`check.sh wasm-fast` が成功した。ほかの2点は修正不要と判断した。`getSnapshot().dirty` は実行時の `dirty` そのもので、`markUnsaved` を外すと検出できることを上で確かめている。保存の後に編集があると古いチェックポイントの `dirty: true` が残るという指摘は、その場合は文書がもともと未保存なので誤りではない。

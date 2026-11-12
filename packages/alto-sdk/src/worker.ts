@@ -73,12 +73,14 @@ interface Candidate {
 }
 interface CandidateContents {
   base: Uint8Array;
-  metadata: { format: number; opaque: string[] } | null;
+  metadata: { format: number; opaque: string[]; dirty?: boolean } | null;
   records: Uint8Array[];
 }
 interface Write {
   kind: "append" | "checkpoint";
   bytes: Uint8Array;
+  /** A checkpoint of work not saved to a file: recovery offers it with no records. */
+  dirty?: boolean;
   seq?: number;
 }
 self.addEventListener("error", (e) => {
@@ -102,6 +104,11 @@ let partialAppend: "header" | "payload" | "crc" | null = null;
 let partialAppendDone = false;
 let partialAppendWaiters: (() => void)[] = [];
 let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
+// Test hook: the next checkpoint ends after its pack ("pack"), after a torn journal
+// write ("journal") or after a complete one whose reply is never taken ("flushed").
+let checkpointStop: "pack" | "journal" | "flushed" | null = null;
+let checkpointStopDone = false;
+let checkpointStopWaiters: (() => void)[] = [];
 // Test hook: while set, the next journal or checkpoint write waits here, still in
 // memory, so a test can end the tab between an edit applied and the edit durable.
 let storageHold: { released: Promise<void>; release(): void } | null = null;
@@ -410,15 +417,29 @@ function queueCheckpoint() {
   if (!journaling) return;
   journaledBytes = 0;
   journaledRecords = 0;
+  const dirty = runtime.isDirty();
   const bytes = runtime.checkpointParts();
   for (const w of writes) pendingBytes -= w.bytes.length;
   writes = writes.filter((w) => w.kind !== "append");
   for (const w of writes) pendingBytes += w.bytes.length;
-  enqueue({ kind: "checkpoint", bytes });
+  enqueue({ kind: "checkpoint", bytes, dirty });
 }
 async function write(w: Write) {
   if (w.kind === "checkpoint") {
-    await io("checkpoint", { entries: w.bytes.buffer as ArrayBuffer }, [w.bytes.buffer]);
+    // The stop stays armed while the write runs, so checkpointStopped() waits for it.
+    const stop = checkpointStop;
+    await io(
+      "checkpoint",
+      { entries: w.bytes.buffer as ArrayBuffer, dirty: !!w.dirty, ...(stop && stop !== "flushed" ? { stop } : {}) },
+      [w.bytes.buffer],
+    );
+    if (stop) {
+      checkpointStop = null;
+      checkpointStopDone = true;
+      for (const resolve of checkpointStopWaiters.splice(0)) resolve();
+      // Like a partial append, this ends the session's writes for good.
+      await new Promise<void>(() => {});
+    }
     return;
   }
   if (injectedStorageFault === "beforeAppend") {
@@ -918,8 +939,8 @@ async function execute(m: Queued): Promise<unknown> {
     }
     case "recover": {
       if (!journaling) throw Error("NOT_FOUND: the engine keeps no recovery journal");
-      // An automatic restart may restore a checkpoint with no edits after it;
-      // inspect().available is false for that store, but the checkpoint is valid.
+      // An automatic restart may restore a checkpoint with no edits after it, saved
+      // or not; inspect().available is false for a saved one, but it is valid.
       if (documentEpoch !== 0) throw Error("CONFLICT: no-recovery: a document is already open");
       await writesIdle();
       const candidates = await io<Candidate[]>("loadCandidates");
@@ -943,6 +964,7 @@ async function execute(m: Queued): Promise<unknown> {
             runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
           else runtime.openPackage(full.base);
           runtime.replayRecords(frameRecords(full.records));
+          if (full.metadata?.dirty) runtime.markUnsaved();
           recovery = candidate;
           break;
         } catch (error) {
@@ -1016,6 +1038,17 @@ async function execute(m: Queued): Promise<unknown> {
       if (partialAppendDone) return true;
       if (!partialAppend) throw Error("CONFLICT: no partial append is armed");
       return new Promise<true>((resolve) => partialAppendWaiters.push(() => resolve(true)));
+    case "stopCheckpoint":
+      if (m.stage !== "pack" && m.stage !== "journal" && m.stage !== "flushed")
+        throw Error("INVALID_ARGUMENT: checkpoint stop stage");
+      if (!storageHold) throw Error("CONFLICT: storage must be held first");
+      checkpointStop = m.stage;
+      checkpointStopDone = false;
+      return true;
+    case "checkpointStopped":
+      if (checkpointStopDone) return true;
+      if (!checkpointStop) throw Error("CONFLICT: no checkpoint stop is armed");
+      return new Promise<true>((resolve) => checkpointStopWaiters.push(() => resolve(true)));
     case "holdStorage":
       if (m.hold) {
         if (!storageHold) {

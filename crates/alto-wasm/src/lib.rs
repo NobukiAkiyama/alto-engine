@@ -1132,6 +1132,18 @@ impl Runtime {
         self.saved = hash.parse().map_err(error)?;
         self.view()
     }
+    /// Whether the document differs from what was last created, opened or saved.
+    /// Recovery checkpoints record it, so work never saved stays recoverable.
+    #[wasm_bindgen(js_name=isDirty)]
+    pub fn is_dirty(&self) -> Result<bool, JsValue> {
+        Ok(self.state_hash()? != self.saved)
+    }
+    /// Recovery restored a checkpoint of unsaved work: loading it counted as opening,
+    /// so the document would look saved. It stays dirty until saved.
+    #[wasm_bindgen(js_name=markUnsaved)]
+    pub fn mark_unsaved(&mut self) {
+        self.saved = ContentHash([0; 32]);
+    }
     #[wasm_bindgen(js_name=destroyGpu)]
     pub fn destroy_gpu(&self) {
         self.renderer.destroy_device();
