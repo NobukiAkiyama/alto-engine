@@ -155,6 +155,41 @@ async function stroke(doc, layer, seed, color) {
   await tool.end();
 }
 
+/**
+ * Two branches that both draw on the layer since "base": "side" also renames it, main
+ * draws in another colour. Merging "side" into main conflicts; every conflict takes
+ * "theirs". Returns the plan's commits and the state before the merge.
+ */
+async function branches(doc, layer, seed) {
+  await doc.versions.commit("work " + seed);
+  await doc.versions.createBranch("side", { checkout: true });
+  await stroke(doc, layer, seed + 11, [0.1, 0.9, 0.9, 1]);
+  await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "side " + seed }));
+  const side = (await doc.versions.commit("side " + seed)).hash;
+  await doc.versions.checkout("main");
+  await stroke(doc, layer, seed + 12, [0.9, 0.5, 0.1, 1]);
+  const main = (await doc.versions.commit("main " + seed)).hash;
+  return { side, main };
+}
+async function merge(doc) {
+  const plan = await doc.versions.prepareMerge("side");
+  assert(plan.kind === "three_way", "the merge is not three-way: " + plan.kind);
+  return { plan, finish: () => doc.versions.finishMerge(plan.token, plan.conflicts.map((c) => ({ conflict_id: c.id, choice: "theirs" })), { message: "merge side" }) };
+}
+/** The merge state checks: the version status and every commit's content. */
+async function mergeState(doc, layer, wait = true) {
+  const out = { ...(await state(doc, layer)), status: JSON.stringify(doc.versions.status()), roots: await roots(doc, layer) };
+  // The restores and their Undos are journaled too: a crash must not land between them.
+  // While writes are held they stay queued behind the merge instead.
+  if (wait) await doc.durable();
+  return out;
+}
+/** True once main's head is the two-parent merge of `side`. */
+async function merged(doc, sides) {
+  const head = (await doc.versions.log())[0];
+  return head.parents.length === 2 && head.parents[0] === sides.main && head.parents[1] === sides.side;
+}
+
 window.altoCrash = {
   /**
    * Builds a document with tiles and a version, makes it durable, then goes to `point`:
@@ -167,6 +202,9 @@ window.altoCrash = {
    *   lands, then the checkpoint ends after its pack ("pack"), after a torn journal
    *   ("journal") or after a flushed journal whose reply is never taken ("flushed").
    * - "folder-*": a `.altoproj` save stops around its manifest replacement.
+   * - "merge-*": a conflicting three-way merge is prepared but not finished
+   *   ("prepared"), finished with its journal write held ("applied") or torn ("torn"),
+   *   or finished and durable ("durable").
    * - "gc-*": a GC over a saved folder stops before or during its manifest replacement,
    *   after its first deletion, or before its complete marker.
    * Returns the state recovery must give back.
@@ -241,6 +279,36 @@ window.altoCrash = {
       assert(adopted !== before.stateHash, "adopting the GC did not move the state hash");
       return { layer, folder: name, expected: { ...before, stateHash: adopted }, lost: before, garbage };
     }
+    if (point.startsWith("merge-")) {
+      // A three-way merge with conflicts, ended before, while or after it is durable.
+      const t = testing(engine);
+      const sides = await branches(doc, layer, seed);
+      await doc.durable();
+      const before = await mergeState(doc, layer);
+      const { plan, finish } = await merge(doc);
+      assert(plan.conflicts.length > 0, "the merge has no conflicts");
+      if (point === "merge-prepared") return { layer, expected: before, merge: sides };
+      if (point !== "merge-durable") await t.holdStorage(true);
+      const generation = (await t.recoveryStore()).latestGeneration;
+      const result = await finish();
+      assert(result.kind === "committed" && await merged(doc, sides), "the merge did not commit two parents");
+      const after = await mergeState(doc, layer, point === "merge-durable");
+      assert(after.hash !== before.hash && after.log !== before.log, "the merge did not change the document and history");
+      if (point === "merge-durable") {
+        await doc.durable();
+        // A merge is journaled, not checkpointed: recovery replays its record.
+        assert((await t.recoveryStore()).latestGeneration === generation, "a checkpoint replaced the merge record");
+        return { layer, expected: after, merge: sides };
+      }
+      const kind = await t.storageHeld();
+      assert(kind === "append", "the held write is a " + kind);
+      if (point === "merge-torn") {
+        await t.partialAppend("payload");
+        await t.holdStorage(false);
+        await t.partialAppendHeld();
+      }
+      return { layer, expected: before, lost: after, merge: sides };
+    }
     if (point.startsWith("checkpoint-")) {
       const stage = point.slice("checkpoint-".length);
       const t = testing(engine);
@@ -287,7 +355,7 @@ window.altoCrash = {
    * Opens the namespace again after the crash and restores its journal. With `folder`,
    * opens that folder instead, in an engine that keeps no journal.
    */
-  async recover(namespace, layer, folder = null, gc = false) {
+  async recover(namespace, layer, folder = null, gc = false, merging = false) {
     if (folder) {
       await start(namespace, { recovery: false });
       openedFolder = await OpfsFolderProvider.open(await folderHandle(folder, false));
@@ -298,15 +366,27 @@ window.altoCrash = {
     await start(namespace);
     assert(engine.recovery.available, "no recovery journal is waiting");
     const doc = await engine.recovery.restore();
-    return state(doc, layer);
+    return merging ? mergeState(doc, layer) : state(doc, layer);
   },
   /**
    * A durable edit after recovery; with `commit`, also a checkpoint over the old files.
    * With `garbage`, a GC over the reopened folder instead, which must remove it all.
    */
-  async editAfterRecovery(layer, commit = false, folder = null, garbage = null) {
+  async editAfterRecovery(layer, commit = false, folder = null, garbage = null, sides = null) {
     const doc = engine.document;
     assert(doc, "document is not open");
+    if (sides) {
+      // Merge again if the crash lost it, else draw and commit on top of the merge.
+      if (!(await merged(doc, sides))) {
+        const result = await (await merge(doc)).finish();
+        assert(result.kind === "committed" && await merged(doc, sides), "the merge after recovery did not commit two parents");
+      } else {
+        await stroke(doc, layer, 99, [0.3, 0.3, 0.3, 1]);
+        await doc.versions.commit("after recovery");
+      }
+      await doc.durable();
+      return mergeState(doc, layer);
+    }
     if (folder && garbage) {
       // GC again over what the stopped one left; it must finish and remove the rest.
       const preview = await doc.versions.gc();
