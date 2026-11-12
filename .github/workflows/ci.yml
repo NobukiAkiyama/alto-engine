@@ -146,9 +146,9 @@ jobs:
         with:
           cache-targets: "true"
           cache-bin: "false"
-          shared-key: native
-          # rust-cache does not hash CARGO_PROFILE_* settings; name the test opt-level.
-          key: test-opt2
+          # rust-cache does not hash CARGO_PROFILE_* settings (and ignores `key`
+          # next to shared-key), so the name carries the test opt-level.
+          shared-key: native-test-opt2
       - name: Host rustfmt, tests, and clippy
         env:
           ALTO_ALPHA_MEASURE_OUT: ${{ runner.temp }}/alto-alpha-measure
