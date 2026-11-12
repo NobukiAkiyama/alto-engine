@@ -3,7 +3,7 @@
 // side is tests/e2e/crash-page.html. A tab is ended two ways: `Page.crash` kills the
 // renderer without unload, and `Target.closeTarget` closes the tab as a user would.
 //
-// Wait points (plan D, rows 1-5):
+// Wait points (plan D, rows 1-6):
 // - stroke-open: a stroke has drawn but not ended. Recovery gives the last durable state.
 // - applied:     edits are applied and their journal write is held in memory.
 //                Recovery gives the last durable state, not the applied one.
@@ -26,6 +26,12 @@
 //                gives the same document, and every commit restores to the same
 //                snapshot and tiles. A second GC must finish and leave no garbage; a
 //                second crash checks the folder it left.
+// - merge-*:     a three-way merge with conflicts is prepared and not finished,
+//                finished with its journal write held or torn, or finished and
+//                durable. Recovery gives the state before the merge for the first
+//                three and the merge for the last, compared with the version status
+//                (refs, head) and every commit's content too. The second round merges
+//                again or commits on top of the merge, then a second crash checks it.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
@@ -34,6 +40,7 @@ const POINTS = [
   "checkpoint-pack", "checkpoint-journal", "checkpoint-flushed",
   "folder-before", "folder-mid", "folder-after",
   "gc-before", "gc-mid", "gc-delete", "gc-complete",
+  "merge-prepared", "merge-applied", "merge-torn", "merge-durable",
 ];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,7 +106,9 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
     }
   }
 
-  for (const point of POINTS)
+  // ALTO_CRASH_ONLY=<regex> runs only the matching points, for investigating one.
+  const only = typeof process !== "undefined" && process.env.ALTO_CRASH_ONLY ? new RegExp(process.env.ALTO_CRASH_ONLY) : null;
+  for (const point of POINTS.filter((p) => !only || only.test(p)))
     for (const method of METHODS)
       for (let i = 0; i < repeat; i++) {
         const name = `${point} / ${method} #${i + 1}`;
@@ -117,8 +126,9 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           second = await open();
           const folder = JSON.stringify(prepared.folder ?? null);
           const gc = point.startsWith("gc-");
+          const merging = point.startsWith("merge-");
           const recover = () =>
-            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder}, ${gc})`;
+            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder}, ${gc}, ${merging})`;
           const recovered = await second.evaluate(recover());
           const differs = Object.keys(prepared.expected).filter((key) => recovered[key] !== prepared.expected[key]);
           if (differs.length)
@@ -132,7 +142,7 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           if (!/^(stroke-open|applied|durable)$/.test(point)) {
             const commit = point.startsWith("checkpoint-");
             const edited = await second.evaluate(
-              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder}, ${JSON.stringify(prepared.garbage ?? null)})`,
+              `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder}, ${JSON.stringify(prepared.garbage ?? null)}, ${JSON.stringify(prepared.merge ?? null)})`,
             );
             await end(second, method);
             second = await open();
