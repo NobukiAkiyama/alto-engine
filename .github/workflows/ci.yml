@@ -116,12 +116,13 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           code=true
-          # The files API lists at most 3000 files; a longer list counts as code.
+          # The files API lists at most 3000 files (a rename adds its old name as
+          # a second line); a list that long counts as code.
           if [ "$GITHUB_EVENT_NAME" = pull_request ] &&
             files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
               --jq '.[] | .filename, (.previous_filename // empty)') &&
-            [ -n "$files" ] && [ "$(printf '%s\n' "$files" | wc -l)" -lt 3000 ] &&
-            ! printf '%s\n' "$files" | grep -qvE '^(doc/.*|README\.md|RELEASING\.md|THIRD-PARTY-NOTICES\.md)$'
+            [ -n "$files" ] && [ "$(wc -l <<< "$files")" -lt 3000 ] &&
+            ! grep -qvE '^(doc/.*|README\.md|RELEASING\.md|THIRD-PARTY-NOTICES\.md)$' <<< "$files"
           then
             code=false
           fi
