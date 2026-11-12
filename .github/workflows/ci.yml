@@ -297,9 +297,10 @@ jobs:
           retention-days: 3
 
   # The browser suites in balanced groups on the shared build. Every suite runs
-  # in exactly one group (CI seconds, 2026-11 macos-15: embed 443, crash 397,
-  # vector 350, parity 226, functional 186, m6 150, m5 145, image-versions 62,
-  # m7 58, examples 33, m8 6). Each verify-browser run starts its own Chrome and
+  # in exactly one group (CI seconds with all four groups running, 2026-11
+  # macos-15: embed 447, crash 424, parity 273, vector 262, functional 193,
+  # m6 162, m5 121, image-versions 76, m7 60, examples 37, m8 7). The crash
+  # group has room for the crash suite to grow. Each verify-browser run starts its own Chrome and
   # keeps its own GPU-process-crash scan; a failure in any group fails CI. Five
   # macOS jobs run at once per account, so more groups would only queue.
   wasm-browser:
@@ -317,10 +318,10 @@ jobs:
             suites: m7,embed
             examples: true
           - group: parity
-            suites: functional,m6,parity
+            suites: image-versions,functional,parity
             parity: true
           - group: vector
-            suites: image-versions,m5
+            suites: m5,m6
             vector: true
     name: wasm-browser (${{ matrix.group }})
     env:
