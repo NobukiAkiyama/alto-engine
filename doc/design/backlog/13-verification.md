@@ -94,7 +94,7 @@
 - [ ] CI の機能検証に組み込み、10 回の連続実行で安定を確認。
 - [ ] 結果を記録、PR。
 
-進行中：「版のマージ確定中」は計画の後・確定後の保留・記録の途中・durable後の4時点で完了（[D-6](../../verification/ENGINE-HARDENING-RESULTS.md#d-6版のマージ確定中)）。「OPFSのGC削除中」はmanifest確定の前・書き込み途中・1件目の削除後・完了の記録の前の4時点で完了（[D-5](../../verification/ENGINE-HARDENING-RESULTS.md#d-5opfsのgc削除中)）。「`.altoproj` の保存中」はmanifest確定の前・書き込み途中・後の3時点で完了（[D-4](../../verification/ENGINE-HARDENING-RESULTS.md#d-4altoproj-保存のmanifest確定前後)）。「チェックポイント書き込み中」は3時点（pack書き込み後、ジャーナル書き込み途中、ジャーナル確定後）で完了し、版の確定後に編集がないと復旧が提示されない欠陥を直した（[D-3](../../verification/ENGINE-HARDENING-RESULTS.md#d-3チェックポイント切替中)）。「ストローク中」を3時点に分けた行は完了（[ENGINE-HARDENING-RESULTS](../../verification/ENGINE-HARDENING-RESULTS.md#d-1ストロークの3時点)）。残りの行は計画の段階Dで1行ずつ進める。
+進行中：「Worker停止、GPU喪失」はエンジンWorkerの例外・panic・再起動の失敗、Storage Worker・デコード用Workerの例外、ストローク中・書き込み保留中のGPU喪失の7時点で完了し、欠陥4件（panic後の応答停止、Storage Worker・デコード用Workerの例外でのエンジン全体の再起動、GPU喪失時のストロークが `INTERNAL` で終わる）を直した（[D-7](../../verification/ENGINE-HARDENING-RESULTS.md#d-7worker停止gpu喪失)）。「版のマージ確定中」は計画の後・確定後の保留・記録の途中・durable後の4時点で完了（[D-6](../../verification/ENGINE-HARDENING-RESULTS.md#d-6版のマージ確定中)）。「OPFSのGC削除中」はmanifest確定の前・書き込み途中・1件目の削除後・完了の記録の前の4時点で完了（[D-5](../../verification/ENGINE-HARDENING-RESULTS.md#d-5opfsのgc削除中)）。「`.altoproj` の保存中」はmanifest確定の前・書き込み途中・後の3時点で完了（[D-4](../../verification/ENGINE-HARDENING-RESULTS.md#d-4altoproj-保存のmanifest確定前後)）。「チェックポイント書き込み中」は3時点（pack書き込み後、ジャーナル書き込み途中、ジャーナル確定後）で完了し、版の確定後に編集がないと復旧が提示されない欠陥を直した（[D-3](../../verification/ENGINE-HARDENING-RESULTS.md#d-3チェックポイント切替中)）。「ストローク中」を3時点に分けた行は完了（[ENGINE-HARDENING-RESULTS](../../verification/ENGINE-HARDENING-RESULTS.md#d-1ストロークの3時点)）。残りの行は計画の段階Dで1行ずつ進める。
 
 ### Task QA-2: ブラウザの分離
 

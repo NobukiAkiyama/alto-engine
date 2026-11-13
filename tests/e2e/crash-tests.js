@@ -3,7 +3,7 @@
 // side is tests/e2e/crash-page.html. A tab is ended two ways: `Page.crash` kills the
 // renderer without unload, and `Target.closeTarget` closes the tab as a user would.
 //
-// Wait points (plan D, rows 1-6):
+// Wait points (plan D, rows 1-7):
 // - stroke-open: a stroke has drawn but not ended. Recovery gives the last durable state.
 // - applied:     edits are applied and their journal write is held in memory.
 //                Recovery gives the last durable state, not the applied one.
@@ -32,6 +32,16 @@
 //                three and the merge for the last, compared with the version status
 //                (refs, head) and every commit's content too. The second round merges
 //                again or commits on top of the merge, then a second crash checks it.
+// - worker-*, storage-*, gpu-*: with durable work and an applied edit whose journal
+//                write is held, the engine Worker throws an uncaught error (from CDP,
+//                inside the Worker) or panics in Rust, or its restart cannot load; or
+//                the Storage Worker throws; or the GPU device is lost under an open
+//                stroke or while the write is held. The same tab must report the status
+//                the contract gives (restarting then ready, storage-failed, failed),
+//                reject the waits the fault cut, keep the durable work, take a durable
+//                edit and see no GPU loss it did not inject; then the tab is ended.
+// - decode-error: a decode Worker throws. Its pool stops and decoding goes inline; the
+//                engine must not restart or change status, and the document is kept.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
 // version log. Restoring without error is not a pass.
 
@@ -41,6 +51,7 @@ const POINTS = [
   "folder-before", "folder-mid", "folder-after",
   "gc-before", "gc-mid", "gc-delete", "gc-complete",
   "merge-prepared", "merge-applied", "merge-torn", "merge-durable",
+  "worker-error", "worker-panic", "worker-failed", "storage-error", "decode-error", "gpu-stroke", "gpu-held",
 ];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,11 +73,23 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
     const targetId = result.targetId;
     let crashed = null;
     const crashedNow = new Promise((resolve) => (crashed = resolve));
-    const page = await connect(`${wsOrigin}/devtools/page/${targetId}`, (message) => {
+    // Workers attach to the page's session, nested ones to their parent's: session -> URL.
+    const workers = new Map();
+    let page = null;
+    const autoAttach = (sessionId) =>
+      page.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, 5000, sessionId);
+    page = await connect(`${wsOrigin}/devtools/page/${targetId}`, (message) => {
       if (message.method === "Inspector.targetCrashed") crashed();
+      if (message.method === "Target.attachedToTarget") {
+        const { sessionId, targetInfo } = message.params;
+        workers.set(sessionId, targetInfo.url);
+        autoAttach(sessionId).catch(() => {});
+      }
+      if (message.method === "Target.detachedFromTarget") workers.delete(message.params.sessionId);
     });
     await page.send("Inspector.enable", {}, 5000);
     await page.send("Runtime.enable", {}, 5000);
+    await autoAttach();
     const evaluate = async (expression, timeoutMs = 120000) => {
       const message = await page.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
       const details = message.result?.exceptionDetails;
@@ -78,7 +101,20 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
       if (i === 200) throw Error("the crash fixture did not load");
       await sleep(50);
     }
-    return { targetId, page, evaluate, crashedNow };
+    /** Throws an uncaught error inside the engine Worker or the Storage Worker. */
+    const inject = async (kind) => {
+      const file = { engine: /\/worker\.js$/, storage: /\/storage-worker\.js$/, decode: /\/decode-worker\.js$/ }[kind];
+      for (let i = 0; ; i++) {
+        const session = [...workers].find(([, url]) => file.test(url))?.[0];
+        if (session) {
+          await page.send("Runtime.evaluate", { expression: "setTimeout(() => { throw Error('injected Worker error'); }); true" }, 5000, session);
+          return;
+        }
+        if (i === 200) throw Error(`no ${kind} Worker attached: ` + [...workers.values()].join(", "));
+        await sleep(25);
+      }
+    };
+    return { targetId, page, evaluate, crashedNow, inject };
   }
   async function close(tab) {
     tab.page.close();
@@ -121,6 +157,10 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           prepared = await first.evaluate(
             `window.altoCrash.prepare(${JSON.stringify(point)}, ${JSON.stringify(namespace)}, ${i + 1})`,
           );
+          if (prepared.inject) {
+            await first.inject(prepared.inject);
+            prepared = { ...prepared, ...(await first.evaluate("window.altoCrash.afterFault()")) };
+          }
           await end(first, method);
           first = null;
           second = await open();

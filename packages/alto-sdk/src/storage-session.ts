@@ -129,7 +129,11 @@ export function createStorageSession({
   try {
     worker = createWorker();
     worker.onmessage = (event) => onMessage(event.data);
-    worker.onerror = () => {
+    worker.onerror = (event) => {
+      // Handled here: unhandled, the error would also reach the engine Worker's own
+      // scope and then the page, which would restart the engine instead of reporting
+      // the storage failure and keeping the live document for an emergency export.
+      event.preventDefault();
       if (mode === "running") failRunning("storage worker failed");
       else void failStart("storage worker failed to start");
     };

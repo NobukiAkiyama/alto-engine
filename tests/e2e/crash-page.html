@@ -9,6 +9,7 @@
 // tab and calls `recover` in a new tab of the same origin, so the same OPFS store.
 import { createEngine, deleteRecovery, OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
+import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 
 const assert = (v, m) => { if (!v) throw Error(m); };
 let engine = null;
@@ -190,6 +191,42 @@ async function merged(doc, sides) {
   return head.parents.length === 2 && head.parents[0] === sides.main && head.parents[1] === sides.side;
 }
 
+
+/** Status changes, GPU events and diagnostics from now on, and the GPU losses this test caused. */
+function watch() {
+  const seen = { states: [], gpu: [], diagnostics: [], injected: 0 };
+  engine.on("status", (s) => seen.states.push(s.state + (s.error ? ":" + s.error.code : "")));
+  unstable(engine).onGpu((g) => seen.gpu.push(g));
+  unstable(engine).onDiagnostic((d) => seen.diagnostics.push(String(d.message ?? "")));
+  return seen;
+}
+const settled = (p) => p.then((value) => ({ ok: true, value }), (e) => ({ ok: false, code: e?.code, message: String(e?.message || e) }));
+async function until(test, ms, what) {
+  const t0 = performance.now();
+  while (!test()) {
+    if (performance.now() - t0 > ms) throw Error("timed out waiting for " + what);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+const same = (a, b) => Object.keys(b).every((key) => a[key] === b[key]);
+function differs(a, b) {
+  return Object.keys(b).filter((key) => a[key] !== b[key]).join(", ");
+}
+/** A GPU loss nobody injected fails the test even when the engine recovered from it. */
+function noUnexpectedLoss(seen) {
+  const lost = seen.gpu.filter((g) => g === "lost").length;
+  assert(lost === seen.injected, `${lost} GPU losses, ${seen.injected} injected: ${seen.gpu.join(", ")}`);
+}
+/** A stroke and a rename on top of the recovered state, then durable. */
+async function editAfterFault(doc, layer, seed) {
+  await stroke(doc, layer, seed + 7, [0.1, 0.7, 0.3, 1]);
+  await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "after fault " + seed }));
+  await doc.durable();
+  return state(doc, layer);
+}
+// What a "worker-*", "storage-*" or "decode-*" point left for `afterFault`, after the runner's fault.
+let faulting = null;
+
 window.altoCrash = {
   /**
    * Builds a document with tiles and a version, makes it durable, then goes to `point`:
@@ -207,6 +244,11 @@ window.altoCrash = {
    *   or finished and durable ("durable").
    * - "gc-*": a GC over a saved folder stops before or during its manifest replacement,
    *   after its first deletion, or before its complete marker.
+   * - "worker-*", "storage-error", "decode-error", "gpu-*": with an applied edit whose
+   *   journal write is held, the engine Worker throws (the runner does it, then calls
+   *   `afterFault`), panics, or cannot load on restart; the Storage Worker or a decode
+   *   Worker throws; or the GPU is lost under an open stroke or the held write. Checks
+   *   the status and rejections the contract gives in the same tab, then a durable edit.
    * Returns the state recovery must give back.
    */
   async prepare(point, namespace, seed) {
@@ -332,6 +374,76 @@ window.altoCrash = {
         ? { layer, expected: committed }
         : { layer, expected: renamed, lost: committed };
     }
+    if (/^(worker|storage|decode|gpu)-/.test(point)) {
+      const t = testing(engine);
+      const seen = watch();
+      if (point === "gpu-stroke") {
+        // The device is lost under an open stroke: the stroke ends with GPU_LOST, the
+        // document keeps what it had, and drawing works on the rebuilt device.
+        const tool = doc.tools.begin("brush", { layer, color: [0.2, 0.8, 0.2, 1], tip: { size: 30 } });
+        for (const s of samples(seed + 2)) tool.input(s);
+        await tool.flush();
+        assert(tool.active, "the stroke ended early");
+        seen.injected++;
+        await t.destroyGpu();
+        const ended = await settled(tool.end());
+        assert(!ended.ok && ended.code === "GPU_LOST", "the cut stroke ended with " + JSON.stringify(ended));
+        await until(() => seen.gpu.includes("restored"), 15000, "the GPU to be restored");
+        const now = await state(doc, layer);
+        assert(same(now, base), "the cut stroke changed the document in " + differs(now, base));
+        const expected = await editAfterFault(doc, layer, seed);
+        noUnexpectedLoss(seen);
+        return { layer, expected };
+      }
+      if (point === "decode-error") {
+        // A decode Worker throws: the pool stops and decoding goes inline. The engine
+        // Worker keeps running, so nothing restarts and no edit is lost.
+        faulting = { point, doc, layer, seed, seen, base };
+        return { layer, inject: "decode" };
+      }
+      // An applied edit whose journal write is held: never durable.
+      await t.holdStorage(true);
+      await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
+      await doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "renamed " + seed }));
+      const after = await state(doc, layer);
+      assert((await t.storageHeld()) === "append", "no journal write is held");
+      if (point === "gpu-held") {
+        // A device loss does not touch the journal: the held edit lands once released.
+        seen.injected++;
+        await t.destroyGpu();
+        await until(() => seen.gpu.includes("restored"), 15000, "the GPU to be restored");
+        const now = await state(doc, layer);
+        assert(same(now, after), "the GPU loss changed the document in " + differs(now, after));
+        await t.holdStorage(false);
+        await doc.durable();
+        noUnexpectedLoss(seen);
+        return { layer, expected: await editAfterFault(doc, layer, seed) };
+      }
+      const held = settled(doc.durable());
+      faulting = { point, doc, layer, seed, seen, base, after, held };
+      if (point === "worker-panic") {
+        const panicked = await settled(t.panic());
+        assert(!panicked.ok && panicked.code === "WORKER_CRASHED", "the panicking request ended with " + JSON.stringify(panicked));
+        return { layer, ...(await window.altoCrash.afterFault()) };
+      }
+      if (point === "worker-failed") {
+        // The restarted Worker cannot load: the engine fails, refuses edits, and the tab
+        // ends in that state. The new tab recovers the journal.
+        t.setWorkerURL("/missing-alto-engine-worker.js");
+        const restarted = await settled(t.crash());
+        t.setWorkerURL(null);
+        assert(!restarted.ok && restarted.code === "WORKER_UNAVAILABLE", "the failed restart ended with " + JSON.stringify(restarted));
+        assert(engine.status.state === "failed" && engine.status.error, "the engine is " + engine.status.state);
+        const refused = await settled(doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "refused" })));
+        assert(!refused.ok && refused.code === "WORKER_UNAVAILABLE", "an edit while failed ended with " + JSON.stringify(refused));
+        const durable = await held;
+        assert(!durable.ok, "durable() resolved for a write the Worker never made");
+        noUnexpectedLoss(seen);
+        return { layer, expected: base, lost: after };
+      }
+      // "worker-error", "storage-error": the runner throws inside the Worker, then calls afterFault.
+      return { layer, inject: point === "storage-error" ? "storage" : "engine" };
+    }
     const journal = point.startsWith("journal-");
     if (point === "applied" || journal) await testing(engine).holdStorage(true);
     await stroke(doc, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
@@ -350,6 +462,56 @@ window.altoCrash = {
     }
     await doc.durable();
     return { layer, expected: after };
+  },
+  /**
+   * After an uncaught error in the engine Worker (or a panic), the Storage Worker or a
+   * decode Worker: checks the status sequence and what the document holds, then makes
+   * a durable edit.
+   */
+  async afterFault() {
+    const { point, doc, layer, seed, seen, base, after, held } = faulting;
+    faulting = null;
+    if (point === "decode-error") {
+      await until(() => seen.diagnostics.some((m) => m.startsWith("decode workers stopped")), 15000, "the decode pool to stop");
+      // Any restart the error caused would have begun by the time its diagnostic arrived.
+      await unstable(engine).settle();
+      assert(!seen.states.length, "a decode Worker error changed the engine status: " + seen.states.join(", "));
+      const now = await state(doc, layer);
+      assert(same(now, base), "the document differs in " + differs(now, base));
+      const expected = await editAfterFault(doc, layer, seed);
+      noUnexpectedLoss(seen);
+      return { expected };
+    }
+    if (point === "storage-error") {
+      await until(() => engine.status.state === "storage-failed", 15000, "storage-failed");
+      assert(engine.status.error?.code === "STORAGE", "storage failed with " + engine.status.error?.code);
+      // It stays failed: the engine does not restart on its own and drop the live document.
+      await unstable(engine).settle();
+      assert(seen.states.join() === "storage-failed:STORAGE", "the storage failure went through " + seen.states.join(", "));
+      // The failure rejects every durable() waiting, the held write's included.
+      const durable = await held;
+      assert(!durable.ok, "durable() resolved after the Storage Worker died");
+      const refused = await settled(doc.transact("layer.props", (tx) => tx.setProps(layer, { name: "refused" })));
+      assert(!refused.ok && refused.code === "STORAGE", "an edit after the storage failure ended with " + JSON.stringify(refused));
+      // The live document is still there to export.
+      const emergency = await engine.recovery.exportEmergency();
+      assert(emergency.size > 0, "the emergency export is empty");
+      const report = await engine.recovery.recoverAfterStorageFailure();
+      assert(report.document === doc && report.matchesDisplay === false, "recovery reported " + JSON.stringify({ same: report.document === doc, matches: report.matchesDisplay }));
+    } else {
+      await until(() => engine.status.state === "ready" && seen.states.includes("restarting"), 30000, "the Worker restart");
+      const durable = await held;
+      assert(!durable.ok && durable.code === "WORKER_CRASHED", "durable() across the crash ended with " + JSON.stringify(durable));
+      assert(engine.document === doc, "the restart replaced the document handle");
+    }
+    assert(engine.status.state === "ready" && !engine.status.error, "the engine is " + engine.status.state);
+    const last = seen.states.at(-1);
+    assert(last === "ready", "the last status is " + last + " of " + seen.states.join(", "));
+    const now = await state(doc, layer);
+    assert(same(now, base), "recovery in the same tab differs in " + differs(now, base));
+    const expected = await editAfterFault(doc, layer, seed);
+    noUnexpectedLoss(seen);
+    return { expected, lost: after };
   },
   /**
    * Opens the namespace again after the crash and restores its journal. With `folder`,

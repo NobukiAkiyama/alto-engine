@@ -1148,6 +1148,11 @@ impl Runtime {
     pub fn destroy_gpu(&self) {
         self.renderer.destroy_device();
     }
+    /// Test hook: panics while the Runtime is borrowed, as a defect in an edit would.
+    #[wasm_bindgen(js_name=testPanic)]
+    pub fn test_panic(&mut self) {
+        panic!("injected panic");
+    }
     #[wasm_bindgen(js_name=recoverGpu)]
     pub async fn recover_gpu(&mut self) -> Result<String, JsValue> {
         self.cancel_brush();
