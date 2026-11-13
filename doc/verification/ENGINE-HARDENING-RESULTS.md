@@ -7,7 +7,7 @@
 | A | 成功 | `0e6f491` | 下記 | [A](#a基準となる検証) |
 | B | 成功 | `1b5ed04` | 下記 | [B](#bcpu合成経路の削除) |
 | C | 成功 | 下記 | 下記 | [C](#c書き出しの契約) |
-| D | 実行中（6/7行。2行目は部分検証） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
+| D | 成功（7/7行。2行目は部分検証） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
 | E | 未着手 | | | |
 | F | 未着手 | | | |
 
@@ -107,7 +107,7 @@ PR #91の最初のCIで、新しい一致試験がSwiftShaderの描画の監視�
 | `.altoproj` 保存のmanifest確定前後 | 成功 | [下記](#d-4altoproj-保存のmanifest確定前後) |
 | OPFSのGC削除中 | 成功 | [下記](#d-5opfsのgc削除中) |
 | 版のマージ確定中 | 成功 | [下記](#d-6版のマージ確定中) |
-| Worker停止、GPU喪失 | 未着手 | |
+| Worker停止、GPU喪失 | 成功（欠陥4件を修正） | [下記](#d-7worker停止gpu喪失)。実機のGPU喪失と、例外を出さないWorkerの終了は未検証 |
 
 ### D-1：ストロークの3時点
 
@@ -318,3 +318,67 @@ opencode（deepseek-v4.1-flash-free）のレビューは4点を挙げた。直�
 対象はジャーナルからの復旧だけ。マージした文書を `.altoproj` へ保存している途中の中断はD-4の範囲で、マージした版で個別には試していない。競合の解決は "theirs" だけで、"ours" と明示値は試していない。生ログはローカルの `verification/out/d6-b9f0363-wip/`。
 
 opencode（deepseek-v4.1-flash-free）のレビューは2点を挙げたが、どちらも誤りと判断した。`versions.status()` は同期関数なので、`await` しなくても中身が比べられている（失敗時の出力に中身が出ていた）。`branches()` の最初の版の確定は、直前にストロークがあるので空にならない。
+
+### D-7：Worker停止、GPU喪失
+
+SDKには描画用のエンジンWorkerがあり、その中に保存用のStorage Workerと画像のデコード用Workerがある。契約は次のとおり。
+
+- エンジンWorkerが止まった：ページが再起動し、確定済みのジャーナルから同じ文書ハンドルへ戻す。状態は `restarting` から `ready` になる。途中の要求は `WORKER_CRASHED` で拒否する。
+- 再起動に失敗した：状態は `failed` になり、編集を `WORKER_UNAVAILABLE` で拒否する。`retry()` で再試行できる。
+- Storage Workerが止まった：状態は `storage-failed`（`STORAGE`）になる。編集は拒否するが、表示中の文書は `exportEmergency()` で書き出せる。`recoverAfterStorageFailure()` で確定済みの内容へ戻す。
+- デコード用Workerが止まった：同じスレッドでのデコードに切り替え、エンジンは止めない。
+- GPUを失った：CPU側の文書からデバイスを作り直す。描画中のストロークは `GPU_LOST` で終わる。ジャーナルには影響しない。
+
+確定済みの作業と、書き込みをメモリに保留したままの編集がある状態で、次の7時点の障害を起こした。各時点では、同じタブで契約どおりの状態通知と拒否を確かめ、確定済みの内容が残ったことを照合する。その後、durableな編集を1件してからタブを終了する。
+
+| 時点 | 起こす障害 | 同じタブで確かめること |
+|---|---|---|
+| `worker-error` | エンジンWorkerの中で未捕捉の例外を投げる（CDPでWorkerに接続して実行） | `restarting`→`ready`、保留中の `durable()` は `WORKER_CRASHED`、同じハンドル、確定済みの状態 |
+| `worker-panic` | Rustのpanic（試験用の `testing.panic()`） | 同上。panicした要求も `WORKER_CRASHED` |
+| `worker-failed` | 再起動時にWorkerのスクリプトを読めない | `failed`、編集は `WORKER_UNAVAILABLE`。この状態のままタブを終了する |
+| `storage-error` | Storage Workerの中で未捕捉の例外を投げる | `storage-failed` だけになり再起動しない、編集は `STORAGE`、非常用の書き出しが空でない、`recoverAfterStorageFailure()` で確定済みの状態 |
+| `decode-error` | デコード用Workerの中で未捕捉の例外を投げる | 状態が変わらない、文書が変わらない |
+| `gpu-stroke` | 描画中のストロークでGPUデバイスを破棄する | ストロークは `GPU_LOST`、文書はストローク前のまま、復元後に描ける |
+| `gpu-held` | 書き込みを保留している間にGPUデバイスを破棄する | 文書は変わらず、保留を解くと編集がdurableになる |
+
+- 判定：新しいタブでジャーナルから復旧し、D-1と同じ項目（snapshot hash、`stateHash`、層のタイルマップ、版履歴、`dirty`）を比べる。2回目は名前の変更をdurableにしてもう一度タブを終了し、照合する。
+- GPUは、注入した喪失の回数と `gpuLost` 通知の回数が一致しない場合に失敗にする。復旧が成功しても、注入していない喪失は合格に数えない。
+
+欠陥4件を見つけて直した。
+
+1. **Rustのpanicの後、エンジンが応答しなくなる。** リリースビルドはpanicで中断し、JSには `RuntimeError: unreachable` として届く。Workerはこれを1件の要求の失敗（`INTERNAL`）として返し、そのまま動き続けた。Runtimeは借用されたまま、メモリも途中の状態で残るため、以降の要求には返事がなく、状態は `ready` のままだった。WASMのトラップ（`WebAssembly.RuntimeError`）を受けたらWorkerはメッセージの受け付けをやめ、例外を捕捉せずに投げ直すようにした。ページ側は既存の経路で再起動し、ジャーナルから戻す（`worker.ts` の `trap`）。復旧候補を順に試す処理でも、トラップは壊れた候補として扱わず、次の候補を試さない。
+2. **Storage Workerが止まると、`storage-failed` を飛ばしてエンジン全体が再起動する。** 保存用のセッションはエラーを受けて `storage-failed` にするが、イベントを処理済みにしていなかった。そのためエラーはエンジンWorkerを経てページまで伝わり、ページはエンジンWorkerが止まったとして再起動していた。結果として、durableでない表示中の編集が非常用の書き出しの機会もなく捨てられ、状態は `ready` に戻っていた。`onerror` で `preventDefault()` を呼ぶようにした（`storage-session.ts`）。
+3. **デコード用Workerが止まると、エンジン全体が再起動する。** 同じ原因で、同じスレッドでのデコードに切り替える設計が働く前に再起動していた。同じ修正をした（`worker.ts` の `startDecoders`）。
+4. **GPUを失ったときのストロークが `GPU_LOST` ではなく `INTERNAL` で終わる。** ストロークを終える際の読み戻しでmapが失敗し、デバイス喪失の通知より先に、その失敗が `INTERNAL: readback map` として返っていた。WebGPUがmapを拒否するのは、デバイスを失ったか、バッファが先に破棄・unmapされたときだけなので、`GPU_LOST` として返すようにした（`alto-gpu` の `readback.rs`）。キャンセルはその前に `CONFLICT` として返る。文書はどちらでもストローク前のまま残っていた。
+
+panicを起こす試験用の入口として、Rustの `Runtime.testPanic` と `testing(engine).panic()` を足した。本番の公開APIには足していない。`testing` の他の入口（`destroyGpu` など）と同じ扱い。WorkerへのCDP接続のため、`verify-browser.mjs` の `connect` の `send` に `sessionId` を渡せるようにした。
+
+修正前の試験は、1〜4のそれぞれで失敗した（panic後の応答待ちのタイムアウト、`storage-failed` の待ちのタイムアウト、デコード用Workerの障害後の「restarting」、`INTERNAL`）。最初から通った時点が欠陥を検出できることも確かめた。ページがWorkerのエラーで再起動しないように変えると `worker-error` が、GPUを失ったときに保留中の書き込みを捨てるように変えると `gpu-held` が失敗した。変更は戻した。
+
+試験側では、エンジンの起動時に作られるデコード用Workerが止まったときに、あとから作り直されるかは確かめていない。止まった後は同じスレッドでデコードし続ける設計で、文書が変わらないことだけを確かめた。
+
+検証：
+
+2026-11-13、`e46382c`（main、PR #100のマージ後）を基準とする本変更。macOS 27.2 / Apple M5、Chrome 157.0.8103.39。
+
+| コマンド | 終了コード | 結果 |
+|---|---|---|
+| `cargo fmt --all -- --check`、`cargo clippy -p alto-gpu -p alto-wasm --all-targets --locked -- -D warnings`、`cargo test -p alto-gpu --locked` | 0 | 138件成功 |
+| `cargo clippy --workspace --target wasm32-unknown-unknown --locked -- -D warnings` | 0 | 警告なし |
+| `node --test packages/alto-sdk/test/*.test.js` | 0 | 54件成功 |
+| `ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`（Metal） | 0 | 540件成功（27時点×2方法×10回）。この行の7時点は1件320〜934 ms |
+| 同上、`ALTO_BROWSER_GPU=swiftshader` | 0 | 540件成功。この行の7時点は1件4.8〜6.8 s |
+| `node scripts/verify-browser.mjs --functional`（Metal） | 0 | 9群・341件成功（crash 54件を含む）。GPUプロセスのクラッシュ0件 |
+
+各待機点で、2つの終わらせ方それぞれ10回連続で成功した。CIは反復1回で、crashは54件になる。
+
+GPUの喪失は `GPUDevice.destroy()` で起こしたもので、ドライバのリセットや外部GPUの取り外しなど実機の喪失は未検証。確認した環境はApple M5のMetalとSwiftShaderだけで、他のGPU・ブラウザには広げない。Workerの停止は未捕捉の例外とpanicで起こしたもので、Workerが例外を出さずに終わる場合（ブラウザによる強制終了）は起こせていない。その場合、エンジンWorkerへの要求は返事を待ち続ける（応答の監視はない）。生ログはローカルの `verification/out/d7-e46382c-wip/`。
+
+opencode（deepseek-v4.1-flash-free）のレビューは4点を挙げたが、いずれも誤りと判断した。
+
+- `storage-error` の確認が、後半の `ready` の判定と矛盾する：その前に `recoverAfterStorageFailure()` で `ready` に戻しているので矛盾しない。
+- `durable` の処理の `catch` にトラップの扱いがない：この `catch` が受けるのはJSの `checkDocument` だけで、WASMは呼ばない。
+- 入れ子のWorkerへのCDP接続が間に合わない：`setAutoAttach` は動いているWorkerにも接続する。Storage Worker・デコード用Workerの時点は、両環境で各40回成功した。
+- 他の理由のmap拒否まで `GPU_LOST` になる：読み戻しのバッファをunmapするのは、先に `CONFLICT` を返すキャンセルと、待っている側がいなくなった後の `Lease` の破棄だけ。
+
+あわせて、CI高速化のセッションからの依頼で、埋め込み試験の `event()` に待ち時間の引数を足し、back/forward cacheの2件の待ちを15秒から45秒にした。負荷の高いSwiftShaderのCIで、復帰が15秒に間に合わず1回失敗したため。判定は変えていない。

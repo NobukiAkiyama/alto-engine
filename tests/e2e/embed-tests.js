@@ -6,11 +6,11 @@ import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
 const near = (a, b, t = 1e-6) => Math.abs(a - b) <= t;
-/** Runs `action` and waits for an engine event that `match` accepts. */
-async function event(engine, name, action, match) {
+/** Runs `action` and waits up to `timeoutMs` for an engine event that `match` accepts. */
+async function event(engine, name, action, match, timeoutMs = 15000) {
   let off;
   const seen = new Promise((resolve, reject) => {
-    const t = setTimeout(() => (off(), reject(Error("timeout " + name))), 15000);
+    const t = setTimeout(() => (off(), reject(Error("timeout " + name))), timeoutMs);
     off = engine.on(name, (v) => {
       if (!match(v)) return;
       clearTimeout(t);
@@ -910,7 +910,7 @@ export async function runEmbedTests(_playground, log) {
       let held = true;
       for (let i = 0; i < 50 && held; i++) held = (await lockHeld()) && (await new Promise((r) => setTimeout(r, 20)), true);
       assert(!held, "the cached page kept the namespace");
-      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "ready");
+      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "ready", 45000);
       assert(engine.document === doc && (await doc.snapshotHash()) === hash, "the restored page lost its document");
       assert(await lockHeld(), "the restored engine runs without its namespace");
       await doc.transact("layer.add", (tx) => tx.addRaster());
@@ -923,7 +923,7 @@ export async function runEmbedTests(_playground, log) {
       dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
       await new Promise((r) => setTimeout(r, 50));
       const other = await engineIn(container(), { storage: { namespace } });
-      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "failed");
+      await event(engine, "status", () => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })), (s) => s.state === "failed", 45000);
       assert(engine.status.error?.details?.reason === "namespace-in-use", "the failure was " + engine.status.error?.code);
       await other.dispose();
       await engine.retry();

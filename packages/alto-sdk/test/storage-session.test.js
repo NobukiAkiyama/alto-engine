@@ -39,8 +39,11 @@ class FakeWorker {
   reply(data) {
     this.onmessage({ data });
   }
+  /** An uncaught error in the worker; returns whether the session handled it. */
   fail() {
-    this.onerror();
+    let prevented = false;
+    this.onerror({ preventDefault: () => (prevented = true) });
+    return prevented;
   }
   failMessage() {
     this.onmessageerror();
@@ -110,7 +113,8 @@ test("startup failure uses the inline journal and still completes an in-flight s
 
 test("a worker error while starting falls back once", async () => {
   const { worker, timers, created, inlineLoads } = session();
-  worker.fail();
+  // Handled, so the error does not also reach the engine Worker and restart it.
+  assert.equal(worker.fail(), true);
   timers.advance(3000);
   assert.equal(await created.request("inspect"), "inline:inspect");
   assert.equal(inlineLoads(), 1);
@@ -134,7 +138,7 @@ test("a worker error after startup rejects an in-flight save without replaying i
   });
   worker.reply({ id: 0, ok: true, value: true });
   const save = created.request("append", { bytes: new Uint8Array([7]) });
-  worker.fail();
+  assert.equal(worker.fail(), true);
   await assert.rejects(save, /STORAGE: storage worker failed/);
   assert.equal(created.state, "failed");
   assert.equal(worker.terminated, true);

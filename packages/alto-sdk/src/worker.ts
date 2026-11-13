@@ -135,6 +135,24 @@ function adoptDocument(epoch: number | undefined) {
   documentEpoch = epoch ?? documentEpoch + 1;
   recoveryPending = false;
 }
+/**
+ * A WASM trap (release builds abort on a Rust panic) can leave the Runtime borrowed
+ * and its memory half-updated, so no later call can be trusted: one answered with
+ * INTERNAL left every later request waiting forever. Stop taking messages and throw
+ * the trap uncaught, so the page restarts the Worker from the confirmed journal.
+ * Returns whether `error` was one.
+ */
+let trapped = false;
+function trap(error: unknown): boolean {
+  if (!(error instanceof WebAssembly.RuntimeError)) return false;
+  if (!trapped) {
+    trapped = true;
+    setTimeout(() => {
+      throw error;
+    });
+  }
+  return true;
+}
 function freezeStorage(error: unknown) {
   if (storageFailure) return;
   storageFailure = structured(error);
@@ -164,7 +182,7 @@ let runtime!: Runtime,
   prefetchSpentMs = 0,
   lastMessageAt = performance.now();
 function schedulePrefetch() {
-  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure)
+  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure || trapped)
     return;
   const quietFor = performance.now() - lastMessageAt;
   const delay = prefetchSpentMs >= 4 ? Math.max(0, 100 - quietFor) : 0;
@@ -184,6 +202,7 @@ function schedulePrefetch() {
       // Each call returns to the event loop so an incoming edit or visible frame wins.
       if (status === "progress" || status === "ready") schedulePrefetch();
     } catch (error) {
+      if (trap(error)) return;
       if (String(error).includes("GPU_LOST")) {
         wantTick = true;
         void drain();
@@ -245,7 +264,11 @@ function startDecoders() {
       wantTick = true;
       void drain();
     };
-    worker.onerror = () => stopDecoders("decode worker failed");
+    // Handled by decoding inline; unhandled, the error would restart the engine Worker.
+    worker.onerror = (event) => {
+      event.preventDefault();
+      stopDecoders("decode worker failed");
+    };
     decoders.push(decoder);
   }
 }
@@ -288,6 +311,7 @@ function pumpDecodes() {
     try {
       if (decodersOn) runtime.provideDecoded(new Uint8Array(out));
     } catch (error) {
+      if (trap(error)) return;
       postMessage({ t: "error", value: structured(error) });
     }
   }
@@ -383,7 +407,7 @@ function scheduleAutoCheckpoint() {
   const wait = Math.max(0, lastCommandAt + AUTO_CHECKPOINT_IDLE_MS - performance.now()) + 10;
   autoCheckpointTimer = setTimeout(() => {
     autoCheckpointTimer = null;
-    if (storageFailure || !runtime) return;
+    if (storageFailure || !runtime || trapped) return;
     // The page sends a tick every animation frame, so only commands count as activity.
     const busy = draining || queue.length || performance.now() - lastCommandAt < AUTO_CHECKPOINT_IDLE_MS;
     if (busy) scheduleAutoCheckpoint();
@@ -393,6 +417,7 @@ function scheduleAutoCheckpoint() {
       try {
         queueCheckpoint();
       } catch (error) {
+        if (trap(error)) return;
         freezeStorage(Error("STORAGE: automatic checkpoint failed: " + String((error as Error).message || error)));
       }
     }
@@ -590,6 +615,7 @@ async function recoverLostGpu() {
     adapterName = runtime.adapterName();
     postMessage({ t: "gpuRestored" });
   } catch (error) {
+    if (trap(error)) return;
     postMessage({ t: "error", value: structured(error) });
   }
 }
@@ -968,6 +994,8 @@ async function execute(m: Queued): Promise<unknown> {
           recovery = candidate;
           break;
         } catch (error) {
+          // A trap is not a damaged candidate: trying the next one would run on a broken Runtime.
+          if (error instanceof WebAssembly.RuntimeError) throw error;
           lastError = error;
         }
       }
@@ -1092,6 +1120,9 @@ async function execute(m: Queued): Promise<unknown> {
       return exportImage(m);
     case "destroyGpu":
       runtime.destroyGpu();
+      return true;
+    case "testPanic":
+      runtime.testPanic();
       return true;
     case "stickPresent": {
       const enabled = !!m.enabled;
@@ -1220,6 +1251,8 @@ async function drain() {
               bytes instanceof Uint8Array ? [bytes.buffer] : value instanceof Uint8Array ? [value.buffer] : [],
             );
         } catch (error) {
+          // Unanswered: the page's restart rejects the request with WORKER_CRASHED.
+          if (trap(error)) return;
           const e = structured(error);
           if (m.id) postMessage({ t: "reply", id: m.id, ok: false, error: e });
           else postMessage({ t: "error", value: e });
@@ -1247,6 +1280,7 @@ async function drain() {
             if (value.presentDeferred && !value.composed) await presentSettled();
             else if (value.pending) await yieldTask();
           } catch (error) {
+            if (trap(error)) return;
             if (String(error).includes("GPU_LOST")) await recoverLostGpu();
             else postMessage({ t: "error", value: structured(error) });
           }
@@ -1259,6 +1293,7 @@ async function drain() {
 }
 
 self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage>) => {
+  if (trapped) return;
   if (m.t === "cancelBrush" && (m.documentEpoch === undefined || m.documentEpoch===documentEpoch)) finishAbort?.cancel();
   if (m.t === "durable") {
     try {

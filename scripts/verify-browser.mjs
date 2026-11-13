@@ -193,14 +193,15 @@ async function connect(url, onEvent = () => {}) {
   });
   return {
     close: () => ws.close(),
-    send: (method, params = {}, timeoutMs = 600000) => new Promise((resolve, reject) => {
+    // `sessionId` addresses a target attached to this one (flatten mode), such as a Worker.
+    send: (method, params = {}, timeoutMs = 600000, sessionId) => new Promise((resolve, reject) => {
       const requestId = ++id;
       const timer = setTimeout(() => {
         pending.delete(requestId);
         reject(Error("CDP timeout: " + method));
       }, timeoutMs);
       pending.set(requestId, { resolve, reject, timer });
-      ws.send(JSON.stringify({ id: requestId, method, params }));
+      ws.send(JSON.stringify({ id: requestId, method, params, ...(sessionId ? { sessionId } : {}) }));
     }),
   };
 }

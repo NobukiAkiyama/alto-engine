@@ -388,9 +388,12 @@ impl Pool {
             if let Some(reason) = timeout.expired(cx.waker()) {
                 return Poll::Ready(Err(RenderError::Internal(reason.into())));
             }
+            // WebGPU rejects a map only when the device is lost or the buffer is
+            // destroyed or unmapped first; cancellation is answered above. The device
+            // lost callback can run after the rejection, so the renderer may not know yet.
             rx.as_mut().poll(cx).map(|r| {
                 r.map_err(|e| RenderError::Internal(e.to_string()))?
-                    .map_err(|e| RenderError::Internal(format!("readback map: {e}")))
+                    .map_err(|e| RenderError::GpuLost(format!("readback map: {e}")))
             })
         })
         .await;

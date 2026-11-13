@@ -14,6 +14,8 @@ export function testing(engine: Engine) {
     /** Restarts the Worker as a crash would. */
     crash: () => core.restart(),
     destroyGpu: () => request("destroyGpu"),
+    /** A Rust panic inside a request, as a defect in an edit would cause. */
+    panic: () => request("testPanic"),
     /** The module URL the next Worker start loads; null for the bundled one. */
     setWorkerURL: (url: URL | string | null) => {
       core.workerURL = url;
