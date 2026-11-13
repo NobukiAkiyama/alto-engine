@@ -642,7 +642,14 @@ pub fn rasterize(
     window: [i64; 4],
     curve_limit: u32,
 ) -> Result<Vec<u8>, RasterError> {
-    rasterize_with(commands, rule, window, Curves::Reject(curve_limit), true)
+    rasterize_with(
+        commands,
+        rule,
+        window,
+        Curves::Reject(curve_limit),
+        true,
+        false,
+    )
 }
 
 /// The most segments one glyph curve is flattened into (v2's 1..=64).
@@ -677,15 +684,21 @@ pub fn rasterize_glyph(commands: &[Command], window: [i64; 4]) -> Result<Vec<u8>
         window,
         Curves::Clamp(GLYPH_CURVE_LIMIT),
         true,
+        false,
     )
 }
 
+/// `skip` drops curves that cannot reach the window (`flatten`); `whole_rows`
+/// stores and integrates every nonzero cell, even of a path outside the window,
+/// instead of the written ones. Both only exist so tests can compare the
+/// shortcuts with the full computation.
 fn rasterize_with(
     commands: &[Command],
     rule: FillRule,
     window: [i64; 4],
     curve_limit: Curves,
     skip: bool,
+    whole_rows: bool,
 ) -> Result<Vec<u8>, RasterError> {
     use RasterError::Range;
     let (commands, origin) = normalized(commands).ok_or(Range)?;
@@ -722,24 +735,29 @@ fn rasterize_with(
     }
     match rule {
         FillRule::NonZero => {
+            // A path whose points (curve control points included, which bound the
+            // flattened segments) are all above, below, left or right of the window
+            // covers none of it: a closed path's crossings left of the window cancel
+            // in every row. It is still flattened, so the curve range and the
+            // interpolation range are refused exactly as before, but nothing is
+            // stored or integrated (`raster_q8_touched_cells_are_exact`).
+            let probe = !whole_rows && outside(&commands, window);
             let mut sink = NonZero {
                 window,
-                cover: vec![0; len],
-                area: vec![0; len],
+                cover: if probe { vec![] } else { vec![0; len] },
+                area: if probe { vec![] } else { vec![0; len] },
+                touched: if probe {
+                    vec![]
+                } else {
+                    vec![(usize::MAX, 0); height]
+                },
+                probe,
             };
             flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
-            for row in 0..height {
-                let mut sum = 0i128;
-                for col in 0..width {
-                    let idx = row * width + col;
-                    sum = sum.checked_add(sink.cover[idx]).ok_or(Range)?;
-                    let n = sum
-                        .checked_mul(512)
-                        .and_then(|v| v.checked_sub(sink.area[idx]))
-                        .ok_or(Range)?;
-                    bytes[idx] = coverage_byte(n.unsigned_abs());
-                }
+            if probe {
+                return Ok(bytes);
             }
+            sink.integrate(&mut bytes, whole_rows)?;
         }
         FillRule::EvenOdd => {
             let mut sink = EvenOdd {
@@ -778,11 +796,73 @@ fn rasterize_with(
     Ok(bytes)
 }
 
-/// Nonzero: the cell integration's `cover` and `area`, per window cell.
+/// Nonzero: the cell integration's `cover` and `area`, per window cell, and
+/// per row the first and last column written (`(usize::MAX, 0)` for none).
+/// A `probe` stores nothing: it only meets the same range checks.
 struct NonZero {
     window: Window,
     cover: Vec<i128>,
     area: Vec<i128>,
+    touched: Vec<(usize, usize)>,
+    probe: bool,
+}
+
+/// Whether every point of `commands` is on or past one edge of the window.
+fn outside(commands: &[Command], window: Window) -> bool {
+    let (mut min, mut max) = ([i64::MAX; 2], [i64::MIN; 2]);
+    for command in commands {
+        let points: &[[i64; 2]] = match command {
+            Command::Move(p) | Command::Line(p) => std::slice::from_ref(p),
+            Command::Quad(a, b) => &[*a, *b],
+            Command::Cubic(a, b, c) => &[*a, *b, *c],
+            Command::Close => &[],
+        };
+        for p in points {
+            for axis in 0..2 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+    }
+    max[0] <= window.xl || min[0] >= window.xr || max[1] <= window.yt || min[1] >= window.yb
+}
+
+impl NonZero {
+    /// The coverage bytes from the running sum of each row. Only the cells a
+    /// segment wrote are integrated: left of a row's first written cell the sum
+    /// and area are 0 (byte 0, as `bytes` starts); right of its last one the area
+    /// is 0 and the sum constant, so every byte there is the same. The bytes and
+    /// the overflow errors equal integrating the whole row (`whole`), which
+    /// `raster_q8_touched_cells_are_exact` checks.
+    fn integrate(&self, bytes: &mut [u8], whole: bool) -> Result<(), RasterError> {
+        use RasterError::Range;
+        let width = self.window.width;
+        for (row, &(first, last)) in self.touched.iter().enumerate() {
+            let (first, last) = if whole {
+                (0, width - 1)
+            } else if first > last {
+                continue;
+            } else {
+                (first, last)
+            };
+            let mut sum = 0i128;
+            for col in first..=last {
+                let idx = row * width + col;
+                sum = sum.checked_add(self.cover[idx]).ok_or(Range)?;
+                let n = sum
+                    .checked_mul(512)
+                    .and_then(|v| v.checked_sub(self.area[idx]))
+                    .ok_or(Range)?;
+                bytes[idx] = coverage_byte(n.unsigned_abs());
+            }
+            if last + 1 < width {
+                let n = sum.checked_mul(512).ok_or(Range)?;
+                bytes[row * width + last + 1..(row + 1) * width]
+                    .fill(coverage_byte(n.unsigned_abs()));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Sink for NonZero {
@@ -854,7 +934,15 @@ impl Sink for NonZero {
                 if cx < 0 || cy < 0 || cx >= width as isize || cy >= height as isize {
                     continue;
                 }
+                // Outside paths only reach the window's left column, where the
+                // area is 0 and the cover (a sum of at most 2^36 i64 steps) cannot
+                // overflow, so skipping the store keeps every error.
+                if self.probe {
+                    continue;
+                }
                 let idx = cy as usize * width + cx as usize;
+                let span = &mut self.touched[cy as usize];
+                *span = (span.0.min(cx as usize), span.1.max(cx as usize));
                 let xbase = (i128::from(lx) + cx as i128) * 256;
                 self.cover[idx] = self.cover[idx].checked_add(dir * dy)?;
                 self.area[idx] = self.area[idx]
@@ -1238,13 +1326,148 @@ mod tests {
                     [-30, -30, 70, 70],
                 ] {
                     assert_eq!(
-                        rasterize_with(path, rule, window, Curves::Reject(CURVE_LIMIT), true),
-                        rasterize_with(path, rule, window, Curves::Reject(CURVE_LIMIT), false),
+                        rasterize_with(
+                            path,
+                            rule,
+                            window,
+                            Curves::Reject(CURVE_LIMIT),
+                            true,
+                            false
+                        ),
+                        rasterize_with(
+                            path,
+                            rule,
+                            window,
+                            Curves::Reject(CURVE_LIMIT),
+                            false,
+                            true
+                        ),
                         "{rule:?} {window:?}"
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn raster_q8_touched_cells_are_exact() {
+        // Deterministic random paths: several subpaths (some left open, so the
+        // implicit close matters), lines, quads and cubics, overlapping windings,
+        // against windows inside, across and fully left, right, above and below.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |range: i64| -> i64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % (2 * range as u64 + 1)) as i64 - range
+        };
+        let mut checked = 0;
+        for case in 0..300 {
+            let mut path = vec![];
+            for sub in 0..1 + case % 4 {
+                path.push(Command::Move([next(6000), next(6000)]));
+                for _ in 0..1 + (case + sub) % 6 {
+                    let kind = next(2).rem_euclid(3);
+                    let mut points = [[0i64; 2]; 3];
+                    for p in &mut points {
+                        *p = [next(6000), next(6000)];
+                    }
+                    let [a, b, c] = points;
+                    path.push(match kind {
+                        0 => Command::Line(a),
+                        1 => Command::Quad(a, b),
+                        _ => Command::Cubic(a, b, c),
+                    });
+                }
+                if sub % 2 == 0 {
+                    path.push(Command::Close);
+                }
+            }
+            for window in [
+                [0, 0, 16, 16],
+                [-24, -24, 48, 48],
+                [next(30), next(30), 1 + next(20).abs(), 1 + next(20).abs()],
+                [-90, -10, 20, 20],
+                [60, -10, 20, 20],
+                [-10, -90, 20, 20],
+                [-10, 60, 20, 20],
+            ] {
+                let fast = rasterize_with(
+                    &path,
+                    FillRule::NonZero,
+                    window,
+                    Curves::Reject(CURVE_LIMIT),
+                    true,
+                    false,
+                );
+                let whole = rasterize_with(
+                    &path,
+                    FillRule::NonZero,
+                    window,
+                    Curves::Reject(CURVE_LIMIT),
+                    true,
+                    true,
+                );
+                assert_eq!(fast, whole, "case {case} {window:?}");
+                checked += usize::from(fast.is_ok_and(|b| b.iter().any(|&v| v != 0)));
+            }
+        }
+        // Most cases draw something, so the comparison is not of empty tiles.
+        assert!(checked > 600, "{checked}");
+    }
+
+    #[test]
+    fn raster_q8_paths_on_the_window_edges_are_exact() {
+        // Paths whose extreme point lies exactly on a window edge, from outside and
+        // from inside, closed and open, with lines and curves: the outside probe
+        // and the touched-cell integration against the whole rows.
+        let window = [2, 3, 4, 5]; // pixels: x 2..6, y 3..8 (Q8 512..1536, 768..2048)
+        let (xl, xr, yt, yb) = (512i64, 1536i64, 768i64, 2048i64);
+        let mut drawn = 0;
+        for (x0, x1) in [
+            (xl - 300, xl),
+            (xl, xl + 300),
+            (xr - 300, xr),
+            (xr, xr + 300),
+            (xl - 300, xr + 300),
+        ] {
+            for (y0, y1) in [
+                (yt - 300, yt),
+                (yt, yt + 300),
+                (yb - 300, yb),
+                (yb, yb + 300),
+                (yt - 300, yb + 300),
+            ] {
+                let rect = vec![
+                    Command::Move([x0, y0]),
+                    Command::Line([x1, y0]),
+                    Command::Line([x1, y1]),
+                    Command::Line([x0, y1]),
+                    Command::Close,
+                ];
+                let open = vec![
+                    Command::Move([x0, y0]),
+                    Command::Quad([x1, y0], [x1, y1]),
+                    Command::Cubic([x0, y1], [x1, (y0 + y1) / 2], [x0, y0 + 1]),
+                ];
+                for path in [rect, open] {
+                    let run = |whole| {
+                        rasterize_with(
+                            &path,
+                            FillRule::NonZero,
+                            window,
+                            Curves::Reject(CURVE_LIMIT),
+                            true,
+                            whole,
+                        )
+                    };
+                    let fast = run(false);
+                    assert_eq!(fast, run(true), "{path:?}");
+                    drawn += usize::from(fast.is_ok_and(|b| b.iter().any(|&v| v != 0)));
+                }
+            }
+        }
+        assert!(drawn > 10, "{drawn}");
     }
 
     #[test]
