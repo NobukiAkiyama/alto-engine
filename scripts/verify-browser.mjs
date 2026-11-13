@@ -218,6 +218,8 @@ const suites = [
   // Diagnostic only, run with --suite=resize-stress.
   ["resize-stress", `const { runResizeStress } = await import('../../tests/diagnostics/resize-stress.js'); await runResizeStress(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
+  // Plan E timings, all samples kept. Opt-in with --suite=perf; ALTO_PERF_FIXTURES, ALTO_PERF_REPS (JSON) and ALTO_PERF_STRESS=1 narrow or extend it.
+  ["perf", `const { runPerfTests } = await import('../../tests/e2e/perf-tests.js'); await runPerfTests(window.altoEngine, (line) => console.log(line), { ...${JSON.stringify({ fixtures: process.env.ALTO_PERF_FIXTURES?.split(",").map((name) => name.trim()).filter(Boolean), stress: process.env.ALTO_PERF_STRESS === "1" })}, reps: JSON.parse(${JSON.stringify(process.env.ALTO_PERF_REPS || "{}")}) });`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
 // "crash" is not an in-page suite: tests/e2e/crash-tests.js ends tabs over CDP.
@@ -503,7 +505,7 @@ try {
       await sampleSystem("startup-settled");
     }
     for (const [name, body] of (startupOnly ? [] : suites)) {
-      if (name === "dense-benchmark" && !selectedSuites?.includes(name)) continue;
+      if ((name === "dense-benchmark" || name === "perf") && !selectedSuites?.includes(name)) continue;
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (name === "resize-stress" && !selectedSuites?.includes(name)) continue;
@@ -525,7 +527,8 @@ try {
       try {
         // A whole suite in one call. CI runs four SwiftShader groups at once, which
         // stretched embed from ~430 s to 600 s; the limit only catches hangs.
-        await evaluate(`(async () => { ${body} })()`, 1200000);
+        // perf is opt-in and its slowest fixture alone takes about half an hour.
+        await evaluate(`(async () => { ${body} })()`, name === "perf" ? 4 * 3600000 : 1200000);
       } catch (error) {
         suiteError = error;
       }
