@@ -9,7 +9,7 @@
 | C | 成功 | 下記 | 下記 | [C](#c書き出しの契約) |
 | D | 成功（7/7行。2行目は部分検証） | 下記 | 下記 | [D](#d保存復旧の障害試験) |
 | E | 成功（修正5件。完了条件との対応は下記） | 下記 | 下記 | [E](#e性能は使われる経路から測る) |
-| F | 未着手 | | | |
+| F | 実行中（配布物の確認は成功、長時間試験は未着手） | `c339e04` | 下記 | [F](#f長時間運用と配布物を確認する) |
 
 ## 環境
 
@@ -973,3 +973,42 @@ SwiftShader の1回目の失敗は、続けて2回実行して再現しなかっ
 opencode（deepseek-v4.1-flash-free）のレビュー：
 - `memory.rs` の差分：不具合はなし。確かめるよう挙げられた3点は、コードで確かめた。解放されていない確保を `retired` にする分岐は、バイト数を変えない。`install` の識別子は `next` を1ずつ増やすので重ならず、`insert` が前の確保を置き換えることはない。`entries` を変えるのは、登録・完了した解放・GPUの処理が終わった後の解放の3か所だけ。
 - `raster_q8.rs` の差分：全体で1回、二つに分けて2回、道具を使わないよう指示して1回渡したが、どれも答えが返らなかった。そのため、次の点を自分で確かめた。probe は空のセルを使い、プールから取らない。プールのセルが必要より長いとき、余りは0のまま。プールが空なら新しく作る。`nonzero` は、平坦化の誤り・`i64` を超えた場合・積分のあとのどれでも、`recycle` を通ってから戻る。
+
+## F：長時間運用と配布物を確認する
+
+計画の各項目の状態：
+
+| 項目 | 状態 | 記録 |
+|---|---|---|
+| クリーンな作業ディレクトリでの再ビルドと `npm pack` | 成功 | [F-1](#f-1配布物の確認) |
+| `npm pack` した SDK からの埋め込み例（生成物の同梱、API、保存・再読込・PNG出力） | 成功 | [F-1](#f-1配布物の確認) |
+| WASM のハッシュ | 記録のみ。`wasm/SHA256SUMS` は更新しない（`RELEASING.md` の手順で、リリース時に更新する） | [F-1](#f-1配布物の確認) |
+| `tests/e2e/soak.js` と4時間の長時間試験（QA-4） | 未着手 | |
+
+未決事項だった「4時間試験を CI で回すか」は、手動の記録にとどめると決めた（2026-11-14）。
+
+### F-1：配布物の確認
+
+2026-11-14、main の `c339e04`（E の完了後）を、新しく作った git worktree（作業ツリーの変更なし、`target/` も空から）で実行。環境は macOS 27.2、Apple M5、rustc 1.99.1、Node v22.23.2、pnpm 11.24.0、npm 10.9.8、Chrome 157.0.8103.39（headless）。
+
+手順：
+
+1. `sh scripts/build-m0.sh`（`CARGO_TARGET_DIR` は worktree の中の空の `target/`）。
+2. `packages/alto-sdk` で `pnpm install --frozen-lockfile`、`npm pack`（`prepack` が `build.mjs` を実行する）。最初に `npm ci` を試したが、SDK の lockfile は pnpm のものだけなので失敗した。CI と同じ pnpm に合わせた。
+3. `examples/minimal-embed` と `examples/react-embed` を作業ディレクトリの外にコピーし、`@alto/engine` の依存を `link:../../packages/alto-sdk` から `file:<tarball>` に変えて、`pnpm install`・`pnpm build`（`tsc --noEmit` と Vite）。pnpm は tarball から展開した store の中のパッケージを参照していた。
+4. 2つのビルドを worktree の `examples/*/dist` に置き、`node scripts/verify-browser.mjs --examples` で動かした。
+
+結果：
+
+| 確認 | 結果 |
+|---|---|
+| tarball | `alto-engine-0.5.0.tgz`、56ファイル、1,728,901 バイト、SHA-256 `1ab74d91d71ccc4131c272be2a5977ab40e68e82c15cb1125caeb5f0ae60fc53` |
+| 生成物の同梱 | `dist/pkg/` に `alto_wasm`・`alto_decode` の `.wasm`・`.js`・`.d.ts` 8ファイル、Worker 3つ（`worker.js`、`decode-worker.js`、`storage-worker.js`）が入る。全ファイルのハッシュは `verification/out/f1-pack-files.txt` |
+| 埋め込み例が使う WASM | 2つのビルドの `alto_wasm_bg` は tarball のものと同じ `e05adbba…`、`alto_decode_bg` も同じ `caccb617…` |
+| API | `pnpm run api:check`（`api-extractor`、本体と `browser` の2つ）が成功。報告された API は commit 済みのものと同じ |
+| minimal-embed | 成功。ブラシ・Undo・Redo、PNG出力（文書と同じ大きさ）、保存して開き直すと同じ `snapshotHash` |
+| react-embed | 成功（同じ確認） |
+
+WASM のハッシュ（`verification/out/f1-wasm-sums.txt`）：`alto_decode` の4ファイルは `wasm/SHA256SUMS` と同じ。`alto_wasm` の4ファイルは違う（`alto_wasm_bg.wasm` は `e05adbba…`、commit 済みは `743f71f6…`）。`alto_wasm_bg.wasm` は、E-10 の計測で同じソースを手元でビルドしたものと同じ値になった。`RELEASING.md` のとおり、`wasm/SHA256SUMS` はリリース前に main の CI の `wasm-hashes-main` から更新するもので、試験を通すために更新しない。commit 済みの値は 2026-11-07（`2421f96`）のもので、その後に WASM を変える変更（E の修正を含む）が入っている。main の CI では、この差は報告だけになる。
+
+生ログ：`f1-examples-pack`・`f1-examples-pack.log`、`f1-wasm-sums.txt`、`f1-pack-files.txt`。
