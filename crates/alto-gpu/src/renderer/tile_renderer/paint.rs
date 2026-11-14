@@ -17,7 +17,8 @@ impl Context<'_> {
             .ok()
             .filter(|l| (-6..=12).contains(l))
             .ok_or_else(|| RenderError::InvalidArgument("v3 vector level out of range".into()))?;
-        // The mapped paths and stroke outlines do not depend on the tile, so
+        // The mapped paths and stroke outlines, normalized for rasterizing
+        // (`raster_q8::Prepared`), do not depend on the tile, so
         // with `keep` they are kept for the node's other tiles (a vector mask's
         // one-path list is made per tile and is not). The entry is taken out
         // while this tile paints and put back after, whatever the result.
@@ -40,7 +41,18 @@ impl Context<'_> {
                 mapped: paths
                     .iter()
                     .map(|path| crate::raster_q8::map_path(&path.data, world, level))
-                    .collect(),
+                    .collect::<Option<Vec<_>>>()
+                    .map(|mapped| {
+                        mapped
+                            .iter()
+                            .map(|commands| {
+                                crate::raster_q8::Prepared::new(
+                                    commands,
+                                    crate::raster_q8::CURVE_LIMIT,
+                                )
+                            })
+                            .collect()
+                    }),
                 outlines: vec![None; paths.len()],
                 bytes: 0,
             },
@@ -109,12 +121,12 @@ impl Context<'_> {
                         FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
                         FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
                     };
-                    crate::raster_q8::rasterize_crop(
-                        commands,
-                        rule,
-                        window,
-                        crate::raster_q8::CURVE_LIMIT,
-                    )
+                    commands
+                        .as_ref()
+                        .map_err(|error| *error)
+                        .and_then(|commands| {
+                            crate::raster_q8::rasterize_crop_prepared(commands, rule, window)
+                        })
                 } else {
                     let built;
                     let outline = match &prepared.outlines[index] {
@@ -126,7 +138,15 @@ impl Context<'_> {
                                 world,
                                 level,
                             )
-                            .map(|o| o.map(|o| crate::raster_q8::Packed::new(&o)));
+                            .and_then(|o| {
+                                o.map(|o| {
+                                    crate::raster_q8::Prepared::new(
+                                        &o,
+                                        crate::raster_q8::CURVE_LIMIT,
+                                    )
+                                })
+                                .transpose()
+                            });
                             let size = outline
                                 .as_ref()
                                 .map_or(0, |o| o.as_ref().map_or(0, |o| o.bytes()));
@@ -140,11 +160,10 @@ impl Context<'_> {
                         }
                     };
                     match outline {
-                        Ok(Some(outline)) => crate::raster_q8::rasterize_crop_packed(
+                        Ok(Some(outline)) => crate::raster_q8::rasterize_crop_prepared(
                             outline,
                             crate::raster_q8::FillRule::NonZero,
                             window,
-                            crate::raster_q8::CURVE_LIMIT,
                         ),
                         Ok(None) => Ok(None),
                         Err(error) => Err(*error),

@@ -1,6 +1,6 @@
 # エンジンの修正・検証計画
 
-作成日：2026-11-09。対象：`0e6f491`。状態：A〜Cは完了。Dは全7行を実施（2行目は部分検証）。Eは1回目の計測を記録し、修正1件目をマージした（#102）。2件目はPR待ち。Fは未着手。進捗と結果は [ENGINE-HARDENING-RESULTS.md](../verification/ENGINE-HARDENING-RESULTS.md) に記録する。
+作成日：2026-11-09。対象：`0e6f491`。状態：A〜Cは完了。Dは全7行を実施（2行目は部分検証）。Eは1回目の計測を記録し、修正1・2件目をマージした（#102、#105）。3件目はPR待ち。Fは未着手。進捗と結果は [ENGINE-HARDENING-RESULTS.md](../verification/ENGINE-HARDENING-RESULTS.md) に記録する。
 
 ## 目的
 
