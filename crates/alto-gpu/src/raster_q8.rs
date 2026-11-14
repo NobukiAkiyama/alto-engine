@@ -446,13 +446,7 @@ impl Prepared {
                 yt: 0,
                 yb: 256,
             };
-            let mut sink = NonZero {
-                window,
-                cover: vec![],
-                area: vec![],
-                touched: vec![],
-                probe: true,
-            };
+            let mut sink = NonZero::<i64>::new(window, true);
             flatten(
                 &normal,
                 Curves::Reject(curve_limit),
@@ -1060,22 +1054,31 @@ fn rasterize_normalized(
             // interpolation range are refused exactly as before, but nothing is
             // stored or integrated (`raster_q8_touched_cells_are_exact`).
             let probe = !whole_rows && outside(&commands, window);
-            let mut sink = NonZero {
-                window,
-                cover: if probe { vec![] } else { vec![0; len] },
-                area: if probe { vec![] } else { vec![0; len] },
-                touched: if probe {
-                    vec![]
-                } else {
-                    vec![(usize::MAX, 0); height]
-                },
-                probe,
-            };
-            flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
             if probe {
+                let mut sink = NonZero::<i64>::new(window, true);
+                flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
                 return Ok((bytes, None));
             }
-            sink.integrate(&mut bytes, whole_rows)?
+            match nonzero::<i64>(&commands, curve_limit, window, skip, whole_rows, &mut bytes) {
+                Err(Integrate::Wide) => {
+                    bytes.fill(0);
+                    match nonzero::<i128>(
+                        &commands,
+                        curve_limit,
+                        window,
+                        skip,
+                        whole_rows,
+                        &mut bytes,
+                    ) {
+                        Ok(Ok(bound)) => bound,
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => return Err(Range),
+                    }
+                }
+                Err(Integrate::Range) => return Err(Range),
+                Ok(Err(error)) => return Err(error),
+                Ok(Ok(bound)) => bound,
+            }
         }
         FillRule::EvenOdd => {
             let mut sink = EvenOdd {
@@ -1115,15 +1118,102 @@ fn rasterize_normalized(
     Ok((bytes, bound))
 }
 
+/// Flatten into a storing `NonZero<A>` and integrate. The outer `Err` is an
+/// overflow of `A`'s sums (`Wide` only for `i64`); `Ok(Err)` is flattening's
+/// own error, which no sum caused.
+fn nonzero<A: Acc>(
+    commands: &[Command],
+    curve_limit: Curves,
+    window: Window,
+    skip: bool,
+    whole_rows: bool,
+    bytes: &mut [u8],
+) -> Result<Result<Option<[usize; 4]>, RasterError>, Integrate> {
+    let mut sink = NonZero::<A>::new(window, false);
+    if let Err(error) = flatten(commands, curve_limit, window, skip, true, &mut sink) {
+        if sink.wide {
+            return Err(Integrate::Wide);
+        }
+        return Ok(Err(error));
+    }
+    sink.integrate(bytes, whole_rows).map(Ok)
+}
+
 /// Nonzero: the cell integration's `cover` and `area`, per window cell, and
 /// per row the first and last column written (`(usize::MAX, 0)` for none).
 /// A `probe` stores nothing: it only meets the same range checks.
-struct NonZero {
+///
+/// The sums are defined in `i128` (`A = i128`). They are first tried in `i64`:
+/// each step's terms are small (a piece's `dy` is at most 256 and its offsets
+/// from the cell's left edge at most 256 each), so only a running sum can pass
+/// `i64`. Then `wide` is set, the `i64` attempt stops, and the path is
+/// integrated again in `i128`, which gives the same bytes and errors as if the
+/// first try had not happened (`raster_q8_narrow_sums_match_the_wide_ones`).
+struct NonZero<A> {
     window: Window,
-    cover: Vec<i128>,
-    area: Vec<i128>,
+    cover: Vec<A>,
+    area: Vec<A>,
     touched: Vec<(usize, usize)>,
     probe: bool,
+    wide: bool,
+}
+
+/// A nonzero accumulator: `i128`, or `i64` for the first try.
+trait Acc: Copy + Default {
+    /// One piece's cover and area steps, or `None` past this type's range.
+    fn step(dir: i8, ux: i64, vx: i64, xbase: i128, va: i64, vb: i64) -> Option<(Self, Self)>;
+    fn add(self, other: Self) -> Option<Self>;
+    /// `|sum * 512 - area|`, or `None` past this type's range.
+    fn coverage(sum: Self, area: Self) -> Option<u128>;
+    /// Whether exceeding this type means trying again in `i128`.
+    const NARROW: bool;
+}
+
+impl Acc for i128 {
+    fn step(dir: i8, ux: i64, vx: i64, xbase: i128, va: i64, vb: i64) -> Option<(Self, Self)> {
+        let dir = i128::from(dir);
+        let dy = i128::from(vb) - i128::from(va);
+        Some((
+            dir * dy,
+            dir * (i128::from(ux) + i128::from(vx) - 2 * xbase) * dy,
+        ))
+    }
+    fn add(self, other: Self) -> Option<Self> {
+        self.checked_add(other)
+    }
+    fn coverage(sum: Self, area: Self) -> Option<u128> {
+        Some(sum.checked_mul(512)?.checked_sub(area)?.unsigned_abs())
+    }
+    const NARROW: bool = false;
+}
+
+impl Acc for i64 {
+    fn step(dir: i8, ux: i64, vx: i64, xbase: i128, va: i64, vb: i64) -> Option<(Self, Self)> {
+        let dir = i64::from(dir);
+        let xbase = i64::try_from(xbase).ok()?;
+        let dy = vb.checked_sub(va)?;
+        let offsets = ux.checked_sub(xbase)?.checked_add(vx.checked_sub(xbase)?)?;
+        Some((
+            dir.checked_mul(dy)?,
+            dir.checked_mul(offsets)?.checked_mul(dy)?,
+        ))
+    }
+    fn add(self, other: Self) -> Option<Self> {
+        self.checked_add(other)
+    }
+    fn coverage(sum: Self, area: Self) -> Option<u128> {
+        Some(u128::from(
+            sum.checked_mul(512)?.checked_sub(area)?.unsigned_abs(),
+        ))
+    }
+    const NARROW: bool = true;
+}
+
+/// Why `NonZero::integrate` stopped.
+enum Integrate {
+    Range,
+    /// An `i64` sum overflowed: integrate again in `i128`.
+    Wide,
 }
 
 /// Whether every point of `commands` is on or past one edge of the window.
@@ -1146,7 +1236,27 @@ fn outside(commands: &[Command], window: Window) -> bool {
     max[0] <= window.xl || min[0] >= window.xr || max[1] <= window.yt || min[1] >= window.yb
 }
 
-impl NonZero {
+impl<A: Acc> NonZero<A> {
+    fn new(window: Window, probe: bool) -> Self {
+        let len = if probe {
+            0
+        } else {
+            window.width * window.height
+        };
+        Self {
+            window,
+            cover: vec![A::default(); len],
+            area: vec![A::default(); len],
+            touched: if probe {
+                vec![]
+            } else {
+                vec![(usize::MAX, 0); window.height]
+            },
+            probe,
+            wide: false,
+        }
+    }
+
     /// The coverage bytes from the running sum of each row. Only the cells a
     /// segment wrote are integrated: left of a row's first written cell the sum
     /// and area are 0 (byte 0, as `bytes` starts); right of its last one the area
@@ -1157,8 +1267,12 @@ impl NonZero {
     /// Returns a rectangle `[x0, y0, x1, y1)` holding every nonzero byte: rows no
     /// segment wrote are 0, and a row is 0 left of its first written cell and,
     /// when its constant byte is 0, right of its last one.
-    fn integrate(&self, bytes: &mut [u8], whole: bool) -> Result<Option<[usize; 4]>, RasterError> {
-        use RasterError::Range;
+    fn integrate(&self, bytes: &mut [u8], whole: bool) -> Result<Option<[usize; 4]>, Integrate> {
+        let fail = if A::NARROW {
+            Integrate::Wide
+        } else {
+            Integrate::Range
+        };
         let width = self.window.width;
         let mut bound: Option<[usize; 4]> = None;
         for (row, &(first, last)) in self.touched.iter().enumerate() {
@@ -1169,20 +1283,24 @@ impl NonZero {
             } else {
                 (first, last)
             };
-            let mut sum = 0i128;
+            let mut sum = A::default();
             for col in first..=last {
                 let idx = row * width + col;
-                sum = sum.checked_add(self.cover[idx]).ok_or(Range)?;
-                let n = sum
-                    .checked_mul(512)
-                    .and_then(|v| v.checked_sub(self.area[idx]))
-                    .ok_or(Range)?;
-                bytes[idx] = coverage_byte(n.unsigned_abs());
+                let Some(next) = sum.add(self.cover[idx]) else {
+                    return Err(fail);
+                };
+                sum = next;
+                let Some(n) = A::coverage(sum, self.area[idx]) else {
+                    return Err(fail);
+                };
+                bytes[idx] = coverage_byte(n);
             }
             let mut right = last + 1;
             if last + 1 < width {
-                let n = sum.checked_mul(512).ok_or(Range)?;
-                let byte = coverage_byte(n.unsigned_abs());
+                let Some(n) = A::coverage(sum, A::default()) else {
+                    return Err(fail);
+                };
+                let byte = coverage_byte(n);
                 bytes[row * width + last + 1..(row + 1) * width].fill(byte);
                 if byte != 0 {
                     right = width;
@@ -1195,7 +1313,7 @@ impl NonZero {
     }
 }
 
-impl Sink for NonZero {
+impl<A: Acc> Sink for NonZero<A> {
     fn segment(&mut self, mut a: [i64; 2], mut b: [i64; 2]) -> Option<()> {
         let Window {
             lx,
@@ -1212,9 +1330,9 @@ impl Sink for NonZero {
         }
         let dir = if a[1] > b[1] {
             std::mem::swap(&mut a, &mut b);
-            -1i128
+            -1i8
         } else {
-            1i128
+            1i8
         };
         let first = a[1].div_euclid(256).max(ly);
         let last = b[1].div_euclid(256).min(ly + height as i64);
@@ -1274,9 +1392,16 @@ impl Sink for NonZero {
                 let span = &mut self.touched[cy as usize];
                 *span = (span.0.min(cx as usize), span.1.max(cx as usize));
                 let xbase = (i128::from(lx) + cx as i128) * 256;
-                self.cover[idx] = self.cover[idx].checked_add(dir * dy)?;
-                self.area[idx] = self.area[idx]
-                    .checked_add(dir * (i128::from(ux) + i128::from(vx) - 2 * xbase) * dy)?;
+                let stored = A::step(dir, ux, vx, xbase, va, vb).and_then(|(cover, area)| {
+                    Some((self.cover[idx].add(cover)?, self.area[idx].add(area)?))
+                });
+                let Some((cover, area)) = stored else {
+                    // `i128` keeps the error; `i64` tries again in `i128`.
+                    self.wide |= A::NARROW;
+                    return None;
+                };
+                self.cover[idx] = cover;
+                self.area[idx] = area;
             }
         }
         Some(())
@@ -1905,6 +2030,83 @@ mod tests {
         }
         // The shortcut is taken, including for paths that end in an error.
         assert!(outside > 30, "{outside}");
+    }
+
+    #[test]
+    fn raster_q8_narrow_sums_match_the_wide_ones() {
+        // The i64 first try must give the i128 definition's bytes, bound and
+        // error, for ordinary paths and for coordinates near the i64 limit.
+        let mut seed = 0xbb67_ae85_84ca_a73bu64;
+        let mut next = |range: i64| -> i64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % (2 * range as u64 + 1)) as i64 - range
+        };
+        let mut compared = 0;
+        for case in 0..240 {
+            let scale = [6000i64, 1 << 40, 1 << 61][case % 3];
+            let mut path = vec![Command::Move([next(scale), next(scale)])];
+            for _ in 0..1 + case % 5 {
+                let [a, b] = [[next(scale), next(scale)], [next(scale), next(scale)]];
+                path.push(if case % 2 == 0 {
+                    Command::Line(a)
+                } else {
+                    Command::Quad(a, b)
+                });
+            }
+            path.push(Command::Close);
+            let Some((normal, origin)) = normalized(&path) else {
+                continue;
+            };
+            for window in [
+                [0, 0, 16, 16],
+                [-24, -24, 48, 48],
+                [next(30), next(30), 9, 7],
+            ] {
+                let [ox, oy, w, h] = window;
+                let (lx, ly) = (ox - origin[0], oy - origin[1]);
+                let (Some(xl), Some(xr), Some(yt), Some(yb)) = (
+                    lx.checked_mul(256),
+                    (lx + w).checked_mul(256),
+                    ly.checked_mul(256),
+                    (ly + h).checked_mul(256),
+                ) else {
+                    continue;
+                };
+                let window = Window {
+                    lx,
+                    ly,
+                    width: w as usize,
+                    height: h as usize,
+                    xl,
+                    xr,
+                    yt,
+                    yb,
+                };
+                for whole in [false, true] {
+                    let mut narrow = vec![0u8; (w * h) as usize];
+                    let mut wide = narrow.clone();
+                    let limit = Curves::Reject(CURVE_LIMIT);
+                    let n = nonzero::<i64>(&normal, limit, window, true, whole, &mut narrow);
+                    let d = nonzero::<i128>(&normal, limit, window, true, whole, &mut wide);
+                    let n = match n {
+                        Ok(r) => Some(r),
+                        Err(Integrate::Wide) => None,
+                        Err(Integrate::Range) => panic!("i64 reports Wide, not Range"),
+                    };
+                    let d = d.unwrap_or(Err(RasterError::Range));
+                    if let Some(n) = n {
+                        assert_eq!(n, d, "case {case} {lx} {ly}");
+                        if n.is_ok() {
+                            assert_eq!(narrow, wide, "case {case} {lx} {ly}");
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared > 1000, "{compared}");
     }
 
     #[test]
