@@ -42,10 +42,13 @@ impl Context<'_> {
                     .map(|path| crate::raster_q8::map_path(&path.data, world, level))
                     .collect(),
                 outlines: vec![None; paths.len()],
+                bytes: 0,
             },
         };
+        let others: usize = self.resources.vectors.iter().map(|v| v.bytes).sum();
         prepared.used = self.r.frame;
-        let result = self.vector_q14_prepared(&mut prepared, [ox, oy], level, roi);
+        let room = PREPARED_BYTES.saturating_sub(others);
+        let result = self.vector_q14_prepared(&mut prepared, [ox, oy], level, roi, room);
         if !keep {
             return result;
         }
@@ -65,6 +68,7 @@ impl Context<'_> {
         [ox, oy]: [i64; 2],
         level: i32,
         roi: Roi,
+        room: usize,
     ) -> Result<Target> {
         let Some(mapped) = &prepared.mapped else {
             return self.zero(roi);
@@ -112,16 +116,31 @@ impl Context<'_> {
                         crate::raster_q8::CURVE_LIMIT,
                     )
                 } else {
-                    let outline = prepared.outlines[index].get_or_insert_with(|| {
-                        crate::stroke_q8::outline(
-                            &path.data,
-                            path.stroke.as_ref().expect("visible stroke"),
-                            world,
-                            level,
-                        )
-                    });
+                    let built;
+                    let outline = match &prepared.outlines[index] {
+                        Some(outline) => outline,
+                        None => {
+                            let outline = crate::stroke_q8::outline(
+                                &path.data,
+                                path.stroke.as_ref().expect("visible stroke"),
+                                world,
+                                level,
+                            )
+                            .map(|o| o.map(|o| crate::raster_q8::Packed::new(&o)));
+                            let size = outline
+                                .as_ref()
+                                .map_or(0, |o| o.as_ref().map_or(0, |o| o.bytes()));
+                            if prepared.bytes + size <= room {
+                                prepared.bytes += size;
+                                prepared.outlines[index].insert(outline)
+                            } else {
+                                built = outline;
+                                &built
+                            }
+                        }
+                    };
                     match outline {
-                        Ok(Some(outline)) => crate::raster_q8::rasterize_crop(
+                        Ok(Some(outline)) => crate::raster_q8::rasterize_crop_packed(
                             outline,
                             crate::raster_q8::FillRule::NonZero,
                             window,

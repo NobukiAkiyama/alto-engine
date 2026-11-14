@@ -348,6 +348,9 @@ pub(super) struct Resources {
 }
 /// The most vector nodes whose prepared paths are kept.
 const PREPARED_VECTORS: usize = 32;
+/// The most packed stroke-outline bytes kept over all nodes. Past it a tile
+/// builds the outlines it needs without keeping them.
+const PREPARED_BYTES: usize = 32 << 20;
 /// A vector node's paths in Q8 level pixels for one world and level: what does
 /// not depend on the tile. The entry holds its own `Arc`, so the address of a
 /// live `paths` can only match the same, unchanged path list.
@@ -361,9 +364,11 @@ struct PreparedVector {
     mapped: Option<Vec<Vec<crate::raster_q8::Command>>>,
     /// Per path, its stroke outline once a tile has needed it.
     outlines: Vec<Option<StrokeOutline>>,
+    /// The packed bytes of `outlines`.
+    bytes: usize,
 }
 type StrokeOutline =
-    std::result::Result<Option<Vec<crate::raster_q8::Command>>, crate::raster_q8::RasterError>;
+    std::result::Result<Option<crate::raster_q8::Packed>, crate::raster_q8::RasterError>;
 impl Resources {
     fn new(device: &wgpu::Device, governor: &Arc<Governor>, exact: bool) -> Result<Self> {
         let (pipeline, resolve) = if exact {

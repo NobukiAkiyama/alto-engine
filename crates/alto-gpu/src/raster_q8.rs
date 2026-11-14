@@ -282,16 +282,23 @@ fn lerp_column(a: [i64; 2], b: [i64; 2], x: i64) -> Option<i64> {
 }
 
 fn normalized(commands: &[Command]) -> Option<(Vec<Command>, [i64; 2])> {
+    normalized_iter(commands.iter().copied())
+}
+
+/// `normalized` over commands read twice from `commands`.
+fn normalized_iter(
+    commands: impl Iterator<Item = Command> + Clone,
+) -> Option<(Vec<Command>, [i64; 2])> {
     let mut min = [i64::MAX; 2];
     let mut found = false;
-    for command in commands {
+    for command in commands.clone() {
         let mut visit = |p: &[i64; 2]| {
             found = true;
             for axis in 0..2 {
                 min[axis] = min[axis].min(p[axis]);
             }
         };
-        match command {
+        match &command {
             Command::Move(p) | Command::Line(p) => visit(p),
             Command::Quad(a, b) => {
                 visit(a);
@@ -315,17 +322,65 @@ fn normalized(commands: &[Command]) -> Option<(Vec<Command>, [i64; 2])> {
             i64::try_from(i128::from(p[1]) - i128::from(origin[1]) * 256).ok()?,
         ])
     };
-    let mut out = Vec::with_capacity(commands.len());
+    let mut out = Vec::with_capacity(commands.size_hint().0);
     for command in commands {
         out.push(match command {
-            Command::Move(p) => Command::Move(shift(*p)?),
-            Command::Line(p) => Command::Line(shift(*p)?),
-            Command::Quad(a, b) => Command::Quad(shift(*a)?, shift(*b)?),
-            Command::Cubic(a, b, c) => Command::Cubic(shift(*a)?, shift(*b)?, shift(*c)?),
+            Command::Move(p) => Command::Move(shift(p)?),
+            Command::Line(p) => Command::Line(shift(p)?),
+            Command::Quad(a, b) => Command::Quad(shift(a)?, shift(b)?),
+            Command::Cubic(a, b, c) => Command::Cubic(shift(a)?, shift(b)?, shift(c)?),
             Command::Close => Command::Close,
         });
     }
     Some((out, origin))
+}
+
+/// A command list kept compactly: a tag byte per command and its points, about
+/// a third of `Vec<Command>` for the line-only stroke outlines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Packed {
+    tags: Vec<u8>,
+    points: Vec<[i64; 2]>,
+}
+
+impl Packed {
+    pub fn new(commands: &[Command]) -> Self {
+        let mut packed = Self::default();
+        for command in commands {
+            let (tag, points): (u8, &[[i64; 2]]) = match command {
+                Command::Move(p) => (0, std::slice::from_ref(p)),
+                Command::Line(p) => (1, std::slice::from_ref(p)),
+                Command::Quad(a, b) => (2, &[*a, *b]),
+                Command::Cubic(a, b, c) => (3, &[*a, *b, *c]),
+                Command::Close => (4, &[]),
+            };
+            packed.tags.push(tag);
+            packed.points.extend_from_slice(points);
+        }
+        packed.tags.shrink_to_fit();
+        packed.points.shrink_to_fit();
+        packed
+    }
+
+    /// The commands, in order.
+    pub fn iter(&self) -> impl Iterator<Item = Command> + Clone + '_ {
+        let mut points = self.points.iter().copied();
+        self.tags.iter().map(move |tag| {
+            let mut next = || points.next().expect("a packed point");
+            match tag {
+                0 => Command::Move(next()),
+                1 => Command::Line(next()),
+                2 => Command::Quad(next(), next()),
+                3 => Command::Cubic(next(), next(), next()),
+                _ => Command::Close,
+            }
+        })
+    }
+
+    /// The heap bytes held.
+    pub fn bytes(&self) -> usize {
+        self.tags.capacity() + self.points.capacity() * std::mem::size_of::<[i64; 2]>()
+    }
 }
 
 /// The window in path-relative Q8 units: `[XL, XR) x [YT, YB)`.
@@ -666,6 +721,25 @@ pub fn rasterize_crop(
     window: [i64; 4],
     curve_limit: u32,
 ) -> Result<Option<Crop>, RasterError> {
+    rasterize_crop_iter(commands.iter().copied(), rule, window, curve_limit)
+}
+
+/// `rasterize_crop` of packed commands.
+pub fn rasterize_crop_packed(
+    commands: &Packed,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
+    rasterize_crop_iter(commands.iter(), rule, window, curve_limit)
+}
+
+fn rasterize_crop_iter(
+    commands: impl Iterator<Item = Command> + Clone,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
     let (bytes, bound) = rasterize_bounded(
         commands,
         rule,
@@ -766,13 +840,22 @@ fn rasterize_with(
     skip: bool,
     whole_rows: bool,
 ) -> Result<Vec<u8>, RasterError> {
-    rasterize_bounded(commands, rule, window, curve_limit, skip, whole_rows).map(|(bytes, _)| bytes)
+    rasterize_bounded(
+        commands.iter().copied(),
+        rule,
+        window,
+        curve_limit,
+        skip,
+        whole_rows,
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 /// `rasterize_with`, and a rectangle `[x0, y0, x1, y1)` of window pixels outside
-/// which every byte is zero (`None` when every byte is).
+/// which every byte is zero. It may hold only zeros; `None` means no byte was
+/// written, so every byte is zero.
 fn rasterize_bounded(
-    commands: &[Command],
+    commands: impl Iterator<Item = Command> + Clone,
     rule: FillRule,
     window: [i64; 4],
     curve_limit: Curves,
@@ -780,7 +863,7 @@ fn rasterize_bounded(
     whole_rows: bool,
 ) -> Result<(Vec<u8>, Option<[usize; 4]>), RasterError> {
     use RasterError::Range;
-    let (commands, origin) = normalized(commands).ok_or(Range)?;
+    let (commands, origin) = normalized_iter(commands).ok_or(Range)?;
     let [ox, oy, width, height] = window;
     let (width, height) = (
         usize::try_from(width).map_err(|_| Range)?,
@@ -1587,6 +1670,12 @@ mod tests {
                 ] {
                     let whole = rasterize(&path, rule, window, CURVE_LIMIT);
                     let cropped = rasterize_crop(&path, rule, window, CURVE_LIMIT);
+                    let packed = Packed::new(&path);
+                    assert_eq!(
+                        rasterize_crop_packed(&packed, rule, window, CURVE_LIMIT),
+                        cropped,
+                        "packed case {case}"
+                    );
                     let expected = whole.map(|b| crop(&b, window[2] as u32, window[3] as u32));
                     drawn += usize::from(matches!(expected, Ok(Some(_))));
                     assert_eq!(cropped, expected, "case {case} {rule:?} {window:?}");
