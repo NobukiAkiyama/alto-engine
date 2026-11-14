@@ -303,7 +303,7 @@ impl Context<'_> {
             }
             RContent::Mesh(paths) => {
                 if self.resources.exact {
-                    self.vector_q14(paths, world.fixed()?, roi)?
+                    self.vector_q14(paths, world.fixed()?, roi, true)?
                 } else {
                     self.vector(VectorContent::Paths(paths), world.legacy()?, roi, true)?
                 }

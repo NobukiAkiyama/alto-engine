@@ -309,12 +309,28 @@ pub(crate) fn rasterize_stroke(
 ) -> Result<Vec<u8>, RasterError> {
     let len = usize::try_from(window[2].checked_mul(window[3]).ok_or(RasterError::Range)?)
         .map_err(|_| RasterError::Range)?;
+    match outline(path, stroke, world, level)? {
+        None => Ok(vec![0; len]),
+        Some(outline) => {
+            raster_q8::rasterize(&outline, FillRule::NonZero, window, raster_q8::CURVE_LIMIT)
+        }
+    }
+}
+
+/// The stroke's outline polygons in Q8 level pixels; `None` for a zero radius.
+/// It depends on the path, stroke, world and level only, never on the window.
+pub(crate) fn outline(
+    path: &PathData,
+    stroke: &Stroke,
+    world: FixedAffine,
+    level: i32,
+) -> Result<Option<Vec<raster_q8::Command>>, RasterError> {
     let bits = local_bits(world, level);
     let width =
         raster_q8::q_from_f32_bits(stroke.width.to_bits(), bits).ok_or(RasterError::Range)?;
     let radius = div(i128::from(width), 2).ok_or(RasterError::Range)?;
     if radius == 0 {
-        return Ok(vec![0; len]);
+        return Ok(None);
     }
     let local = quantize_path(path, bits).ok_or(RasterError::Range)?;
     let mut outline = Vec::new();
@@ -432,7 +448,7 @@ pub(crate) fn rasterize_stroke(
             }
         }
     }
-    raster_q8::rasterize(&outline, FillRule::NonZero, window, raster_q8::CURVE_LIMIT)
+    Ok(Some(outline))
 }
 
 #[cfg(test)]
