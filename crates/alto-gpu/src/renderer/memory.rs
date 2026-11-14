@@ -193,6 +193,8 @@ struct State {
     next: u64,
     serial: u64,
     entries: HashMap<u64, Allocation>,
+    /// The sum of `entries`' bytes, kept as entries come and go.
+    installed: u64,
     pending: u64,
     work: u64,
     readback_reservation: u64,
@@ -213,6 +215,7 @@ impl Governor {
                 next: 0,
                 serial: 0,
                 entries: HashMap::new(),
+                installed: 0,
                 pending: 0,
                 work: 1048576,
                 readback_reservation: readback,
@@ -221,10 +224,11 @@ impl Governor {
         })
     }
     fn used(s: &State) -> u64 {
-        s.entries.values().map(|a| a.bytes).sum::<u64>()
-            + s.pending
-            + s.work
-            + s.readback_reservation
+        debug_assert_eq!(
+            s.installed,
+            s.entries.values().map(|a| a.bytes).sum::<u64>()
+        );
+        s.installed + s.pending + s.work + s.readback_reservation
     }
     fn reserve(self: &Arc<Self>, bytes: u64, class: Class, work: bool) -> Result<Reservation> {
         let mut s = locked(&self.state);
@@ -288,6 +292,7 @@ impl Governor {
         let mut s = locked(&self.state);
         if complete {
             if let Some(a) = s.entries.remove(&id) {
+                s.installed -= a.bytes;
                 s.work += a.work_credit;
             }
         } else if let Some(a) = s.entries.get_mut(&id) {
@@ -313,15 +318,17 @@ impl Governor {
         queue.on_submitted_work_done(move || {
             if let Some(g) = weak.upgrade() {
                 let mut s = locked(&g.state);
-                let mut credit = 0;
+                let (mut credit, mut freed) = (0, 0);
                 s.entries.retain(|_, a| {
                     let keep = !a.retired || a.serial == 0 || a.serial > serial;
                     if !keep {
                         credit += a.work_credit;
+                        freed += a.bytes;
                     }
                     keep
                 });
                 s.work += credit;
+                s.installed -= freed;
             }
         });
     }
@@ -337,6 +344,7 @@ impl Reservation {
     fn install(mut self) -> u64 {
         let mut s = locked(&self.governor.state);
         s.pending -= self.bytes;
+        s.installed += self.bytes;
         s.next += 1;
         let id = s.next;
         s.entries.insert(

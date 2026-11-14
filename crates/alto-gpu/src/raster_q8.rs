@@ -1130,13 +1130,23 @@ fn nonzero<A: Acc>(
     bytes: &mut [u8],
 ) -> Result<Result<Option<[usize; 4]>, RasterError>, Integrate> {
     let mut sink = NonZero::<A>::new(window, false);
-    if let Err(error) = flatten(commands, curve_limit, window, skip, true, &mut sink) {
-        if sink.wide {
-            return Err(Integrate::Wide);
-        }
-        return Ok(Err(error));
-    }
-    sink.integrate(bytes, whole_rows).map(Ok)
+    let result = match flatten(commands, curve_limit, window, skip, true, &mut sink) {
+        Err(_) if sink.wide => Err(Integrate::Wide),
+        Err(error) => Ok(Err(error)),
+        Ok(()) => sink.integrate(bytes, whole_rows).map(Ok),
+    };
+    sink.recycle();
+    result
+}
+
+/// The largest cell count whose zeroed `i64` cells are kept for the next path
+/// (two vectors of 1 MiB each). A tile's window is at most 256 x 256 cells.
+const POOLED_CELLS: usize = 1 << 17;
+
+thread_local! {
+    /// Zeroed `i64` cells for the next `NonZero::<i64>`: `cover`, `area`.
+    static CELLS: std::cell::RefCell<(Vec<i64>, Vec<i64>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 /// Nonzero: the cell integration's `cover` and `area`, per window cell, and
@@ -1156,6 +1166,8 @@ struct NonZero<A> {
     touched: Vec<(usize, usize)>,
     probe: bool,
     wide: bool,
+    /// Scratch for one row's pieces in `segment`.
+    points: Vec<[i64; 2]>,
 }
 
 /// A nonzero accumulator: `i128`, or `i64` for the first try.
@@ -1167,6 +1179,12 @@ trait Acc: Copy + Default {
     fn coverage(sum: Self, area: Self) -> Option<u128>;
     /// Whether exceeding this type means trying again in `i128`.
     const NARROW: bool;
+    /// `len` zeroed cells for `cover` and `area` (at least `len`; any more are 0).
+    fn cells(len: usize) -> (Vec<Self>, Vec<Self>) {
+        (vec![Self::default(); len], vec![Self::default(); len])
+    }
+    /// Take back cells that are all 0 again.
+    fn recycle(_cover: Vec<Self>, _area: Vec<Self>) {}
 }
 
 impl Acc for i128 {
@@ -1188,6 +1206,23 @@ impl Acc for i128 {
 }
 
 impl Acc for i64 {
+    fn cells(len: usize) -> (Vec<Self>, Vec<Self>) {
+        if len == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let (mut cover, mut area) = CELLS.with_borrow_mut(std::mem::take);
+        if cover.len() < len {
+            cover.resize(len, 0);
+            area.resize(len, 0);
+        }
+        (cover, area)
+    }
+    fn recycle(cover: Vec<Self>, area: Vec<Self>) {
+        if cover.len() <= POOLED_CELLS {
+            debug_assert!(cover.iter().chain(&area).all(|&cell| cell == 0));
+            CELLS.set((cover, area));
+        }
+    }
     fn step(dir: i8, ux: i64, vx: i64, xbase: i128, va: i64, vb: i64) -> Option<(Self, Self)> {
         let dir = i64::from(dir);
         let xbase = i64::try_from(xbase).ok()?;
@@ -1243,10 +1278,12 @@ impl<A: Acc> NonZero<A> {
         } else {
             window.width * window.height
         };
+        let (cover, area) = A::cells(len);
         Self {
             window,
-            cover: vec![A::default(); len],
-            area: vec![A::default(); len],
+            cover,
+            area,
+            points: Vec::new(),
             touched: if probe {
                 vec![]
             } else {
@@ -1255,6 +1292,24 @@ impl<A: Acc> NonZero<A> {
             probe,
             wide: false,
         }
+    }
+
+    /// Give the cells back for the next path. Every cell a segment wrote lies in
+    /// its row's `touched` span (the span is widened before the store), so
+    /// zeroing those spans leaves all cells 0.
+    fn recycle(mut self) {
+        let width = self.window.width;
+        for (row, &(first, last)) in self.touched.iter().enumerate() {
+            if first <= last {
+                let cells = row * width + first..=row * width + last;
+                self.cover[cells.clone()].fill(A::default());
+                self.area[cells].fill(A::default());
+            }
+        }
+        A::recycle(
+            std::mem::take(&mut self.cover),
+            std::mem::take(&mut self.area),
+        );
     }
 
     /// The coverage bytes from the running sum of each row. Only the cells a
@@ -1352,7 +1407,9 @@ impl<A: Acc> Sink for NonZero<A> {
             } else {
                 lerp_line(a, b, bottom)?
             };
-            let mut points = vec![[xa, top]];
+            let mut points = std::mem::take(&mut self.points);
+            points.clear();
+            points.push([xa, top]);
             if xa != xb {
                 let left = xa.min(xb).div_euclid(256).max(lx);
                 let right = xa.max(xb).div_euclid(256).min(lx + width as i64);
@@ -1403,6 +1460,7 @@ impl<A: Acc> Sink for NonZero<A> {
                 self.cover[idx] = cover;
                 self.area[idx] = area;
             }
+            self.points = points;
         }
         Some(())
     }
