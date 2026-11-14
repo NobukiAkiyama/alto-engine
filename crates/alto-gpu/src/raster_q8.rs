@@ -383,6 +383,120 @@ impl Packed {
     }
 }
 
+/// Commands normalized once for rasterizing into many windows (a vector path
+/// or stroke outline on every tile).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prepared {
+    commands: Packed,
+    origin: [i64; 2],
+    /// The smallest and largest normalized point, control points included.
+    bounds: Option<[[i64; 2]; 2]>,
+    /// What flattening returns for a nonzero window that every point is on or
+    /// past one edge of. It is the same for every such window: each curve is
+    /// dropped or replaced by its chord before it is subdivided (the curve and
+    /// interpolation checks before that do not read the window), and with every
+    /// coordinate at most `2^60` no segment's interpolation can overflow. `None`
+    /// for larger coordinates, which are flattened as before.
+    outside: Option<Result<(), RasterError>>,
+}
+
+/// Normalized coordinates up to this keep `NonZero::segment`'s interpolation
+/// inside `i128` and `i64` for any window.
+const PREPARED_EXTENT: i64 = 1 << 60;
+
+impl Prepared {
+    /// `Err` is the error `rasterize` gives for every window when the commands
+    /// cannot be normalized.
+    pub fn new(commands: &[Command], curve_limit: u32) -> Result<Self, RasterError> {
+        let (normal, origin) = normalized(commands).ok_or(RasterError::Range)?;
+        let mut bounds: Option<[[i64; 2]; 2]> = None;
+        for command in &normal {
+            let points: &[[i64; 2]] = match command {
+                Command::Move(p) | Command::Line(p) => std::slice::from_ref(p),
+                Command::Quad(a, b) => &[*a, *b],
+                Command::Cubic(a, b, c) => &[*a, *b, *c],
+                Command::Close => &[],
+            };
+            for p in points {
+                let b = bounds.get_or_insert([*p, *p]);
+                for axis in 0..2 {
+                    b[0][axis] = b[0][axis].min(p[axis]);
+                    b[1][axis] = b[1][axis].max(p[axis]);
+                }
+            }
+        }
+        let max = bounds.map_or(0, |[_, max]| max[0].max(max[1]));
+        let outside = (max <= PREPARED_EXTENT).then(|| {
+            // A one-pixel window right of every point.
+            let lx = max.div_euclid(256) + 1;
+            let window = Window {
+                lx,
+                ly: 0,
+                width: 1,
+                height: 1,
+                xl: lx * 256,
+                xr: lx * 256 + 256,
+                yt: 0,
+                yb: 256,
+            };
+            let mut sink = NonZero {
+                window,
+                cover: vec![],
+                area: vec![],
+                touched: vec![],
+                probe: true,
+            };
+            flatten(
+                &normal,
+                Curves::Reject(curve_limit),
+                window,
+                true,
+                true,
+                &mut sink,
+            )
+        });
+        Ok(Self {
+            commands: Packed::new(&normal),
+            origin,
+            bounds,
+            outside,
+        })
+    }
+
+    /// Whether every point is on or past one edge of `window` (`outside`).
+    fn is_outside(&self, window: Window) -> bool {
+        let Some([min, max]) = self.bounds else {
+            return true;
+        };
+        max[0] <= window.xl || min[0] >= window.xr || max[1] <= window.yt || min[1] >= window.yb
+    }
+
+    /// The heap bytes held.
+    pub fn bytes(&self) -> usize {
+        self.commands.bytes()
+    }
+}
+
+/// `rasterize_crop` of prepared commands, for the same `curve_limit`.
+pub fn rasterize_crop_prepared(
+    prepared: &Prepared,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
+    let (bytes, bound) = rasterize_normalized(
+        Normal::Prepared(prepared),
+        prepared.origin,
+        rule,
+        window,
+        Curves::Reject(curve_limit),
+        true,
+        false,
+    )?;
+    let width = window[2] as usize;
+    Ok(bound.and_then(|bound| crop_within(&bytes, width, bound)))
+}
+
 /// The window in path-relative Q8 units: `[XL, XR) x [YT, YB)`.
 #[derive(Clone, Copy)]
 struct Window {
@@ -724,16 +838,6 @@ pub fn rasterize_crop(
     rasterize_crop_iter(commands.iter().copied(), rule, window, curve_limit)
 }
 
-/// `rasterize_crop` of packed commands.
-pub fn rasterize_crop_packed(
-    commands: &Packed,
-    rule: FillRule,
-    window: [i64; 4],
-    curve_limit: u32,
-) -> Result<Option<Crop>, RasterError> {
-    rasterize_crop_iter(commands.iter(), rule, window, curve_limit)
-}
-
 fn rasterize_crop_iter(
     commands: impl Iterator<Item = Command> + Clone,
     rule: FillRule,
@@ -862,8 +966,38 @@ fn rasterize_bounded(
     skip: bool,
     whole_rows: bool,
 ) -> Result<(Vec<u8>, Option<[usize; 4]>), RasterError> {
+    let (commands, origin) = normalized_iter(commands).ok_or(RasterError::Range)?;
+    rasterize_normalized(
+        Normal::Owned(commands),
+        origin,
+        rule,
+        window,
+        curve_limit,
+        skip,
+        whole_rows,
+    )
+}
+
+/// Normalized commands for `rasterize_normalized`: just made, or prepared once
+/// for many windows.
+enum Normal<'a> {
+    Owned(Vec<Command>),
+    Prepared(&'a Prepared),
+}
+
+/// `rasterize_bounded` after normalization. With `Normal::Prepared`, a path
+/// whose result outside the window is known returns it without flattening and
+/// without the bytes (`Prepared::outside`).
+fn rasterize_normalized(
+    commands: Normal<'_>,
+    origin: [i64; 2],
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: Curves,
+    skip: bool,
+    whole_rows: bool,
+) -> Result<(Vec<u8>, Option<[usize; 4]>), RasterError> {
     use RasterError::Range;
-    let (commands, origin) = normalized_iter(commands).ok_or(Range)?;
     let [ox, oy, width, height] = window;
     let (width, height) = (
         usize::try_from(width).map_err(|_| Range)?,
@@ -890,6 +1024,20 @@ fn rasterize_bounded(
         xr,
         yt,
         yb,
+    };
+    if let Normal::Prepared(prepared) = &commands
+        && len > 0
+        && matches!(rule, FillRule::NonZero)
+        && skip
+        && !whole_rows
+        && let Some(result) = prepared.outside
+        && prepared.is_outside(window)
+    {
+        return result.map(|()| (vec![], None));
+    }
+    let commands = match commands {
+        Normal::Owned(commands) => commands,
+        Normal::Prepared(prepared) => prepared.commands.iter().collect(),
     };
     let mut bytes = vec![0u8; len];
     if len == 0 {
@@ -1670,12 +1818,9 @@ mod tests {
                 ] {
                     let whole = rasterize(&path, rule, window, CURVE_LIMIT);
                     let cropped = rasterize_crop(&path, rule, window, CURVE_LIMIT);
-                    let packed = Packed::new(&path);
-                    assert_eq!(
-                        rasterize_crop_packed(&packed, rule, window, CURVE_LIMIT),
-                        cropped,
-                        "packed case {case}"
-                    );
+                    let prepared = Prepared::new(&path, CURVE_LIMIT)
+                        .and_then(|p| rasterize_crop_prepared(&p, rule, window, CURVE_LIMIT));
+                    assert_eq!(prepared, cropped, "prepared case {case}");
                     let expected = whole.map(|b| crop(&b, window[2] as u32, window[3] as u32));
                     drawn += usize::from(matches!(expected, Ok(Some(_))));
                     assert_eq!(cropped, expected, "case {case} {rule:?} {window:?}");
@@ -1683,6 +1828,76 @@ mod tests {
             }
         }
         assert!(drawn > 900, "{drawn}");
+    }
+
+    #[test]
+    fn raster_q8_prepared_outside_keeps_every_error() {
+        // A prepared path skips flattening for a window it is outside of, and
+        // returns the result it found once. Paths that flatten to an error must
+        // still give that error, whichever side of the window they are on:
+        // a curve with no start point (Range), a curve past the limit
+        // (CurveRange), lines only, and coordinates past the shortcut's range.
+        let big = 1i64 << 40;
+        let huge = 1i64 << 61;
+        let paths: Vec<Vec<Command>> = vec![
+            vec![Command::Quad([0, 0], [512, 512])],
+            vec![Command::Move([0, 0]), Command::Quad([big, 0], [0, big])],
+            vec![
+                Command::Move([0, 0]),
+                Command::Line([2048, 0]),
+                Command::Line([0, 2048]),
+                Command::Close,
+            ],
+            vec![
+                Command::Move([0, 0]),
+                Command::Cubic([3000, -500], [-500, 3000], [2048, 2048]),
+                Command::Close,
+            ],
+            vec![
+                Command::Move([0, 0]),
+                Command::Line([huge, 0]),
+                Command::Line([0, 512]),
+            ],
+            vec![],
+        ];
+        let mut outside = 0;
+        for (case, path) in paths.iter().enumerate() {
+            for window in [
+                [0, 0, 16, 16],
+                [-40, 0, 20, 20],
+                [40, 0, 20, 20],
+                [0, -40, 20, 20],
+                [0, 40, 20, 20],
+                [1 << 40, 0, 8, 8],
+                [3, 3, 0, 4],
+            ] {
+                for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                    let whole = rasterize_crop(path, rule, window, CURVE_LIMIT);
+                    let prepared = Prepared::new(path, CURVE_LIMIT);
+                    outside += usize::from(prepared.as_ref().is_ok_and(|p| {
+                        let [ox, oy, w, h] = window;
+                        let lx = ox - p.origin[0];
+                        let ly = oy - p.origin[1];
+                        p.outside.is_some()
+                            && p.is_outside(Window {
+                                lx,
+                                ly,
+                                width: w as usize,
+                                height: h as usize,
+                                xl: lx * 256,
+                                xr: (lx + w) * 256,
+                                yt: ly * 256,
+                                yb: (ly + h) * 256,
+                            })
+                    }));
+                    let got = prepared
+                        .and_then(|p| rasterize_crop_prepared(&p, rule, window, CURVE_LIMIT));
+                    assert_eq!(got, whole, "case {case} {window:?} {rule:?}");
+                }
+            }
+        }
+        // The shortcut is taken, including for paths that end in an error.
+        assert!(outside > 30, "{outside}");
     }
 
     #[test]
