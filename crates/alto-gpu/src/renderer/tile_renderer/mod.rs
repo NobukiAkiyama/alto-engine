@@ -290,12 +290,6 @@ struct GlyphQ14Params {
 }
 /// Glyph instances per `glyph-q14.wgsl` dispatch (memo `GLYPH_Q14_CHUNK`).
 const GLYPH_Q14_CHUNK: usize = 1024;
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct VectorQ14Params {
-    color: [u32; 4],
-    size: [u32; 4],
-}
 /// Verify the stored f32 ROI against the tile key before any version 3 stage.
 fn integer_origin(key: CacheKey, roi: Roi) -> Result<RoiQ> {
     let grid = RoiQ::from_roi(roi)?;
@@ -344,12 +338,37 @@ pub(super) struct Resources {
     exact: bool,
     pipeline: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
-    vector_q14: Option<wgpu::ComputePipeline>,
     glyph_q14: Option<wgpu::ComputePipeline>,
     pool: Vec<Pooled>,
+    /// Version 3 vector paths prepared for a world and level, shared by every
+    /// tile (`paint.rs`).
+    vectors: Vec<PreparedVector>,
     pub(super) allocations: u64,
     pub(super) reuses: u64,
 }
+/// The most vector nodes whose prepared paths are kept.
+const PREPARED_VECTORS: usize = 32;
+/// The most packed stroke-outline bytes kept over all nodes. Past it a tile
+/// builds the outlines it needs without keeping them.
+const PREPARED_BYTES: usize = 32 << 20;
+/// A vector node's paths in Q8 level pixels for one world and level: what does
+/// not depend on the tile. The entry holds its own `Arc`, so the address of a
+/// live `paths` can only match the same, unchanged path list.
+struct PreparedVector {
+    paths: Arc<Vec<StyledPath>>,
+    world: alto_core::FixedAffine,
+    level: i32,
+    used: u64,
+    /// `None` when a point of some path is outside the Q8 range: the whole node
+    /// is transparent (VECTOR_TRANSFORM_RANGE).
+    mapped: Option<Vec<Vec<crate::raster_q8::Command>>>,
+    /// Per path, its stroke outline once a tile has needed it.
+    outlines: Vec<Option<StrokeOutline>>,
+    /// The packed bytes of `outlines`.
+    bytes: usize,
+}
+type StrokeOutline =
+    std::result::Result<Option<crate::raster_q8::Packed>, crate::raster_q8::RasterError>;
 impl Resources {
     fn new(device: &wgpu::Device, governor: &Arc<Governor>, exact: bool) -> Result<Self> {
         let (pipeline, resolve) = if exact {
@@ -385,17 +404,6 @@ impl Resources {
             reuses: 0,
             pipeline,
             resolve,
-            vector_q14: exact.then(|| {
-                compute(
-                    device,
-                    "M5 integer vector paint",
-                    &format!(
-                        "{}\n{}",
-                        include_str!("../../../shaders/q14.wgsl"),
-                        include_str!("../../../shaders/vector-q14.wgsl")
-                    ),
-                )
-            }),
             glyph_q14: exact.then(|| {
                 compute(
                     device,
@@ -407,6 +415,7 @@ impl Resources {
                     ),
                 )
             }),
+            vectors: Vec::new(),
             pool: vec![Pooled {
                 texture: memory::create_texture(
                     governor,
@@ -451,6 +460,8 @@ impl Resources {
             }
         }
         self.pool = kept;
+        self.vectors
+            .retain(|v| frame.saturating_sub(v.used) < POOL_IDLE_FRAMES);
     }
     /// Hands every target to `retired`, for when these resources are discarded.
     pub(super) fn retire(self, retired: &mut super::Retired) {

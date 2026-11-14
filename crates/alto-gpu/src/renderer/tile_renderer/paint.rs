@@ -1,12 +1,15 @@
 //! Vector and text content painted into tile targets, float and Q14.
 use super::*;
 
+const VECTOR_BUDGET: &str = "v3 vector coverage exceeds GPU budget";
+
 impl Context<'_> {
     pub(super) fn vector_q14(
         &mut self,
-        paths: &[StyledPath],
+        paths: &Arc<Vec<StyledPath>>,
         world: alto_core::FixedAffine,
         roi: Roi,
+        keep: bool,
     ) -> Result<Target> {
         let [ox, oy, level] = crate::raster_q8::roi_grid(roi.x, roi.y, roi.scale)
             .ok_or_else(|| RenderError::GpuUnsupported("v3 vector ROI is not integer".into()))?;
@@ -14,19 +17,73 @@ impl Context<'_> {
             .ok()
             .filter(|l| (-6..=12).contains(l))
             .ok_or_else(|| RenderError::InvalidArgument("v3 vector level out of range".into()))?;
-        // VECTOR_TRANSFORM_RANGE: a world that puts a point of the node outside
-        // the Q8 grid's integer range makes the whole node transparent (not the
-        // tile refused), like TEXT_TRANSFORM_RANGE. It depends on the node and
-        // level only, so every tile agrees.
-        let mut mapped = Vec::with_capacity(paths.len());
-        for path in paths {
-            match crate::raster_q8::map_path(&path.data, world, level) {
-                Some(commands) => mapped.push(commands),
-                None => return self.zero(roi),
-            }
+        // The mapped paths and stroke outlines do not depend on the tile, so
+        // with `keep` they are kept for the node's other tiles (a vector mask's
+        // one-path list is made per tile and is not). The entry is taken out
+        // while this tile paints and put back after, whatever the result.
+        let found = self
+            .resources
+            .vectors
+            .iter()
+            .position(|v| Arc::ptr_eq(&v.paths, paths) && v.world == world && v.level == level);
+        let mut prepared = match found {
+            Some(index) => self.resources.vectors.swap_remove(index),
+            None => PreparedVector {
+                paths: paths.clone(),
+                world,
+                level,
+                used: 0,
+                // VECTOR_TRANSFORM_RANGE: a world that puts a point of the node
+                // outside the Q8 grid's integer range makes the whole node
+                // transparent (not the tile refused), like TEXT_TRANSFORM_RANGE.
+                // It depends on the node and level only, so every tile agrees.
+                mapped: paths
+                    .iter()
+                    .map(|path| crate::raster_q8::map_path(&path.data, world, level))
+                    .collect(),
+                outlines: vec![None; paths.len()],
+                bytes: 0,
+            },
+        };
+        let others: usize = self.resources.vectors.iter().map(|v| v.bytes).sum();
+        prepared.used = self.r.frame;
+        let room = PREPARED_BYTES.saturating_sub(others);
+        let result = self.vector_q14_prepared(&mut prepared, [ox, oy], level, roi, room);
+        if !keep {
+            return result;
         }
+        if self.resources.vectors.len() >= PREPARED_VECTORS {
+            let oldest = (0..self.resources.vectors.len())
+                .min_by_key(|&i| self.resources.vectors[i].used)
+                .expect("a full cache");
+            self.resources.vectors.swap_remove(oldest);
+        }
+        self.resources.vectors.push(prepared);
+        result
+    }
+
+    fn vector_q14_prepared(
+        &mut self,
+        prepared: &mut PreparedVector,
+        [ox, oy]: [i64; 2],
+        level: i32,
+        roi: Roi,
+        room: usize,
+    ) -> Result<Target> {
+        let Some(mapped) = &prepared.mapped else {
+            return self.zero(roi);
+        };
+        let (paths, world) = (prepared.paths.clone(), prepared.world);
+        // Each paint's coverage is cropped to its nonzero cells and painted in
+        // order by `glyph-q14.wgsl`, many paints per dispatch. The shader's
+        // formula is vector-q14.wgsl's, and a zero byte leaves a pixel as it
+        // was in both, so the Q14 result is the same as one dispatch per paint.
+        let window = [ox, oy, i64::from(roi.w), i64::from(roi.h)];
+        let flush = 4 * bucket(roi.w) as usize * bucket(roi.h) as usize;
         let mut current = self.zero(roi)?;
-        for (path, commands) in paths.iter().zip(mapped) {
+        let mut pending: Vec<crate::glyph_q8::GlyphCrop> = vec![];
+        let mut pending_bytes = 0;
+        for (index, (path, commands)) in paths.iter().zip(mapped).enumerate() {
             // Fill precedes stroke for every styled path, including when one
             // paint has no visible alpha or exceeds the curve range.
             for paint in 0..2 {
@@ -47,31 +104,56 @@ impl Context<'_> {
                 if color[3] == 0 {
                     continue;
                 }
-                let window = [ox, oy, i64::from(roi.w), i64::from(roi.h)];
-                let coverage = if paint == 0 {
+                let cropped = if paint == 0 {
                     let rule = match path.fill_rule {
                         FillRule::NonZero => crate::raster_q8::FillRule::NonZero,
                         FillRule::EvenOdd => crate::raster_q8::FillRule::EvenOdd,
                     };
-                    crate::raster_q8::rasterize(
-                        &commands,
+                    crate::raster_q8::rasterize_crop(
+                        commands,
                         rule,
                         window,
                         crate::raster_q8::CURVE_LIMIT,
                     )
                 } else {
-                    crate::stroke_q8::rasterize_stroke(
-                        &path.data,
-                        path.stroke.as_ref().expect("visible stroke"),
-                        world,
-                        level,
-                        window,
-                    )
+                    let built;
+                    let outline = match &prepared.outlines[index] {
+                        Some(outline) => outline,
+                        None => {
+                            let outline = crate::stroke_q8::outline(
+                                &path.data,
+                                path.stroke.as_ref().expect("visible stroke"),
+                                world,
+                                level,
+                            )
+                            .map(|o| o.map(|o| crate::raster_q8::Packed::new(&o)));
+                            let size = outline
+                                .as_ref()
+                                .map_or(0, |o| o.as_ref().map_or(0, |o| o.bytes()));
+                            if prepared.bytes + size <= room {
+                                prepared.bytes += size;
+                                prepared.outlines[index].insert(outline)
+                            } else {
+                                built = outline;
+                                &built
+                            }
+                        }
+                    };
+                    match outline {
+                        Ok(Some(outline)) => crate::raster_q8::rasterize_crop_packed(
+                            outline,
+                            crate::raster_q8::FillRule::NonZero,
+                            window,
+                            crate::raster_q8::CURVE_LIMIT,
+                        ),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(*error),
+                    }
                 };
                 // A path whose integer subdivision budget is exceeded is
                 // skipped identically on every tile.
-                let coverage = match coverage {
-                    Ok(coverage) => coverage,
+                let cropped = match cropped {
+                    Ok(cropped) => cropped,
                     Err(crate::raster_q8::RasterError::CurveRange) => continue,
                     Err(crate::raster_q8::RasterError::Range) => {
                         return Err(RenderError::GpuUnsupported(
@@ -79,123 +161,28 @@ impl Context<'_> {
                         ));
                     }
                 };
-                if coverage.iter().all(|&v| v == 0) {
+                let Some(([x, y], w, h, bytes)) = cropped else {
                     continue;
-                }
-                let need = u64::from(roi.w) * u64::from(roi.h) + 64;
-                if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
-                    return Err(RenderError::Budget(
-                        "v3 vector coverage exceeds GPU budget".into(),
-                    ));
-                }
-                // Every fallible step comes before the coverage texture, so an
-                // error never drops a registered texture without destroying it.
-                let output = self.alloc(roi)?;
-                if self.resources.vector_q14.is_none() {
-                    return Err(RenderError::Internal(
-                        "v3 vector pipeline was not created".into(),
-                    ));
-                }
-                let params = buffer(
-                    &self.r.governor,
-                    &self.r.device,
-                    &self.r.queue,
-                    "v3 vector paint params",
-                    &[VectorQ14Params {
-                        color: color.map(u32::from),
-                        size: [roi.w, roi.h, 0, 0],
-                    }],
-                    wgpu::BufferUsages::UNIFORM,
-                )?;
-                let created = memory::create_texture(
-                    &self.r.governor,
-                    &self.r.device,
-                    &wgpu::TextureDescriptor {
-                        label: Some("v3 vector coverage"),
-                        size: wgpu::Extent3d {
-                            width: roi.w,
-                            height: roi.h,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::R8Unorm,
-                        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    },
-                    Class::Effects,
-                );
-                let texture = match created {
-                    Ok(texture) => texture,
-                    Err(error) => {
-                        memory::destroy_buffer(&self.r.governor, &params, true);
-                        return Err(error);
-                    }
                 };
-                self.r.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &coverage,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(roi.w),
-                        rows_per_image: Some(roi.h),
-                    },
-                    wgpu::Extent3d {
-                        width: roi.w,
-                        height: roi.h,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let pipeline = self.resources.vector_q14.as_ref().expect("checked above");
-                let input = self.resources.pool[current.index]
-                    .texture
-                    .create_view(&Default::default());
-                let mask = texture.create_view(&Default::default());
-                let target = self.resources.pool[output.index]
-                    .texture
-                    .create_view(&Default::default());
-                let group = self.r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("v3 vector paint"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&input),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&mask),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&target),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: params.as_entire_binding(),
-                        },
-                    ],
+                pending_bytes += bytes.len();
+                pending.push(crate::glyph_q8::GlyphCrop {
+                    dst: [x, y],
+                    w,
+                    h,
+                    bytes,
+                    color,
                 });
-                {
-                    let mut pass = self.encoder.begin_compute_pass(&Default::default());
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &group, &[]);
-                    pass.dispatch_workgroups(roi.w.div_ceil(16), roi.h.div_ceil(16), 1);
+                if pending.len() >= GLYPH_Q14_CHUNK || pending_bytes >= flush {
+                    current = self.paint_crops(current, &pending, roi, VECTOR_BUDGET)?;
+                    pending.clear();
+                    pending_bytes = 0;
                 }
-                self.r.retired.effect_texture(texture);
-                self.r
-                    .retired
-                    .classified_buffer(&params, MemoryClass::Effects);
-                current = output;
             }
         }
-        Ok(current)
+        if pending.is_empty() {
+            return Ok(current);
+        }
+        self.paint_crops(current, &pending, roi, VECTOR_BUDGET)
     }
 
     /// Render version 3 text from its bake only: every glyph's coverage
@@ -211,7 +198,7 @@ impl Context<'_> {
         roi: Roi,
     ) -> Result<Target> {
         let grid = RoiQ::from_roi(roi)?;
-        let mut current = self.zero(roi)?;
+        let current = self.zero(roi)?;
         let Some(bake) = bake else {
             return Ok(current);
         };
@@ -221,6 +208,20 @@ impl Context<'_> {
             grid.level,
             [grid.ox, grid.oy, i64::from(roi.w), i64::from(roi.h)],
         );
+        self.paint_crops(current, &crops, roi, "v3 glyph scratch exceeds GPU budget")
+    }
+
+    /// Paint coverage crops onto `current` in order with `glyph-q14.wgsl`:
+    /// shelf-packed into fresh `R8Unorm` scratch textures, in chunks that each
+    /// read the previous chunk's Q14. `budget` is the error when a chunk would
+    /// exceed the GPU budget.
+    fn paint_crops(
+        &mut self,
+        mut current: Target,
+        crops: &[crate::glyph_q8::GlyphCrop],
+        roi: Roi,
+        budget: &str,
+    ) -> Result<Target> {
         let (sw, sh) = (bucket(roi.w), bucket(roi.h));
         let mut next = 0;
         while next < crops.len() {
@@ -250,9 +251,7 @@ impl Context<'_> {
             }
             let need = u64::from(sw) * u64::from(sh) + 48 * batch.len() as u64 + 16;
             if self.r.gpu_bytes().budget_used.saturating_add(need) > self.r.budget_bytes {
-                return Err(RenderError::Budget(
-                    "v3 glyph scratch exceeds GPU budget".into(),
-                ));
+                return Err(RenderError::Budget(budget.into()));
             }
             let instances: Vec<GlyphQ14> = batch
                 .iter()
@@ -546,14 +545,15 @@ impl Context<'_> {
             Self::input_roi_v3(std::slice::from_ref(&effect), sample)?
         };
         let coverage = self.vector_q14(
-            &[StyledPath {
+            &Arc::new(vec![StyledPath {
                 data: path.clone(),
                 fill: Some([1.0; 4]),
                 stroke: None,
                 fill_rule: rule,
-            }],
+            }]),
             world,
             input,
+            false,
         )?;
         if radius_q8 == 0 {
             return Ok(coverage);

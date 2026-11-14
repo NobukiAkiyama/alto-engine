@@ -282,16 +282,23 @@ fn lerp_column(a: [i64; 2], b: [i64; 2], x: i64) -> Option<i64> {
 }
 
 fn normalized(commands: &[Command]) -> Option<(Vec<Command>, [i64; 2])> {
+    normalized_iter(commands.iter().copied())
+}
+
+/// `normalized` over commands read twice from `commands`.
+fn normalized_iter(
+    commands: impl Iterator<Item = Command> + Clone,
+) -> Option<(Vec<Command>, [i64; 2])> {
     let mut min = [i64::MAX; 2];
     let mut found = false;
-    for command in commands {
+    for command in commands.clone() {
         let mut visit = |p: &[i64; 2]| {
             found = true;
             for axis in 0..2 {
                 min[axis] = min[axis].min(p[axis]);
             }
         };
-        match command {
+        match &command {
             Command::Move(p) | Command::Line(p) => visit(p),
             Command::Quad(a, b) => {
                 visit(a);
@@ -315,17 +322,65 @@ fn normalized(commands: &[Command]) -> Option<(Vec<Command>, [i64; 2])> {
             i64::try_from(i128::from(p[1]) - i128::from(origin[1]) * 256).ok()?,
         ])
     };
-    let mut out = Vec::with_capacity(commands.len());
+    let mut out = Vec::with_capacity(commands.size_hint().0);
     for command in commands {
         out.push(match command {
-            Command::Move(p) => Command::Move(shift(*p)?),
-            Command::Line(p) => Command::Line(shift(*p)?),
-            Command::Quad(a, b) => Command::Quad(shift(*a)?, shift(*b)?),
-            Command::Cubic(a, b, c) => Command::Cubic(shift(*a)?, shift(*b)?, shift(*c)?),
+            Command::Move(p) => Command::Move(shift(p)?),
+            Command::Line(p) => Command::Line(shift(p)?),
+            Command::Quad(a, b) => Command::Quad(shift(a)?, shift(b)?),
+            Command::Cubic(a, b, c) => Command::Cubic(shift(a)?, shift(b)?, shift(c)?),
             Command::Close => Command::Close,
         });
     }
     Some((out, origin))
+}
+
+/// A command list kept compactly: a tag byte per command and its points, about
+/// a third of `Vec<Command>` for the line-only stroke outlines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Packed {
+    tags: Vec<u8>,
+    points: Vec<[i64; 2]>,
+}
+
+impl Packed {
+    pub fn new(commands: &[Command]) -> Self {
+        let mut packed = Self::default();
+        for command in commands {
+            let (tag, points): (u8, &[[i64; 2]]) = match command {
+                Command::Move(p) => (0, std::slice::from_ref(p)),
+                Command::Line(p) => (1, std::slice::from_ref(p)),
+                Command::Quad(a, b) => (2, &[*a, *b]),
+                Command::Cubic(a, b, c) => (3, &[*a, *b, *c]),
+                Command::Close => (4, &[]),
+            };
+            packed.tags.push(tag);
+            packed.points.extend_from_slice(points);
+        }
+        packed.tags.shrink_to_fit();
+        packed.points.shrink_to_fit();
+        packed
+    }
+
+    /// The commands, in order.
+    pub fn iter(&self) -> impl Iterator<Item = Command> + Clone + '_ {
+        let mut points = self.points.iter().copied();
+        self.tags.iter().map(move |tag| {
+            let mut next = || points.next().expect("a packed point");
+            match tag {
+                0 => Command::Move(next()),
+                1 => Command::Line(next()),
+                2 => Command::Quad(next(), next()),
+                3 => Command::Cubic(next(), next(), next()),
+                _ => Command::Close,
+            }
+        })
+    }
+
+    /// The heap bytes held.
+    pub fn bytes(&self) -> usize {
+        self.tags.capacity() + self.points.capacity() * std::mem::size_of::<[i64; 2]>()
+    }
 }
 
 /// The window in path-relative Q8 units: `[XL, XR) x [YT, YB)`.
@@ -652,6 +707,91 @@ pub fn rasterize(
     )
 }
 
+/// A coverage cropped to its nonzero bytes: top-left in window pixels, width,
+/// height and the row-major bytes.
+pub type Crop = ([u32; 2], u32, u32, Vec<u8>);
+
+/// `rasterize` cropped to the smallest rectangle that holds every nonzero byte
+/// (`crop`), `None` when every byte is zero. Only the rectangle the rasterizer
+/// wrote is scanned. Painting the crop at its top-left gives the same Q14 result
+/// as painting the whole coverage, since a zero byte leaves a pixel unchanged.
+pub fn rasterize_crop(
+    commands: &[Command],
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
+    rasterize_crop_iter(commands.iter().copied(), rule, window, curve_limit)
+}
+
+/// `rasterize_crop` of packed commands.
+pub fn rasterize_crop_packed(
+    commands: &Packed,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
+    rasterize_crop_iter(commands.iter(), rule, window, curve_limit)
+}
+
+fn rasterize_crop_iter(
+    commands: impl Iterator<Item = Command> + Clone,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: u32,
+) -> Result<Option<Crop>, RasterError> {
+    let (bytes, bound) = rasterize_bounded(
+        commands,
+        rule,
+        window,
+        Curves::Reject(curve_limit),
+        true,
+        false,
+    )?;
+    let width = window[2] as usize;
+    Ok(bound.and_then(|bound| crop_within(&bytes, width, bound)))
+}
+
+/// The smallest rectangle of a row-major `w`×`h` coverage that holds every
+/// nonzero byte: its top-left, width, height and bytes. `None` when every byte
+/// is zero.
+pub fn crop(coverage: &[u8], w: u32, h: u32) -> Option<Crop> {
+    let (w, h) = (w as usize, h as usize);
+    assert_eq!(coverage.len(), w * h, "coverage is w*h bytes");
+    crop_within(coverage, w, [0, 0, w, h])
+}
+
+/// `crop`, scanning only `bound` (`[x0, y0, x1, y1)`), outside which every
+/// byte must be zero.
+fn crop_within(coverage: &[u8], w: usize, bound: [usize; 4]) -> Option<Crop> {
+    let [bx0, by0, bx1, by1] = bound;
+    let (mut x0, mut x1, mut y0, mut y1) = (bx1, bx0, by1, by0);
+    for y in by0..by1 {
+        let row = &coverage[y * w + bx0..y * w + bx1];
+        let Some(first) = row.iter().position(|&v| v != 0) else {
+            continue;
+        };
+        let last = row.iter().rposition(|&v| v != 0).expect("a nonzero byte");
+        x0 = x0.min(bx0 + first);
+        x1 = x1.max(bx0 + last + 1);
+        y0 = y0.min(y);
+        y1 = y + 1;
+    }
+    if y0 >= y1 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity((x1 - x0) * (y1 - y0));
+    for y in y0..y1 {
+        bytes.extend_from_slice(&coverage[y * w + x0..y * w + x1]);
+    }
+    Some((
+        [x0 as u32, y0 as u32],
+        (x1 - x0) as u32,
+        (y1 - y0) as u32,
+        bytes,
+    ))
+}
+
 /// The most segments one glyph curve is flattened into (v2's 1..=64).
 pub const GLYPH_CURVE_LIMIT: u32 = 64;
 /// Glyph coordinates, from the glyph's own pixel origin, are at most this
@@ -700,8 +840,30 @@ fn rasterize_with(
     skip: bool,
     whole_rows: bool,
 ) -> Result<Vec<u8>, RasterError> {
+    rasterize_bounded(
+        commands.iter().copied(),
+        rule,
+        window,
+        curve_limit,
+        skip,
+        whole_rows,
+    )
+    .map(|(bytes, _)| bytes)
+}
+
+/// `rasterize_with`, and a rectangle `[x0, y0, x1, y1)` of window pixels outside
+/// which every byte is zero. It may hold only zeros; `None` means no byte was
+/// written, so every byte is zero.
+fn rasterize_bounded(
+    commands: impl Iterator<Item = Command> + Clone,
+    rule: FillRule,
+    window: [i64; 4],
+    curve_limit: Curves,
+    skip: bool,
+    whole_rows: bool,
+) -> Result<(Vec<u8>, Option<[usize; 4]>), RasterError> {
     use RasterError::Range;
-    let (commands, origin) = normalized(commands).ok_or(Range)?;
+    let (commands, origin) = normalized_iter(commands).ok_or(Range)?;
     let [ox, oy, width, height] = window;
     let (width, height) = (
         usize::try_from(width).map_err(|_| Range)?,
@@ -731,9 +893,9 @@ fn rasterize_with(
     };
     let mut bytes = vec![0u8; len];
     if len == 0 {
-        return Ok(bytes);
+        return Ok((bytes, None));
     }
-    match rule {
+    let bound = match rule {
         FillRule::NonZero => {
             // A path whose points (curve control points included, which bound the
             // flattened segments) are all above, below, left or right of the window
@@ -755,9 +917,9 @@ fn rasterize_with(
             };
             flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
             if probe {
-                return Ok(bytes);
+                return Ok((bytes, None));
             }
-            sink.integrate(&mut bytes, whole_rows)?;
+            sink.integrate(&mut bytes, whole_rows)?
         }
         FillRule::EvenOdd => {
             let mut sink = EvenOdd {
@@ -791,9 +953,10 @@ fn rasterize_with(
             for (byte, t) in bytes.iter_mut().zip(tally) {
                 *byte = coverage_byte(u128::from(t) * 32);
             }
+            Some([0, 0, width, height])
         }
-    }
-    Ok(bytes)
+    };
+    Ok((bytes, bound))
 }
 
 /// Nonzero: the cell integration's `cover` and `area`, per window cell, and
@@ -834,9 +997,14 @@ impl NonZero {
     /// is 0 and the sum constant, so every byte there is the same. The bytes and
     /// the overflow errors equal integrating the whole row (`whole`), which
     /// `raster_q8_touched_cells_are_exact` checks.
-    fn integrate(&self, bytes: &mut [u8], whole: bool) -> Result<(), RasterError> {
+    ///
+    /// Returns a rectangle `[x0, y0, x1, y1)` holding every nonzero byte: rows no
+    /// segment wrote are 0, and a row is 0 left of its first written cell and,
+    /// when its constant byte is 0, right of its last one.
+    fn integrate(&self, bytes: &mut [u8], whole: bool) -> Result<Option<[usize; 4]>, RasterError> {
         use RasterError::Range;
         let width = self.window.width;
+        let mut bound: Option<[usize; 4]> = None;
         for (row, &(first, last)) in self.touched.iter().enumerate() {
             let (first, last) = if whole {
                 (0, width - 1)
@@ -855,13 +1023,19 @@ impl NonZero {
                     .ok_or(Range)?;
                 bytes[idx] = coverage_byte(n.unsigned_abs());
             }
+            let mut right = last + 1;
             if last + 1 < width {
                 let n = sum.checked_mul(512).ok_or(Range)?;
-                bytes[row * width + last + 1..(row + 1) * width]
-                    .fill(coverage_byte(n.unsigned_abs()));
+                let byte = coverage_byte(n.unsigned_abs());
+                bytes[row * width + last + 1..(row + 1) * width].fill(byte);
+                if byte != 0 {
+                    right = width;
+                }
             }
+            let b = bound.get_or_insert([first, row, right, row + 1]);
+            *b = [b[0].min(first), b[1], b[2].max(right), row + 1];
         }
-        Ok(())
+        Ok(bound)
     }
 }
 
@@ -983,6 +1157,41 @@ impl Sink for EvenOdd {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raster_q8_crop_keeps_every_nonzero_byte() {
+        assert_eq!(crop(&[0; 12], 4, 3), None);
+        assert_eq!(crop(&[], 0, 0), None);
+        let mut seed = 0x9e37_79b9_u32;
+        for case in 0..400 {
+            let (w, h) = (1 + case % 9, 1 + (case / 9) % 7);
+            let mut coverage = vec![0u8; (w * h) as usize];
+            for byte in &mut coverage {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = if seed >> 29 == 0 {
+                    (seed >> 8) as u8 | 1
+                } else {
+                    0
+                };
+            }
+            let Some(([x, y], cw, ch, bytes)) = crop(&coverage, w, h) else {
+                assert!(coverage.iter().all(|&v| v == 0));
+                continue;
+            };
+            // Painting the crop back over zeros gives the coverage, and every
+            // edge of the crop holds a nonzero byte.
+            let mut back = vec![0u8; coverage.len()];
+            for row in 0..ch {
+                for col in 0..cw {
+                    back[((y + row) * w + x + col) as usize] = bytes[(row * cw + col) as usize];
+                }
+            }
+            assert_eq!(back, coverage, "case {case}");
+            let at = |c: u32, r: u32| bytes[(r * cw + c) as usize] != 0;
+            assert!((0..cw).any(|c| at(c, 0)) && (0..cw).any(|c| at(c, ch - 1)));
+            assert!((0..ch).any(|r| at(0, r)) && (0..ch).any(|r| at(cw - 1, r)));
+        }
+    }
+
     use super::*;
     use alto_core::Affine2;
 
@@ -1414,6 +1623,66 @@ mod tests {
         }
         // Most cases draw something, so the comparison is not of empty tiles.
         assert!(checked > 600, "{checked}");
+    }
+
+    #[test]
+    fn raster_q8_crop_equals_cropping_the_whole_coverage() {
+        // The rectangle the rasterizer reports must hold every nonzero byte, for
+        // both rules, windows inside, across and outside the path, and errors.
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+        let mut next = |range: i64| -> i64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % (2 * range as u64 + 1)) as i64 - range
+        };
+        let mut drawn = 0;
+        for case in 0..300 {
+            let mut path = vec![];
+            for sub in 0..1 + case % 3 {
+                let scale = [400, 3000, 6000][(case + sub) % 3];
+                path.push(Command::Move([next(scale), next(scale)]));
+                for _ in 0..1 + (case + sub) % 5 {
+                    let mut points = [[0i64; 2]; 3];
+                    for p in &mut points {
+                        *p = [next(scale), next(scale)];
+                    }
+                    let [a, b, c] = points;
+                    path.push(match next(2).rem_euclid(3) {
+                        0 => Command::Line(a),
+                        1 => Command::Quad(a, b),
+                        _ => Command::Cubic(a, b, c),
+                    });
+                }
+                if sub % 2 == 0 {
+                    path.push(Command::Close);
+                }
+            }
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                for window in [
+                    [0, 0, 16, 16],
+                    [-24, -24, 48, 48],
+                    [next(30), next(30), 1 + next(20).abs(), 1 + next(20).abs()],
+                    [-90, -10, 20, 20],
+                    [60, -10, 20, 20],
+                    [-10, 60, 20, 20],
+                    [-3, -3, 0, 5],
+                ] {
+                    let whole = rasterize(&path, rule, window, CURVE_LIMIT);
+                    let cropped = rasterize_crop(&path, rule, window, CURVE_LIMIT);
+                    let packed = Packed::new(&path);
+                    assert_eq!(
+                        rasterize_crop_packed(&packed, rule, window, CURVE_LIMIT),
+                        cropped,
+                        "packed case {case}"
+                    );
+                    let expected = whole.map(|b| crop(&b, window[2] as u32, window[3] as u32));
+                    drawn += usize::from(matches!(expected, Ok(Some(_))));
+                    assert_eq!(cropped, expected, "case {case} {rule:?} {window:?}");
+                }
+            }
+        }
+        assert!(drawn > 900, "{drawn}");
     }
 
     #[test]
