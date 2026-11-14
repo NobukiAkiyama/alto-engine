@@ -220,7 +220,7 @@ const suites = [
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   // Plan E timings, all samples kept. Opt-in with --suite=perf; ALTO_PERF_FIXTURES, ALTO_PERF_REPS (JSON) and ALTO_PERF_STRESS=1 narrow or extend it.
   // Plan F / QA-4 long run. Opt-in with --suite=soak; ALTO_SOAK_MINUTES (default 240) and ALTO_SOAK_SEED (default 1).
-  ["soak", `const { runSoak } = await import('../../tests/e2e/soak.js'); await runSoak(window.altoEngine, (line) => console.log(line), ${JSON.stringify({ minutes: Number(process.env.ALTO_SOAK_MINUTES || 240), seed: Number(process.env.ALTO_SOAK_SEED || 1) })});`],
+  ["soak", `const { runSoak } = await import('../../tests/e2e/soak.js'); await runSoak(window.altoEngine, (line) => console.log(line), ${JSON.stringify({ minutes: Number(process.env.ALTO_SOAK_MINUTES || 240), seed: Number(process.env.ALTO_SOAK_SEED || 1), inspect: process.env.ALTO_SOAK_INSPECT === "1" })});`],
   ["perf", `const { runPerfTests } = await import('../../tests/e2e/perf-tests.js'); await runPerfTests(window.altoEngine, (line) => console.log(line), { ...${JSON.stringify({ fixtures: process.env.ALTO_PERF_FIXTURES?.split(",").map((name) => name.trim()).filter(Boolean), stress: process.env.ALTO_PERF_STRESS === "1" })}, reps: JSON.parse(${JSON.stringify(process.env.ALTO_PERF_REPS || "{}")}) });`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];

@@ -94,6 +94,68 @@ async function build(engine) {
   return { doc, ids, W, H };
 }
 
+/** What a saved `.alto` holds: objects split by which snapshot references them. */
+export async function archiveBreakdown(blob) {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const dv = new DataView(buf.buffer);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error("archiveBreakdown: no end of central directory");
+  const count = dv.getUint16(eocd + 10, true);
+  let at = dv.getUint32(eocd + 16, true);
+  const text = new TextDecoder();
+  const entries = [];
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(at, true) !== 0x02014b50) throw new Error("archiveBreakdown: central directory");
+    if (dv.getUint16(at + 10, true) !== 0) throw new Error("archiveBreakdown: expected stored entries");
+    const size = dv.getUint32(at + 20, true);
+    const nameLen = dv.getUint16(at + 28, true);
+    const extraLen = dv.getUint16(at + 30, true);
+    const commentLen = dv.getUint16(at + 32, true);
+    const local = dv.getUint32(at + 42, true);
+    const name = text.decode(buf.subarray(at + 46, at + 46 + nameLen));
+    const start = local + 30 + dv.getUint16(local + 26, true) + dv.getUint16(local + 28, true);
+    entries.push({ name, size, data: () => text.decode(buf.subarray(start, start + size)) });
+    at += 46 + nameLen + extraLen + commentLen;
+  }
+  const hashes = (json) => new Set(json.match(/(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])/g) ?? []);
+  const manifest = JSON.parse(entries.find((e) => e.name === "manifest.json").data());
+  const current = String(manifest.snapshot).match(/[0-9a-f]{64}/)[0];
+  let live = new Set();
+  const inVersions = new Set();
+  const out = { objects: 0, objectBytes: 0, snapshots: 0, snapshotBytes: 0, commits: 0, commitBytes: 0 };
+  for (const e of entries) {
+    if (e.name.startsWith("snapshots/")) {
+      out.snapshots++;
+      out.snapshotBytes += e.size;
+      const refs = hashes(e.data());
+      if (e.name.includes(current)) live = refs;
+      else for (const h of refs) inVersions.add(h);
+    } else if (e.name.startsWith("commits/")) {
+      out.commits++;
+      out.commitBytes += e.size;
+    }
+  }
+  if (live.size === 0) throw new Error("archiveBreakdown: the current snapshot references nothing");
+  const split = { live: [0, 0], versionsOnly: [0, 0], unreferenced: [0, 0] };
+  for (const e of entries) {
+    if (!e.name.startsWith("objects/")) continue;
+    out.objects++;
+    out.objectBytes += e.size;
+    const h = e.name.split("/").pop();
+    const k = live.has(h) ? "live" : inVersions.has(h) ? "versionsOnly" : "unreferenced";
+    split[k][0]++;
+    split[k][1] += e.size;
+  }
+  out.split = split;
+  return out;
+}
+
 /** Runs the soak and returns the report. `publish` receives it after every sample. */
 export async function runSoak(engine, log, options = {}) {
   const minutes = options.minutes ?? 240;
@@ -233,10 +295,30 @@ export async function runSoak(engine, log, options = {}) {
     const before = await journalBytes();
     const started = performance.now();
     let bytes = 0;
-    await doc.save({ write: async (stream) => (bytes = (await new Response(stream).blob()).size) });
+    let blob = null;
+    const wasmBefore = options.inspect ? (await settle()).wasmBytes : null;
+    await doc.save({
+      write: async (stream) => {
+        blob = await new Response(stream).blob();
+        bytes = blob.size;
+      },
+    });
     await doc.durable();
     const after = await journalBytes();
-    report.saves.push({ t: performance.now(), ms: performance.now() - started, archiveBytes: bytes, journalBefore: before, journalAfter: after });
+    const entry = { t: performance.now(), ms: performance.now() - started, archiveBytes: bytes, journalBefore: before, journalAfter: after };
+    if (options.inspect) {
+      entry.wasmBefore = wasmBefore;
+      entry.wasmAfter = (await settle()).wasmBytes;
+      try {
+        entry.contents = await archiveBreakdown(blob);
+      } catch (e) {
+        entry.contents = { error: String(e) };
+      }
+      entry.versions = report.ops.commit ?? 0;
+      log(`SOAK save ${(bytes / MIB).toFixed(1)}MiB wasm ${(wasmBefore / MIB).toFixed(0)}->${(entry.wasmAfter / MIB).toFixed(0)}MiB ${JSON.stringify(entry.contents.split ?? entry.contents)}`);
+    }
+    blob = null;
+    report.saves.push(entry);
     count("save");
   };
   const commit = async () => {
