@@ -219,6 +219,8 @@ const suites = [
   ["resize-stress", `const { runResizeStress } = await import('../../tests/diagnostics/resize-stress.js'); await runResizeStress(window.altoEngine, (line) => console.log(line));`],
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   // Plan E timings, all samples kept. Opt-in with --suite=perf; ALTO_PERF_FIXTURES, ALTO_PERF_REPS (JSON) and ALTO_PERF_STRESS=1 narrow or extend it.
+  // Plan F / QA-4 long run. Opt-in with --suite=soak; ALTO_SOAK_MINUTES (default 240) and ALTO_SOAK_SEED (default 1).
+  ["soak", `const { runSoak } = await import('../../tests/e2e/soak.js'); await runSoak(window.altoEngine, (line) => console.log(line), ${JSON.stringify({ minutes: Number(process.env.ALTO_SOAK_MINUTES || 240), seed: Number(process.env.ALTO_SOAK_SEED || 1) })});`],
   ["perf", `const { runPerfTests } = await import('../../tests/e2e/perf-tests.js'); await runPerfTests(window.altoEngine, (line) => console.log(line), { ...${JSON.stringify({ fixtures: process.env.ALTO_PERF_FIXTURES?.split(",").map((name) => name.trim()).filter(Boolean), stress: process.env.ALTO_PERF_STRESS === "1" })}, reps: JSON.parse(${JSON.stringify(process.env.ALTO_PERF_REPS || "{}")}) });`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
@@ -505,7 +507,7 @@ try {
       await sampleSystem("startup-settled");
     }
     for (const [name, body] of (startupOnly ? [] : suites)) {
-      if ((name === "dense-benchmark" || name === "perf") && !selectedSuites?.includes(name)) continue;
+      if ((name === "dense-benchmark" || name === "perf" || name === "soak") && !selectedSuites?.includes(name)) continue;
       if (selectedSuites && !selectedSuites.includes(name)) continue;
       if (functionalOnly && name === "benchmark") continue;
       if (name === "resize-stress" && !selectedSuites?.includes(name)) continue;
@@ -528,7 +530,7 @@ try {
         // A whole suite in one call. CI runs four SwiftShader groups at once, which
         // stretched embed from ~430 s to 600 s; the limit only catches hangs.
         // perf is opt-in and its slowest fixture alone takes about half an hour.
-        await evaluate(`(async () => { ${body} })()`, name === "perf" ? 4 * 3600000 : 1200000);
+        await evaluate(`(async () => { ${body} })()`, name === "perf" ? 4 * 3600000 : name === "soak" ? (Number(process.env.ALTO_SOAK_MINUTES || 240) + 60) * 60000 : 1200000);
       } catch (error) {
         suiteError = error;
       }
