@@ -125,12 +125,7 @@ impl Context<'_> {
                         .as_ref()
                         .map_err(|error| *error)
                         .and_then(|commands| {
-                            crate::raster_q8::rasterize_crop_prepared(
-                                commands,
-                                rule,
-                                window,
-                                crate::raster_q8::CURVE_LIMIT,
-                            )
+                            crate::raster_q8::rasterize_crop_prepared(commands, rule, window)
                         })
                 } else {
                     let built;
@@ -169,7 +164,6 @@ impl Context<'_> {
                             outline,
                             crate::raster_q8::FillRule::NonZero,
                             window,
-                            crate::raster_q8::CURVE_LIMIT,
                         ),
                         Ok(None) => Ok(None),
                         Err(error) => Err(*error),

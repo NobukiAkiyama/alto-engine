@@ -398,6 +398,8 @@ pub struct Prepared {
     /// coordinate at most `2^60` no segment's interpolation can overflow. `None`
     /// for larger coordinates, which are flattened as before.
     outside: Option<Result<(), RasterError>>,
+    /// The curve limit `outside` was found with, used for every window.
+    curve_limit: u32,
 }
 
 /// Normalized coordinates up to this keep `NonZero::segment`'s interpolation
@@ -425,8 +427,13 @@ impl Prepared {
                 }
             }
         }
-        let max = bounds.map_or(0, |[_, max]| max[0].max(max[1]));
-        let outside = (max <= PREPARED_EXTENT).then(|| {
+        // Normalization subtracts the smallest point, so every coordinate is
+        // already at least 0; both ends are checked so the bound does not rest
+        // on that.
+        let [min, max] = bounds.map_or([0, 0], |[min, max]| {
+            [min[0].min(min[1]), max[0].max(max[1])]
+        });
+        let outside = (min >= 0 && max <= PREPARED_EXTENT).then(|| {
             // A one-pixel window right of every point.
             let lx = max.div_euclid(256) + 1;
             let window = Window {
@@ -460,6 +467,7 @@ impl Prepared {
             origin,
             bounds,
             outside,
+            curve_limit,
         })
     }
 
@@ -477,19 +485,19 @@ impl Prepared {
     }
 }
 
-/// `rasterize_crop` of prepared commands, for the same `curve_limit`.
+/// `rasterize_crop` of prepared commands, with the curve limit they were
+/// prepared for.
 pub fn rasterize_crop_prepared(
     prepared: &Prepared,
     rule: FillRule,
     window: [i64; 4],
-    curve_limit: u32,
 ) -> Result<Option<Crop>, RasterError> {
     let (bytes, bound) = rasterize_normalized(
         Normal::Prepared(prepared),
         prepared.origin,
         rule,
         window,
-        Curves::Reject(curve_limit),
+        Curves::Reject(prepared.curve_limit),
         true,
         false,
     )?;
@@ -1819,7 +1827,7 @@ mod tests {
                     let whole = rasterize(&path, rule, window, CURVE_LIMIT);
                     let cropped = rasterize_crop(&path, rule, window, CURVE_LIMIT);
                     let prepared = Prepared::new(&path, CURVE_LIMIT)
-                        .and_then(|p| rasterize_crop_prepared(&p, rule, window, CURVE_LIMIT));
+                        .and_then(|p| rasterize_crop_prepared(&p, rule, window));
                     assert_eq!(prepared, cropped, "prepared case {case}");
                     let expected = whole.map(|b| crop(&b, window[2] as u32, window[3] as u32));
                     drawn += usize::from(matches!(expected, Ok(Some(_))));
@@ -1890,8 +1898,7 @@ mod tests {
                                 yb: (ly + h) * 256,
                             })
                     }));
-                    let got = prepared
-                        .and_then(|p| rasterize_crop_prepared(&p, rule, window, CURVE_LIMIT));
+                    let got = prepared.and_then(|p| rasterize_crop_prepared(&p, rule, window));
                     assert_eq!(got, whole, "case {case} {window:?} {rule:?}");
                 }
             }
