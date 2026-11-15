@@ -569,7 +569,7 @@ impl Engine {
 
     /// Object paths a folder needs, given its manifest, snapshots and commits.
     pub fn folder_plan(entries: BTreeMap<String, Vec<u8>>) -> Result<Vec<String>, EngineError> {
-        let p = alto_store::decode_entries(entries)?;
+        let p = decode_folder(entries)?;
         let mut hashes = doc_hashes(&Document::from_snapshot_bytes(&p.snapshot)?);
         for s in p.snapshots.values() {
             if let Ok(d) = Document::from_snapshot_bytes(s) {
@@ -579,13 +579,43 @@ impl Engine {
         Ok(hashes.iter().map(alto_store::object_path).collect())
     }
 
-    /// Opens either package form from its logical entries.
+    /// Opens a folder from its logical entries.
     pub fn open_entries(
         &mut self,
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false, None, None)
+        self.open_decoded_package(decode_folder(entries)?, false, None, None)
+    }
+
+    /// Opens a .alto from its logical entries. A thin one opens with its versions'
+    /// objects left outside, as listed in `external-objects.json`.
+    pub(crate) fn open_package_entries(
+        &mut self,
+        entries: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
+        let mut p = alto_store::decode_entries(entries)?;
+        let Some(external) = p.external.take() else {
+            return self.open_decoded_package(p, false, None, None);
+        };
+        if external.document != Document::from_snapshot_bytes(&p.snapshot)?.root {
+            return Err(branches::fail(
+                "CORRUPT_DATA",
+                "external-objects.json belongs to another document",
+            ));
+        }
+        let (handle, warnings) =
+            self.open_decoded_package(p, false, None, Some(external.objects.clone()))?;
+        if self.version_only_objects(handle)? != external.objects {
+            self.documents.remove(&handle);
+            self.versions.remove(&handle);
+            self.lazy.remove(&handle);
+            self.maintain();
+            return Err(branches::fail(
+                "CORRUPT_DATA",
+                "external-objects.json does not match the versions",
+            ));
+        }
+        Ok((handle, warnings))
     }
 
     /// Journal-only fast path. The caller must verify the entire checkpoint's
@@ -773,4 +803,18 @@ impl Engine {
         self.maintain();
         Ok((handle, warnings))
     }
+}
+
+/// A folder's package. Only a thin .alto leaves objects outside itself.
+pub(crate) fn decode_folder(
+    entries: BTreeMap<String, Vec<u8>>,
+) -> Result<alto_store::Package, EngineError> {
+    let p = alto_store::decode_entries(entries)?;
+    if p.external.is_some() {
+        return Err(branches::fail(
+            "UNSUPPORTED",
+            "a folder holds every object and lists none outside itself",
+        ));
+    }
+    Ok(p)
 }
