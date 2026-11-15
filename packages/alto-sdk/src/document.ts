@@ -677,7 +677,7 @@ export class DocumentHandle {
       const held = !!this.releaseHold;
       await this.releaseHold?.(); this.releaseHold = undefined;
       try { return await owner.whileNotHeld(collect); }
-      finally { if (held) this.releaseHold = await owner.holdObjects?.(); }
+      finally { if (held) this.keepHold(await owner.holdObjects?.()); }
     });
   }
   /**
@@ -761,7 +761,12 @@ export class DocumentHandle {
     this.savedFolder = { provider: owner, manifest };
     if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = undefined; }
     else if (!options.hold || this.releaseHold) return;
-    this.releaseHold = await owner.holdObjects?.();
+    this.keepHold(await owner.holdObjects?.());
+  }
+  /** A hold taken while the document closed is released, not kept: close() already ran. */
+  private keepHold(release: (() => Promise<void>) | undefined): void {
+    if (this.closed) void release?.();
+    else this.releaseHold = release;
   }
   /**
    * @internal Attaches the history store of a thin `.alto` just opened, or warns
@@ -810,6 +815,7 @@ export class DocumentHandle {
   }
   /** @internal With `readOnly`, versions are read from the folder but nothing is saved there. */
   setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>, readOnly = false): void {
+    if (this.closed) { void releaseHold?.(); return; }
     void this.releaseHold?.();
     this.releaseHold = releaseHold;
     this.savedFolder = readOnly ? { provider, manifest, readOnly } : { provider, manifest };

@@ -742,6 +742,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         };
         return provider.exclusive ? provider.exclusive(load) : load(provider);
       });
+      // Releases the hold instead if another open already closed the document.
       doc.setFolder(provider, manifestHash, releaseHold);
       return doc;
     } catch (e) {

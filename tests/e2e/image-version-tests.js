@@ -464,6 +464,18 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.open(t.thin, { history: bare }); await d.versions.attachFolder(bare);
       await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the attached store");
     });
+    await test("thin .alto: a document closed during a save keeps no hold", async () => {
+      await sixVersions();
+      const { store, holds } = heldStore(), hold = store.holdObjects; let entered, release;
+      const holding = new Promise((resolve) => { entered = resolve; }), gate = new Promise((resolve) => { release = resolve; });
+      store.holdObjects = async () => { entered(); await gate; return hold(); };
+      const closed = d, saving = closed.save(blobTarget(), { history: { folder: store } }).catch((e) => e);
+      // The engine gives the document up while the save waits for its hold.
+      await holding; closed.close(); release(); await saving;
+      assert(holds() === 0, `a hold taken after close is kept: ${holds()}`);
+      const late = heldStore(); closed.setFolder(late.store, "", await late.store.holdObjects());
+      assert(late.holds() === 0 && closed.folder !== late.store, `setFolder after close kept the hold: ${late.holds()}`);
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
