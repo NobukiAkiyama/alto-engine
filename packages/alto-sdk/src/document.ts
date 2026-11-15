@@ -514,7 +514,8 @@ export class DocumentHandle {
       const saved = await this.edit(() =>
         this.withObjects({ type: "all" }, async () => ({
           ...(await this.request("save")),
-          payload: await this.request("packageBytes"),
+          // Advice only: failing to work it out must not fail a save that succeeded.
+          payload: await this.request("packageBytes").catch(() => null),
         })),
       );
       token = saved.token;
