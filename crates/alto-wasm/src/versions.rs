@@ -269,10 +269,20 @@ impl Runtime {
     #[wasm_bindgen(js_name=forgetStoredObjectPaths)]
     pub fn forget_stored_object_paths(&mut self, paths: &str) -> Result<(), JsValue> {
         let paths: Vec<String> = serde_json::from_str(paths).map_err(error)?;
-        for p in paths {
-            if let Some(h) = p.rsplit('/').next().and_then(|h| h.parse::<ContentHash>().ok()) {
-                self.stored_objects.remove(&h);
-            }
+        // An object kept as stored by mistake would be left out of the next checkpoint,
+        // which the store then refuses; a path that names no object is an error here.
+        let mut hashes = Vec::with_capacity(paths.len());
+        for p in &paths {
+            let hash = p
+                .strip_prefix("objects/")
+                .and_then(|rest| rest.rsplit('/').next())
+                .and_then(|h| h.parse::<ContentHash>().ok())
+                .filter(|h| alto_store::object_path(h) == *p)
+                .ok_or_else(|| error(format!("INVALID_ARGUMENT: not an object path: {p}")))?;
+            hashes.push(hash);
+        }
+        for hash in hashes {
+            self.stored_objects.remove(&hash);
         }
         Ok(())
     }

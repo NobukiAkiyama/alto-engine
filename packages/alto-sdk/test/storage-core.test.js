@@ -219,3 +219,39 @@ test("packs neither journal names are collected mid-session, and their objects a
   // The older journal is still whole too: its packs were kept.
   assert.equal(await recoveredVersion(next, candidates[1].generation), 3);
 });
+
+test("a session that starts on two journals collects only what neither names", async () => {
+  // Session 1 leaves two journals and three packs; the first pack is already dead.
+  let handle = await (async () => {
+    const { handle } = await import(`../dist/storage-core.js?session=${++sessions}`);
+    await handle({ t: "configure", namespace: "resume" });
+    return handle;
+  })();
+  await handle({ t: "checkpoint", entries: checkpointOf(1, [1, 2]) });
+  await handle({ t: "checkpoint", entries: checkpointOf(2, [3]) });
+  await handle({ t: "checkpoint", entries: checkpointOf(3, [5]) });
+  // Session 2 recovers, as the engine Worker does, then writes and collects.
+  const { handle: next } = await import(`../dist/storage-core.js?session=${++sessions}`);
+  await next({ t: "configure", namespace: "resume" });
+  const candidates = await next({ t: "loadCandidates" });
+  assert.deepEqual(candidates.map((c) => c.generation), [3, 2]);
+  assert.equal(await recoveredVersion(next, 3), 3);
+  await next({ t: "activate", generation: 3 });
+  // Before the session's first write nothing is collected mid-session; the startup
+  // collection takes the dead pack with that write.
+  assert.deepEqual((await next({ t: "collectPlan" })).packs, []);
+  await next({ t: "checkpoint", entries: checkpointOf(4, [5, 6], [6]) });
+  assert.ok(!packNames("resume").includes("1.pack"), "the startup collection kept a dead pack");
+  const plan = await next({ t: "collectPlan" });
+  // Journals 4 and 3 name packs 3 and 4 (or 4 alone after a merge); pack 2 is dead.
+  assert.deepEqual(plan.packs, ["2.pack"]);
+  assert.deepEqual(plan.objects, [object(3)]);
+  assert.equal((await next({ t: "collect", packs: plan.packs })).packs, 1);
+  // Both journals still recover in a third session.
+  const { handle: third } = await import(`../dist/storage-core.js?session=${++sessions}`);
+  await third({ t: "configure", namespace: "resume" });
+  const after = await third({ t: "loadCandidates" });
+  assert.deepEqual(after.map((c) => c.generation), [4, 3]);
+  assert.equal(await recoveredVersion(third, 4), 4);
+  assert.equal(await recoveredVersion(third, 3), 3);
+});

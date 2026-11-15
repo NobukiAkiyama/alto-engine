@@ -370,16 +370,24 @@ async function collect(planned: string[]) {
   const dead = new Set(await deadPacks());
   const removed = new Set(planned.filter((name) => dead.has(name)));
   for (const [path, at] of stored) if (at.pack !== undefined && removed.has(at.pack)) stored.delete(path);
-  let bytes = 0;
+  let packs = 0,
+    bytes = 0;
   for (const name of removed) {
+    // Its objects have already left `stored`: a file that cannot be removed now is
+    // deleted by the startup collection, and only what was removed is counted.
+    const size = await packsDirectory
+      .getFileHandle(name)
+      .then((handle) => handle.getFile())
+      .then((file) => file.size, () => 0);
     try {
-      bytes += (await (await packsDirectory.getFileHandle(name)).getFile()).size;
       await packsDirectory.removeEntry(name);
+      packs++;
+      bytes += size;
     } catch {
-      // Its objects already left `stored`; the startup collection deletes the file.
+      // Left for the next startup.
     }
   }
-  return { packs: removed.size, bytes };
+  return { packs, bytes };
 }
 /** After recovery is decided, the parsed packages and records are not needed in memory. */
 function release() {
