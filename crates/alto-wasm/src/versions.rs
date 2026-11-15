@@ -83,7 +83,7 @@ impl Runtime {
             let result = serde_json::to_string(&c).map_err(error)?;
             self.journal.push(
                 self.engine
-                    .version_record(self.doc, checkpoint.digest)
+                    .version_record_since(self.doc, &checkpoint)
                     .map_err(error)?,
             );
             Ok(result)
