@@ -514,7 +514,29 @@ async function pump() {
     }
     durableWaiters = durableWaiters.filter((d) => (d.seq <= durableSeq ? (d.resolve(), false) : true));
     if (hasRoom()) for (const wake of roomWaiters.splice(0)) wake();
+    if (w.kind === "checkpoint" && !writes.some((next) => next.kind === "checkpoint")) {
+      try {
+        await collectPacks();
+      } catch (error) {
+        freezeStorage(error);
+        return;
+      }
+    }
   }
+}
+/**
+ * Deletes the packs neither journal names, so the store does not grow for the whole
+ * session (packs were collected only at startup). It runs between writes, after a
+ * checkpoint with none queued behind it. A checkpoint queued while the plan was read
+ * was built counting those objects as stored, so the collection waits for the next
+ * one. Otherwise the engine forgets the objects first and the deletion is the next
+ * storage request: every checkpoint built after it writes them again if it needs them.
+ */
+async function collectPacks() {
+  const plan = await io<{ packs: string[]; objects: string[] }>("collectPlan");
+  if (!plan.packs.length || writes.some((next) => next.kind === "checkpoint")) return;
+  runtime.forgetStoredObjectPaths(JSON.stringify(plan.objects));
+  await io("collect", { packs: plan.packs });
 }
 function hasRoom() {
   return writes.length < MAX_PENDING_WRITES && pendingBytes < MAX_PENDING_BYTES;

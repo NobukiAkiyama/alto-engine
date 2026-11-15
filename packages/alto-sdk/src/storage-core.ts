@@ -54,6 +54,8 @@ export interface StorageMessage {
   stop?: "pack" | "journal";
   /** Checkpoint: the document differs from what was last created, opened or saved. */
   dirty?: boolean;
+  /** Collect: the packs a `collectPlan` named. */
+  packs?: string[];
 }
 let namespace = "default",
   directory: FileSystemDirectoryHandle | null = null,
@@ -64,8 +66,9 @@ let namespace = "default",
   generation = 0,
   offset = 0,
   // Where each stored object is: { pack, offset, length }, or { loose: true } for a
-  // format 3 file. Nothing is deleted mid-session: a checkpoint skips objects listed
-  // here, so one must never vanish, and every location recorded stays readable.
+  // format 3 file. A checkpoint skips objects listed here, so one must never vanish
+  // while it is listed. Mid-session, only `collect` deletes: packs neither journal
+  // names, after the engine has forgotten their objects.
   stored = new Map<string, Stored>(),
   // What a valid checkpoint referenced at startup; the rest is garbage.
   keptPacks = new Set<string>(),
@@ -336,6 +339,43 @@ async function collectGarbage() {
       await packsDirectory.removeEntry(name).catch(() => {});
   for (const [path, dir] of await listObjects())
     if (!keptLoose.has(path)) await dir.removeEntry(path.split("/")[2]).catch(() => {});
+}
+/**
+ * Packs neither journal names. Recovery reads only the two journals, so these hold
+ * nothing it can reach: objects a later checkpoint copied to a newer pack, or that no
+ * checkpoint since references. Format 3 files are left to the startup collection.
+ */
+async function deadPacks() {
+  const live = new Set<string>();
+  for (const { metadata } of candidates) for (const name of metadata?.packs ?? []) live.add(name);
+  const dead: string[] = [];
+  for await (const [name, handle] of entries(packsDirectory))
+    if (handle.kind === "file" && PACK_NAME.test(name) && !live.has(name)) dead.push(name);
+  return dead;
+}
+/** What `collect` would delete: dead packs, and the stored objects only they hold. */
+async function collectPlan() {
+  if (!active || !collected) return { packs: [], objects: [] };
+  const packs = await deadPacks();
+  const dead = new Set(packs);
+  const objects = [...stored].filter(([, at]) => at.pack !== undefined && dead.has(at.pack)).map(([path]) => path);
+  return { packs, objects };
+}
+/**
+ * Deletes packs from a plan that are still dead. The engine has forgotten their
+ * objects, so the next checkpoint that references one writes it again; they leave
+ * `stored` first. A pack that cannot be removed now goes at the next startup.
+ */
+async function collect(planned: string[]) {
+  const dead = new Set(await deadPacks());
+  const removed = new Set(planned.filter((name) => dead.has(name)));
+  for (const [path, at] of stored) if (at.pack !== undefined && removed.has(at.pack)) stored.delete(path);
+  let bytes = 0;
+  for (const name of removed) {
+    bytes += (await (await packsDirectory.getFileHandle(name)).getFile()).size;
+    await packsDirectory.removeEntry(name).catch(() => {});
+  }
+  return { packs: removed.size, bytes };
 }
 /** After recovery is decided, the parsed packages and records are not needed in memory. */
 function release() {
@@ -701,6 +741,12 @@ export async function handle(data: StorageMessage): Promise<unknown> {
     if (data.stop !== undefined && data.stop !== "pack" && data.stop !== "journal") throw Error("Invalid checkpoint stop");
     await checkpoint(new Uint8Array(data.entries!), false, data.stop, data.dirty === true);
     value = true;
+  } else if (data.t === "collectPlan") {
+    value = await collectPlan();
+  } else if (data.t === "collect") {
+    if (!Array.isArray(data.packs) || !data.packs.every((name) => typeof name === "string" && PACK_NAME.test(name)))
+      throw Error("Invalid collect");
+    value = await collect(data.packs);
   } else if (data.t === "checkpointLoose") {
     await checkpoint(new Uint8Array(data.entries!), true, undefined, data.dirty === true);
     value = true;

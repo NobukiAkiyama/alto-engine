@@ -264,6 +264,18 @@ impl Runtime {
         }
         Ok(())
     }
+    /// Object paths the recovery store deleted: the next checkpoint that references
+    /// one writes it again.
+    #[wasm_bindgen(js_name=forgetStoredObjectPaths)]
+    pub fn forget_stored_object_paths(&mut self, paths: &str) -> Result<(), JsValue> {
+        let paths: Vec<String> = serde_json::from_str(paths).map_err(error)?;
+        for p in paths {
+            if let Some(h) = p.rsplit('/').next().and_then(|h| h.parse::<ContentHash>().ok()) {
+                self.stored_objects.remove(&h);
+            }
+        }
+        Ok(())
+    }
     /// The recovery store was emptied (its journal discarded); the next checkpoint
     /// writes every object again.
     #[wasm_bindgen(js_name=forgetStoredObjects)]
