@@ -681,9 +681,10 @@ export async function runTests(engine, benchmark, log) {
         const now = await doc.packageSize();
         assert(now.limit === 512 * 1024 * 1024 && now.near === false, JSON.stringify(now));
         assert(now.bytes === seen[0].bytes && now.bytes > 0, `${now.bytes} != ${seen[0].bytes}`);
+        assert(seen[0].limit === now.limit && seen[0].near === false, JSON.stringify(seen[0]));
         let written = 0;
         await doc.save({ write: async (stream) => { written = (await new Response(stream).arrayBuffer()).byteLength; } });
-        assert(seen.length === 2 && seen[1].bytes === now.bytes, JSON.stringify(seen));
+        assert(seen.length === 2 && seen[1].bytes === now.bytes && seen[1].limit === now.limit && seen[1].near === false, JSON.stringify(seen));
         // The cap counts the entries' data; the archive adds ZIP headers to it.
         assert(written > now.bytes, `archive ${written} <= payload ${now.bytes}`);
       } finally {

@@ -860,7 +860,10 @@ async function execute(m: Queued): Promise<unknown> {
     case "markFolderSaved": runtime.markFolderSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
-    case "packageBytes": return runtime.packageBytes() ?? null;
+    case "packageBytes": {
+      const bytes = runtime.packageBytes();
+      return bytes === undefined ? null : { bytes, limit: runtime.packageLimit() };
+    }
     case "openFolder": {
       const s = JSON.parse(m.known ? runtime.openFolderOnDemand(new Uint8Array(m.bytes), JSON.stringify(m.known)) : runtime.openFolder(new Uint8Array(m.bytes)));
       adoptDocument(m.nextDocumentEpoch);

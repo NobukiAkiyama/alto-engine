@@ -34,10 +34,9 @@ import type {
   VersionStatus,
 } from "./types.js";
 
-/** The `.alto` cap a save counts against (`MAX_PACKAGE_BYTES` in the engine). */
-const PACKAGE_LIMIT = 512 * 1024 * 1024;
-function packageSizeOf(bytes: number): PackageSize {
-  return { bytes, limit: PACKAGE_LIMIT, near: bytes >= PACKAGE_LIMIT * 0.8 };
+/** `limit` is the engine's `.alto` cap (`MAX_PACKAGE_BYTES`). */
+function packageSizeOf({ bytes, limit }: { bytes: number; limit: number }): PackageSize {
+  return { bytes, limit, near: bytes >= limit * 0.8 };
 }
 
 export interface SelectionSpec {
@@ -480,17 +479,17 @@ export class DocumentHandle {
   packageSize(): Promise<PackageSize> {
     return this.edit(() =>
       this.withObjects({ type: "all" }, async () => {
-        const bytes = await this.request("packageBytes");
-        if (bytes === null) throw new AltoError("INTERNAL", "package size unknown after reading every object");
-        return packageSizeOf(bytes);
+        const size = await this.request("packageBytes");
+        if (size === null) throw new AltoError("INTERNAL", "package size unknown after reading every object");
+        return packageSizeOf(size);
       }),
     );
   }
   /** Sends `packageSize` when the size is known without reading anything. */
   private async reportPackageSize(): Promise<void> {
     try {
-      const bytes = await this.request("packageBytes");
-      if (bytes !== null) this.core.emit("packageSize", packageSizeOf(bytes));
+      const size = await this.request("packageBytes");
+      if (size !== null) this.core.emit("packageSize", packageSizeOf(size));
     } catch {
       // The size is advice; a failure to work it out must not fail the commit.
     }
