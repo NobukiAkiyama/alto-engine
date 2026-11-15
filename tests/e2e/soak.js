@@ -192,10 +192,15 @@ export async function runSoak(engine, log, options = {}) {
   // The namespace's OPFS folder: the two journal files apart from the objects and packs
   // the versions keep (those grow with every version and are not the journal).
   const folder = "ns-" + Array.from(new TextEncoder().encode(engine.namespace), (b) => b.toString(16).padStart(2, "0")).join("");
+  // Packs are deleted mid-session, so a file listed here can be gone when it is read.
+  const gone = (e) => {
+    if (e?.name === "NotFoundError") return 0;
+    throw e;
+  };
   const sizeOf = async (dir) => {
     let bytes = 0;
     for await (const [, handle] of dir.entries())
-      bytes += handle.kind === "file" ? (await handle.getFile()).size : await sizeOf(handle);
+      bytes += handle.kind === "file" ? await handle.getFile().then((f) => f.size, gone) : await sizeOf(handle);
     return bytes;
   };
   const storage = async () => {
