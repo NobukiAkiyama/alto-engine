@@ -895,8 +895,9 @@ async function execute(m: Queued): Promise<unknown> {
     case "markFolderSaved": runtime.markFolderSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
+    case "saveThin": return runtime.saveThinPackage();
     case "packageBytes": {
-      const bytes = runtime.packageBytes();
+      const bytes = m.external ? runtime.thinPackageBytes() : runtime.packageBytes();
       return bytes === undefined ? null : { bytes, limit: runtime.packageLimit() };
     }
     case "openFolder": {

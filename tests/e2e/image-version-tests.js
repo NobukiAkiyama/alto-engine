@@ -274,6 +274,39 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.open(full.blob); assert(await d.snapshotHash() === hash && (await d.versions.log({ mode: "dag" })).length === count, "full archive");
       d = await engine.open(working.blob); assert((await d.versions.log()).length === 0, "working-only archive has no history");
     });
+    const sixVersions = async () => {
+      d = await engine.createDocument({ width: 512, height: 512 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 512, height: 512 } }); });
+      for (let i = 0; i < 6; i++) { await d.image.fill(layer, [0, 0], [i / 8, 0.5, 1 - i / 8, 1], { tolerance: 255 }); await d.versions.commit("v" + i); }
+    };
+    await test("thin .alto: versions in a folder store", async () => {
+      await sixVersions();
+      const all = await d.packageSize(), external = await d.packageSize({ history: "external" });
+      assert(external.bytes < all.bytes, `external ${external.bytes} < all ${all.bytes}`);
+      const states = [], sizes = [], offState = engine.on("saveState", (s) => states.push(s)), offSize = engine.on("packageSize", (s) => sizes.push(s.bytes));
+      const store = new MemoryObjectProvider(), thin = blobTarget();
+      try { await d.save(thin, { history: { folder: store } }); } finally { offState(); offSize(); }
+      assert(eq(states, ["saving", "saved"]), "saveState " + states.join());
+      assert(sizes.at(-1) === external.bytes, `packageSize event ${sizes.at(-1)} is the thin size ${external.bytes}`);
+      assert(!d.getSnapshot().dirty && d.folder === store, "saved and attached");
+      const full = blobTarget(); await d.save(full);
+      assert(external.bytes <= thin.blob.size && thin.blob.size < full.blob.size, `thin ${thin.blob.size} (payload ${external.bytes}) < full ${full.blob.size}`);
+      log(`thin .alto: ${thin.blob.size} bytes, full ${full.blob.size}`);
+      const history = await d.versions.log({ mode: "dag" }), hash = await d.snapshotHash();
+      d = await engine.openFolder(store);
+      assert(eq(await d.versions.log({ mode: "dag" }), history) && await d.snapshotHash() === hash, "the store opens alone with the same history");
+    });
+    await test("thin .alto: a failed .alto write leaves the store attached and the document dirty", async () => {
+      await sixVersions();
+      const store = new MemoryObjectProvider(), states = [], off = engine.on("saveState", (s) => states.push(s));
+      const broken = { write: async (stream) => { await stream.cancel(); throw Error("disk full"); } };
+      let failed = false;
+      try { await d.save(broken, { history: { folder: store } }); } catch (e) { failed = e.message === "disk full"; } finally { off(); }
+      assert(failed, "save rejected with the write error");
+      assert(states.at(-1) === "error" && d.getSnapshot().dirty, "error and dirty");
+      assert(d.folder === store && await store.readRef("manifest.json"), "store committed and attached");
+      const good = blobTarget(); await d.save(good, { history: { folder: store } });
+      assert(!d.getSnapshot().dirty && good.blob.size > 0, "second save");
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });

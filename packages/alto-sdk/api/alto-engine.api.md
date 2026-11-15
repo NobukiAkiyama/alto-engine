@@ -325,10 +325,14 @@ export class DocumentHandle {
         remove: (layer: NodeId) => Promise<void>;
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
-    packageSize(): Promise<PackageSize>;
+    packageSize(options?: {
+        history?: "all" | "external";
+    }): Promise<PackageSize>;
     redo(): Promise<void>;
     save(target: ArchiveTarget, options?: {
-        history?: "all" | "omit";
+        history?: "all" | "omit" | {
+            folder: ObjectStorageProvider;
+        };
     }): Promise<void>;
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;

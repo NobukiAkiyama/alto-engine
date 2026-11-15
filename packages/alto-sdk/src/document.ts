@@ -474,9 +474,17 @@ export class DocumentHandle {
   /**
    * The document's size against the `.alto` cap now. For a folder opened on demand this
    * reads the objects still in the folder first. The `packageSize` event reports the same
-   * after each `.alto` save and each commit.
+   * after each `.alto` save and each commit. With `history: "external"` it is the size of the
+   * thin `.alto` that `save(target, { history: { folder } })` writes, worked out without
+   * reading anything.
    */
-  packageSize(): Promise<PackageSize> {
+  packageSize(options: { history?: "all" | "external" } = {}): Promise<PackageSize> {
+    if (options.history === "external")
+      return this.edit(async () => {
+        const size = await this.request("packageBytes", { external: true });
+        if (size === null) throw new AltoError("INTERNAL", "thin package size unknown");
+        return packageSizeOf(size);
+      });
     return this.edit(() =>
       this.withObjects({ type: "all" }, async () => {
         const size = await this.request("packageBytes");
@@ -498,9 +506,18 @@ export class DocumentHandle {
    * Writes the document as a `.alto` archive. On success the document is no longer dirty.
    * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
    * history that lives in an unreachable folder would otherwise make the save fail.
+   * With `history: { folder }` it first saves the folder form to `folder`, as `saveFolder`
+   * does, then writes a thin `.alto` holding the working document's objects alone; the
+   * versions' objects stay in `folder`, which the document stays attached to. If the
+   * `.alto` write fails, the folder is already saved and stays attached; the document
+   * stays dirty.
    */
-  async save(target: ArchiveTarget, options: { history?: "all" | "omit" } = {}): Promise<void> {
+  async save(
+    target: ArchiveTarget,
+    options: { history?: "all" | "omit" | { folder: ObjectStorageProvider } } = {},
+  ): Promise<void> {
     await this.endTool();
+    if (typeof options.history === "object" && options.history) return this.saveThin(target, options.history.folder);
     if (options.history === "omit") {
       const bytes = await this.request("saveWithoutHistory");
       await target.write(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream());
@@ -520,6 +537,37 @@ export class DocumentHandle {
       token = saved.token;
       await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
       this.apply(await this.request("saved", { token }));
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
+  private async saveThin(target: ArchiveTarget, owner: ObjectStorageProvider): Promise<void> {
+    this.core.emit("saveState", "saving");
+    let token: number | undefined;
+    try {
+      const saved = await this.edit(async () => {
+        const write = () =>
+          owner.exclusive
+            ? owner.exclusive((storage) => this.writeFolder(owner, storage, {}))
+            : this.writeFolder(owner, owner, {});
+        // Before the target's lock: reading from another folder takes that folder's lock.
+        const written = this.savedFolder?.provider === owner ? await write() : await this.withObjects({ type: "all" }, write);
+        token = written.token;
+        await this.adoptFolder(owner, written.manifest);
+        return {
+          bytes: await this.request("saveThin"),
+          // Advice only: failing to work it out must not fail a save that succeeded.
+          payload: await this.request("packageBytes", { external: true }).catch(() => null),
+        };
+      });
+      await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
+      this.apply(await this.request("saved", { token: token! }));
+      await this.request("markFolderSaved");
       token = undefined;
       this.core.emit("saveState", "saved");
       if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));
@@ -607,6 +655,31 @@ export class DocumentHandle {
     this.core.emit("saveState", "saving");
     let token: number | undefined;
     try {
+      const written = await this.writeFolder(owner, provider, options);
+      token = written.token;
+      await this.adoptFolder(owner, written.manifest);
+      this.apply(await this.request("saved", { token }));
+      await this.request("markFolderSaved");
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      return written.report;
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
+  /**
+   * Writes the folder form to `provider` (the locked view of `owner`) and reads its manifest
+   * back. Returns the save token and the manifest's hash; the caller confirms the save.
+   */
+  private async writeFolder(
+    owner: ObjectStorageProvider,
+    provider: ObjectStorageProvider,
+    options: { overwrite?: boolean },
+  ): Promise<{ report: { written: number; skipped: number; warnings: string[] }; token: number; manifest: string }> {
+    let token: number | undefined;
+    try {
       const current = await provider.readRef("manifest.json");
       const currentHash = current ? await sha256Hex(current) : "";
       const base = this.savedFolder?.provider === owner ? this.savedFolder.manifest : undefined;
@@ -629,19 +702,17 @@ export class DocumentHandle {
       const warnings: string[] = [];
       const mirror = entries.get("document.json");
       if (mirror) { try { await provider.writeRef("document.json", mirror); } catch { warnings.push("比較用の文書コピーを更新できませんでした。正本の保存は完了しています。"); } }
-      const movedFolder = this.savedFolder?.provider !== owner;
-      this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
-      if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
-      this.apply(await this.request("saved", { token }));
-      await this.request("markFolderSaved");
-      token = undefined;
-      this.core.emit("saveState", "saved");
-      return { ...report, warnings };
+      return { report: { ...report, warnings }, token, manifest: await sha256Hex(manifest) };
     } catch (e) {
       this.releaseSave(token);
-      this.core.emit("saveState", "error");
       throw e;
     }
+  }
+  /** The folder just saved to is now the document's; a hold moves with it. */
+  private async adoptFolder(owner: ObjectStorageProvider, manifest: string): Promise<void> {
+    const movedFolder = this.savedFolder?.provider !== owner;
+    this.savedFolder = { provider: owner, manifest };
+    if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
   }
   /** @internal */
   setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {

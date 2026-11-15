@@ -227,6 +227,20 @@ impl Runtime {
     pub fn save_without_history(&self) -> Result<Vec<u8>, JsValue> {
         self.engine.save_without_history(self.doc).map_err(error)
     }
+    /// A .alto holding the working document's objects; versions' objects stay in the
+    /// folder it was just saved to.
+    #[wasm_bindgen(js_name=saveThinPackage)]
+    pub fn save_thin_package(&mut self) -> Result<Vec<u8>, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("CONFLICT: active tool must be flushed"));
+        }
+        self.engine.save_thin_package(self.doc).map_err(error)
+    }
+    /// `packageBytes` for the thin .alto. Known without reading anything.
+    #[wasm_bindgen(js_name=thinPackageBytes)]
+    pub fn thin_package_bytes(&self) -> Result<f64, JsValue> {
+        Ok(self.engine.thin_package_bytes(self.doc).map_err(error)? as f64)
+    }
     #[wasm_bindgen(js_name=folderPlan)]
     pub fn folder_plan(&self, framed: &[u8]) -> Result<String, JsValue> {
         serde_json::to_string(&Engine::folder_plan(unframe(framed)?).map_err(error)?).map_err(error)

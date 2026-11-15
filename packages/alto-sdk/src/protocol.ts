@@ -112,7 +112,10 @@ export interface Requests {
   markFolderSaved: Q<None, true>;
   externalObjects: Q<None, number>;
   saveWithoutHistory: Q<None, Uint8Array>;
-  packageBytes: Q<None, { bytes: number; limit: number } | null>;
+  /** The thin .alto: the working document's objects; versions' objects stay in its folder. */
+  saveThin: Q<None, Uint8Array>;
+  /** `external`: the thin .alto's size, always known. */
+  packageBytes: Q<{ external?: boolean }, { bytes: number; limit: number } | null>;
   importFont: Q<{ bytes: ArrayBuffer; faceIndex: number }, ImportedFontRecord>;
   releaseImport: Q<{ hash: string }, boolean>;
   pruneVersions: Q<None, WireState & { removed?: number }>;
