@@ -405,7 +405,11 @@ fn a_save_writes_the_same_bytes_as_the_gathered_package() {
     paint(&mut e, d, id, TileKey { tx: 1, ty: 0 }, 2);
     e.commit(d, "v1", 1, None, false).unwrap();
     paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 3);
-    let expected = alto_store::encode_parts(&e.package_parts(d).unwrap()).unwrap();
+    // The old writer: every object gathered, then copied into entries.
+    let parts = e.package_parts(d).unwrap();
+    let expected =
+        alto_store::write_entries(&alto_store::package_entries(&parts).unwrap()).unwrap();
+    assert_eq!(alto_store::encode_parts(&parts).unwrap(), expected);
     assert!(!e.package_parts(d).unwrap().objects.is_empty());
     assert_eq!(e.save_package(d).unwrap(), expected);
     let doc = e.document(d).unwrap();
