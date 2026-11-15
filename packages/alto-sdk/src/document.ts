@@ -586,7 +586,7 @@ export class DocumentHandle {
         await this.adoptFolder(owner, written.manifest, { hold: true });
         // The store is committed now, whatever happens to the .alto. Inside the queue, so a
         // version committed during the .alto write is not taken to be in the store.
-        await this.request("markFolderSaved");
+        await this.request("markStoreSaved");
         return {
           bytes: await this.request("saveThin"),
           // Advice only: failing to work it out must not fail a save that succeeded.

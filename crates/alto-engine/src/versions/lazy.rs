@@ -205,6 +205,17 @@ impl Engine {
         self.maintain();
         Ok(())
     }
+    /// After a thin save: the history store just written holds everything the document and
+    /// its versions reference, so the versions' objects need not stay in memory.
+    /// A document that held everything until now starts reading them from the store.
+    pub fn mark_store_saved(&mut self, h: DocHandle) -> Result<(), EngineError> {
+        self.document(h)?;
+        self.lazy.entry(h).or_insert_with(|| LazyObjects {
+            external_history: true,
+            ..Default::default()
+        });
+        self.mark_folder_saved(h)
+    }
     /// Objects the document references that are only in its folder.
     pub fn external_objects(&self, h: DocHandle) -> Result<BTreeSet<ContentHash>, EngineError> {
         let Some(lazy) = self.lazy.get(&h) else {
@@ -712,6 +723,23 @@ mod tests {
         assert_eq!(estimate, payload);
         assert!(estimate < bytes.len() as u64);
         assert!(estimate < e.package_bytes(d).unwrap().unwrap());
+    }
+
+    #[test]
+    fn a_thin_save_lets_the_versions_objects_leave_memory() {
+        let f = fixture();
+        let (mut e, d) = whole(&f);
+        assert!(e.tiles.reachable(&f.old_tile));
+        e.mark_store_saved(d).unwrap();
+        assert_eq!(e.external_objects(d).unwrap(), BTreeSet::from([f.old_tile]));
+        assert!(!e.tiles.reachable(&f.old_tile), "the version's tile stayed");
+        assert!(e.tiles.reachable(&f.head_tile));
+        assert!(e.history_is_external(d));
+        // The next save to the same store reads nothing back.
+        let entries = e.folder_entries_keeping_external(d).unwrap();
+        assert!(!entries.contains_key(&alto_store::object_path(&f.old_tile)));
+        // A save to a format-2 folder still needs every object.
+        assert!(e.folder_entries(d).is_err());
     }
 
     #[test]

@@ -303,6 +303,26 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.openFolder(store);
       assert(eq(await d.versions.log({ mode: "dag" }), history) && await d.snapshotHash() === hash, "the store opens alone with the same history");
     });
+    await test("thin .alto: after a thin save the versions' objects live in the store alone", async () => {
+      await sixVersions();
+      // Past the Undo limit, only the versions reference their pixels.
+      for (let i = 0; i < 101; i++) await d.transact("layer.props", (tx) => tx.setProps(layer, { opacity: i % 2 ? 1 : 0.9 }));
+      const full = blobTarget(); await d.save(full);
+      const { store } = heldStore(), seen = { put: [], read: 0 }, exclusive = store.exclusive.bind(store);
+      store.exclusive = (run) => exclusive((view) => run({ ...view,
+        putObjects: (entries) => { seen.put.push(...entries.map((e) => e.path).filter((p) => p.startsWith("objects/"))); return view.putObjects(entries); },
+        getObject: async (path) => { if (path.startsWith("objects/")) seen.read++; return view.getObject(path); } }));
+      await d.save(blobTarget(), { history: { folder: store } });
+      const stored = (await store.list("objects/")).length, external = await d.versions.externalObjects();
+      assert(external > 0, `a created document keeps its versions' objects in memory after a thin save: ${external}`);
+      seen.put = []; await d.save(blobTarget(), { history: { folder: store } });
+      assert(seen.put.length === stored - external, `the second thin save sent ${seen.put.length} objects, the working document has ${stored - external}`);
+      const v0 = (await d.versions.log()).find((c) => c.message === "v0").hash;
+      seen.read = 0; await d.versions.restore(v0); assert(seen.read > 0, "the old version was not read from the store");
+      const color = async () => (await d.image.pickColor(layer, [0, 0])).bytes, restored = await color();
+      d = await engine.open(full.blob); await d.versions.restore(v0);
+      assert(eq(restored, await color()), "restored from the store as from the full .alto");
+    });
     await test("thin .alto: versions committed during a slow .alto write reach the store", async () => {
       await sixVersions(); const store = new MemoryObjectProvider(); await d.saveFolder(store);
       d = await engine.openFolder(store, { history: "on-demand" });

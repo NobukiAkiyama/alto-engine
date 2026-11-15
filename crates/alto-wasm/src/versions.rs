@@ -218,6 +218,12 @@ impl Runtime {
     pub fn mark_folder_saved(&mut self) -> Result<(), JsValue> {
         self.engine.mark_folder_saved(self.doc).map_err(error)
     }
+    /// After a thin save's store write: the versions' objects stay in the store, even for
+    /// a document that held every object until now.
+    #[wasm_bindgen(js_name=markStoreSaved)]
+    pub fn mark_store_saved(&mut self) -> Result<(), JsValue> {
+        self.engine.mark_store_saved(self.doc).map_err(error)
+    }
     #[wasm_bindgen(js_name=externalObjects)]
     pub fn external_objects(&self) -> Result<u32, JsValue> {
         Ok(self.engine.external_objects(self.doc).map_err(error)?.len() as u32)

@@ -893,6 +893,7 @@ async function execute(m: Queued): Promise<unknown> {
     }
     case "releaseObjects": runtime.releaseObjects(); return true;
     case "markFolderSaved": runtime.markFolderSaved(); return true;
+    case "markStoreSaved": runtime.markStoreSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
     case "historyIsExternal": return runtime.historyIsExternal();
     case "checkHistoryStore": return JSON.parse(runtime.checkHistoryStore(new Uint8Array(m.bytes), JSON.stringify(m.objects), m.warn));

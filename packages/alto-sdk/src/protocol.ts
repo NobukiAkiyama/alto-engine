@@ -110,6 +110,8 @@ export interface Requests {
   provideObjects: Q<{ bytes: ArrayBuffer; target: ObjectTarget }, true>;
   releaseObjects: Q<None, true>;
   markFolderSaved: Q<None, true>;
+  /** `markFolderSaved` after a thin save: the versions' objects leave memory for the store. */
+  markStoreSaved: Q<None, true>;
   externalObjects: Q<None, number>;
   /** True when the document came from a thin .alto, even one with nothing outside. */
   historyIsExternal: Q<None, boolean>;
