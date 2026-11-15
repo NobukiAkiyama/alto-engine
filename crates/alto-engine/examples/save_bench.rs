@@ -94,13 +94,15 @@ fn main() {
     e.commit(d, "v1", 0, None, false).unwrap();
     // Half the tiles are redrawn after the commit, so the version keeps the old ones.
     paint(&mut e, d, layer, &keys[..keys.len() / 2], 5000);
-    for round in 0..3u32 {
+    for round in 0..20u32 {
         let base = CUR.load(Relaxed);
         PEAK.store(base, Relaxed);
+        let started = std::time::Instant::now();
         let bytes = e.save_package(d).unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
         let peak = PEAK.load(Relaxed) - base;
         println!(
-            "tiles={tiles} round={round} alto={:.1}MiB peak={:.1}MiB ratio={:.2}",
+            "tiles={tiles} round={round} alto={:.1}MiB peak={:.1}MiB ratio={:.2} ms={ms:.1}",
             bytes.len() as f64 / MIB,
             peak as f64 / MIB,
             peak as f64 / bytes.len() as f64
