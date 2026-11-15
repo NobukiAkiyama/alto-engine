@@ -511,7 +511,7 @@ fn decode_entries_impl(
         && (!matches!(
             (
                 value.get("format").and_then(|v| v.as_u64()),
-                value.get("external_history").is_some()
+                value.get("external_history").is_some_and(|v| !v.is_null())
             ),
             (Some(2), false) | (Some(3), true)
         ) || value.get("document_format").and_then(|v| v.as_u64()) != Some(5))
@@ -1017,8 +1017,11 @@ mod tests {
         let mut e = thin.clone();
         set_manifest(&mut e, |m| m["format"] = 2.into());
         unsupported(e);
-        let mut e = thin;
+        let mut e = thin.clone();
         set_manifest(&mut e, |m| m["format"] = 4.into());
+        unsupported(e);
+        let mut e = thin;
+        set_manifest(&mut e, |m| m["external_history"] = serde_json::Value::Null);
         unsupported(e);
     }
     #[test]
@@ -1026,6 +1029,13 @@ mod tests {
         let (parts, _) = thin_parts();
         let expected = write_entries(&package_entries(&parts).unwrap()).unwrap();
         assert_eq!(encode_parts(&parts).unwrap(), expected);
+        // One object is supplied through the fetch callback instead of `parts`.
+        let mut held = parts.clone();
+        let (h, b) = held.objects.pop_first().unwrap();
+        let fetched = BTreeMap::from([(h, b.len() as u64)]);
+        let bytes =
+            encode_parts_fetching(&held, &fetched, |_| Ok::<_, StoreError>(b.clone())).unwrap();
+        assert_eq!(bytes, expected);
         assert_eq!(
             package_payload(&parts, &BTreeMap::new()).unwrap(),
             package_entries(&parts)
