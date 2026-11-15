@@ -46,7 +46,14 @@ fn paint(e: &mut Engine, d: alto_engine::DocHandle, layer: NodeId, keys: &[(u32,
     let mut changes = Vec::new();
     for (i, &(tx, ty)) in keys.iter().enumerate() {
         let after = e.put_tile(noise(seed + i as u32)).unwrap();
-        changes.push(TileChange { key: TileKey { tx: tx as i32, ty: ty as i32 }, before: None, after: Some(after) });
+        changes.push(TileChange {
+            key: TileKey {
+                tx: tx as i32,
+                ty: ty as i32,
+            },
+            before: None,
+            after: Some(after),
+        });
     }
     let doc = e.document(d).unwrap();
     let before_tiles = match &doc.node(layer).unwrap().kind {
@@ -57,7 +64,8 @@ fn paint(e: &mut Engine, d: alto_engine::DocHandle, layer: NodeId, keys: &[(u32,
         c.before = before_tiles.get(&c.key).copied();
     }
     let revision = doc.revision;
-    e.transact(d, "paint", vec![Op::SetTiles { layer, changes }], revision).unwrap();
+    e.transact(d, "paint", vec![Op::SetTiles { layer, changes }], revision)
+        .unwrap();
 }
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -65,12 +73,24 @@ fn main() {
     let mode = args.get(2).cloned().unwrap_or("full".into());
     let side = 64u32;
     let mut e = Engine::new();
-    let d = e.create_document(DocumentMeta::srgb_u8(side * 256, side * 256)).unwrap();
+    let d = e
+        .create_document(DocumentMeta::srgb_u8(side * 256, side * 256))
+        .unwrap();
     let node = Node::raster("layer");
     let layer = node.id;
     let parent = e.document(d).unwrap().root;
     let revision = e.document(d).unwrap().revision;
-    e.transact(d, "layer", vec![Op::InsertNode { node, parent, index: 0 }], revision).unwrap();
+    e.transact(
+        d,
+        "layer",
+        vec![Op::InsertNode {
+            node,
+            parent,
+            index: 0,
+        }],
+        revision,
+    )
+    .unwrap();
     let keys: Vec<_> = (0..tiles).map(|i| (i % side, i / side)).collect();
     paint(&mut e, d, layer, &keys, 1);
     for round in 0..3u32 {

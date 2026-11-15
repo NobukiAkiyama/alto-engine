@@ -58,7 +58,7 @@ impl Engine {
         h: DocHandle,
         before: ContentHash,
     ) -> Result<Vec<u8>, EngineError> {
-        self.version_record_without(h, before, &BTreeSet::new())
+        self.version_record_without(h, before, &BTreeSet::new(), false)
     }
     /// A history state transition without the objects the state before it references.
     /// A replay starts from that state (its digest must match), so it holds them, and
@@ -68,23 +68,30 @@ impl Engine {
         h: DocHandle,
         before: &VersionCheckpoint,
     ) -> Result<Vec<u8>, EngineError> {
+        // A document reading objects from its folder on demand may not hold them when
+        // its journal replays, so its records stay complete.
+        if self.lazy.contains_key(&h) {
+            return self.version_record(h, before.digest);
+        }
         let held: BTreeSet<_> = before
             .hashes
             .iter()
             .filter(|hash| self.tiles.contains(hash) || self.blobs.contains_key(hash))
             .copied()
             .collect();
-        self.version_record_without(h, before.digest, &held)
+        self.version_record_without(h, before.digest, &held, true)
     }
     fn version_record_without(
         &self,
         h: DocHandle,
         before: ContentHash,
         skip: &BTreeSet<ContentHash>,
+        incremental: bool,
     ) -> Result<Vec<u8>, EngineError> {
         let mut checkpoint = self.recovery_checkpoint(h, skip)?.entries;
         checkpoint.insert("version-state.json".into(),serde_json::to_vec(&serde_json::json!({
-            "before":before,"after":self.version_state_digest(h)?,"revision":self.document(h)?.revision
+            "before":before,"after":self.version_state_digest(h)?,"revision":self.document(h)?.revision,
+            "incremental":incremental
         })).map_err(|e|invalid(e.to_string()))?);
         Ok(alto_store::write_entries(&checkpoint)?)
     }
@@ -106,7 +113,8 @@ impl Engine {
             .as_u64()
             .ok_or_else(|| fail("CORRUPT_DATA", "missing version revision"))?;
         // An incremental record lists objects it does not carry; the state it starts
-        // from holds them.
+        // from holds them. A complete record must carry every one.
+        let incremental = header["incremental"].as_bool().unwrap_or(false);
         let listed: serde_json::Value = serde_json::from_slice(
             entries
                 .get("checkpoint.json")
@@ -118,7 +126,7 @@ impl Engine {
             let path = path
                 .as_str()
                 .ok_or_else(|| fail("CORRUPT_DATA", "object path"))?;
-            if entries.contains_key(path) {
+            if entries.contains_key(path) || !incremental {
                 continue;
             }
             let hash: ContentHash = path
@@ -127,6 +135,9 @@ impl Engine {
                 .unwrap()
                 .parse()
                 .map_err(|_| fail("CORRUPT_DATA", "object path"))?;
+            if path != alto_store::object_path(&hash) {
+                return Err(fail("CORRUPT_DATA", "object path"));
+            }
             let bytes = self
                 .encoded(hash)?
                 .ok_or_else(|| fail("CORRUPT_DATA", "history transition object is missing"))?;
@@ -213,8 +224,17 @@ mod tests {
         let node = alto_doc::Node::raster("layer");
         let layer = node.id;
         let parent = e.document(h).unwrap().root;
-        e.transact(h, "layer", vec![Op::InsertNode { node, parent, index: 0 }], 0)
-            .unwrap();
+        e.transact(
+            h,
+            "layer",
+            vec![Op::InsertNode {
+                node,
+                parent,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
         // Noise, so the tile does not compress and its absence shows in the size.
         let mut x = 0x9e37_79b9u32;
         let mut pixels = vec![0u8; 262144];
@@ -256,14 +276,29 @@ mod tests {
         e.release_version_state(before);
         let path = alto_store::object_path(&tile);
         assert!(alto_store::read_entries(&full).unwrap().contains_key(&path));
-        assert!(!alto_store::read_entries(&incremental).unwrap().contains_key(&path));
-        assert!(incremental.len() * 10 < full.len(), "{} vs {}", incremental.len(), full.len());
+        assert!(
+            !alto_store::read_entries(&incremental)
+                .unwrap()
+                .contains_key(&path)
+        );
+        assert!(
+            incremental.len() * 10 < full.len(),
+            "{} vs {}",
+            incremental.len(),
+            full.len()
+        );
 
         let mut f = Engine::new();
         let (d, _) = f.open_package(&initial).unwrap();
-        assert_eq!(f.replay_record(d, &incremental).unwrap(), crate::Replayed::Applied);
+        assert_eq!(
+            f.replay_record(d, &incremental).unwrap(),
+            crate::Replayed::Applied
+        );
         assert_eq!(f.version_status(d).unwrap().head, Some(c.hash));
-        assert_eq!(f.version_state_digest(d).unwrap(), e.version_state_digest(h).unwrap());
+        assert_eq!(
+            f.version_state_digest(d).unwrap(),
+            e.version_state_digest(h).unwrap()
+        );
         // The commit retains the tile, so it survives on the replaying side too.
         assert!(f.encoded(tile).unwrap().is_some());
     }
@@ -291,6 +326,85 @@ mod tests {
         let (d, _) = f.open_package(&initial).unwrap();
         let digest = f.version_state_digest(d).unwrap();
         assert!(f.replay_record(d, &tampered).is_err());
-        assert_eq!(f.version_state_digest(d).unwrap(), digest, "a refused record changed the state");
+        assert_eq!(
+            f.version_state_digest(d).unwrap(),
+            digest,
+            "a refused record changed the state"
+        );
+    }
+
+    #[test]
+    fn an_incremental_record_replays_onto_a_package_that_holds_an_earlier_version() {
+        let (mut e, h, _) = painted();
+        e.commit(h, "first", 1, None, false).unwrap();
+        // Paint over the tile: the first version alone keeps the old one.
+        let layer = e
+            .document(h)
+            .unwrap()
+            .nodes
+            .values()
+            .find(|n| matches!(n.kind, alto_doc::NodeKind::Raster { .. }))
+            .unwrap()
+            .id;
+        let old = match &e.document(h).unwrap().node(layer).unwrap().kind {
+            alto_doc::NodeKind::Raster { tiles, .. } => tiles.tiles.values().next().copied(),
+            _ => unreachable!(),
+        };
+        let tile = e
+            .put_tile(
+                alto_raster::TileData::new(alto_core::PixelFormat::Rgba8, vec![9u8; 262144])
+                    .unwrap(),
+            )
+            .unwrap();
+        let revision = e.document(h).unwrap().revision;
+        e.transact(
+            h,
+            "repaint",
+            vec![Op::SetTiles {
+                layer,
+                changes: vec![alto_doc::TileChange {
+                    key: alto_core::TileKey { tx: 0, ty: 0 },
+                    before: old,
+                    after: Some(tile),
+                }],
+            }],
+            revision,
+        )
+        .unwrap();
+        let saved = e.save_package(h).unwrap();
+        let before = e.capture_version_state(h).unwrap();
+        let c = e.commit(h, "second", 2, None, false).unwrap();
+        let record = e.version_record_since(h, &before).unwrap();
+        e.release_version_state(before);
+        let entries = alto_store::read_entries(&record).unwrap();
+        assert!(!entries.contains_key(&alto_store::object_path(&old.unwrap())));
+        assert!(!entries.contains_key(&alto_store::object_path(&tile)));
+
+        let mut f = Engine::new();
+        let (d, _) = f.open_package(&saved).unwrap();
+        assert_eq!(
+            f.replay_record(d, &record).unwrap(),
+            crate::Replayed::Applied
+        );
+        assert_eq!(f.version_status(d).unwrap().head, Some(c.hash));
+        assert_eq!(
+            f.version_state_digest(d).unwrap(),
+            e.version_state_digest(h).unwrap()
+        );
+        assert!(f.encoded(old.unwrap()).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_complete_record_missing_an_object_is_not_filled_in() {
+        let (mut e, h, tile) = painted();
+        let initial = e.save_package(h).unwrap();
+        let before = e.version_state_digest(h).unwrap();
+        e.commit(h, "first", 1, None, false).unwrap();
+        let mut entries = alto_store::read_entries(&e.version_record(h, before).unwrap()).unwrap();
+        entries.remove(&alto_store::object_path(&tile));
+        let truncated = alto_store::write_entries(&entries).unwrap();
+        let mut f = Engine::new();
+        let (d, _) = f.open_package(&initial).unwrap();
+        assert!(f.replay_record(d, &truncated).is_err());
     }
 }
