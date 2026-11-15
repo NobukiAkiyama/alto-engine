@@ -508,8 +508,8 @@ export class DocumentHandle {
    * history that lives in an unreachable folder would otherwise make the save fail.
    * With `history: { folder }` it first saves the folder form to `folder`, as `saveFolder`
    * does, then writes a thin `.alto` holding the working document's objects alone; the
-   * versions' objects stay in `folder`, which the document stays attached to. If the
-   * `.alto` write fails, the folder is already saved and stays attached; the document
+   * versions' objects stay in `folder`, which the document stays attached to and holds. If
+   * the `.alto` write fails, the folder is already saved and stays attached; the document
    * stays dirty.
    */
   async save(
@@ -517,7 +517,12 @@ export class DocumentHandle {
     options: { history?: "all" | "omit" | { folder: ObjectStorageProvider } } = {},
   ): Promise<void> {
     await this.endTool();
-    if (typeof options.history === "object" && options.history) return this.saveThin(target, options.history.folder);
+    if (typeof options.history === "object" && options.history) {
+      const folder = options.history.folder as ObjectStorageProvider | undefined;
+      if (!folder || typeof folder !== "object")
+        throw new AltoError("INVALID_ARGUMENT", "history.folder must be an object storage provider");
+      return this.saveThin(target, folder);
+    }
     if (options.history === "omit") {
       const bytes = await this.request("saveWithoutHistory");
       await target.write(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream());
@@ -560,6 +565,9 @@ export class DocumentHandle {
         token = written.token;
         // The versions now live only in the folder: hold it so GC elsewhere keeps them.
         await this.adoptFolder(owner, written.manifest, { hold: true });
+        // The store is committed now, whatever happens to the .alto. Inside the queue, so a
+        // version committed during the .alto write is not taken to be in the store.
+        await this.request("markFolderSaved");
         return {
           bytes: await this.request("saveThin"),
           // Advice only: failing to work it out must not fail a save that succeeded.
@@ -568,7 +576,6 @@ export class DocumentHandle {
       });
       await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
       this.apply(await this.request("saved", { token: token! }));
-      await this.request("markFolderSaved");
       token = undefined;
       this.core.emit("saveState", "saved");
       if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));

@@ -303,6 +303,23 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.openFolder(store);
       assert(eq(await d.versions.log({ mode: "dag" }), history) && await d.snapshotHash() === hash, "the store opens alone with the same history");
     });
+    await test("thin .alto: versions committed during a slow .alto write reach the store", async () => {
+      await sixVersions(); const store = new MemoryObjectProvider(); await d.saveFolder(store);
+      d = await engine.openFolder(store, { history: "on-demand" });
+      await reject(d.save(blobTarget(), { history: {} }), "INVALID_ARGUMENT");
+      let release, started; const gate = new Promise((resolve) => { release = resolve; }), writing = new Promise((resolve) => { started = resolve; });
+      const saving = d.save({ write: async (stream) => { started(); await gate; await new Response(stream).blob(); } }, { history: { folder: store } });
+      // The store is written; these edits happen while the .alto write waits.
+      await writing;
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1], { tolerance: 255 }); const during = await d.versions.commit("during");
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1], { tolerance: 255 });
+      // Past the Undo limit, only that version references its pixels.
+      for (let i = 0; i < 101; i++) await d.transact("layer.props", (tx) => tx.setProps(layer, { opacity: i % 2 ? 1 : 0.9 }));
+      release(); await saving;
+      await d.save(blobTarget(), { history: { folder: store } });
+      d = await engine.openFolder(store); await d.versions.restore(during.hash);
+      assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 0, 255]), "the version committed during the write");
+    });
     await test("thin .alto: a failed .alto write leaves the store attached and the document dirty", async () => {
       await sixVersions();
       const { store, holds } = heldStore(), states = [], off = engine.on("saveState", (s) => states.push(s));
