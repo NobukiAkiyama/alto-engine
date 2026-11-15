@@ -36,6 +36,8 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
 }
 pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
 pub use warning::Warning;
+/// The `.alto` cap a save checks, as `package_bytes` counts it.
+pub use alto_store::MAX_PACKAGE_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocHandle(pub u64);

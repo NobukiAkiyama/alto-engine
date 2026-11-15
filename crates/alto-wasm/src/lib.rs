@@ -1071,7 +1071,7 @@ impl Runtime {
     /// The package cap `packageBytes` is measured against.
     #[wasm_bindgen(js_name=packageLimit)]
     pub fn package_limit(&self) -> f64 {
-        alto_store::MAX_PACKAGE_BYTES as f64
+        alto_engine::MAX_PACKAGE_BYTES as f64
     }
     #[wasm_bindgen(js_name=savePackage)]
     pub fn save_package(&mut self) -> Result<Vec<u8>, JsValue> {
