@@ -40,6 +40,10 @@
 //                the contract gives (restarting then ready, storage-failed, failed),
 //                reject the waits the fault cut, keep the durable work, take a durable
 //                edit and see no GPU loss it did not inject; then the tab is ended.
+// - package-limit: random-pixel layers until saving a `.alto` is refused for the
+//                512 MiB cap; then an edit, durable, a commit and durable. Recovery gives
+//                the last durable state. The steps' results go in the report as `info`.
+//                Opt-in: ALTO_CRASH_ONLY=package-limit.
 // - decode-error: a decode Worker throws. Its pool stops and decoding goes inline; the
 //                engine must not restart or change status, and the document is kept.
 // Recovery is compared by snapshot hash, state hash, the layer's tile map and the
@@ -52,7 +56,9 @@ const POINTS = [
   "gc-before", "gc-mid", "gc-delete", "gc-complete",
   "merge-prepared", "merge-applied", "merge-torn", "merge-durable",
   "worker-error", "worker-panic", "worker-failed", "storage-error", "decode-error", "gpu-stroke", "gpu-held",
+  "package-limit",
 ];
+const OPT_IN = ["package-limit"];
 const METHODS = ["Page.crash", "Target.closeTarget"];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -144,7 +150,8 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
 
   // ALTO_CRASH_ONLY=<regex> runs only the matching points, for investigating one.
   const only = typeof process !== "undefined" && process.env.ALTO_CRASH_ONLY ? new RegExp(process.env.ALTO_CRASH_ONLY) : null;
-  for (const point of POINTS.filter((p) => !only || only.test(p)))
+  // package-limit needs about 2.7 GiB of WASM memory: it runs only when ALTO_CRASH_ONLY matches it.
+  for (const point of POINTS.filter((p) => (only ? only.test(p) : !OPT_IN.includes(p))))
     for (const method of METHODS)
       for (let i = 0; i < repeat; i++) {
         const name = `${point} / ${method} #${i + 1}`;
@@ -203,7 +210,8 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
         }
         const ms = Math.round(performance.now() - started);
         results.push({ name, pass: !error, ms, ...(error ? { error } : {}) });
-        log(`${error ? "FAIL" : "PASS"} ${name} ${ms} ms${error ? " " + error : ""}`);
+        if (prepared?.info) results.at(-1).info = prepared.info;
+        log(`${error ? "FAIL" : "PASS"} ${name} ${ms} ms${error ? " " + error : ""}${prepared?.info ? " " + JSON.stringify(prepared.info) : ""}`);
       }
   return { results };
 }

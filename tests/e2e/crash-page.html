@@ -156,6 +156,73 @@ async function stroke(doc, layer, seed, color) {
   await tool.end();
 }
 
+/** A layer of random pixels: neither its tiles nor its PNG compress. */
+async function noise(seed, size) {
+  const c = new OffscreenCanvas(size, size);
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(size, size);
+  let x = seed * 2654435761 >>> 0;
+  const u32 = new Uint32Array(img.data.buffer);
+  for (let i = 0; i < u32.length; i++) {
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+    u32[i] = (x | 0xff000000) >>> 0;
+  }
+  ctx.putImageData(img, 0, 0);
+  return engine.assets.importImage(await c.convertToBlob({ type: "image/png" }));
+}
+/**
+ * "package-limit": adds layers of random pixels until saving a `.alto` is refused for
+ * the 512 MiB cap, then draws, waits for durable, commits and waits again, recording
+ * each step. Recovery must give back the last durable state. `info` records the layer
+ * count, each save's size and WASM memory, and what each step past the cap returned.
+ */
+async function packageLimit(doc, layer, seed) {
+  const MIB = 1048576;
+  const wasm = async () => Math.round((await unstable(engine).settle()).wasmBytes / MIB);
+  const info = { layers: 0, saved: [], wasmAtStart: await wasm() };
+  for (let i = 0; i < 40; i++) {
+    const image = await noise(seed * 100 + i, 2048);
+    await doc.transact("noise", (tx) => tx.addRasterFromAsset(image, { name: "noise " + i }));
+    await doc.durable();
+    info.layers = i + 1;
+    if (i < 10) continue;
+    let bytes = 0;
+    try {
+      await doc.save({ write: async (stream) => (bytes = (await new Response(stream).blob()).size) });
+      info.saved.push([info.layers, Math.round(bytes / MIB), await wasm()]);
+    } catch (e) {
+      info.refused = String(e?.message || e);
+      break;
+    }
+  }
+  assert(info.refused, "saving was never refused");
+  assert(info.saved.length > 0, "the first save was already refused");
+  assert(/RESOURCE_LIMIT/.test(info.refused), "saving failed another way: " + info.refused);
+  info.wasmAtRefusal = await wasm();
+  assert(engine.status.state === "ready", "the engine is " + JSON.stringify(engine.status) + " after the refused save");
+  // Each step past the cap is recorded, not assumed: an edit, durable, a commit, durable.
+  const attempt = async (name, work) => {
+    try {
+      await work();
+      info[name] = "ok";
+    } catch (e) {
+      info[name] = String(e?.message || e);
+    }
+    info[name + "Status"] = engine.status.state;
+  };
+  const beforeEdit = await state(doc, layer);
+  await attempt("edit", () => stroke(doc, layer, seed + 5, [0.2, 0.7, 0.3, 1]));
+  await attempt("durableAfterEdit", () => doc.durable());
+  assert(info.edit === "ok" && info.durableAfterEdit === "ok", "an edit past the cap did not become durable");
+  const afterEdit = await state(doc, layer);
+  assert(afterEdit.hash !== beforeEdit.hash, "the edit did not change the document");
+  await attempt("commit", () => doc.versions.commit("past the limit"));
+  await attempt("durableAfterCommit", () => doc.durable());
+  assert(info.commit === "ok" || /RESOURCE_LIMIT/.test(info.commit), "the commit failed another way: " + info.commit);
+  info.wasmAfterCommit = await wasm();
+  const ok = info.durableAfterCommit === "ok";
+  return { layer, expected: ok ? await state(doc, layer) : afterEdit, info };
+}
 /**
  * Two branches that both draw on the layer since "base": "side" also renames it, main
  * draws in another colour. Merging "side" into main conflicts; every conflict takes
@@ -253,6 +320,12 @@ window.altoCrash = {
    */
   async prepare(point, namespace, seed) {
     await start(namespace);
+    if (point === "package-limit") {
+      const big = await engine.createDocument({ width: 2048, height: 2048 });
+      let paint;
+      await big.transact("layer.add", (tx) => (paint = tx.addRaster({ name: "paint" })));
+      return packageLimit(big, paint, seed);
+    }
     const doc = await engine.createDocument({ width: 256, height: 256 });
     let layer;
     await doc.transact("layer.add", (tx) => (layer = tx.addRaster({ name: "paint" })));
