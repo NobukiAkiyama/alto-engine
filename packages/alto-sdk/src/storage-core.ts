@@ -372,8 +372,12 @@ async function collect(planned: string[]) {
   for (const [path, at] of stored) if (at.pack !== undefined && removed.has(at.pack)) stored.delete(path);
   let bytes = 0;
   for (const name of removed) {
-    bytes += (await (await packsDirectory.getFileHandle(name)).getFile()).size;
-    await packsDirectory.removeEntry(name).catch(() => {});
+    try {
+      bytes += (await (await packsDirectory.getFileHandle(name)).getFile()).size;
+      await packsDirectory.removeEntry(name);
+    } catch {
+      // Its objects already left `stored`; the startup collection deletes the file.
+    }
   }
   return { packs: removed.size, bytes };
 }

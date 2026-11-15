@@ -444,7 +444,7 @@ function queueCheckpoint() {
   journaledBytes = 0;
   journaledRecords = 0;
   const dirty = runtime.isDirty();
-  const bytes = runtime.checkpointParts();
+  const bytes = checkpointParts();
   for (const w of writes) pendingBytes -= w.bytes.length;
   writes = writes.filter((w) => w.kind !== "append");
   for (const w of writes) pendingBytes += w.bytes.length;
@@ -529,14 +529,26 @@ async function pump() {
  * session (packs were collected only at startup). It runs between writes, after a
  * checkpoint with none queued behind it. A checkpoint queued while the plan was read
  * was built counting those objects as stored, so the collection waits for the next
- * one. Otherwise the engine forgets the objects first and the deletion is the next
- * storage request: every checkpoint built after it writes them again if it needs them.
+ * one. Otherwise the objects are noted for the engine to forget before it builds its
+ * next checkpoint, which therefore writes them again if it needs them; that checkpoint
+ * is written after the deletion, since writes go one at a time.
  */
 async function collectPacks() {
   const plan = await io<{ packs: string[]; objects: string[] }>("collectPlan");
   if (!plan.packs.length || writes.some((next) => next.kind === "checkpoint")) return;
-  runtime.forgetStoredObjectPaths(JSON.stringify(plan.objects));
+  // Not the runtime itself: pump runs beside the drain loop, which may hold it borrowed.
+  collectedObjects.push(...plan.objects);
   await io("collect", { packs: plan.packs });
+}
+// Objects the store deleted that the engine still counts as stored. Every checkpoint
+// is built through checkpointParts(), which hands these over first.
+let collectedObjects: string[] = [];
+function checkpointParts() {
+  if (collectedObjects.length) {
+    runtime.forgetStoredObjectPaths(JSON.stringify(collectedObjects));
+    collectedObjects = [];
+  }
+  return runtime.checkpointParts();
 }
 function hasRoom() {
   return writes.length < MAX_PENDING_WRITES && pendingBytes < MAX_PENDING_BYTES;
@@ -759,6 +771,7 @@ async function execute(m: Queued): Promise<unknown> {
       await writesIdle();
       await io("discard");
       runtime.forgetStoredObjects();
+      collectedObjects = [];
       recoveryPending = false;
       return true;
     case "createDocument": {
@@ -1072,7 +1085,7 @@ async function execute(m: Queued): Promise<unknown> {
       return io("corruptBothCheckpoints");
     case "looseCheckpoint": {
       await writesIdle();
-      const entries = runtime.checkpointParts();
+      const entries = checkpointParts();
       await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer }, [entries.buffer]);
       return true;
     }
