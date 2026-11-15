@@ -340,15 +340,17 @@ window.altoCrash = {
       // stroke, durable. The store outlives the tab; the thin .alto does not need to.
       const name = folderName(namespace);
       const store = await OpfsFolderProvider.open(await folderHandle(name));
+      // The base version's hash, taken on the original document: the reopened one must not
+      // touch it, or its undo history would carry the tiles into the recovery checkpoint.
+      const baseHash = (await doc.versions.log()).find((c) => c.message === "base")?.hash;
+      assert(baseHash, "no base version in the log");
+      await doc.versions.restore(baseHash);
+      const old = await doc.snapshotHash();
+      await doc.undo();
       const thin = blobTarget();
       await doc.save(thin, { history: { folder: store } });
       const opened = await engine.open(thin.blob, { history: store });
       assert(opened.folder === store, "the thin .alto did not attach its store");
-      const baseHash = (await opened.versions.log()).find((c) => c.message === "base")?.hash;
-      assert(baseHash, "no base version in the log");
-      await opened.versions.restore(baseHash);
-      const old = await opened.snapshotHash();
-      await opened.undo();
       await stroke(opened, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
       await opened.durable();
       const after = await state(opened, layer);
@@ -618,6 +620,9 @@ window.altoCrash = {
       assert(engine.recovery.available, "no recovery journal is waiting");
       const doc = await engine.recovery.restore();
       const out = await state(doc, layer);
+      let error;
+      try { await doc.versions.restore(thin.baseHash); } catch (e) { error = e; }
+      assert(error?.code === "STORAGE" && error.details?.reason === "objects-unavailable", "restore without the store: " + error?.code + " " + error?.details?.reason);
       await doc.versions.attachFolder(await OpfsFolderProvider.open(await folderHandle(folder, false)));
       await doc.versions.restore(thin.baseHash);
       assert(await doc.snapshotHash() === thin.old, "the old version restored differently from the store");

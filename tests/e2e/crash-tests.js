@@ -26,9 +26,10 @@
 //                gives the same document, and every commit restores to the same
 //                snapshot and tiles. A second GC must finish and leave no garbage; a
 //                second crash checks the folder it left.
-// - thin-open:  a thin `.alto` with its versions in an OPFS store is opened with the store,
+// - thin-open:   a thin `.alto` with its versions in an OPFS store is opened with the store,
 //                a stroke is drawn and durable. Recovery gives the stroke and the same
-//                version log; after attachFolder an old version restores from the store.
+//                version log; an old version fails to restore until attachFolder, then restores from
+//                the store.
 // - merge-*:     a three-way merge with conflicts is prepared and not finished,
 //                finished with its journal write held or torn, or finished and
 //                durable. Recovery gives the state before the merge for the first
