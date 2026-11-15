@@ -4,7 +4,7 @@ mod journal;
 mod lazy;
 pub use journal::VersionCheckpoint;
 pub(crate) use lazy::LazyObjects;
-pub use lazy::ObjectTarget;
+pub use lazy::{ObjectTarget, StoreMismatch};
 mod merge;
 pub use merge::{MergeConflict, MergePlan, MergeResolution, MergeResult, MergeValue};
 mod branches;

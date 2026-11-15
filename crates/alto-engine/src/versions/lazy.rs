@@ -13,6 +13,24 @@ pub(crate) struct LazyObjects {
     pub(crate) pinned: BTreeSet<ContentHash>,
 }
 
+/// Why a history store cannot serve the document it was found for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreMismatch {
+    /// The store lacks objects the versions need, or cannot be read.
+    Missing,
+    /// The store belongs to a different document.
+    OtherDocument,
+}
+
+impl StoreMismatch {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            StoreMismatch::Missing => "missing",
+            StoreMismatch::OtherDocument => "other-document",
+        }
+    }
+}
+
 /// What an operation is about to read.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -242,6 +260,37 @@ impl Engine {
             .filter(|hash| !working.contains(hash))
             .copied()
             .collect())
+    }
+    /// Whether a history store can serve the document. `manifest_and_snapshot` holds the
+    /// store's `manifest.json` and the snapshot it names; `present` lists the objects
+    /// the store has. An unreadable store is `Missing`, not an error, so opening succeeds.
+    pub fn check_history_store(
+        &self,
+        h: DocHandle,
+        manifest_and_snapshot: BTreeMap<String, Vec<u8>>,
+        present: &BTreeSet<ContentHash>,
+    ) -> Result<Option<StoreMismatch>, EngineError> {
+        let root = self.document(h)?.root;
+        let store_root = manifest_and_snapshot
+            .get("manifest.json")
+            .and_then(|b| serde_json::from_slice::<alto_store::Manifest>(b).ok())
+            .and_then(|m| manifest_and_snapshot.get(&alto_store::snapshot_path(&m.snapshot)))
+            .and_then(|b| Document::from_snapshot_bytes(b).ok())
+            .map(|d| d.root);
+        match store_root {
+            None => return Ok(Some(StoreMismatch::Missing)),
+            Some(r) if r != root => return Ok(Some(StoreMismatch::OtherDocument)),
+            Some(_) => {}
+        }
+        if self
+            .external_objects(h)?
+            .iter()
+            .all(|o| present.contains(o))
+        {
+            Ok(None)
+        } else {
+            Ok(Some(StoreMismatch::Missing))
+        }
     }
     /// A thin package's parts, without object bytes, and the objects it holds: the
     /// working document's alone.
@@ -689,6 +738,60 @@ mod tests {
         assert_eq!(e.snapshot(d).unwrap(), before);
         assert_eq!(e.external_objects(d).unwrap(), BTreeSet::from([f.old_tile]));
         assert_eq!(e.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes, [20; 4]);
+    }
+
+    #[test]
+    fn history_store_check() {
+        let f = fixture();
+        let bytes = thin(&f);
+        let mut e = Engine::new();
+        let (d, _) = e.open_package(&bytes).unwrap();
+        let store = |entries: &BTreeMap<String, Vec<u8>>| {
+            let manifest = entries["manifest.json"].clone();
+            let m: alto_store::Manifest = serde_json::from_slice(&manifest).unwrap();
+            let path = alto_store::snapshot_path(&m.snapshot);
+            BTreeMap::from([
+                ("manifest.json".to_string(), manifest),
+                (path.clone(), entries[&path].clone()),
+            ])
+        };
+        let present = known(&f.entries);
+        let ours = store(&f.entries);
+        assert_eq!(
+            e.check_history_store(d, ours.clone(), &present).unwrap(),
+            None
+        );
+        let mut without = present.clone();
+        without.remove(&f.old_tile);
+        assert_eq!(
+            e.check_history_store(d, ours.clone(), &without).unwrap(),
+            Some(StoreMismatch::Missing)
+        );
+        let other = store(&fixture().entries);
+        assert_eq!(
+            e.check_history_store(d, other, &present).unwrap(),
+            Some(StoreMismatch::OtherDocument)
+        );
+        let mut no_manifest = ours.clone();
+        no_manifest.remove("manifest.json");
+        let mut broken = ours.clone();
+        broken.insert("manifest.json".into(), b"{".to_vec());
+        let mut no_snapshot = ours.clone();
+        no_snapshot.retain(|n, _| n == "manifest.json");
+        let mut bad_snapshot = ours.clone();
+        for (n, b) in bad_snapshot.iter_mut() {
+            if n.starts_with("snapshots/") {
+                *b = b"not json".to_vec();
+            }
+        }
+        for damaged in [no_manifest, broken, no_snapshot, bad_snapshot] {
+            assert_eq!(
+                e.check_history_store(d, damaged, &present).unwrap(),
+                Some(StoreMismatch::Missing)
+            );
+        }
+        assert_eq!(StoreMismatch::Missing.reason(), "missing");
+        assert_eq!(StoreMismatch::OtherDocument.reason(), "other-document");
     }
 
     #[test]
