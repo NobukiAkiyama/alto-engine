@@ -120,6 +120,8 @@ export interface Requests {
   checkHistoryStore: Q<{ bytes: ArrayBuffer; objects: string[]; warn: boolean }, { mismatch: "missing" | "other-document" | null; contained: boolean; state: WireState }>;
   /** Whether every root of `manifest` (a store's manifest.json) is one of the document's versions. */
   storeRootsContained: Q<{ manifest: ArrayBuffer }, boolean>;
+  /** A store was attached after all: drops `HISTORY_STORE_UNAVAILABLE`. */
+  historyStoreAttached: Q<None, WireState>;
   saveWithoutHistory: Q<None, Uint8Array>;
   /** The thin .alto: the working document's objects; versions' objects stay in its folder. */
   saveThin: Q<None, Uint8Array>;

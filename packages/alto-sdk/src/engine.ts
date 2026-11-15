@@ -155,6 +155,7 @@ const readableAfterStorageFailure = new Set([
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
+  "historyStoreAttached",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 

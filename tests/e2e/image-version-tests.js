@@ -453,6 +453,17 @@ export async function runImageVersionTests(engine, log) {
       await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "the newer .alto restores from the store");
       await d.save(blobTarget(), { history: { folder: t.store } }); assert(!d.getSnapshot().dirty, "the newer .alto saves to its store");
     });
+    await test("thin .alto: attachFolder through a store without a manifest clears the warning", async () => {
+      const t = await thinWithStore(), bare = new MemoryObjectProvider();
+      await bare.putObjects(await Promise.all((await t.store.list("objects/")).map(async (path) => ({ path, data: await t.store.getObject(path) }))));
+      d = await engine.open(t.thin, { history: bare });
+      assert(eq(storeWarnings().map((w) => w.details.reason), ["missing"]) && d.folder === null, `no manifest: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.attachFolder(bare);
+      assert(d.folder === bare && storeWarnings().length === 0, `attached, warning cleared: ${JSON.stringify(storeWarnings())}`);
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      d = await engine.open(t.thin, { history: bare }); await d.versions.attachFolder(bare);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the attached store");
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });

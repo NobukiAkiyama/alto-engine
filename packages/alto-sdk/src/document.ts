@@ -412,6 +412,8 @@ export class DocumentHandle {
         const manifest = await (provider.exclusive ? provider.exclusive(load) : load(provider));
         const hash = manifest ? await sha256Hex(manifest) : "";
         const contained = !manifest || (await this.request("storeRootsContained", { manifest: manifest.slice().buffer as ArrayBuffer }));
+        // As when the store matched: the warning from opening without it no longer holds.
+        this.apply(await this.request("historyStoreAttached"));
         this.setFolder(provider, hash, hold, !contained);
       } catch (e) { void hold?.(); throw e; }
     }),

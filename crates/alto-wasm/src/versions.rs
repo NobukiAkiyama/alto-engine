@@ -278,6 +278,13 @@ impl Runtime {
         }))
         .map_err(error)
     }
+    /// A history store was attached after all: its `HISTORY_STORE_UNAVAILABLE` warning goes.
+    #[wasm_bindgen(js_name=historyStoreAttached)]
+    pub fn history_store_attached(&mut self) -> Result<String, JsValue> {
+        self.warnings
+            .retain(|w| w.code != alto_engine::HISTORY_STORE_UNAVAILABLE);
+        self.view()
+    }
     /// Whether every root of a store's `manifest.json` is one of this document's versions.
     #[wasm_bindgen(js_name=storeRootsContained)]
     pub fn store_roots_contained(&self, manifest: &[u8]) -> Result<bool, JsValue> {
