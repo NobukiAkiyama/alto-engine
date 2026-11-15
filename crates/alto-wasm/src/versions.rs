@@ -277,7 +277,7 @@ impl Runtime {
                 .strip_prefix("objects/")
                 .and_then(|rest| rest.rsplit('/').next())
                 .and_then(|h| h.parse::<ContentHash>().ok())
-                .filter(|h| alto_store::object_path(h) == *p)
+                .filter(|h| alto_engine::object_path(h) == *p)
                 .ok_or_else(|| error(format!("INVALID_ARGUMENT: not an object path: {p}")))?;
             hashes.push(hash);
         }
