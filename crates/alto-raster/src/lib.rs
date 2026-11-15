@@ -159,6 +159,10 @@ impl StoredTile {
         out.extend_from_slice(&self.compressed);
         Ok(out)
     }
+    /// The length of `encoded()`, without building it.
+    pub fn encoded_len(&self) -> usize {
+        9 + self.compressed.len()
+    }
     pub fn decode(&self, hash: &ContentHash) -> Result<TileData, TileError> {
         let corrupt = || TileError::Corrupt(*hash);
         if ContentHash::of(&self.compressed) != self.compressed_hash {

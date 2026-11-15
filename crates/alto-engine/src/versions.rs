@@ -455,17 +455,20 @@ impl Engine {
     /// Package contents including every committed snapshot and its objects.
     pub fn package_parts(&self, h: DocHandle) -> Result<PackageParts, EngineError> {
         Ok(self
-            .package_parts_except(h, &BTreeSet::new(), BTreeSet::new())?
+            .package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), true)?
             .0)
     }
 
     /// Package parts without the bytes of objects in `stored`, plus every object the
     /// package references. A recovery checkpoint writes only the objects it lacks.
+    /// With `with_objects` false, `parts.objects` stays empty and the caller fetches
+    /// the referenced objects itself.
     pub fn package_parts_except(
         &self,
         h: DocHandle,
         stored: &BTreeSet<ContentHash>,
         extra: BTreeSet<ContentHash>,
+        with_objects: bool,
     ) -> Result<(PackageParts, BTreeSet<ContentHash>), EngineError> {
         let doc = self.document(h)?;
         let store = self.versions(h)?;
@@ -473,7 +476,7 @@ impl Engine {
         hashes.extend(doc_hashes(doc));
         hashes.extend(store.retained.iter().copied());
         let mut objects = BTreeMap::new();
-        for &hash in hashes.difference(stored) {
+        for &hash in hashes.difference(stored).filter(|_| with_objects) {
             let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
             objects.insert(hash, bytes);
         }
@@ -506,7 +509,7 @@ impl Engine {
         }
         let external = self.external_objects(h)?;
         let skip: BTreeSet<_> = stored.union(&external).copied().collect();
-        let (parts, mut refs) = self.package_parts_except(h, &skip, history_objects)?;
+        let (parts, mut refs) = self.package_parts_except(h, &skip, history_objects, true)?;
         refs.retain(|hash| !external.contains(hash));
         let mut entries = alto_store::package_entries(&parts)?;
         if let Some(lazy) = self.lazy.get(&h) {

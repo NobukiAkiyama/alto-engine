@@ -379,3 +379,43 @@ fn divergent_history_survives_commit_and_reopen_until_prune() {
     assert!(!reopened.versions[&g].commits.contains_key(&b.hash));
     assert_eq!(reopened.log(g).unwrap().len(), 2);
 }
+
+#[test]
+fn a_save_writes_the_same_bytes_as_the_gathered_package() {
+    // Fonts are blobs, painted tiles are fetched one at a time; the version keeps
+    // tiles the working document no longer uses.
+    let (mut e, d, latin, jp) = setup();
+    add_text(&mut e, d, vertical(vec![jp, latin]));
+    let bg = Node::raster("背景");
+    let id = bg.id;
+    let root = e.document(d).unwrap().root;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "add",
+        vec![Op::InsertNode {
+            node: bg,
+            parent: root,
+            index: 0,
+        }],
+        rev,
+    )
+    .unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 1);
+    paint(&mut e, d, id, TileKey { tx: 1, ty: 0 }, 2);
+    e.commit(d, "v1", 1, None, false).unwrap();
+    paint(&mut e, d, id, TileKey { tx: 0, ty: 0 }, 3);
+    let expected = alto_store::encode_parts(&e.package_parts(d).unwrap()).unwrap();
+    assert!(!e.package_parts(d).unwrap().objects.is_empty());
+    assert_eq!(e.save_package(d).unwrap(), expected);
+    let doc = e.document(d).unwrap();
+    let alone = alto_store::encode_package(&doc.snapshot_bytes().unwrap(), {
+        let mut objects = BTreeMap::new();
+        for hash in crate::versions::doc_hashes(doc) {
+            objects.insert(hash, e.encoded(hash).unwrap().unwrap());
+        }
+        objects
+    })
+    .unwrap();
+    assert_eq!(e.save_without_history(d).unwrap(), alone);
+}
