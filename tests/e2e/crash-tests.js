@@ -26,6 +26,9 @@
 //                gives the same document, and every commit restores to the same
 //                snapshot and tiles. A second GC must finish and leave no garbage; a
 //                second crash checks the folder it left.
+// - thin-open:  a thin `.alto` with its versions in an OPFS store is opened with the store,
+//                a stroke is drawn and durable. Recovery gives the stroke and the same
+//                version log; after attachFolder an old version restores from the store.
 // - merge-*:     a three-way merge with conflicts is prepared and not finished,
 //                finished with its journal write held or torn, or finished and
 //                durable. Recovery gives the state before the merge for the first
@@ -54,7 +57,7 @@ const POINTS = [
   "checkpoint-pack", "checkpoint-journal", "checkpoint-flushed",
   "folder-before", "folder-mid", "folder-after",
   "gc-before", "gc-mid", "gc-delete", "gc-complete",
-  "merge-prepared", "merge-applied", "merge-torn", "merge-durable",
+  "thin-open", "merge-prepared", "merge-applied", "merge-torn", "merge-durable",
   "worker-error", "worker-panic", "worker-failed", "storage-error", "decode-error", "gpu-stroke", "gpu-held",
   "package-limit",
 ];
@@ -175,7 +178,7 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
           const gc = point.startsWith("gc-");
           const merging = point.startsWith("merge-");
           const recover = () =>
-            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder}, ${gc}, ${merging})`;
+            `window.altoCrash.recover(${JSON.stringify(namespace)}, ${JSON.stringify(prepared.layer)}, ${folder}, ${gc}, ${merging}, ${JSON.stringify(prepared.thin ?? null)})`;
           const recovered = await second.evaluate(recover());
           const differs = Object.keys(prepared.expected).filter((key) => recovered[key] !== prepared.expected[key]);
           if (differs.length)
@@ -186,7 +189,7 @@ export async function runCrashTests({ browser, connect, wsOrigin }, pageUrl, { r
               : "") +
               ": " + JSON.stringify({ expected: pick(prepared.expected, differs), recovered: pick(recovered, differs) }),
             );
-          if (!/^(stroke-open|applied|durable)$/.test(point)) {
+          if (!/^(stroke-open|applied|durable|thin-open)$/.test(point)) {
             const commit = point.startsWith("checkpoint-");
             const edited = await second.evaluate(
               `window.altoCrash.editAfterRecovery(${JSON.stringify(prepared.layer)}, ${commit}, ${folder}, ${JSON.stringify(prepared.garbage ?? null)}, ${JSON.stringify(prepared.merge ?? null)})`,

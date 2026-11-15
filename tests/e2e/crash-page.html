@@ -8,6 +8,7 @@
 // engine at a wait point and returns what recovery must give; the runner then ends the
 // tab and calls `recover` in a new tab of the same origin, so the same OPFS store.
 import { createEngine, deleteRecovery, OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
+import { blobTarget } from "../../packages/alto-sdk/dist/browser.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 
@@ -334,6 +335,26 @@ window.altoCrash = {
     await stroke(doc, layer, seed + 1, [0.1, 0.4, 0.9, 0.7]);
     await doc.durable();
     const base = await state(doc, layer);
+    if (point === "thin-open") {
+      // Saved thin with its versions in an OPFS store, reopened with that store; then a
+      // stroke, durable. The store outlives the tab; the thin .alto does not need to.
+      const name = folderName(namespace);
+      const store = await OpfsFolderProvider.open(await folderHandle(name));
+      const thin = blobTarget();
+      await doc.save(thin, { history: { folder: store } });
+      const opened = await engine.open(thin.blob, { history: store });
+      assert(opened.folder === store, "the thin .alto did not attach its store");
+      const baseHash = (await opened.versions.log()).find((c) => c.message === "base")?.hash;
+      assert(baseHash, "no base version in the log");
+      await opened.versions.restore(baseHash);
+      const old = await opened.snapshotHash();
+      await opened.undo();
+      await stroke(opened, layer, seed + 3, [0.6, 0.1, 0.8, 1]);
+      await opened.durable();
+      const after = await state(opened, layer);
+      assert(after.hash !== base.hash && old !== after.hash, "the stroke did not change the document");
+      return { layer, folder: name, thin: { baseHash, old }, expected: after };
+    }
     if (point === "stroke-open") {
       const tool = doc.tools.begin("brush", { layer, color: [0.2, 0.8, 0.2, 1], tip: { size: 30 } });
       for (const s of samples(seed + 2)) tool.input(s);
@@ -590,7 +611,19 @@ window.altoCrash = {
    * Opens the namespace again after the crash and restores its journal. With `folder`,
    * opens that folder instead, in an engine that keeps no journal.
    */
-  async recover(namespace, layer, folder = null, gc = false, merging = false) {
+  async recover(namespace, layer, folder = null, gc = false, merging = false, thin = null) {
+    if (thin) {
+      // The journal restores the thin-opened document; its store attaches afterwards.
+      await start(namespace);
+      assert(engine.recovery.available, "no recovery journal is waiting");
+      const doc = await engine.recovery.restore();
+      const out = await state(doc, layer);
+      await doc.versions.attachFolder(await OpfsFolderProvider.open(await folderHandle(folder, false)));
+      await doc.versions.restore(thin.baseHash);
+      assert(await doc.snapshotHash() === thin.old, "the old version restored differently from the store");
+      await doc.undo();
+      return out;
+    }
     if (folder) {
       await start(namespace, { recovery: false });
       openedFolder = await OpfsFolderProvider.open(await folderHandle(folder, false));
