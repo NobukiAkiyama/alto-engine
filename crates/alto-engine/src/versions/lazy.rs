@@ -11,6 +11,8 @@ pub(crate) struct LazyObjects {
     pub(crate) known: BTreeSet<ContentHash>,
     /// Kept in memory for the operation in progress.
     pub(crate) pinned: BTreeSet<ContentHash>,
+    /// Opened from a thin .alto: its versions' objects belong in a history store.
+    pub(crate) external_history: bool,
 }
 
 /// Why a history store cannot serve the document it was found for.
@@ -212,6 +214,10 @@ impl Engine {
         hashes.extend(self.versions(h)?.retained.iter().copied());
         hashes.retain(|hash| !self.present(hash) && lazy.known.contains(hash));
         Ok(hashes)
+    }
+    /// Whether the document was opened from a thin .alto, even one with nothing outside.
+    pub fn history_is_external(&self, h: DocHandle) -> bool {
+        self.lazy.get(&h).is_some_and(|lazy| lazy.external_history)
     }
     /// Folder entries for the folder the document came from: objects still there are not read.
     pub fn folder_entries_keeping_external(
@@ -854,6 +860,13 @@ mod tests {
         let (r, warnings) = fresh.open_package(&bytes).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(fresh.external_objects(r).unwrap().is_empty());
+        assert!(
+            fresh.history_is_external(r),
+            "thin even with nothing outside"
+        );
+        let (n, _) = fresh.open_package(&e.save_package(d).unwrap()).unwrap();
+        assert!(!fresh.history_is_external(n));
+        assert!(!e.history_is_external(d));
         assert_eq!(
             fresh.pick_color(r, layer, [0.0, 0.0]).unwrap().bytes,
             [7; 4]

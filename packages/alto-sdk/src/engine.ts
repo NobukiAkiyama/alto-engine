@@ -126,8 +126,14 @@ export interface Engine {
   };
   /** A new empty document. It uses render version 3, the only version. */
   createDocument(meta: { width: number; height: number; renderVersion?: 3 }): Promise<DocumentHandle>;
-  /** Opens a `.alto` archive. Refused while a recovery journal waits. */
-  open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
+  /**
+   * Opens a `.alto` archive. Refused while a recovery journal waits. For a thin `.alto`,
+   * `history` is the folder its versions were saved to: when it holds them for this document
+   * it is attached and held, as after `versions.attachFolder`; when not, the document still
+   * opens, without it, with a `HISTORY_STORE_UNAVAILABLE` warning (`details.reason`
+   * `"missing"` or `"other-document"`). A normal `.alto` reads nothing from `history`.
+   */
+  open(source: Blob | ArchiveSource, options?: { history?: ObjectStorageProvider }): Promise<DocumentHandle>;
   /** Opens the folder form, reading only objects reachable from the document and its history. */
   /**
    * Opens a folder. With `history: "on-demand"`, only the working document's pixels are read;
@@ -148,7 +154,7 @@ const readableAfterStorageFailure = new Set([
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
-  "packageBytes",
+  "packageBytes", "historyIsExternal", "checkHistoryStore",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 
@@ -695,12 +701,17 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   async createDocument(meta: { width: number; height: number; renderVersion?: 3 }): Promise<DocumentHandle> {
     return this.replaceDocument((epoch) => this.requestReplacement("createDocument", meta, epoch));
   }
-  async open(source: Blob | ArchiveSource): Promise<DocumentHandle> {
-    return this.replaceDocument(async (epoch) => {
+  async open(source: Blob | ArchiveSource, options: { history?: ObjectStorageProvider } = {}): Promise<DocumentHandle> {
+    const store = options.history;
+    if (store !== undefined && (!store || typeof store !== "object"))
+      throw new AltoError("INVALID_ARGUMENT", "history must be an object storage provider");
+    const doc = await this.replaceDocument(async (epoch) => {
       const blob = source instanceof Blob ? source : await source.read();
       const bytes = await blob.arrayBuffer();
       return this.requestReplacement("open", { bytes }, epoch, [bytes]);
     });
+    if (store) await doc.attachHistoryStore(store);
+    return doc;
   }
   async openFolder(provider: ObjectStorageProvider, options: { history?: "all" | "on-demand" } = {}): Promise<DocumentHandle> {
     const onDemand = options.history === "on-demand";

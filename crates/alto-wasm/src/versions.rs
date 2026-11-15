@@ -222,6 +222,45 @@ impl Runtime {
     pub fn external_objects(&self) -> Result<u32, JsValue> {
         Ok(self.engine.external_objects(self.doc).map_err(error)?.len() as u32)
     }
+    /// Whether the document came from a thin .alto, whose versions belong in a store.
+    #[wasm_bindgen(js_name=historyIsExternal)]
+    pub fn history_is_external(&self) -> bool {
+        self.engine.history_is_external(self.doc)
+    }
+    /// Whether a history store serves this document. `framed` holds the store's
+    /// `manifest.json` and the snapshot it names; `objects` is a JSON list of its object
+    /// paths. With `warn`, a mismatch becomes a `HISTORY_STORE_UNAVAILABLE` warning; a
+    /// store that serves the document clears that warning.
+    #[wasm_bindgen(js_name=checkHistoryStore)]
+    pub fn check_history_store(
+        &mut self,
+        framed: &[u8],
+        objects: &str,
+        warn: bool,
+    ) -> Result<String, JsValue> {
+        let paths: Vec<String> = serde_json::from_str(objects).map_err(error)?;
+        let present = paths
+            .iter()
+            .filter_map(|p| p.rsplit('/').next()?.parse().ok())
+            .collect();
+        let mismatch = self
+            .engine
+            .check_history_store(self.doc, unframe(framed)?, &present)
+            .map_err(error)?;
+        match mismatch {
+            Some(m) if warn => self.warnings.push(
+                alto_engine::Warning::new(alto_engine::HISTORY_STORE_UNAVAILABLE)
+                    .with("reason", m.reason()),
+            ),
+            Some(_) => {}
+            None => self
+                .warnings
+                .retain(|w| w.code != alto_engine::HISTORY_STORE_UNAVAILABLE),
+        }
+        let state: serde_json::Value = serde_json::from_str(&self.view()?).map_err(error)?;
+        serde_json::to_string(&json!({ "mismatch": mismatch.map(|m| m.reason()), "state": state }))
+            .map_err(error)
+    }
     /// The working document alone. A normal save fails rather than dropping history.
     #[wasm_bindgen(js_name=saveWithoutHistory)]
     pub fn save_without_history(&self) -> Result<Vec<u8>, JsValue> {

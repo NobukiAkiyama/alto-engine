@@ -38,6 +38,15 @@ import type {
 function packageSizeOf({ bytes, limit }: { bytes: number; limit: number }): PackageSize {
   return { bytes, limit, near: bytes >= limit * 0.8 };
 }
+/** The snapshot a folder's manifest names, or null when it names none readably. */
+function snapshotPath(manifest: Uint8Array): string | null {
+  try {
+    const hash: unknown = JSON.parse(new TextDecoder().decode(manifest)).snapshot;
+    return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? `snapshots/${hash}.json` : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface SelectionSpec {
   kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
@@ -375,12 +384,16 @@ export class DocumentHandle {
     externalObjects: () => this.request("externalObjects"),
     /**
      * Connects the folder holding this document's history, after a page reload recovered the
-     * document without it. Refused if the folder lacks an object the document needs.
+     * document without it, or a thin `.alto` opened without its store. Refused if the folder
+     * holds another document or lacks an object the document needs.
      */
     attachFolder: (provider: ObjectStorageProvider) => this.edit(async () => {
-      const missing = await this.request("missingObjects", { target: { type: "all" } });
       const hold = await provider.holdObjects?.();
       try {
+        const mismatch = await this.checkStore(provider, false, hold);
+        if (mismatch === null) return;
+        if (mismatch === "other-document") throw new AltoError("CONFLICT", "this folder holds another document", { reason: "folder-occupied" });
+        const missing = await this.request("missingObjects", { target: { type: "all" } });
         const load = async (storage: ObjectStorageProvider) => {
           const present = new Set(await storage.list("objects/"));
           if (missing.some((path) => !present.has(path))) throw new AltoError("CONFLICT", "this folder does not hold the document's history", { reason: "folder-occupied" });
@@ -560,8 +573,14 @@ export class DocumentHandle {
           owner.exclusive
             ? owner.exclusive((storage) => this.writeFolder(owner, storage, {}))
             : this.writeFolder(owner, owner, {});
+        const attached = this.savedFolder?.provider === owner;
+        // Before reading the versions' objects, which a thin .alto opened without its store
+        // cannot: saving into that store is refused as writeFolder would refuse it.
+        const occupied = async (storage: ObjectStorageProvider) => !!(await storage.readRef("manifest.json"));
+        if (!attached && (await (owner.exclusive ? owner.exclusive(occupied) : occupied(owner))))
+          throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
         // Before the target's lock: reading from another folder takes that folder's lock.
-        const written = this.savedFolder?.provider === owner ? await write() : await this.withObjects({ type: "all" }, write);
+        const written = attached ? await write() : await this.withObjects({ type: "all" }, write);
         token = written.token;
         // The versions now live only in the folder: hold it so GC elsewhere keeps them.
         await this.adoptFolder(owner, written.manifest, { hold: true });
@@ -726,6 +745,51 @@ export class DocumentHandle {
     if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = undefined; }
     else if (!options.hold || this.releaseHold) return;
     this.releaseHold = await owner.holdObjects?.();
+  }
+  /**
+   * @internal Attaches the history store of a thin `.alto` just opened, or warns
+   * `HISTORY_STORE_UNAVAILABLE` and leaves it. A normal `.alto` has nothing in a store.
+   */
+  attachHistoryStore(provider: ObjectStorageProvider): Promise<void> {
+    return this.edit(async () => {
+      if (!(await this.request("historyIsExternal"))) return;
+      // Before the store's lock, in the order GC takes them.
+      const hold = await provider.holdObjects?.();
+      try {
+        if ((await this.checkStore(provider, true, hold)) !== null) void hold?.();
+      } catch (e) { void hold?.(); throw e; }
+    });
+  }
+  /**
+   * Whether `provider` is this document's history store: the same document, with every object
+   * only its versions use. If so it becomes the document's folder, holding it with `hold`.
+   * A store that cannot be read is `"missing"`. With `warn`, a mismatch becomes a warning.
+   */
+  private async checkStore(
+    provider: ObjectStorageProvider,
+    warn: boolean,
+    hold: (() => Promise<void>) | undefined,
+  ): Promise<"missing" | "other-document" | null> {
+    const read = async (storage: ObjectStorageProvider) => {
+      const entries = new Map<string, Uint8Array>();
+      const manifest = await storage.readRef("manifest.json");
+      if (manifest) {
+        entries.set("manifest.json", manifest);
+        const snapshot = snapshotPath(manifest);
+        const bytes = snapshot ? await storage.getObject(snapshot) : null;
+        if (snapshot && bytes) entries.set(snapshot, bytes);
+      }
+      return { entries, objects: await storage.list("objects/"), manifest: manifest ? await sha256Hex(manifest) : "" };
+    };
+    // The hold keeps GC from removing objects between this read and the check.
+    const found = await (provider.exclusive ? provider.exclusive(read) : read(provider)).catch(() => ({
+      entries: new Map<string, Uint8Array>(), objects: [] as string[], manifest: "",
+    }));
+    const framed = frameEntries(found.entries);
+    const r = await this.request("checkHistoryStore", { bytes: framed.buffer as ArrayBuffer, objects: found.objects, warn }, [framed.buffer]);
+    this.apply(r.state);
+    if (r.mismatch === null) this.setFolder(provider, found.manifest, hold);
+    return r.mismatch;
   }
   /** @internal */
   setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {

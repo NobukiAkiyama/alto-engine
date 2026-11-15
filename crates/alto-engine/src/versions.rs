@@ -615,6 +615,9 @@ impl Engine {
                 "external-objects.json does not match the versions",
             ));
         }
+        if let Some(lazy) = self.lazy.get_mut(&handle) {
+            lazy.external_history = true;
+        }
         Ok((handle, warnings))
     }
 
@@ -790,6 +793,7 @@ impl Engine {
                 LazyObjects {
                     known,
                     pinned: carried,
+                    external_history: false,
                 },
             );
         }

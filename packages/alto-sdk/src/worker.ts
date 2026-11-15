@@ -120,7 +120,7 @@ const readableAfterFailure = new Set<string>([
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
-  "packageBytes",
+  "packageBytes", "historyIsExternal", "checkHistoryStore",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -894,6 +894,8 @@ async function execute(m: Queued): Promise<unknown> {
     case "releaseObjects": runtime.releaseObjects(); return true;
     case "markFolderSaved": runtime.markFolderSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
+    case "historyIsExternal": return runtime.historyIsExternal();
+    case "checkHistoryStore": return JSON.parse(runtime.checkHistoryStore(new Uint8Array(m.bytes), JSON.stringify(m.objects), m.warn));
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
     case "saveThin": return runtime.saveThinPackage();
     case "packageBytes": {

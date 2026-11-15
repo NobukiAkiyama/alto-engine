@@ -514,7 +514,9 @@ export interface Engine {
     readonly document: DocumentHandle | null;
     readonly element: HTMLCanvasElement;
     on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
-    open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
+    open(source: Blob | ArchiveSource, options?: {
+        history?: ObjectStorageProvider;
+    }): Promise<DocumentHandle>;
     openFolder(provider: ObjectStorageProvider, options?: {
         history?: "all" | "on-demand";
     }): Promise<DocumentHandle>;
@@ -1546,7 +1548,7 @@ export class ViewportControl {
 }
 
 // @public (undocumented)
-export type WarningCode = "RECOVERED_OLDER_GENERATION" | "RECOVERED_TRUNCATED" | "RECOVERY_DIVERGED" | "MISSING_TILE" | "PACKAGE_DAMAGED" | "COMMIT_DAMAGED" | "COMMIT_SNAPSHOT_MISSING" | "HISTORY_OBJECT_MISSING" | "FONT_EMBEDDING_RESTRICTED" | "FONT_SUBSETTING_FORBIDDEN" | "FONT_MISSING";
+export type WarningCode = "RECOVERED_OLDER_GENERATION" | "RECOVERED_TRUNCATED" | "RECOVERY_DIVERGED" | "MISSING_TILE" | "PACKAGE_DAMAGED" | "COMMIT_DAMAGED" | "COMMIT_SNAPSHOT_MISSING" | "HISTORY_OBJECT_MISSING" | "HISTORY_STORE_UNAVAILABLE" | "FONT_EMBEDDING_RESTRICTED" | "FONT_SUBSETTING_FORBIDDEN" | "FONT_MISSING";
 
 // @public (undocumented)
 export type WritingMode = "horizontal_tb" | "vertical_rl";
