@@ -488,6 +488,12 @@ pub fn install(repo: &Path, exe: &str) -> Result<()> {
 pub fn export(file: &Path, dir: &Path) -> Result<folder::FolderReport> {
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
     let p = Opened::from_entries(alto_store::read_entries(&bytes).map_err(|e| e.to_string())?)?;
+    if p.package.external.is_some() {
+        return Err(
+            "thin .alto です: 版のオブジェクトは履歴ストアにあるため、フォルダに書き出せません"
+                .into(),
+        );
+    }
     let parts = parts(&p.package);
     let entries = alto_store::folder_entries(&parts).map_err(|e| e.to_string())?;
     let expect = std::fs::read(dir.join("manifest.json"))
@@ -530,6 +536,7 @@ fn parts(p: &Package) -> alto_store::PackageParts {
         commits: p.commits.clone(),
         head: p.head,
         refs: p.refs.clone(),
-        external: None,
+        // A thin package's versions reference objects it does not hold.
+        external: p.external.clone(),
     }
 }

@@ -982,3 +982,39 @@ fn a_checked_out_branch_is_not_deleted_and_a_pruned_commit_is_imported_again() {
     git(&dir, &["fsck", "--strict", "--no-progress"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_thin_alto_is_not_exported_as_a_folder() {
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+    let node = Node::raster("layer");
+    let layer = node.id;
+    let parent = e.document(d).unwrap().root;
+    let revision = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "add",
+        vec![Op::InsertNode {
+            node,
+            parent,
+            index: 0,
+        }],
+        revision,
+    )
+    .unwrap();
+    let key = TileKey { tx: 0, ty: 0 };
+    paint(&mut e, d, layer, key, 10);
+    e.commit(d, "old", 1, None, false).unwrap();
+    paint(&mut e, d, layer, key, 20);
+    e.commit(d, "new", 2, None, false).unwrap();
+    let dir = std::env::temp_dir().join(format!("alto-git-thin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("thin.alto");
+    std::fs::write(&file, e.save_thin_package(d).unwrap()).unwrap();
+    let out = dir.join("thin.altoproj");
+    let error = alto_git::export(&file, &out).unwrap_err();
+    assert!(error.contains("thin"), "{error}");
+    assert!(!out.join("manifest.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
