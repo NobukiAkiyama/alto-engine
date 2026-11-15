@@ -156,3 +156,102 @@ test("a journal that does not exist yet is not an error", async () => {
   await handle({ t: "configure", namespace: "fresh" });
   assert.deepEqual(await handle({ t: "loadCandidates" }), []);
 });
+
+/** A checkpoint of `version` naming `listed`, carrying the bytes of `carried`. */
+function checkpointOf(version, listed, carried = listed) {
+  const objects = listed.map(object);
+  const entries = new Map([
+    ["checkpoint.json", encoder.encode(JSON.stringify({ objects, opaque: [] }))],
+    ["document.json", encoder.encode(JSON.stringify({ version }))],
+  ]);
+  for (const path of carried.map(object)) entries.set(path, encoder.encode(`contents of ${path}`));
+  return frame(entries).buffer;
+}
+/** Pack files in a namespace, found by walking the fake OPFS. */
+function packNames(namespace) {
+  const folder = "ns-" + Array.from(encoder.encode(namespace), (b) => b.toString(16).padStart(2, "0")).join("");
+  const find = (dir) => {
+    for (const [name, child] of dir.children ?? []) {
+      if (name === folder) return child.children.get("packs");
+      const found = child.kind === "directory" && find(child);
+      if (found) return found;
+    }
+  };
+  return [...(find(root)?.children.keys() ?? [])].sort();
+}
+
+test("packs neither journal names are collected mid-session, and their objects are written again", async () => {
+  const handle = await (async () => {
+    const { handle } = await import(`../dist/storage-core.js?session=${++sessions}`);
+    await handle({ t: "configure", namespace: "collect" });
+    return handle;
+  })();
+  await handle({ t: "checkpoint", entries: checkpointOf(1, [1, 2]) });
+  await handle({ t: "checkpoint", entries: checkpointOf(2, [3]) });
+  // Both journals still name a pack each: nothing is dead.
+  assert.deepEqual((await handle({ t: "collectPlan" })).packs, []);
+  await handle({ t: "checkpoint", entries: checkpointOf(3, [4]) });
+  const plan = await handle({ t: "collectPlan" });
+  assert.deepEqual(plan.packs, ["1.pack"]);
+  assert.deepEqual(plan.objects.sort(), [object(1), object(2)]);
+  assert.deepEqual(packNames("collect"), ["1.pack", "2.pack", "3.pack"]);
+  const result = await handle({ t: "collect", packs: plan.packs });
+  assert.equal(result.packs, 1);
+  assert.deepEqual(packNames("collect"), ["2.pack", "3.pack"]);
+  assert.ok(result.bytes > 0);
+  assert.equal((await handle({ t: "collectPlan" })).packs.length, 0);
+
+  // Object 1 left the store: a checkpoint that counts on it being stored is refused,
+  // and one that carries it again is written.
+  await assert.rejects(handle({ t: "checkpoint", entries: checkpointOf(4, [1, 4], []) }), /lacks/);
+  await handle({ t: "checkpoint", entries: checkpointOf(4, [1, 4], [1]) });
+
+  // A pack a journal names is never deleted, even when a plan named it.
+  const plan2 = await handle({ t: "collectPlan" });
+  assert.deepEqual((await handle({ t: "collect", packs: ["3.pack", "4.pack", ...plan2.packs] })).packs, plan2.packs.length);
+
+  // A new session recovers the newest checkpoint and reads every object it names.
+  const { handle: next } = await import(`../dist/storage-core.js?session=${++sessions}`);
+  await next({ t: "configure", namespace: "collect" });
+  const candidates = await next({ t: "loadCandidates" });
+  assert.equal(candidates[0].generation, 4);
+  assert.equal(await recoveredVersion(next, candidates[0].generation), 4);
+  // The older journal is still whole too: its packs were kept.
+  assert.equal(await recoveredVersion(next, candidates[1].generation), 3);
+});
+
+test("a session that starts on two journals collects only what neither names", async () => {
+  // Session 1 leaves two journals and three packs; the first pack is already dead.
+  let handle = await (async () => {
+    const { handle } = await import(`../dist/storage-core.js?session=${++sessions}`);
+    await handle({ t: "configure", namespace: "resume" });
+    return handle;
+  })();
+  await handle({ t: "checkpoint", entries: checkpointOf(1, [1, 2]) });
+  await handle({ t: "checkpoint", entries: checkpointOf(2, [3]) });
+  await handle({ t: "checkpoint", entries: checkpointOf(3, [5]) });
+  // Session 2 recovers, as the engine Worker does, then writes and collects.
+  const { handle: next } = await import(`../dist/storage-core.js?session=${++sessions}`);
+  await next({ t: "configure", namespace: "resume" });
+  const candidates = await next({ t: "loadCandidates" });
+  assert.deepEqual(candidates.map((c) => c.generation), [3, 2]);
+  assert.equal(await recoveredVersion(next, 3), 3);
+  await next({ t: "activate", generation: 3 });
+  // Before the session's first write nothing is collected mid-session; the startup
+  // collection takes the dead pack with that write.
+  assert.deepEqual((await next({ t: "collectPlan" })).packs, []);
+  await next({ t: "checkpoint", entries: checkpointOf(4, [5, 6], [6]) });
+  assert.ok(!packNames("resume").includes("1.pack"), "the startup collection kept a dead pack");
+  const plan = await next({ t: "collectPlan" });
+  // Journals 4 and 3 name packs 3 and 4 (or 4 alone after a merge); pack 2 is dead.
+  assert.deepEqual(plan.packs, ["2.pack"]);
+  assert.deepEqual(plan.objects, [object(3)]);
+  assert.equal((await next({ t: "collect", packs: plan.packs })).packs, 1);
+  // Both journals still recover in a third session.
+  const { handle: third } = await import(`../dist/storage-core.js?session=${++sessions}`);
+  await third({ t: "configure", namespace: "resume" });
+  const after = await third({ t: "loadCandidates" });
+  assert.deepEqual(after.map((c) => c.generation), [4, 3]);
+  assert.equal(await recoveredVersion(third, 4), 4);
+  assert.equal(await recoveredVersion(third, 3), 3);
+});
