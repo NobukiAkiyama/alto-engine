@@ -1058,6 +1058,16 @@ impl Runtime {
         };
         Ok(json!({"record":record,"tiles":map,"width":w,"height":h}).to_string())
     }
+    /// The bytes a save would count against the 512 MiB package cap now, or
+    /// `undefined` while objects of a folder opened on demand are unread.
+    #[wasm_bindgen(js_name=packageBytes)]
+    pub fn package_bytes(&self) -> Result<Option<f64>, JsValue> {
+        Ok(self
+            .engine
+            .package_bytes(self.doc)
+            .map_err(error)?
+            .map(|b| b as f64))
+    }
     #[wasm_bindgen(js_name=savePackage)]
     pub fn save_package(&mut self) -> Result<Vec<u8>, JsValue> {
         if self.sampler.is_some() {

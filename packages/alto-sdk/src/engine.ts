@@ -6,7 +6,7 @@ import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { ToolHost, ToolSession } from "./tools.js";
 import type { ImportedImage } from "./transaction.js";
-import type { FontAsset, ImageAsset, PathData } from "./types.js";
+import type { FontAsset, ImageAsset, PackageSize, PathData } from "./types.js";
 import { ViewportControl, type Viewport } from "./viewport.js";
 
 const SDK_VERSION = "0.5.0";
@@ -63,6 +63,11 @@ export interface EngineEvents {
   /** The view moved, zoomed or rotated. */
   viewport: Viewport;
   saveState: "saving" | "saved" | "error";
+  /**
+   * The document's size against the `.alto` cap, after each `.alto` save and each
+   * commit. Not sent for a commit while objects of a folder opened on demand are unread.
+   */
+  packageSize: PackageSize;
   /** A recovery journal from an earlier session can be restored. */
   recoveryAvailable: { records: number };
   /** A failure no call is waiting for, such as a stroke's input failing. */
@@ -143,6 +148,7 @@ const readableAfterStorageFailure = new Set([
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
+  "packageBytes",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 

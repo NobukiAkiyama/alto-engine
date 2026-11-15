@@ -727,14 +727,14 @@ impl Engine {
             Ok(self.blobs.get(&h).map(|b| alto_store::encode_object(0, b)))
         }
     }
-    /// Package bytes for `hashes`, with tiles fetched one at a time while the ZIP is
-    /// written instead of being gathered first. Other objects (imported blobs) go in
-    /// `parts.objects`.
-    pub(crate) fn encode_fetching(
+    /// Splits `hashes` into tiles, which are fetched one at a time while the ZIP is
+    /// written (hash → encoded length), and other objects (imported blobs), which go
+    /// in `parts.objects`.
+    fn fetch_plan(
         &self,
-        mut parts: alto_store::PackageParts,
+        parts: &mut alto_store::PackageParts,
         hashes: &BTreeSet<ContentHash>,
-    ) -> Result<Vec<u8>, EngineError> {
+    ) -> Result<BTreeMap<ContentHash, u64>, EngineError> {
         let mut tiles = BTreeMap::new();
         for &hash in hashes {
             if let Some(object) = self.tiles.object(&hash) {
@@ -744,6 +744,16 @@ impl Engine {
                 parts.objects.insert(hash, bytes);
             }
         }
+        Ok(tiles)
+    }
+    /// Package bytes for `hashes`, with tiles fetched one at a time while the ZIP is
+    /// written instead of being gathered first.
+    pub(crate) fn encode_fetching(
+        &self,
+        mut parts: alto_store::PackageParts,
+        hashes: &BTreeSet<ContentHash>,
+    ) -> Result<Vec<u8>, EngineError> {
+        let tiles = self.fetch_plan(&mut parts, hashes)?;
         alto_store::encode_parts_fetching(&parts, &tiles, |hash| {
             let object = self
                 .tiles
@@ -751,6 +761,19 @@ impl Engine {
                 .ok_or(EngineError::MissingTile(*hash))?;
             Ok(object.encoded(hash)?)
         })
+    }
+    /// The bytes a save would count against the package cap
+    /// ([`alto_store::MAX_PACKAGE_BYTES`]) now, without writing the package. `None`
+    /// while objects of a folder opened on demand are still unread: their size is
+    /// not known until they are.
+    pub fn package_bytes(&self, h: DocHandle) -> Result<Option<u64>, EngineError> {
+        if !self.external_objects(h)?.is_empty() {
+            return Ok(None);
+        }
+        let (mut parts, hashes) =
+            self.package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), false)?;
+        let tiles = self.fetch_plan(&mut parts, &hashes)?;
+        Ok(Some(alto_store::package_payload(&parts, &tiles)?))
     }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
         let (parts, hashes) =

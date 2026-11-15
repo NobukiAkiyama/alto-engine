@@ -20,6 +20,7 @@ import type {
   CommitView,
   Effect,
   NodeId,
+  PackageSize,
   Rect,
   StylePatch,
   StyledPath,
@@ -32,6 +33,12 @@ import type {
   VersionDiff,
   VersionStatus,
 } from "./types.js";
+
+/** The `.alto` cap a save counts against (`MAX_PACKAGE_BYTES` in the engine). */
+const PACKAGE_LIMIT = 512 * 1024 * 1024;
+function packageSizeOf(bytes: number): PackageSize {
+  return { bytes, limit: PACKAGE_LIMIT, near: bytes >= PACKAGE_LIMIT * 0.8 };
+}
 
 export interface SelectionSpec {
   kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
@@ -419,6 +426,7 @@ export class DocumentHandle {
           time: Date.now(),
         });
         this.apply(r.state);
+        await this.reportPackageSize();
         return r.commit;
       }),
     log: (options: { mode?: "first_parent" | "dag"; allBranches?: boolean } = {}) => this.request("versionLog", { dag: options.mode === "dag", allBranches: options.allBranches ?? false }),
@@ -465,6 +473,29 @@ export class DocumentHandle {
     return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
   }
   /**
+   * The document's size against the `.alto` cap now. For a folder opened on demand this
+   * reads the objects still in the folder first. The `packageSize` event reports the same
+   * after each `.alto` save and each commit.
+   */
+  packageSize(): Promise<PackageSize> {
+    return this.edit(() =>
+      this.withObjects({ type: "all" }, async () => {
+        const bytes = await this.request("packageBytes");
+        if (bytes === null) throw new AltoError("INTERNAL", "package size unknown after reading every object");
+        return packageSizeOf(bytes);
+      }),
+    );
+  }
+  /** Sends `packageSize` when the size is known without reading anything. */
+  private async reportPackageSize(): Promise<void> {
+    try {
+      const bytes = await this.request("packageBytes");
+      if (bytes !== null) this.core.emit("packageSize", packageSizeOf(bytes));
+    } catch {
+      // The size is advice; a failure to work it out must not fail the commit.
+    }
+  }
+  /**
    * Writes the document as a `.alto` archive. On success the document is no longer dirty.
    * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
    * history that lives in an unreachable folder would otherwise make the save fail.
@@ -480,12 +511,18 @@ export class DocumentHandle {
     let token: number | undefined;
     try {
       // In the edit queue: an operation in progress may be holding objects of its own.
-      const saved = await this.edit(() => this.withObjects({ type: "all" }, () => this.request("save")));
+      const saved = await this.edit(() =>
+        this.withObjects({ type: "all" }, async () => ({
+          ...(await this.request("save")),
+          payload: await this.request("packageBytes"),
+        })),
+      );
       token = saved.token;
       await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
       this.apply(await this.request("saved", { token }));
       token = undefined;
       this.core.emit("saveState", "saved");
+      if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));
     } catch (e) {
       this.releaseSave(token);
       this.core.emit("saveState", "error");

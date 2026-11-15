@@ -375,6 +375,20 @@ export interface VersionStatus {
   pending_intents: number;
 }
 
+// ── Package size ───────────────────────────────────────────────────────────
+
+/**
+ * How much of the `.alto` cap the document uses. `bytes` is what a save counts against
+ * `limit` (the entries' data, without ZIP headers); a save over `limit` fails with
+ * RESOURCE_LIMIT. `near` is true from 80% of `limit`, early enough to commit less,
+ * prune versions or save to a folder (which has no cap) before saving fails.
+ */
+export interface PackageSize {
+  readonly bytes: number;
+  readonly limit: number;
+  readonly near: boolean;
+}
+
 // ── Warnings ───────────────────────────────────────────────────────────────
 
 export type WarningCode =

@@ -343,6 +343,8 @@ mod tests {
             "the old tile stays in the folder"
         );
         assert_eq!(e.external_objects(d).unwrap().len(), 1);
+        // An unread object's size is not known, so neither is the package's.
+        assert_eq!(e.package_bytes(d).unwrap(), None);
         assert_eq!(e.log(d).unwrap().len(), 2);
         assert!(
             !e.diff_versions(d, VersionRef::Commit(f.old), VersionRef::Working)
@@ -438,7 +440,9 @@ mod tests {
         e.close_document(w).unwrap();
 
         provide(&mut e, d, &f, &ObjectTarget::All);
+        let payload = e.package_bytes(d).unwrap().expect("every object is read");
         let whole = e.save_package(d).unwrap();
+        assert!(payload > 0 && payload < whole.len() as u64);
         e.release_objects(d);
         let (_, warnings) = Engine::new().open_package(&whole).unwrap();
         assert!(warnings.is_empty());

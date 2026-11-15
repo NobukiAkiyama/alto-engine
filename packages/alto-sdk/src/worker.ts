@@ -120,6 +120,7 @@ const readableAfterFailure = new Set<string>([
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
+  "packageBytes",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -859,6 +860,7 @@ async function execute(m: Queued): Promise<unknown> {
     case "markFolderSaved": runtime.markFolderSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
+    case "packageBytes": return runtime.packageBytes() ?? null;
     case "openFolder": {
       const s = JSON.parse(m.known ? runtime.openFolderOnDemand(new Uint8Array(m.bytes), JSON.stringify(m.known)) : runtime.openFolder(new Uint8Array(m.bytes)));
       adoptDocument(m.nextDocumentEpoch);
