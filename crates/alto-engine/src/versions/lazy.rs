@@ -201,19 +201,18 @@ impl Engine {
         h: DocHandle,
     ) -> Result<BTreeMap<String, Vec<u8>>, EngineError> {
         let external = self.external_objects(h)?;
-        let (parts, _) = self.package_parts_except(h, &external, BTreeSet::new())?;
+        let (parts, _) = self.package_parts_except(h, &external, BTreeSet::new(), true)?;
         Ok(alto_store::folder_entries(&parts)?)
     }
     /// A package of the working document alone, for when the history cannot be read.
     /// The caller asked for this explicitly: a normal save fails instead.
     pub fn save_without_history(&self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
         let doc = self.document(h)?;
-        let mut objects = BTreeMap::new();
-        for hash in doc_hashes(doc) {
-            let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
-            objects.insert(hash, bytes);
-        }
-        Ok(alto_store::encode_package(&doc.snapshot_bytes()?, objects)?)
+        let parts = alto_store::PackageParts {
+            snapshot: doc.snapshot_bytes()?,
+            ..Default::default()
+        };
+        self.encode_fetching(parts, &doc_hashes(doc))
     }
     /// Object paths to read when only the working document is loaded.
     pub fn folder_plan_on_demand(

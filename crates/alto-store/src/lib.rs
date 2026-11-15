@@ -89,7 +89,7 @@ pub struct Package {
     pub refs: VersionRefs,
 }
 /// Everything a package contains, before choosing the single-file or folder form.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PackageParts {
     pub snapshot: Vec<u8>,
     pub objects: BTreeMap<ContentHash, Vec<u8>>,
@@ -197,8 +197,98 @@ pub fn folder_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>>
     Ok(e)
 }
 pub fn encode_parts(parts: &PackageParts) -> Result<Vec<u8>> {
-    write_entries(&package_entries(parts)?)
+    encode_parts_fetching(parts, &BTreeMap::new(), |hash| {
+        Err(StoreError::Io(format!("object {hash} was not supplied")))
+    })
 }
+
+/// Where the bytes of one ZIP entry come from while a package is written.
+enum Source<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+    Fetched(ContentHash, u64),
+}
+
+/// The ZIP form of `parts`, written without copying its entries first. The objects
+/// in `fetched` (hash → encoded length) are not in `parts`: each is fetched when its
+/// entry is written and dropped right after, so the engine never holds a second copy
+/// of every object. The output buffer is sized up front, so it is not regrown while
+/// it fills. The bytes are the same as `write_entries(&package_entries(parts))` with
+/// the fetched objects added to `parts.objects`.
+pub fn encode_parts_fetching<E: From<StoreError>>(
+    parts: &PackageParts,
+    fetched: &BTreeMap<ContentHash, u64>,
+    mut fetch: impl FnMut(&ContentHash) -> std::result::Result<Vec<u8>, E>,
+) -> std::result::Result<Vec<u8>, E> {
+    parts.refs.validate(parts.head)?;
+    let hash = ContentHash::of(&parts.snapshot);
+    let mut entries: BTreeMap<String, Source> = BTreeMap::new();
+    for (h, data) in &parts.snapshots {
+        entries.insert(snapshot_path(h), Source::Borrowed(data));
+    }
+    entries.insert(snapshot_path(&hash), Source::Borrowed(&parts.snapshot));
+    for (h, data) in &parts.commits {
+        entries.insert(commit_path(h), Source::Borrowed(data));
+    }
+    for (h, &len) in fetched {
+        debug_assert!(
+            !parts.objects.contains_key(h),
+            "{h} is both held and fetched"
+        );
+        entries.insert(object_path(h), Source::Fetched(*h, len));
+    }
+    for (h, data) in &parts.objects {
+        entries.insert(object_path(h), Source::Borrowed(data));
+    }
+    entries.insert(
+        "manifest.json".into(),
+        Source::Owned(manifest_bytes_with_refs(
+            hash,
+            parts.head,
+            parts.refs.clone(),
+        )),
+    );
+    let len = |source: &Source| match source {
+        Source::Borrowed(b) => b.len() as u64,
+        Source::Owned(b) => b.len() as u64,
+        Source::Fetched(_, len) => *len,
+    };
+    let total: u64 = entries.values().map(len).sum();
+    if total > MAX_PACKAGE_BYTES {
+        return Err(StoreError::Io("RESOURCE_LIMIT: package exceeds 512 MiB".into()).into());
+    }
+    let capacity = total as usize
+        + entries
+            .keys()
+            .map(|name| ZIP_ENTRY_OVERHEAD + 2 * name.len())
+            .sum::<usize>()
+        + ZIP_END_OVERHEAD;
+    let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(capacity)));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let io = |e: &dyn std::fmt::Display| StoreError::Io(e.to_string());
+    for (name, source) in &entries {
+        zip.start_file(name.as_str(), options).map_err(|e| io(&e))?;
+        match source {
+            Source::Borrowed(b) => zip.write_all(b),
+            Source::Owned(b) => zip.write_all(b),
+            Source::Fetched(h, len) => {
+                let bytes = fetch(h)?;
+                if bytes.len() as u64 != *len {
+                    return Err(StoreError::Io(format!("object {h} changed size")).into());
+                }
+                zip.write_all(&bytes)
+            }
+        }
+        .map_err(|e| io(&e))?;
+    }
+    Ok(zip.finish().map_err(|e| io(&e))?.into_inner())
+}
+/// Bytes a stored ZIP entry adds besides its data and two copies of its name: the
+/// local header (30) and the central directory record (46).
+const ZIP_ENTRY_OVERHEAD: usize = 76;
+/// The end of central directory record (22), plus the Zip64 record (56) and locator
+/// (20) a package with more than 65,535 entries also gets.
+const ZIP_END_OVERHEAD: usize = 128;
 pub fn encode_object(tag: u8, data: &[u8]) -> Vec<u8> {
     let mut out = b"ALTOOBJ1".to_vec();
     out.push(tag);
@@ -685,6 +775,78 @@ pub trait RefStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sample_parts() -> PackageParts {
+        let objects: BTreeMap<_, _> = (0..40u8)
+            .map(|i| {
+                let pixels: Vec<u8> = (0..65536u32).map(|j| (j as u8) ^ i).collect();
+                let bytes = encode_object(1, &pixels);
+                (object_hash(1, &pixels), bytes)
+            })
+            .collect();
+        let old = b"{\"old\":1}".to_vec();
+        PackageParts {
+            snapshot: b"{\"doc\":1}".to_vec(),
+            snapshots: [(ContentHash::of(&old), old)].into(),
+            objects,
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn fetching_writes_the_same_bytes_without_regrowing_the_buffer() {
+        let parts = sample_parts();
+        let expected = write_entries(&package_entries(&parts).unwrap()).unwrap();
+        // Half the objects are fetched, the rest are in `parts`.
+        let mut held = parts.clone();
+        let fetched: BTreeMap<_, _> = parts
+            .objects
+            .iter()
+            .step_by(2)
+            .map(|(h, b)| {
+                held.objects.remove(h);
+                (*h, b.len() as u64)
+            })
+            .collect();
+        let mut calls = 0;
+        let bytes = encode_parts_fetching(&held, &fetched, |h| {
+            calls += 1;
+            Ok::<_, StoreError>(parts.objects[h].clone())
+        })
+        .unwrap();
+        assert_eq!(calls, fetched.len());
+        assert_eq!(bytes, expected);
+        assert_eq!(encode_parts(&parts).unwrap(), expected);
+        let entries = package_entries(&parts).unwrap();
+        let capacity = entries.values().map(Vec::len).sum::<usize>()
+            + entries
+                .keys()
+                .map(|n| ZIP_ENTRY_OVERHEAD + 2 * n.len())
+                .sum::<usize>()
+            + ZIP_END_OVERHEAD;
+        assert!(bytes.len() <= capacity, "{} > {capacity}", bytes.len());
+    }
+    #[test]
+    fn fetching_refuses_a_package_over_the_cap_before_fetching() {
+        let parts = sample_parts();
+        let fetched: BTreeMap<_, _> = [(ContentHash::of(b"big"), MAX_PACKAGE_BYTES)].into();
+        let err = encode_parts_fetching(&parts, &fetched, |_| -> Result<Vec<u8>> {
+            panic!("fetched over the cap")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("RESOURCE_LIMIT"), "{err}");
+    }
+    #[test]
+    fn fetching_refuses_an_object_whose_size_changed() {
+        let parts = sample_parts();
+        let (h, b) = parts.objects.iter().next().unwrap();
+        let mut held = parts.clone();
+        held.objects.remove(h);
+        let fetched: BTreeMap<_, _> = [(*h, b.len() as u64 + 1)].into();
+        let err = encode_parts_fetching(&held, &fetched, |h| {
+            Ok::<_, StoreError>(parts.objects[h].clone())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("changed size"), "{err}");
+    }
     #[test]
     fn folder_and_zip_share_entries_and_history() {
         let pixels = vec![7; 262144];

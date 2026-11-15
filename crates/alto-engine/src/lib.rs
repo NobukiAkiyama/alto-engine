@@ -10,7 +10,7 @@ use alto_core::ContentHash;
 use alto_doc::{BlendMode, ChangeSet, DocError, Document, DocumentMeta, Editor, NodeKind, Op};
 use alto_raster::{DecodeCache, ObjectStore, TileData, TileStore};
 use alto_scene::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 pub use text::{CaretInfo, ImportedFont, TextInfo};
 
 fn render_blend(mode: BlendMode) -> RenderBlend {
@@ -727,8 +727,35 @@ impl Engine {
             Ok(self.blobs.get(&h).map(|b| alto_store::encode_object(0, b)))
         }
     }
+    /// Package bytes for `hashes`, with tiles fetched one at a time while the ZIP is
+    /// written instead of being gathered first. Other objects (imported blobs) go in
+    /// `parts.objects`.
+    pub(crate) fn encode_fetching(
+        &self,
+        mut parts: alto_store::PackageParts,
+        hashes: &BTreeSet<ContentHash>,
+    ) -> Result<Vec<u8>, EngineError> {
+        let mut tiles = BTreeMap::new();
+        for &hash in hashes {
+            if let Some(object) = self.tiles.object(&hash) {
+                tiles.insert(hash, object.encoded_len() as u64);
+            } else {
+                let bytes = self.encoded(hash)?.ok_or(EngineError::MissingTile(hash))?;
+                parts.objects.insert(hash, bytes);
+            }
+        }
+        alto_store::encode_parts_fetching(&parts, &tiles, |hash| {
+            let object = self
+                .tiles
+                .object(hash)
+                .ok_or(EngineError::MissingTile(*hash))?;
+            Ok(object.encoded(hash)?)
+        })
+    }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
-        let bytes = alto_store::encode_parts(&self.package_parts(h)?)?;
+        let (parts, hashes) =
+            self.package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), false)?;
+        let bytes = self.encode_fetching(parts, &hashes)?;
         self.backed = true;
         self.maintain();
         Ok(bytes)
