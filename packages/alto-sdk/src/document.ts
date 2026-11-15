@@ -558,7 +558,8 @@ export class DocumentHandle {
         // Before the target's lock: reading from another folder takes that folder's lock.
         const written = this.savedFolder?.provider === owner ? await write() : await this.withObjects({ type: "all" }, write);
         token = written.token;
-        await this.adoptFolder(owner, written.manifest);
+        // The versions now live only in the folder: hold it so GC elsewhere keeps them.
+        await this.adoptFolder(owner, written.manifest, { hold: true });
         return {
           bytes: await this.request("saveThin"),
           // Advice only: failing to work it out must not fail a save that succeeded.
@@ -708,11 +709,16 @@ export class DocumentHandle {
       throw e;
     }
   }
-  /** The folder just saved to is now the document's; a hold moves with it. */
-  private async adoptFolder(owner: ObjectStorageProvider, manifest: string): Promise<void> {
+  /**
+   * The folder just saved to is now the document's; a hold moves with it. With `hold`, the
+   * document holds the folder afterwards even if it held nothing before.
+   */
+  private async adoptFolder(owner: ObjectStorageProvider, manifest: string, options: { hold?: boolean } = {}): Promise<void> {
     const movedFolder = this.savedFolder?.provider !== owner;
     this.savedFolder = { provider: owner, manifest };
-    if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
+    if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = undefined; }
+    else if (!options.hold || this.releaseHold) return;
+    this.releaseHold = await owner.holdObjects?.();
   }
   /** @internal */
   setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {

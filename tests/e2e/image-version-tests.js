@@ -278,13 +278,21 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.createDocument({ width: 512, height: 512 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 512, height: 512 } }); });
       for (let i = 0; i < 6; i++) { await d.image.fill(layer, [0, 0], [i / 8, 0.5, 1 - i / 8, 1], { tolerance: 255 }); await d.versions.commit("v" + i); }
     };
+    // A store whose holds can be counted: an open document that keeps versions there holds it.
+    const heldStore = () => {
+      const store = new MemoryObjectProvider(); let holds = 0;
+      store.holdObjects = async () => { holds++; let released = false; return async () => { if (!released) { released = true; holds--; } }; };
+      return { store, holds: () => holds };
+    };
     await test("thin .alto: versions in a folder store", async () => {
       await sixVersions();
       const all = await d.packageSize(), external = await d.packageSize({ history: "external" });
       assert(external.bytes < all.bytes, `external ${external.bytes} < all ${all.bytes}`);
       const states = [], sizes = [], offState = engine.on("saveState", (s) => states.push(s)), offSize = engine.on("packageSize", (s) => sizes.push(s.bytes));
-      const store = new MemoryObjectProvider(), thin = blobTarget();
+      const { store, holds } = heldStore(), thin = blobTarget();
       try { await d.save(thin, { history: { folder: store } }); } finally { offState(); offSize(); }
+      assert(holds() === 1, `a new document holds its store after a thin save: ${holds()}`);
+      await d.save(blobTarget(), { history: { folder: store } }); assert(holds() === 1, `one hold after a second thin save: ${holds()}`);
       assert(eq(states, ["saving", "saved"]), "saveState " + states.join());
       assert(sizes.at(-1) === external.bytes, `packageSize event ${sizes.at(-1)} is the thin size ${external.bytes}`);
       assert(!d.getSnapshot().dirty && d.folder === store, "saved and attached");
@@ -297,15 +305,18 @@ export async function runImageVersionTests(engine, log) {
     });
     await test("thin .alto: a failed .alto write leaves the store attached and the document dirty", async () => {
       await sixVersions();
-      const store = new MemoryObjectProvider(), states = [], off = engine.on("saveState", (s) => states.push(s));
+      const { store, holds } = heldStore(), states = [], off = engine.on("saveState", (s) => states.push(s));
       const broken = { write: async (stream) => { await stream.cancel(); throw Error("disk full"); } };
       let failed = false;
       try { await d.save(broken, { history: { folder: store } }); } catch (e) { failed = e.message === "disk full"; } finally { off(); }
       assert(failed, "save rejected with the write error");
       assert(states.at(-1) === "error" && d.getSnapshot().dirty, "error and dirty");
       assert(d.folder === store && await store.readRef("manifest.json"), "store committed and attached");
+      assert(holds() === 1, `the attached store is held after a failed .alto write: ${holds()}`);
       const good = blobTarget(); await d.save(good, { history: { folder: store } });
-      assert(!d.getSnapshot().dirty && good.blob.size > 0, "second save");
+      assert(!d.getSnapshot().dirty && good.blob.size > 0 && holds() === 1, "second save");
+      const other = heldStore(); await d.save(blobTarget(), { history: { folder: other.store } });
+      assert(d.folder === other.store && other.holds() === 1 && holds() === 0, `the hold moves to the new store: ${other.holds()}, ${holds()}`);
     });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
