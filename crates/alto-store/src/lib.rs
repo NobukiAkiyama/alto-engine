@@ -220,40 +220,8 @@ pub fn encode_parts_fetching<E: From<StoreError>>(
     fetched: &BTreeMap<ContentHash, u64>,
     mut fetch: impl FnMut(&ContentHash) -> std::result::Result<Vec<u8>, E>,
 ) -> std::result::Result<Vec<u8>, E> {
-    parts.refs.validate(parts.head)?;
-    let hash = ContentHash::of(&parts.snapshot);
-    let mut entries: BTreeMap<String, Source> = BTreeMap::new();
-    for (h, data) in &parts.snapshots {
-        entries.insert(snapshot_path(h), Source::Borrowed(data));
-    }
-    entries.insert(snapshot_path(&hash), Source::Borrowed(&parts.snapshot));
-    for (h, data) in &parts.commits {
-        entries.insert(commit_path(h), Source::Borrowed(data));
-    }
-    for (h, &len) in fetched {
-        debug_assert!(
-            !parts.objects.contains_key(h),
-            "{h} is both held and fetched"
-        );
-        entries.insert(object_path(h), Source::Fetched(*h, len));
-    }
-    for (h, data) in &parts.objects {
-        entries.insert(object_path(h), Source::Borrowed(data));
-    }
-    entries.insert(
-        "manifest.json".into(),
-        Source::Owned(manifest_bytes_with_refs(
-            hash,
-            parts.head,
-            parts.refs.clone(),
-        )),
-    );
-    let len = |source: &Source| match source {
-        Source::Borrowed(b) => b.len() as u64,
-        Source::Owned(b) => b.len() as u64,
-        Source::Fetched(_, len) => *len,
-    };
-    let total: u64 = entries.values().map(len).sum();
+    let entries = package_sources(parts, fetched)?;
+    let total = sources_len(&entries);
     if total > MAX_PACKAGE_BYTES {
         return Err(StoreError::Io("RESOURCE_LIMIT: package exceeds 512 MiB".into()).into());
     }
@@ -282,6 +250,55 @@ pub fn encode_parts_fetching<E: From<StoreError>>(
         .map_err(|e| io(&e))?;
     }
     Ok(zip.finish().map_err(|e| io(&e))?.into_inner())
+}
+/// The bytes the package cap counts (the entries' data, without ZIP headers) for
+/// `parts` plus objects of the given encoded lengths, without writing anything.
+pub fn package_payload(parts: &PackageParts, fetched: &BTreeMap<ContentHash, u64>) -> Result<u64> {
+    Ok(sources_len(&package_sources(parts, fetched)?))
+}
+fn sources_len(entries: &BTreeMap<String, Source>) -> u64 {
+    entries
+        .values()
+        .map(|source| match source {
+            Source::Borrowed(b) => b.len() as u64,
+            Source::Owned(b) => b.len() as u64,
+            Source::Fetched(_, len) => *len,
+        })
+        .sum()
+}
+fn package_sources<'a>(
+    parts: &'a PackageParts,
+    fetched: &BTreeMap<ContentHash, u64>,
+) -> Result<BTreeMap<String, Source<'a>>> {
+    parts.refs.validate(parts.head)?;
+    let hash = ContentHash::of(&parts.snapshot);
+    let mut entries: BTreeMap<String, Source> = BTreeMap::new();
+    for (h, data) in &parts.snapshots {
+        entries.insert(snapshot_path(h), Source::Borrowed(data));
+    }
+    entries.insert(snapshot_path(&hash), Source::Borrowed(&parts.snapshot));
+    for (h, data) in &parts.commits {
+        entries.insert(commit_path(h), Source::Borrowed(data));
+    }
+    for (h, &len) in fetched {
+        debug_assert!(
+            !parts.objects.contains_key(h),
+            "{h} is both held and fetched"
+        );
+        entries.insert(object_path(h), Source::Fetched(*h, len));
+    }
+    for (h, data) in &parts.objects {
+        entries.insert(object_path(h), Source::Borrowed(data));
+    }
+    entries.insert(
+        "manifest.json".into(),
+        Source::Owned(manifest_bytes_with_refs(
+            hash,
+            parts.head,
+            parts.refs.clone(),
+        )),
+    );
+    Ok(entries)
 }
 /// Bytes a stored ZIP entry adds besides its data and two copies of its name: the
 /// local header (30) and the central directory record (46).

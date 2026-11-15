@@ -112,6 +112,7 @@ export interface Requests {
   markFolderSaved: Q<None, true>;
   externalObjects: Q<None, number>;
   saveWithoutHistory: Q<None, Uint8Array>;
+  packageBytes: Q<None, { bytes: number; limit: number } | null>;
   importFont: Q<{ bytes: ArrayBuffer; faceIndex: number }, ImportedFontRecord>;
   releaseImport: Q<{ hash: string }, boolean>;
   pruneVersions: Q<None, WireState & { removed?: number }>;

@@ -671,6 +671,27 @@ export async function runTests(engine, benchmark, log) {
       assert(added === 1, `the checkpoint wrote ${added} objects`);
       await doc.undo();
     });
+    await test("the package size against the .alto cap is reported after a commit and a save", async () => {
+      const seen = [];
+      const off = engine.on("packageSize", (size) => seen.push(size));
+      try {
+        await stroke(doc, brushLayer, "brush", [{ x: 400, y: 300, pressure: 1 }]);
+        await doc.versions.commit("package size");
+        assert(seen.length === 1, `a commit sent ${seen.length} packageSize events`);
+        const now = await doc.packageSize();
+        assert(now.limit === 512 * 1024 * 1024 && now.near === false, JSON.stringify(now));
+        assert(now.bytes === seen[0].bytes && now.bytes > 0, `${now.bytes} != ${seen[0].bytes}`);
+        assert(seen[0].limit === now.limit && seen[0].near === false, JSON.stringify(seen[0]));
+        let written = 0;
+        await doc.save({ write: async (stream) => { written = (await new Response(stream).arrayBuffer()).byteLength; } });
+        assert(seen.length === 2 && seen[1].bytes === now.bytes && seen[1].limit === now.limit && seen[1].near === false, JSON.stringify(seen));
+        // The cap counts the entries' data; the archive adds ZIP headers to it.
+        assert(written > now.bytes, `archive ${written} <= payload ${now.bytes}`);
+      } finally {
+        off();
+      }
+      await doc.undo();
+    });
     await test("a long journal is checkpointed once editing pauses", async () => {
       const name = doc.getSnapshot().nodes.get(brushLayer).name;
       const start = await testing(engine).recoveryStore();

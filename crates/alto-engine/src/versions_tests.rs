@@ -412,6 +412,11 @@ fn a_save_writes_the_same_bytes_as_the_gathered_package() {
     assert_eq!(alto_store::encode_parts(&parts).unwrap(), expected);
     assert!(!e.package_parts(d).unwrap().objects.is_empty());
     assert_eq!(e.save_package(d).unwrap(), expected);
+    // The size the cap counts is the entries' data, as a save adds it up.
+    let entries = alto_store::package_entries(&e.package_parts(d).unwrap()).unwrap();
+    let payload: u64 = entries.values().map(|b| b.len() as u64).sum();
+    assert_eq!(e.package_bytes(d).unwrap(), Some(payload));
+    assert!(payload < expected.len() as u64);
     let doc = e.document(d).unwrap();
     let alone = alto_store::encode_package(&doc.snapshot_bytes().unwrap(), {
         let mut objects = BTreeMap::new();

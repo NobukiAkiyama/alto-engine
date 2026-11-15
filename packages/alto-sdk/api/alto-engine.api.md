@@ -325,6 +325,7 @@ export class DocumentHandle {
         remove: (layer: NodeId) => Promise<void>;
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
+    packageSize(): Promise<PackageSize>;
     redo(): Promise<void>;
     save(target: ArchiveTarget, options?: {
         history?: "all" | "omit";
@@ -537,6 +538,7 @@ export interface Engine {
 export interface EngineEvents {
     document: DocumentHandle | null;
     error: AltoError;
+    packageSize: PackageSize;
     // (undocumented)
     presentation: PresentationSnapshot;
     recoveryAvailable: {
@@ -1080,6 +1082,16 @@ export class OpfsFolderProvider extends FileSystemDirectoryProvider {
     whileNotHeld<T>(run: () => Promise<T>): Promise<T>;
     // (undocumented)
     writeRef(name: string, data: Uint8Array, expectHash?: string): Promise<void>;
+}
+
+// @public
+export interface PackageSize {
+    // (undocumented)
+    readonly bytes: number;
+    // (undocumented)
+    readonly limit: number;
+    // (undocumented)
+    readonly near: boolean;
 }
 
 // @public (undocumented)
