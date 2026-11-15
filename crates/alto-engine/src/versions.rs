@@ -487,6 +487,7 @@ impl Engine {
             commits: store.commit_bytes.clone(),
             head: store.head,
             refs: store.refs.clone(),
+            external: None,
         };
         Ok((parts, hashes))
     }

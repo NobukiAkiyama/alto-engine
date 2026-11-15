@@ -530,5 +530,6 @@ fn parts(p: &Package) -> alto_store::PackageParts {
         commits: p.commits.clone(),
         head: p.head,
         refs: p.refs.clone(),
+        external: None,
     }
 }

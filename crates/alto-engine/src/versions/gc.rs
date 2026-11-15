@@ -141,6 +141,7 @@ impl Engine {
                 .collect(),
             head: s.head,
             refs,
+            external: None,
         };
         let entries = alto_store::folder_entries(&parts)?;
         let mut by_kind = BTreeMap::<String, GcCounts>::new();

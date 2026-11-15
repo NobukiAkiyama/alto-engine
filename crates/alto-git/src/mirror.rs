@@ -293,7 +293,7 @@ fn mirror_manifest(p: &Opened, h: &ContentHash, c: &Commit) -> Vec<u8> {
     view.branches.retain(|_, b| inside.contains(&b.head));
     view.tags.retain(|_, t| inside.contains(t));
     view.pinned.retain(|t| inside.contains(t));
-    alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), view)
+    alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), view, None)
 }
 
 fn tree_files(root: &Path, commit: &str, prefix: &str) -> Result<BTreeSet<String>> {
