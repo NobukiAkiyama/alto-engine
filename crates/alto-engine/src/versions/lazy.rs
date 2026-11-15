@@ -309,6 +309,23 @@ impl Engine {
             Ok(Some(StoreMismatch::Missing))
         }
     }
+    /// Whether every root of a store's `manifest.json` (head, branch heads, tags, pins) is
+    /// a version this document has. If not, the store moved on past this document: saving
+    /// its refs there would drop versions. A manifest that cannot be read is not contained.
+    pub fn store_roots_contained(
+        &self,
+        h: DocHandle,
+        manifest: &[u8],
+    ) -> Result<bool, EngineError> {
+        let commits = &self.versions(h)?.commits;
+        let Ok(m) = serde_json::from_slice::<alto_store::Manifest>(manifest) else {
+            return Ok(false);
+        };
+        Ok(m.head
+            .into_iter()
+            .chain(m.refs.roots())
+            .all(|root| commits.contains_key(&root)))
+    }
     /// A thin package's parts, without object bytes, and the objects it holds: the
     /// working document's alone.
     pub(crate) fn thin_package_parts(
@@ -826,6 +843,35 @@ mod tests {
         }
         assert_eq!(StoreMismatch::Missing.reason(), "missing");
         assert_eq!(StoreMismatch::OtherDocument.reason(), "other-document");
+    }
+
+    #[test]
+    fn a_store_that_moved_on_is_not_contained() {
+        let f = fixture();
+        let mut e = Engine::new();
+        let (d, _) = e.open_package(&thin(&f)).unwrap();
+        assert!(
+            e.store_roots_contained(d, &f.entries["manifest.json"])
+                .unwrap()
+        );
+        // The same document, saved again after one more version.
+        let (mut later, l) = whole(&f);
+        paint(&mut later, l, f.layer, 30);
+        later.commit(l, "later", 3, None, false).unwrap();
+        let ahead = later.folder_entries(l).unwrap();
+        assert!(!e.store_roots_contained(d, &ahead["manifest.json"]).unwrap());
+        // A tag or a pin on a version this document lacks counts too.
+        let mut tagged: alto_store::Manifest =
+            serde_json::from_slice(&f.entries["manifest.json"]).unwrap();
+        let unknown = ContentHash::of(b"elsewhere");
+        tagged.refs.tags.insert("t".into(), unknown);
+        let bytes = serde_json::to_vec(&tagged).unwrap();
+        assert!(!e.store_roots_contained(d, &bytes).unwrap());
+        tagged.refs.tags.clear();
+        tagged.refs.pinned.insert(unknown);
+        let bytes = serde_json::to_vec(&tagged).unwrap();
+        assert!(!e.store_roots_contained(d, &bytes).unwrap());
+        assert!(!e.store_roots_contained(d, b"{").unwrap());
     }
 
     #[test]

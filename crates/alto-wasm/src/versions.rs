@@ -236,7 +236,8 @@ impl Runtime {
     /// Whether a history store serves this document. `framed` holds the store's
     /// `manifest.json` and the snapshot it names; `objects` is a JSON list of its object
     /// paths. With `warn`, a mismatch becomes a `HISTORY_STORE_UNAVAILABLE` warning; a
-    /// store that serves the document clears that warning.
+    /// store that serves the document clears that warning. `contained`: whether every root
+    /// of the store's manifest is one of this document's versions.
     #[wasm_bindgen(js_name=checkHistoryStore)]
     pub fn check_history_store(
         &mut self,
@@ -249,9 +250,15 @@ impl Runtime {
             .iter()
             .filter_map(|p| p.rsplit('/').next()?.parse().ok())
             .collect();
+        let entries = unframe(framed)?;
+        let manifest = entries.get("manifest.json").cloned().unwrap_or_default();
         let mismatch = self
             .engine
-            .check_history_store(self.doc, unframe(framed)?, &present)
+            .check_history_store(self.doc, entries, &present)
+            .map_err(error)?;
+        let contained = self
+            .engine
+            .store_roots_contained(self.doc, &manifest)
             .map_err(error)?;
         match mismatch {
             Some(m) if warn => self.warnings.push(
@@ -264,7 +271,18 @@ impl Runtime {
                 .retain(|w| w.code != alto_engine::HISTORY_STORE_UNAVAILABLE),
         }
         let state: serde_json::Value = serde_json::from_str(&self.view()?).map_err(error)?;
-        serde_json::to_string(&json!({ "mismatch": mismatch.map(|m| m.reason()), "state": state }))
+        serde_json::to_string(&json!({
+            "mismatch": mismatch.map(|m| m.reason()),
+            "contained": contained,
+            "state": state,
+        }))
+        .map_err(error)
+    }
+    /// Whether every root of a store's `manifest.json` is one of this document's versions.
+    #[wasm_bindgen(js_name=storeRootsContained)]
+    pub fn store_roots_contained(&self, manifest: &[u8]) -> Result<bool, JsValue> {
+        self.engine
+            .store_roots_contained(self.doc, manifest)
             .map_err(error)
     }
     /// The working document alone. A normal save fails rather than dropping history.

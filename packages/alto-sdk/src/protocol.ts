@@ -116,7 +116,10 @@ export interface Requests {
   /** True when the document came from a thin .alto, even one with nothing outside. */
   historyIsExternal: Q<None, boolean>;
   /** `bytes`: the store's manifest.json and the snapshot it names, framed; `objects`: its object paths. */
-  checkHistoryStore: Q<{ bytes: ArrayBuffer; objects: string[]; warn: boolean }, { mismatch: "missing" | "other-document" | null; state: WireState }>;
+  /** `contained`: every root of the store's manifest is one of the document's versions. */
+  checkHistoryStore: Q<{ bytes: ArrayBuffer; objects: string[]; warn: boolean }, { mismatch: "missing" | "other-document" | null; contained: boolean; state: WireState }>;
+  /** Whether every root of `manifest` (a store's manifest.json) is one of the document's versions. */
+  storeRootsContained: Q<{ manifest: ArrayBuffer }, boolean>;
   saveWithoutHistory: Q<None, Uint8Array>;
   /** The thin .alto: the working document's objects; versions' objects stay in its folder. */
   saveThin: Q<None, Uint8Array>;

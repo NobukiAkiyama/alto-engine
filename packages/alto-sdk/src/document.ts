@@ -47,6 +47,10 @@ function snapshotPath(manifest: Uint8Array): string | null {
     return null;
   }
 }
+/** A folder attached read-only: it was saved since with versions this document lacks. */
+function folderAhead(): AltoError {
+  return new AltoError("CONFLICT", "the folder holds versions this document does not have", { reason: "folder-changed" });
+}
 
 export interface SelectionSpec {
   kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
@@ -78,7 +82,11 @@ export class DocumentHandle {
   private readonly store = new SnapshotStore();
   private readonly listeners = new Set<(change: DocumentChange) => void>();
   private tool: ToolSession | null = null;
-  private savedFolder: { provider: ObjectStorageProvider; manifest: string } | null = null;
+  /**
+   * `readOnly`: the folder's manifest names versions this document lacks, so saving this
+   * document's refs there would drop them. Versions are still read from it.
+   */
+  private savedFolder: { provider: ObjectStorageProvider; manifest: string; readOnly?: boolean } | null = null;
   private releaseHold: (() => Promise<void>) | undefined;
 
   /** @internal */
@@ -385,7 +393,9 @@ export class DocumentHandle {
     /**
      * Connects the folder holding this document's history, after a page reload recovered the
      * document without it, or a thin `.alto` opened without its store. Refused if the folder
-     * holds another document or lacks an object the document needs.
+     * holds another document or lacks an object the document needs. A folder saved since with
+     * versions this document lacks attaches read-only: versions are read from it, but saving or
+     * collecting it from this document fails `CONFLICT` (`folder-changed`).
      */
     attachFolder: (provider: ObjectStorageProvider) => this.edit(async () => {
       const hold = await provider.holdObjects?.();
@@ -397,10 +407,12 @@ export class DocumentHandle {
         const load = async (storage: ObjectStorageProvider) => {
           const present = new Set(await storage.list("objects/"));
           if (missing.some((path) => !present.has(path))) throw new AltoError("CONFLICT", "this folder does not hold the document's history", { reason: "folder-occupied" });
-          const manifest = await storage.readRef("manifest.json");
-          return manifest ? sha256Hex(manifest) : "";
+          return storage.readRef("manifest.json");
         };
-        this.setFolder(provider, await (provider.exclusive ? provider.exclusive(load) : load(provider)), hold);
+        const manifest = await (provider.exclusive ? provider.exclusive(load) : load(provider));
+        const hash = manifest ? await sha256Hex(manifest) : "";
+        const contained = !manifest || (await this.request("storeRootsContained", { manifest: manifest.slice().buffer as ArrayBuffer }));
+        this.setFolder(provider, hash, hold, !contained);
       } catch (e) { void hold?.(); throw e; }
     }),
     /** Returns a new compact archive. Does not overwrite an existing file. */
@@ -608,6 +620,7 @@ export class DocumentHandle {
     return this.edit(async () => {
       const owner = this.savedFolder?.provider;
       if (!owner) throw new AltoError("UNSUPPORTED", "save or open a folder before collecting it");
+      if (this.savedFolder?.readOnly) throw folderAhead();
       const dryRun = options.dryRun ?? true;
       const capabilities = owner.gcCapabilities;
       if (!dryRun && (typeof owner.exclusive !== "function" || capabilities?.exclusive !== true || capabilities.atomicManifest !== true || capabilities.deleteObjects !== true))
@@ -709,9 +722,11 @@ export class DocumentHandle {
     try {
       const current = await provider.readRef("manifest.json");
       const currentHash = current ? await sha256Hex(current) : "";
-      const base = this.savedFolder?.provider === owner ? this.savedFolder.manifest : undefined;
+      const folder = this.savedFolder?.provider === owner ? this.savedFolder : undefined;
+      const base = folder?.manifest;
       if (current && base === undefined && !options.overwrite)
         throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
+      if (folder?.readOnly) throw folderAhead();
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
       const saved = await this.request("folderEntries", { keepExternal: base !== undefined });
@@ -788,14 +803,14 @@ export class DocumentHandle {
     const framed = frameEntries(found.entries);
     const r = await this.request("checkHistoryStore", { bytes: framed.buffer as ArrayBuffer, objects: found.objects, warn }, [framed.buffer]);
     this.apply(r.state);
-    if (r.mismatch === null) this.setFolder(provider, found.manifest, hold);
+    if (r.mismatch === null) this.setFolder(provider, found.manifest, hold, !r.contained);
     return r.mismatch;
   }
-  /** @internal */
-  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {
+  /** @internal With `readOnly`, versions are read from the folder but nothing is saved there. */
+  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>, readOnly = false): void {
     void this.releaseHold?.();
     this.releaseHold = releaseHold;
-    this.savedFolder = { provider, manifest };
+    this.savedFolder = readOnly ? { provider, manifest, readOnly } : { provider, manifest };
   }
   /** A cancelled or failed save no longer needs the Worker's copy of the package. */
   private releaseSave(token: number | undefined) {

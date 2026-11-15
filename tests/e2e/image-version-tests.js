@@ -425,6 +425,34 @@ export async function runImageVersionTests(engine, log) {
       error = undefined; try { await d.save({ write: async (stream) => { wrote = true; await stream.cancel(); } }); } catch (e) { error = e; }
       assert(error?.code === "STORAGE" && error.details?.reason === "objects-unavailable" && !wrote, `default save without the store: ${error?.code} ${error?.details?.reason} wrote=${wrote}`);
     });
+    await test("thin .alto: an older thin .alto never rolls its store back", async () => {
+      const t = await thinWithStore();
+      await d.image.fill(layer, [0, 0], [1, 1, 0, 1], { tolerance: 255 }); await d.versions.commit("later");
+      const newer = blobTarget(); await d.save(newer, { history: { folder: t.store } });
+      const manifest = async () => [...(await t.store.readRef("manifest.json"))].join(), ahead = await manifest();
+      const refused = async (run, what) => {
+        let error; try { await run(); } catch (e) { error = e; }
+        assert(error?.code === "CONFLICT" && error.details?.reason === "folder-changed", `${what}: ${error?.code} ${error?.details?.reason}`);
+        assert(await manifest() === ahead, `${what} changed the store's manifest`);
+      };
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      // Opened with the store, the older .alto reads its versions there and saves nothing to it.
+      d = await engine.open(t.thin, { history: t.store });
+      assert(d.folder === t.store && storeWarnings().length === 0, `older thin .alto attaches: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the store");
+      await refused(() => d.save(blobTarget(), { history: { folder: t.store } }), "thin save");
+      await refused(() => d.saveFolder(t.store), "saveFolder");
+      await refused(() => d.versions.gc(), "GC preview");
+      // The same through attachFolder.
+      d = await engine.open(t.thin); await d.versions.attachFolder(t.store); assert(d.folder === t.store, "attached later");
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored after attachFolder");
+      await refused(() => d.save(blobTarget(), { history: { folder: t.store } }), "thin save after attachFolder");
+      // The newer .alto is the store's own and still saves there.
+      d = await engine.open(newer.blob, { history: t.store });
+      assert(d.folder === t.store && storeWarnings().length === 0, `newer thin .alto attaches: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "the newer .alto restores from the store");
+      await d.save(blobTarget(), { history: { folder: t.store } }); assert(!d.getSnapshot().dirty, "the newer .alto saves to its store");
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
