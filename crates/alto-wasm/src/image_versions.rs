@@ -342,7 +342,7 @@ impl Runtime {
             };
             let record = self
                 .engine
-                .version_record(self.doc, checkpoint.digest)
+                .version_record_since(self.doc, &checkpoint)
                 .map_err(error)?;
             if is_gc {
                 self.saved = self.state_hash()?;
