@@ -1,6 +1,6 @@
 # 版を `.alto` の外に持つ
 
-作成日：2026-11-16。状態：設計（未実装）。対象：main `bcf8ab5`。
+作成日：2026-11-16。状態：実装済み（ブランチ `claude/versions-outside-alto`、結果は [ENGINE-HARDENING-RESULTS.md の F-9](../verification/ENGINE-HARDENING-RESULTS.md#f-9版を-alto-の外に持つ)）。対象：main `bcf8ab5`。
 
 ## 1. 目的
 
