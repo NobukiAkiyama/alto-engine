@@ -274,6 +274,28 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.open(full.blob); assert(await d.snapshotHash() === hash && (await d.versions.log({ mode: "dag" })).length === count, "full archive");
       d = await engine.open(working.blob); assert((await d.versions.log()).length === 0, "working-only archive has no history");
     });
+    await test("on-demand history: a commit during a same-folder save is not marked saved", async () => {
+      d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1]); const first = await d.versions.commit("first");
+      const store = new MemoryObjectProvider(); let entered, release, stall = false;
+      const folder = new Proxy(store, { get(target, key) {
+        const slow = (view) => ({ ...view, putObjects: async (objects) => { if (stall) { stall = false; entered(); await new Promise((r) => (release = r)); } return view.putObjects(objects); } });
+        if (key === "exclusive") return (run) => target.exclusive((view) => run(slow(view)));
+        const value = target[key]; return typeof value === "function" ? value.bind(target) : value;
+      } });
+      await d.saveFolder(folder); d = await engine.openFolder(folder, { history: "on-demand" });
+      // The save stops while writing; an edit and a commit are sent meanwhile.
+      stall = true; const writing = new Promise((r) => (entered = r)); const saving = d.saveFolder(folder); await writing;
+      const editing = d.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 }); const committing = d.versions.commit("during");
+      await new Promise((r) => setTimeout(r, 100)); release(); await saving; await editing; const during = await committing;
+      // Leave that version (its pixels may then leave memory), save again, and open the folder
+      // alone: the commit's pixels must be in it.
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1], { tolerance: 255 }); await d.versions.commit("after");
+      await d.versions.detach(first.hash); await d.saveFolder(folder);
+      d = await engine.openFolder(folder);
+      await d.versions.detach(during.hash); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [0, 255, 0, 255]), "the commit made during the save");
+      await d.versions.detach(first.hash); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 0, 255]), "first");
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
