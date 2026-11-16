@@ -690,8 +690,9 @@ export class DocumentHandle {
   ): Promise<{ written: number; skipped: number; warnings: string[] }> {
     await this.endTool();
     const save = () => (provider.exclusive ? provider.exclusive((storage) => this.saveFolderLocked(provider, storage, options)) : this.saveFolderLocked(provider, provider, options));
-    // Before the target's lock: reading from another folder takes that folder's lock.
-    return this.savedFolder?.provider === provider ? save() : this.edit(() => this.withObjects({ type: "all" }, save));
+    // In the edit queue, so no commit lands between the entries and markFolderSaved. Objects
+    // are read before the target's lock: reading from another folder takes that folder's lock.
+    return this.edit(() => (this.savedFolder?.provider === provider ? save() : this.withObjects({ type: "all" }, save)));
   }
   private async saveFolderLocked(owner: ObjectStorageProvider, provider: ObjectStorageProvider, options: { overwrite?: boolean }): Promise<{ written: number; skipped: number; warnings: string[] }> {
     this.core.emit("saveState", "saving");
