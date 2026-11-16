@@ -36,8 +36,9 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
 }
 /// The `.alto` cap a save checks, as `package_bytes` counts it.
 pub use alto_store::{MAX_PACKAGE_BYTES, object_path};
+pub use versions::StoreMismatch;
 pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
-pub use warning::Warning;
+pub use warning::{HISTORY_STORE_UNAVAILABLE, Warning};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocHandle(pub u64);
@@ -777,6 +778,13 @@ impl Engine {
         let tiles = self.fetch_plan(&mut parts, &hashes)?;
         Ok(Some(alto_store::package_payload(&parts, &tiles)?))
     }
+    /// [`Self::package_bytes`] for a thin package. Known even while versions' objects
+    /// are unread: a thin package holds only the working document's, always in memory.
+    pub fn thin_package_bytes(&self, h: DocHandle) -> Result<u64, EngineError> {
+        let (mut parts, hashes) = self.thin_package_parts(h)?;
+        let tiles = self.fetch_plan(&mut parts, &hashes)?;
+        Ok(alto_store::package_payload(&parts, &tiles)?)
+    }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
         let (parts, hashes) =
             self.package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), false)?;
@@ -819,7 +827,7 @@ impl Engine {
         Ok(())
     }
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        self.open_entries(alto_store::read_entries(bytes)?)
+        self.open_package_entries(alto_store::read_entries(bytes)?)
     }
     pub(crate) fn install_package(
         &mut self,

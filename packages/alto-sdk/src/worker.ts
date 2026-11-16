@@ -120,7 +120,8 @@ const readableAfterFailure = new Set<string>([
   "textSelection", "textNavigate", "versionLog", "versionDiff",
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
-  "packageBytes",
+  "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
+  "historyStoreAttached",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -893,10 +894,16 @@ async function execute(m: Queued): Promise<unknown> {
     }
     case "releaseObjects": runtime.releaseObjects(); return true;
     case "markFolderSaved": runtime.markFolderSaved(); return true;
+    case "markStoreSaved": runtime.markStoreSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
+    case "historyIsExternal": return runtime.historyIsExternal();
+    case "checkHistoryStore": return JSON.parse(runtime.checkHistoryStore(new Uint8Array(m.bytes), JSON.stringify(m.objects), m.warn));
+    case "storeRootsContained": return runtime.storeRootsContained(new Uint8Array(m.manifest));
+    case "historyStoreAttached": return JSON.parse(runtime.historyStoreAttached());
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
+    case "saveThin": return runtime.saveThinPackage();
     case "packageBytes": {
-      const bytes = runtime.packageBytes();
+      const bytes = m.external ? runtime.thinPackageBytes() : runtime.packageBytes();
       return bytes === undefined ? null : { bytes, limit: runtime.packageLimit() };
     }
     case "openFolder": {

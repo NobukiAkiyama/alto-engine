@@ -218,14 +218,98 @@ impl Runtime {
     pub fn mark_folder_saved(&mut self) -> Result<(), JsValue> {
         self.engine.mark_folder_saved(self.doc).map_err(error)
     }
+    /// After a thin save's store write: the versions' objects stay in the store, even for
+    /// a document that held every object until now.
+    #[wasm_bindgen(js_name=markStoreSaved)]
+    pub fn mark_store_saved(&mut self) -> Result<(), JsValue> {
+        self.engine.mark_store_saved(self.doc).map_err(error)
+    }
     #[wasm_bindgen(js_name=externalObjects)]
     pub fn external_objects(&self) -> Result<u32, JsValue> {
         Ok(self.engine.external_objects(self.doc).map_err(error)?.len() as u32)
+    }
+    /// Whether the document came from a thin .alto, whose versions belong in a store.
+    #[wasm_bindgen(js_name=historyIsExternal)]
+    pub fn history_is_external(&self) -> bool {
+        self.engine.history_is_external(self.doc)
+    }
+    /// Whether a history store serves this document. `framed` holds the store's
+    /// `manifest.json` and the snapshot it names; `objects` is a JSON list of its object
+    /// paths. With `warn`, a mismatch becomes a `HISTORY_STORE_UNAVAILABLE` warning; a
+    /// store that serves the document clears that warning. `contained`: whether every root
+    /// of the store's manifest is one of this document's versions.
+    #[wasm_bindgen(js_name=checkHistoryStore)]
+    pub fn check_history_store(
+        &mut self,
+        framed: &[u8],
+        objects: &str,
+        warn: bool,
+    ) -> Result<String, JsValue> {
+        let paths: Vec<String> = serde_json::from_str(objects).map_err(error)?;
+        let present = paths
+            .iter()
+            .filter_map(|p| p.rsplit('/').next()?.parse().ok())
+            .collect();
+        let entries = unframe(framed)?;
+        let manifest = entries.get("manifest.json").cloned().unwrap_or_default();
+        let mismatch = self
+            .engine
+            .check_history_store(self.doc, entries, &present)
+            .map_err(error)?;
+        let contained = self
+            .engine
+            .store_roots_contained(self.doc, &manifest)
+            .map_err(error)?;
+        match mismatch {
+            Some(m) if warn => self.warnings.push(
+                alto_engine::Warning::new(alto_engine::HISTORY_STORE_UNAVAILABLE)
+                    .with("reason", m.reason()),
+            ),
+            Some(_) => {}
+            None => self
+                .warnings
+                .retain(|w| w.code != alto_engine::HISTORY_STORE_UNAVAILABLE),
+        }
+        let state: serde_json::Value = serde_json::from_str(&self.view()?).map_err(error)?;
+        serde_json::to_string(&json!({
+            "mismatch": mismatch.map(|m| m.reason()),
+            "contained": contained,
+            "state": state,
+        }))
+        .map_err(error)
+    }
+    /// A history store was attached after all: its `HISTORY_STORE_UNAVAILABLE` warning goes.
+    #[wasm_bindgen(js_name=historyStoreAttached)]
+    pub fn history_store_attached(&mut self) -> Result<String, JsValue> {
+        self.warnings
+            .retain(|w| w.code != alto_engine::HISTORY_STORE_UNAVAILABLE);
+        self.view()
+    }
+    /// Whether every root of a store's `manifest.json` is one of this document's versions.
+    #[wasm_bindgen(js_name=storeRootsContained)]
+    pub fn store_roots_contained(&self, manifest: &[u8]) -> Result<bool, JsValue> {
+        self.engine
+            .store_roots_contained(self.doc, manifest)
+            .map_err(error)
     }
     /// The working document alone. A normal save fails rather than dropping history.
     #[wasm_bindgen(js_name=saveWithoutHistory)]
     pub fn save_without_history(&self) -> Result<Vec<u8>, JsValue> {
         self.engine.save_without_history(self.doc).map_err(error)
+    }
+    /// A .alto holding the working document's objects; versions' objects stay in the
+    /// folder it was just saved to.
+    #[wasm_bindgen(js_name=saveThinPackage)]
+    pub fn save_thin_package(&mut self) -> Result<Vec<u8>, JsValue> {
+        if self.sampler.is_some() {
+            return Err(error("CONFLICT: active tool must be flushed"));
+        }
+        self.engine.save_thin_package(self.doc).map_err(error)
+    }
+    /// `packageBytes` for the thin .alto. Known without reading anything.
+    #[wasm_bindgen(js_name=thinPackageBytes)]
+    pub fn thin_package_bytes(&self) -> Result<f64, JsValue> {
+        Ok(self.engine.thin_package_bytes(self.doc).map_err(error)? as f64)
     }
     #[wasm_bindgen(js_name=folderPlan)]
     pub fn folder_plan(&self, framed: &[u8]) -> Result<String, JsValue> {

@@ -110,9 +110,23 @@ export interface Requests {
   provideObjects: Q<{ bytes: ArrayBuffer; target: ObjectTarget }, true>;
   releaseObjects: Q<None, true>;
   markFolderSaved: Q<None, true>;
+  /** `markFolderSaved` after a thin save: the versions' objects leave memory for the store. */
+  markStoreSaved: Q<None, true>;
   externalObjects: Q<None, number>;
+  /** True when the document came from a thin .alto, even one with nothing outside. */
+  historyIsExternal: Q<None, boolean>;
+  /** `bytes`: the store's manifest.json and the snapshot it names, framed; `objects`: its object paths. */
+  /** `contained`: every root of the store's manifest is one of the document's versions. */
+  checkHistoryStore: Q<{ bytes: ArrayBuffer; objects: string[]; warn: boolean }, { mismatch: "missing" | "other-document" | null; contained: boolean; state: WireState }>;
+  /** Whether every root of `manifest` (a store's manifest.json) is one of the document's versions. */
+  storeRootsContained: Q<{ manifest: ArrayBuffer }, boolean>;
+  /** A store was attached after all: drops `HISTORY_STORE_UNAVAILABLE`. */
+  historyStoreAttached: Q<None, WireState>;
   saveWithoutHistory: Q<None, Uint8Array>;
-  packageBytes: Q<None, { bytes: number; limit: number } | null>;
+  /** The thin .alto: the working document's objects; versions' objects stay in its folder. */
+  saveThin: Q<None, Uint8Array>;
+  /** `external`: the thin .alto's size, always known. */
+  packageBytes: Q<{ external?: boolean }, { bytes: number; limit: number } | null>;
   importFont: Q<{ bytes: ArrayBuffer; faceIndex: number }, ImportedFontRecord>;
   releaseImport: Q<{ hash: string }, boolean>;
   pruneVersions: Q<None, WireState & { removed?: number }>;

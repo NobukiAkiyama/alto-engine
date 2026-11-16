@@ -38,6 +38,19 @@ import type {
 function packageSizeOf({ bytes, limit }: { bytes: number; limit: number }): PackageSize {
   return { bytes, limit, near: bytes >= limit * 0.8 };
 }
+/** The snapshot a folder's manifest names, or null when it names none readably. */
+function snapshotPath(manifest: Uint8Array): string | null {
+  try {
+    const hash: unknown = JSON.parse(new TextDecoder().decode(manifest)).snapshot;
+    return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? `snapshots/${hash}.json` : null;
+  } catch {
+    return null;
+  }
+}
+/** A folder attached read-only: it was saved since with versions this document lacks. */
+function folderAhead(): AltoError {
+  return new AltoError("CONFLICT", "the folder holds versions this document does not have", { reason: "folder-changed" });
+}
 
 export interface SelectionSpec {
   kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
@@ -69,7 +82,11 @@ export class DocumentHandle {
   private readonly store = new SnapshotStore();
   private readonly listeners = new Set<(change: DocumentChange) => void>();
   private tool: ToolSession | null = null;
-  private savedFolder: { provider: ObjectStorageProvider; manifest: string } | null = null;
+  /**
+   * `readOnly`: the folder's manifest names versions this document lacks, so saving this
+   * document's refs there would drop them. Versions are still read from it.
+   */
+  private savedFolder: { provider: ObjectStorageProvider; manifest: string; readOnly?: boolean } | null = null;
   private releaseHold: (() => Promise<void>) | undefined;
 
   /** @internal */
@@ -375,19 +392,29 @@ export class DocumentHandle {
     externalObjects: () => this.request("externalObjects"),
     /**
      * Connects the folder holding this document's history, after a page reload recovered the
-     * document without it. Refused if the folder lacks an object the document needs.
+     * document without it, or a thin `.alto` opened without its store. Refused if the folder
+     * holds another document or lacks an object the document needs. A folder saved since with
+     * versions this document lacks attaches read-only: versions are read from it, but saving or
+     * collecting it from this document fails `CONFLICT` (`folder-changed`).
      */
     attachFolder: (provider: ObjectStorageProvider) => this.edit(async () => {
-      const missing = await this.request("missingObjects", { target: { type: "all" } });
       const hold = await provider.holdObjects?.();
       try {
+        const mismatch = await this.checkStore(provider, false, hold);
+        if (mismatch === null) return;
+        if (mismatch === "other-document") throw new AltoError("CONFLICT", "this folder holds another document", { reason: "folder-occupied" });
+        const missing = await this.request("missingObjects", { target: { type: "all" } });
         const load = async (storage: ObjectStorageProvider) => {
           const present = new Set(await storage.list("objects/"));
           if (missing.some((path) => !present.has(path))) throw new AltoError("CONFLICT", "this folder does not hold the document's history", { reason: "folder-occupied" });
-          const manifest = await storage.readRef("manifest.json");
-          return manifest ? sha256Hex(manifest) : "";
+          return storage.readRef("manifest.json");
         };
-        this.setFolder(provider, await (provider.exclusive ? provider.exclusive(load) : load(provider)), hold);
+        const manifest = await (provider.exclusive ? provider.exclusive(load) : load(provider));
+        const hash = manifest ? await sha256Hex(manifest) : "";
+        const contained = !manifest || (await this.request("storeRootsContained", { manifest: manifest.slice().buffer as ArrayBuffer }));
+        // As when the store matched: the warning from opening without it no longer holds.
+        this.apply(await this.request("historyStoreAttached"));
+        this.setFolder(provider, hash, hold, !contained);
       } catch (e) { void hold?.(); throw e; }
     }),
     /** Returns a new compact archive. Does not overwrite an existing file. */
@@ -474,9 +501,17 @@ export class DocumentHandle {
   /**
    * The document's size against the `.alto` cap now. For a folder opened on demand this
    * reads the objects still in the folder first. The `packageSize` event reports the same
-   * after each `.alto` save and each commit.
+   * after each `.alto` save and each commit. With `history: "external"` it is the size of the
+   * thin `.alto` that `save(target, { history: { folder } })` writes, worked out without
+   * reading anything.
    */
-  packageSize(): Promise<PackageSize> {
+  packageSize(options: { history?: "all" | "external" } = {}): Promise<PackageSize> {
+    if (options.history === "external")
+      return this.edit(async () => {
+        const size = await this.request("packageBytes", { external: true });
+        if (size === null) throw new AltoError("INTERNAL", "thin package size unknown");
+        return packageSizeOf(size);
+      });
     return this.edit(() =>
       this.withObjects({ type: "all" }, async () => {
         const size = await this.request("packageBytes");
@@ -498,9 +533,23 @@ export class DocumentHandle {
    * Writes the document as a `.alto` archive. On success the document is no longer dirty.
    * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
    * history that lives in an unreachable folder would otherwise make the save fail.
+   * With `history: { folder }` it first saves the folder form to `folder`, as `saveFolder`
+   * does, then writes a thin `.alto` holding the working document's objects alone; the
+   * versions' objects stay in `folder`, which the document stays attached to and holds. If
+   * the `.alto` write fails, the folder is already saved and stays attached; the document
+   * stays dirty.
    */
-  async save(target: ArchiveTarget, options: { history?: "all" | "omit" } = {}): Promise<void> {
+  async save(
+    target: ArchiveTarget,
+    options: { history?: "all" | "omit" | { folder: ObjectStorageProvider } } = {},
+  ): Promise<void> {
     await this.endTool();
+    if (typeof options.history === "object" && options.history) {
+      const folder = options.history.folder as ObjectStorageProvider | undefined;
+      if (!folder || typeof folder !== "object")
+        throw new AltoError("INVALID_ARGUMENT", "history.folder must be an object storage provider");
+      return this.saveThin(target, folder);
+    }
     if (options.history === "omit") {
       const bytes = await this.request("saveWithoutHistory");
       await target.write(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream());
@@ -529,10 +578,51 @@ export class DocumentHandle {
       throw e;
     }
   }
+  private async saveThin(target: ArchiveTarget, owner: ObjectStorageProvider): Promise<void> {
+    this.core.emit("saveState", "saving");
+    let token: number | undefined;
+    try {
+      const saved = await this.edit(async () => {
+        const write = () =>
+          owner.exclusive
+            ? owner.exclusive((storage) => this.writeFolder(owner, storage, {}))
+            : this.writeFolder(owner, owner, {});
+        const attached = this.savedFolder?.provider === owner;
+        // Before reading the versions' objects, which a thin .alto opened without its store
+        // cannot: saving into that store is refused as writeFolder would refuse it.
+        const occupied = async (storage: ObjectStorageProvider) => !!(await storage.readRef("manifest.json"));
+        if (!attached && (await (owner.exclusive ? owner.exclusive(occupied) : occupied(owner))))
+          throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
+        // Before the target's lock: reading from another folder takes that folder's lock.
+        const written = attached ? await write() : await this.withObjects({ type: "all" }, write);
+        token = written.token;
+        // The versions now live only in the folder: hold it so GC elsewhere keeps them.
+        await this.adoptFolder(owner, written.manifest, { hold: true });
+        // The store is committed now, whatever happens to the .alto. Inside the queue, so a
+        // version committed during the .alto write is not taken to be in the store.
+        await this.request("markStoreSaved");
+        return {
+          bytes: await this.request("saveThin"),
+          // Advice only: failing to work it out must not fail a save that succeeded.
+          payload: await this.request("packageBytes", { external: true }).catch(() => null),
+        };
+      });
+      await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
+      this.apply(await this.request("saved", { token: token! }));
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
   private gcFolder(options: GcOptions): Promise<GcReport> {
     return this.edit(async () => {
       const owner = this.savedFolder?.provider;
       if (!owner) throw new AltoError("UNSUPPORTED", "save or open a folder before collecting it");
+      if (this.savedFolder?.readOnly) throw folderAhead();
       const dryRun = options.dryRun ?? true;
       const capabilities = owner.gcCapabilities;
       if (!dryRun && (typeof owner.exclusive !== "function" || capabilities?.exclusive !== true || capabilities.atomicManifest !== true || capabilities.deleteObjects !== true))
@@ -587,7 +677,7 @@ export class DocumentHandle {
       const held = !!this.releaseHold;
       await this.releaseHold?.(); this.releaseHold = undefined;
       try { return await owner.whileNotHeld(collect); }
-      finally { if (held) this.releaseHold = await owner.holdObjects?.(); }
+      finally { if (held) this.keepHold(await owner.holdObjects?.()); }
     });
   }
   /**
@@ -608,11 +698,38 @@ export class DocumentHandle {
     this.core.emit("saveState", "saving");
     let token: number | undefined;
     try {
+      const written = await this.writeFolder(owner, provider, options);
+      token = written.token;
+      await this.adoptFolder(owner, written.manifest);
+      this.apply(await this.request("saved", { token }));
+      await this.request("markFolderSaved");
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      return written.report;
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
+  /**
+   * Writes the folder form to `provider` (the locked view of `owner`) and reads its manifest
+   * back. Returns the save token and the manifest's hash; the caller confirms the save.
+   */
+  private async writeFolder(
+    owner: ObjectStorageProvider,
+    provider: ObjectStorageProvider,
+    options: { overwrite?: boolean },
+  ): Promise<{ report: { written: number; skipped: number; warnings: string[] }; token: number; manifest: string }> {
+    let token: number | undefined;
+    try {
       const current = await provider.readRef("manifest.json");
       const currentHash = current ? await sha256Hex(current) : "";
-      const base = this.savedFolder?.provider === owner ? this.savedFolder.manifest : undefined;
+      const folder = this.savedFolder?.provider === owner ? this.savedFolder : undefined;
+      const base = folder?.manifest;
       if (current && base === undefined && !options.overwrite)
         throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
+      if (folder?.readOnly) throw folderAhead();
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
       const saved = await this.request("folderEntries", { keepExternal: base !== undefined });
@@ -630,25 +747,79 @@ export class DocumentHandle {
       const warnings: string[] = [];
       const mirror = entries.get("document.json");
       if (mirror) { try { await provider.writeRef("document.json", mirror); } catch { warnings.push("比較用の文書コピーを更新できませんでした。正本の保存は完了しています。"); } }
-      const movedFolder = this.savedFolder?.provider !== owner;
-      this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
-      if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
-      this.apply(await this.request("saved", { token }));
-      await this.request("markFolderSaved");
-      token = undefined;
-      this.core.emit("saveState", "saved");
-      return { ...report, warnings };
+      return { report: { ...report, warnings }, token, manifest: await sha256Hex(manifest) };
     } catch (e) {
       this.releaseSave(token);
-      this.core.emit("saveState", "error");
       throw e;
     }
   }
-  /** @internal */
-  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {
+  /**
+   * The folder just saved to is now the document's; a hold moves with it. With `hold`, the
+   * document holds the folder afterwards even if it held nothing before.
+   */
+  private async adoptFolder(owner: ObjectStorageProvider, manifest: string, options: { hold?: boolean } = {}): Promise<void> {
+    const movedFolder = this.savedFolder?.provider !== owner;
+    this.savedFolder = { provider: owner, manifest };
+    if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = undefined; }
+    else if (!options.hold || this.releaseHold) return;
+    this.keepHold(await owner.holdObjects?.());
+  }
+  /** A hold taken while the document closed is released, not kept: close() already ran. */
+  private keepHold(release: (() => Promise<void>) | undefined): void {
+    if (this.closed) void release?.();
+    else this.releaseHold = release;
+  }
+  /**
+   * @internal Attaches the history store of a thin `.alto` just opened, or warns
+   * `HISTORY_STORE_UNAVAILABLE` and leaves it. A normal `.alto` has nothing in a store.
+   */
+  attachHistoryStore(provider: ObjectStorageProvider): Promise<void> {
+    return this.edit(async () => {
+      if (!(await this.request("historyIsExternal"))) return;
+      // Before the store's lock, in the order GC takes them.
+      const hold = await provider.holdObjects?.();
+      try {
+        if ((await this.checkStore(provider, true, hold)) !== null) void hold?.();
+      } catch (e) { void hold?.(); throw e; }
+    });
+  }
+  /**
+   * Whether `provider` is this document's history store: the same document, with every object
+   * only its versions use. If so it becomes the document's folder, holding it with `hold`.
+   * A store that cannot be read is `"missing"`. With `warn`, a mismatch becomes a warning.
+   */
+  private async checkStore(
+    provider: ObjectStorageProvider,
+    warn: boolean,
+    hold: (() => Promise<void>) | undefined,
+  ): Promise<"missing" | "other-document" | null> {
+    const read = async (storage: ObjectStorageProvider) => {
+      const entries = new Map<string, Uint8Array>();
+      const manifest = await storage.readRef("manifest.json");
+      if (manifest) {
+        entries.set("manifest.json", manifest);
+        const snapshot = snapshotPath(manifest);
+        const bytes = snapshot ? await storage.getObject(snapshot) : null;
+        if (snapshot && bytes) entries.set(snapshot, bytes);
+      }
+      return { entries, objects: await storage.list("objects/"), manifest: manifest ? await sha256Hex(manifest) : "" };
+    };
+    // The hold keeps GC from removing objects between this read and the check.
+    const found = await (provider.exclusive ? provider.exclusive(read) : read(provider)).catch(() => ({
+      entries: new Map<string, Uint8Array>(), objects: [] as string[], manifest: "",
+    }));
+    const framed = frameEntries(found.entries);
+    const r = await this.request("checkHistoryStore", { bytes: framed.buffer as ArrayBuffer, objects: found.objects, warn }, [framed.buffer]);
+    this.apply(r.state);
+    if (r.mismatch === null) this.setFolder(provider, found.manifest, hold, !r.contained);
+    return r.mismatch;
+  }
+  /** @internal With `readOnly`, versions are read from the folder but nothing is saved there. */
+  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>, readOnly = false): void {
+    if (this.closed) { void releaseHold?.(); return; }
     void this.releaseHold?.();
     this.releaseHold = releaseHold;
-    this.savedFolder = { provider, manifest };
+    this.savedFolder = readOnly ? { provider, manifest, readOnly } : { provider, manifest };
   }
   /** A cancelled or failed save no longer needs the Worker's copy of the package. */
   private releaseSave(token: number | undefined) {

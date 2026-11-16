@@ -2,6 +2,10 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// A thin .alto's history store could not be attached; `details.reason` is
+/// `"missing"` or `"other-document"`.
+pub const HISTORY_STORE_UNAVAILABLE: &str = "HISTORY_STORE_UNAVAILABLE";
+
 /// `code` names the condition; `details` carries its values (hashes, font families)
 /// and, for conditions read from damaged data, an English `detail` for developers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
