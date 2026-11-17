@@ -65,7 +65,7 @@
 
 **2. 薄い `.alto` の seed を足す。** 版を外に持つ保存で作った薄い `.alto`（manifest format 3）を `tests/fixtures/` に1つ置く（新規）。`run-all.sh` の `package`、`recovery`、`folder` の seed に入れる。`tests/fixtures/*.alto` の既存の6つは変えない。文書に実データの個人情報を入れない（生成した合成画像だけ）。
 
-**3. TypeScript 側のジャーナル読み取りを壊して読む。** ファザーではなく、固定 seed の変異試験にする。`storage-core.ts` のジャーナルのバイト列を、先頭・長さ・CRC・末尾の切り詰めと1ビット反転で壊して読む。期待は「構造化エラーで拒否するか、不完全な末尾として除外して直前までを返す」こと。例外の型が不定、ハング、確保の暴走は失敗。試験は `packages/alto-sdk/test/` に置く（新規。既存の SDK の試験と同じく node:test）。
+**3. TypeScript 側のジャーナル読み取りを壊して読む。** ファザーではなく、固定 seed の変異試験にする。`storage-core.ts` のジャーナルのバイト列を、先頭・長さ・CRC・末尾の切り詰めと1ビット反転で壊して読む。読み取りは最初の不正（長さ・CRC・形）で打ち切り、それ以降の完全な記録も捨てる（`storage-core.ts` の読み取りループ）。したがって試験は「拒否か除外」では足りず、**記録数を厳密に検証する**：壊した位置より前の記録数と内容が一致し、位置以降は捨てられることを固定する。先頭以外の記録の途中が壊れて後ろに完全な記録が続く場合に、それを黙って捨ててよいかは設計上の確認点とし（利用者の決定。既定は現状の契約の維持）、試験は現状の挙動を明示して固定する。例外の型が不定、ハング、確保の暴走は失敗。試験は `packages/alto-sdk/test/` に置く（新規。既存の SDK の試験と同じく node:test）。
 
 **運用の規則。** 新しい外部バイト列の入口（ICC、PSD、書き出しの逆読みなど、01、09 の項目）を作る PR は、同じ PR で target と seed を足し、`fuzz_regressions.rs` の `run` に同じ名前の分岐を足す。target を足したら次の4か所をそろえる：`fuzz/Cargo.toml` の `[[bin]]`、`fuzz.yml` の `matrix.target`、`run-all.sh` の seed 配置、`fuzz_regressions.rs`。
 
@@ -92,7 +92,7 @@
 
 - [ ] **Task QA-1a: `folder` と `decode` の target。**
   Create `fuzz/fuzz_targets/folder.rs`（新規）、`fuzz/fuzz_targets/decode.rs`（新規）、`fuzz/seeds/folder/`（新規）、`fuzz/seeds/decode/`（新規）。Modify `fuzz/Cargo.toml`（`alto-decode`、`alto-store` の依存と `[[bin]]`）、`.github/workflows/fuzz.yml`（`matrix.target`）、`fuzz/run-all.sh`、`crates/alto-engine/tests/fuzz_regressions.rs`（`run` に分岐）。
-  各 target を60秒動かし、`sh fuzz/run-all.sh 60` が終わること。見つけた欠陥は再現入力を `tests/fixtures/fuzz/<target>/` に置いて直す（`fuzz_regressions_do_not_panic` がその target を再生する）。
+  `cargo fuzz list` に `folder` と `decode` が出ること、`TARGETS="folder decode" sh fuzz/run-all.sh 60` が終わり、各 seed がコーパスに入ったこと（`run-all.sh` は一覧にある target だけを動かすので、`[[bin]]` を忘れると黙って省かれる）。見つけた欠陥は再現入力を `tests/fixtures/fuzz/<target>/` に置いて直す（`fuzz_regressions_do_not_panic` がその target を再生する）。
 - [ ] **Task QA-1b: 薄い `.alto` の seed。**
   Create `tests/fixtures/` の薄い `.alto`（新規。版を外に持つ保存で作る）。`run-all.sh` の seed 配置を直す。`package` を60秒動かし、`open_package_entries` の外部履歴の分岐にカバレッジが入ること（`cargo fuzz coverage`）を確かめる。
 - [ ] **Task QA-1c: ジャーナル読み取りの変異試験。**
@@ -165,7 +165,7 @@
 | `opfs-sync-handle-worker` | Worker で `createSyncAccessHandle` が使え、書いて読み戻せる | 自動 |
 | `opfs-sync-handle-nested` | 入れ子の Worker で同上 | 自動 |
 | `web-locks` | `navigator.locks.request`（`ifAvailable`、`shared`、`signal`） | 自動 |
-| `fsa-picker` | `showSaveFilePicker`、`showDirectoryPicker` が存在する | 存在のみ。選択は人の操作が要るので `null` |
+| `fsa-picker` | `showSaveFilePicker`、`showDirectoryPicker` が存在する | 自動（存在のみ）。ダイアログの操作は人の操作が要るので `detail` に「未操作」と書く |
 | `image-decode` | `createImageBitmap(blob)` と `OffscreenCanvas` の2Dで PNG を復号し、画素が一致する | 自動 |
 | `png-encode` | `OffscreenCanvas.convertToBlob` で PNG を書ける | 自動 |
 | `wasm-engine` | 同梱の WASM が instantiate でき、空の文書を開く | 自動（SDK を読む） |
@@ -195,7 +195,7 @@
 
 - [ ] **Task QA-2a: 機能の有無のページ。**
   Create `tests/diagnostics/browser-features.html`（新規）、`tests/diagnostics/browser-features.js`（新規）、`scripts/browser-matrix.mjs`（新規。ページを開き、結果を Markdown の行にする。Chromium は CDP、Firefox は BiDi、Safari は WebDriver）。Modify `tests/diagnostics/README.md`（使い方）。
-  試験：Chrome で全キーが `ok`（`fsa-picker` と `pagehide` は `null`）。`worker-nested` は、ページ自身が作る Worker の中でコンストラクターを塞いだ場合に `false` になること（エンジンの Worker は対象外）。
+  試験：Chrome で全キーが `ok`（`pagehide` は `null`。`fsa-picker` は存在すれば `ok`、無ければ `false`）。`worker-nested` は、ページ自身が作る Worker の中でコンストラクターを塞いだ場合に `false` になること（エンジンの Worker は対象外）。
 - [ ] **Task QA-2b: Edge で `verify-browser.mjs`。**
   Modify `scripts/verify-browser.mjs`（ブラウザ名を記録に加える。Chromium の既定の動作は変えない）。Edge を `CHROME` で指定して `--functional` を動かす。Chrome の結果を変えない試験：既存の `summary.json` の項目が変わらないこと。
 - [ ] **Task QA-2c: 表と記録。**
@@ -336,7 +336,7 @@
 - [ ] **Task QA-4b: 次の機会の再実行。** 形式や保存の入口が変わる項目（08、09）の完了後に、薄い保存の4時間を seed 1 で1回回し、`verdict` を記録する。保存の入口が変わらなければ回さない。
 - [ ] **Task QA-4c: 実制作での評価。** 人が行い、別の文書に記録する。
 
-完了条件：アトラス圧迫の試験が Metal と SwiftShader で通る。検証コマンド：`node scripts/verify-browser.mjs --suite=soak`（短くするには `ALTO_SOAK_MINUTES=20`）。
+完了条件：アトラス圧迫の試験が Metal と SwiftShader で通る。検証コマンド：専用の群なら `node scripts/verify-browser.mjs --suite=atlas-pressure`（新規。`ALTO_BROWSER_GPU=swiftshader` でも1回）。`soak.js` に組み込む場合は `--suite=soak` で `ALTO_SOAK_MINUTES=20`。どちらかに決めてから書く。
 
 ### 依存
 
@@ -348,7 +348,7 @@
 
 ### 現状
 
-実装済み。**CDP でタブを落とす試験は27時点・54ケース（2つの落とし方）で、各時点を10回連続で成功させている**（Metal と SwiftShader）。
+実装済み。**CDP でタブを落とす試験は28時点・56ケース（2つの落とし方）。うち27時点は10回連続の成功を記録した**（Metal と SwiftShader。540件）。F-9 で足した `thin-open` は、機能試験の群での成功の記録はあるが、10回連続の記録はない。
 
 - 仕組み：`tests/e2e/crash-tests.js`（Node 側）が CDP でタブを開いて落とし、ページ側は `tests/e2e/crash-page.html`。`Page.crash`（unload を経ない）と `Target.closeTarget`（利用者がタブを閉じるのと同じ）の2つで落とす。`scripts/verify-browser.mjs` が機能試験の後に実行する（`--suite=crash`、`ALTO_CRASH_REPEAT` で反復、`ALTO_CRASH_ONLY=<正規表現>` で時点を絞る）。CI は `wasm-browser` の `crash` 群（`m8,crash`）で反復1回。
 - 待機点：SDK の `testing` 入口（`packages/alto-sdk/src/testing.ts`）に `holdStorage`、`partialAppend`、`stopCheckpoint`、`destroyGpu`、`testPanic` などがある。本番の公開 API には足していない。
@@ -363,6 +363,7 @@
 | OPFS の GC の削除中 4 | 再試行で全 root の bytes / hash が保たれる | 成功 | [D-5](../../verification/ENGINE-HARDENING-RESULTS.md#d-5opfsのgc削除中) |
 | マージの確定中 4 | 文書だけが変わった状態にならない | 成功 | [D-6](../../verification/ENGINE-HARDENING-RESULTS.md#d-6版のマージ確定中) |
 | Worker 停止、GPU 喪失 7（追加） | 契約どおりの状態通知と復旧 | 成功（欠陥4件を修正） | [D-7](../../verification/ENGINE-HARDENING-RESULTS.md#d-7worker停止gpu喪失) |
+| 薄い `.alto` を開いた後の復旧 1（`thin-open`、F-9 で追加） | 版の置き場を読んで復旧できる | 成功（10回連続の記録なし） | [F-9](../../verification/ENGINE-HARDENING-RESULTS.md#f-9版を-alto-の外に持つ) |
 
 見つけて直した欠陥は計5件（D-3 に1件：版の確定後に編集がないと復旧が提示されない。D-7 に4件）。
 
@@ -387,7 +388,7 @@
    - 判定：復旧した状態が、**編集の列の何番目かの接頭辞**と完全に一致する（snapshot hash を編集ごとに記録しておく）。`durable()` が解決した編集は必ず含まれる。含まれない編集があれば欠陥。
    - 反復数：1回の実行で 50 回（seed 固定。失敗した seed と時刻を出力する）。CI では 10 回（SwiftShader で時間が長い。測ってから決める）。
    - 不安定なときに再実行で隠さない。失敗は seed つきで記録し、再現できなければ「未再現」と書く。
-2. **Worker が例外なく終わる場合。** Worker が `close()` で自分を終わらせても、`error` イベントも再起動の合図も出ない。エンジンの再起動は `packages/alto-sdk/src/engine.ts` の `worker.onerror` からだけ始まる。したがって現状は検出されない見込みで、試験は先に「今は検出されず、要求が返らない」ことを確かめる欠陥の再現になる。直すなら、要求の無応答を監視して `WORKER_CRASHED` で拒否し再起動する設計を別に書く（SDK の変更。Worker との要求を増やすなら `PROTOCOL` を上げる必要がある。値は要割り当て）。判定条件：修正後は `restarting` から `ready` に戻り、確定済みの内容が残る。
+2. **Worker が例外なく終わる場合。** Worker が `close()` で自分を終わらせても、`error` イベントも再起動の合図も出ない。`packages/alto-sdk/src/engine.ts` の再起動は `worker.onerror` のほか `retry()`、`recoverAfterStorageFailure`、bfcache からの復帰でも呼ばれるが、無言の終了を検出して起こす経路はない。したがって現状は検出されない見込みで、試験は先に「今は検出されず、要求が返らない」ことを確かめる欠陥の再現になる。直すなら、要求の無応答を監視して `WORKER_CRASHED` で拒否し再起動する設計を別に書く（SDK の変更。Worker との要求を増やすなら `PROTOCOL` を上げる必要がある。値は要割り当て）。判定条件：修正後は `restarting` から `ready` に戻り、確定済みの内容が残る。
 3. **実機の GPU 喪失。** `destroyGpu` では起こせない。QA-3 の実機で、ブラウザの GPU プロセスを OS から落とす（`scripts/gpu-process-crash.mjs` が数える種類のクラッシュ）手順を手で試し、結果を GPU-MATRIX に書く。自動化しない。
 4. **マージ後の保存と "ours" の競合解決。** D-6 の記録の「試していない」を、`.altoproj` の保存の3時点（D-4）をマージ後の文書で繰り返し、解決を "ours" と明示値にして足す。
 
@@ -414,7 +415,7 @@ STO-7（ステージング退避、未確定ストロークの復元）が入る
 - [ ] **Task QA-5d: 実機の GPU 喪失。** QA-3 の実機で手で試して `doc/verification/GPU-MATRIX.md`（新規）に書く。
 - [ ] **Task QA-5e: 記録。** ENGINE-HARDENING-RESULTS に追記する。
 
-完了条件：新しい3つの試験が、各2つの落とし方で10回連続成功する。検証コマンド：`ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`、`ALTO_BROWSER_GPU=swiftshader node scripts/verify-browser.mjs --functional`。
+完了条件：`append-random-kill` と `merge-ours-altoproj` が各2つの落とし方で10回連続成功する。`worker-silent-exit` は、検出の修正が入るまでは「検出されない」ことの再現として記録するだけで、10回連続の条件に入れない（修正後に同じ条件を課す）。検証コマンド：`ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`、`ALTO_BROWSER_GPU=swiftshader ALTO_CRASH_REPEAT=10 node scripts/verify-browser.mjs --suite=crash`、`ALTO_BROWSER_GPU=swiftshader node scripts/verify-browser.mjs --functional`（反復1回）。
 
 ### 依存
 
