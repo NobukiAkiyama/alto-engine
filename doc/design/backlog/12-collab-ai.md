@@ -167,7 +167,7 @@ commit、ブランチの作成、タグ、`pruneVersions`、保存は使える�
   - 参加者 → 順序係：`hello { protocol, room, client, documentFormat, renderVersion, engine, mode: "edit" | "view", resume? }`、`submit { id, baseSeq, intent, label?, ops, bases?, objects }`、`digest { seq, hash }`。
   - 順序係 → 参加者：`welcome { baseHash, baseBytes, headSeq, limits }`、`tx { seq, client, id, ... }`（送り主にも）、`reject { id, code }`、`diverged { seq }`。`client` は順序係が接続ごとに付ける。参加者の自己申告は使わない。
 - オブジェクトのチャネル（別の WebSocket、バイナリ）：`put`、`get`、`data`、`missing`。置き場は順序係の実装の中にあり、検証はしない。受け手が必ず検証する。
-- 参加の始め：開く側 `host(doc, { url, room })` は `doc.save(target, { history: "omit" })` が書く作業文書だけの `.alto`（版を含まない）を基点として置く。参加する側 `join({ url, room })` は基点を取って `engine.open` し、`seq` 1 から最新までを適用する。参加者は `documentFormat`（01 が入れる `alto_doc::FORMAT_VERSION`（新規）の値）、描画の版、エンジンのビルドが基点と同じでなければ `hello` で断られる（`FORMAT_MISMATCH`）。
+- 参加の始め：開く側 `host(doc, { url, room })` は `doc.save(target, { history: "omit" })` が書く作業文書だけの `.alto`（版を含まない）を基点として置く。参加する側 `join({ url, room })` は基点を取って `engine.open` し、`seq` 1 から最新までを適用する。参加者は `documentFormat`（01 の共通の設計で回 6 の PR が入れる `alto_doc::FORMAT_VERSION`（新規）の値）、描画の版、エンジンのビルドが基点と同じでなければ `hello` で断られる（`FORMAT_MISMATCH`）。
 - 切断：未確定の取引はそのまま残り、文書は触れる。再接続で `hello { resume: 最後に適用した seq }` を送り、取りこぼしを受けて rebase し、未確定を順に再送する。`id` が同じ取引は順序係が重複とみなし、前の `seq` を返す。切断中のストロークも同じ（ストロークの確定後、未確定に積まれ、再接続の後に順序が付く）。
 - 収束の確認：未確定が空のときに `seq` が 64 の倍数を越えたら、`shared_digest`（新規）を `digest` で送る。順序係は同じ `seq` の値が割れたら `diverged` を配る。受けた参加者は基点から取り直す（`rejoin`。未確定は `onDropped` に返す）。
 - 運用向けのサーバー、認証、権限、`view` の強制、ログの圧縮は本リポジトリの範囲外。`examples/collab-relay/`（新規）は順序付けだけをする参照実装（Node の WebSocket、認証なし、ローカル確認用）。
@@ -222,10 +222,10 @@ export interface CollabPort {
 
 ### 形式と通信
 
-- `format_version`：**上げない**。文書に新しいフィールドを足さない。共同編集の通信が運ぶ `Op` の JSON は文書の形式に結び付くので、`hello` で `FORMAT_VERSION`（新規）（01 の RV4-1 が作る）（いまは `DocumentMeta.format_version` が 5 固定）の一致を要る。形式が上がった後は、旧い形式の参加者を断る。
+- `format_version`：**上げない**。文書に新しいフィールドを足さない。共同編集の通信が運ぶ `Op` の JSON は文書の形式に結び付くので、`hello` で `FORMAT_VERSION`（新規）（01 の「共通の設計：形式番号を上げる経路」。全文書で最初に番号を上げる回 6 の PR が作る）（いまは `DocumentMeta.format_version` が 5 固定）の一致を要る。形式が上がった後は、旧い形式の参加者を断る。
 - manifest：変えない。`document_format`、`.altoproj`、薄い `.alto`、`LazyObjects` は触れない。基点の `.alto` は既存の `save(target, { history: "omit" })`。
 - 描画の版：触れない。共同編集は描画に触れない。`render_version` は `hello` で一致を見る。v4 が入るのは RV4-1 の後で、その後は v3 と v4 の文書を別の部屋として扱う。
-- `PROTOCOL`：**上げる**（値は要割り当て）。要求 `collabAttach`、`collabConfirm`、`collabMissing`、`collabReadObject`、`collabInstallObject`、`collabDigest`、`collabDetach`（新規）と、ワーカーから出る `outgoing` の通知を足す。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：**上げる**（13。段階4の回。00-ROADMAP の番号の表）。要求 `collabAttach`、`collabConfirm`、`collabMissing`、`collabReadObject`、`collabInstallObject`、`collabDigest`、`collabDetach`（新規）と、ワーカーから出る `outgoing` の通知を足す。README と RELEASING を同じ PR で更新する。
 - 通信のプロトコル：`@alto/collab` の `COLLAB_PROTOCOL`（新規）の初版の値。SDK の `PROTOCOL` とは別に持つ。
 - 復旧のジャーナル：共同編集の確定を表す記録 `JournalKind::Collab`（新規）を足す。`transaction.json` に `entry`（`seq`、`client`、`id`、`ops`、`bases`）と、自分の取引の通知かどうか（`own`）を入れる。`journal_record` はオブジェクトも入れる。チェックポイントに `collab.json`（新規。`actor`、確定済みの `seq`、未確定の列、休止中の印）を足す。復旧は同じ関数で再生し、`after` が合わなければ `Replayed::Diverged` を返す（既存の扱い）。復旧後は `resume` で再接続できる。旧い記録を読む必要はない（共通規則3、移行なし）。
 - `ErrorCode`：足さない。`ConflictReason` に `collab-active`、`collab-pending-rejected`、`ErrorDetails.reason` に `collab-pending` を足す（`packages/alto-sdk/src/errors.ts`）。
@@ -283,7 +283,7 @@ export interface CollabPort {
 
 ### 依存
 
-- 先に：VER-3（`merge_text`（新規））、VER-6（オブジェクトの符号化と内容アドレスの転送の形を揃える。コードの依存は無いが、同じ符号化を使う）。01 の RV4-1（`FORMAT_VERSION`（新規）の一致を `hello` で見る。無ければ現在の 5 を直接比べ、RV4-1 の後で置き換える）。
+- 先に：VER-3（`merge_text`（新規））、VER-6（オブジェクトの符号化と内容アドレスの転送の形を揃える。コードの依存は無いが、同じ符号化を使う）。回 6 の PR（06 の TXT-4〜TXT-7。01 の「共通の設計」の `FORMAT_VERSION`（新規）の一致を `hello` で見る。無ければ現在の 5 を直接比べ、回 6 の後で置き換える）。
 - 後に：なし。
 
 ## Review Focus

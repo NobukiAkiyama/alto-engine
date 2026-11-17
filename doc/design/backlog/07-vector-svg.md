@@ -38,7 +38,7 @@
 
 - 11-04 は着色を `vector-q14.wgsl` と書いていた。979f1d7 で、パスごとの dispatch をやめて crop をまとめ `glyph-q14.wgsl` で重ねる形になった。`vector-q14.wgsl` は描画に使われない。
 - 同じ変更で、座標変換（`map_path`）と線の輪郭がノード単位で保持されるようになった（`PreparedVector`）。勾配は被覆に依存しないので、この保持の対象外にできる。
-- 11-04 は FX-9 を「共通シェーダー関数を WGSL の共通ファイルから使う」と書いた。FX-9 は 02-effects.md の項目で、先に着手した側が共通部分を作る。
+- 11-04 は FX-9 を「共通シェーダー関数を WGSL の共通ファイルから使う」と書いた。FX-9 は 02-effects.md の項目で、共通部分（`Gradient`、`gradient-q14.wgsl`）は VEC-1 が先に作る（00-ROADMAP の重なりの表）。
 
 ### 設計
 
@@ -113,11 +113,11 @@ export type VectorPaint = Color | VectorGradient;
 
 ### 形式と通信
 
-- `format_version`：**上げる**（要割り当て）。`fill` と `stroke.color` に新しい形が入り、古い実装は `deny_unknown_fields` で読めない。VEC-2 の `dash` と同じ番号にまとめる。`DocumentMeta.format_version` は全スナップショットに入るので、文書全体のバイト列は変わる（単色だけの文書も）。変わらないのは `StyledPath` の直列化と `fingerprint` で、試験で固定する。
-- `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は要割り当て）。
+- `format_version`：**上げる**（7。00-ROADMAP の番号の表）。`fill` と `stroke.color` に新しい形が入り、古い実装は `deny_unknown_fields` で読めない。VEC-2 の `dash` と同じ番号にまとめる。`DocumentMeta.format_version` は全スナップショットに入るので、文書全体のバイト列は変わる（単色だけの文書も）。変わらないのは `StyledPath` の直列化と `fingerprint` で、試験で固定する。
+- `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は 7。`FORMAT_VERSION`／`SUPPORTED_FORMATS` と manifest・`gc.rs`・`merge.rs` の経路は回 6 の PR（06）が先に入れるので、この PR は 7 を足す。回 6 より先に入るなら、この PR が基盤を入れ、番号を取り直す）。（新規）
 - `PROTOCOL`：上げない。新しい要求は無く、`setVector` のペイロードの型が広がるだけである。
 - 描画の版：v3 のまま。既存の画素と `tests/parity/` の既存行は変わらない（共通規則1）。勾配は新しい行を足すだけである。
-- シェーダーのモード番号：使わない（効果の段ではなく crop の着色 dispatch）。FX-9 の勾配の平面（モード番号は要割り当て）と `gradient-q14.wgsl` を共有する。
+- シェーダーのモード番号：使わない（効果の段ではなく crop の着色 dispatch）。FX-9 の勾配の平面（モード 42）と `gradient-q14.wgsl` を共有する。
 
 ### 作業手順
 
@@ -125,7 +125,7 @@ export type VectorPaint = Color | VectorGradient;
 - Create `crates/alto-core/src/gradient.rs`（新規。FX-9 が先に作った場合は Modify）、`crates/alto-gpu/shaders/gradient-q14.wgsl`（新規。FX-9 と共有）、`crates/alto-gpu/shaders/vector-gradient-q14.wgsl`（新規）。
 - Modify `crates/alto-core/src/lib.rs`、`crates/alto-vector/src/lib.rs`、`crates/alto-vector/src/glyph.rs`、`crates/alto-engine/src/vector_tests.rs`、`crates/alto-engine/examples/create-vector-sample.rs`、`crates/alto-gpu/src/cpu_composite/known_value_tests.rs`、`crates/alto-wasm/src/vector_probe.rs`、`crates/alto-gpu/src/raster_q8.rs`、`crates/alto-gpu/src/renderer/tile_renderer/paint.rs`、`crates/alto-gpu/src/renderer/tile_renderer/mod.rs`、`crates/alto-gpu/src/renderer.rs`、`crates/alto-gpu/src/renderer/tile_renderer/pool_tests.rs`、`crates/alto-gpu/src/renderer/uniform.rs`、`crates/alto-gpu/src/cpu_composite/v3_tests.rs`、`crates/alto-doc/src/version.rs`、`crates/alto-doc/src/lib.rs`（`format_version` 検査）、`crates/alto-store/src/lib.rs`（manifest の `document_format` の書き出しと受け入れ。試験 `package_with_new_document_format_roundtrips`、旧番号は拒否）、`crates/alto-engine/src/svg.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-text/src/outline.rs`（`Paint::Solid` への置き換え）、`tests/e2e/cpu-composite.js`、`tests/e2e/parity-tests.js`、`tests/parity/v3-browser.txt`（追記のみ）、`packages/alto-sdk/src/types.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`examples/browser-playground/vector-ui.js`。
 
-**Interfaces:** Produces `Paint`、`Gradient`、`GradientKind`、`GradientStop`、`Gradient::validate`、`raster_q8::gradient_plan`、`raster_q8::gradient_q14`、`vector_gradient_q14` パイプライン。Consumes FX-9 と共有する `gradient_q14` の WGSL（先に着手した側が作る）。
+**Interfaces:** Produces `Paint`、`Gradient`、`GradientKind`、`GradientStop`、`Gradient::validate`、`raster_q8::gradient_plan`、`raster_q8::gradient_q14`、`vector_gradient_q14` パイプライン。Consumes なし。`gradient_q14` の WGSL は本項目が作り、FX-9 が使う（00-ROADMAP の重なりの表）。
 
 - [ ] 手順1：`Paint` と `Gradient` を入れ、`fill` と `stroke.color` の型を変えて全呼び出し元（上の Modify の一覧）を `Paint::Solid` でビルドが通るようにする。この時点で描画の挙動は変えない。
 - [ ] 試験（`alto-vector`）`solid_paint_serializes_as_before`（既存のスナップショットの `fingerprint` が不変）、`gradient_roundtrips_through_json`、`paint_array_and_object_are_told_apart`。
@@ -141,7 +141,7 @@ export type VectorPaint = Color | VectorGradient;
 
 ### 依存
 
-- 先に：なし（FX-9 と共有する `gradient-q14.wgsl` と `alto-core` の型はどちらが先でもよい）。VEC-3 の段階2が VEC-1 に依存する。
+- 先に：なし。`Gradient`（`crates/alto-core/src/gradient.rs`（新規））、`gradient-q14.wgsl`（新規）、停止点の格納の持ち主は本項目で、FX-9（02）より先に入れる（00-ROADMAP の重なりの表）。VEC-3 の段階2が VEC-1 に依存する。
 - 後に：VEC-3 段階2（SVG の勾配）、IMG-2（勾配のベクターの確定）。FX-9 とは型と WGSL を共有する。
 
 ## VEC-2 破線
@@ -196,8 +196,8 @@ pub struct Dash { pub pattern: Vec<f32>, #[serde(default)] pub offset: f32 }
 
 ### 形式と通信
 
-- `format_version`：**上げる**（要割り当て。VEC-1 と同じ番号にまとめる）。`dash` は `deny_unknown_fields` の型に増え、古い実装は読めない。`dash` なしの文書のバイト列は変わらない。
-- `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は要割り当て）。
+- `format_version`：**上げる**（7。VEC-1 と同じ回）。`dash` は `deny_unknown_fields` の型に増え、古い実装は読めない。`dash` なしの文書のバイト列は変わらない。
+- `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は 7。VEC-1 と同じ）。
 - `PROTOCOL`：上げない（要求の追加なし）。
 - 描画の版：v3 のまま。破線なしの画素は変わらない（共通規則1）。破線の画素は新規。
 - シェーダー：変更なし（輪郭は CPU が作る）。
@@ -311,7 +311,7 @@ XML の展開攻撃には、`roxmltree` の `allow_dtd: false`（エンティテ
 ### 依存
 
 - 先に：段階2は VEC-1、段階3は VEC-2、段階5は 06-text.md の組版が安定していること（TXT-5、TXT-6 などで `TextContent` が増える場合、`<text>` の写し先を合わせる）、段階4の復号は依存の決定（JPEG）。段階1と段階6は独立。
-- 後に：なし。QA-1 の fuzz target `svg` は段階ごとに seed を増やして使う。
+- 後に：なし。QA-1 の fuzz target `svg` は段階ごとに seed を増やして使う。直接依存の `png` crate は本項目が足し、COL-5、COL-2（01）が共有する（00-ROADMAP の重なりの表）。
 
 ## VEC-4 vello 本体描画
 
@@ -351,7 +351,7 @@ XML の展開攻撃には、`roxmltree` の `allow_dtd: false`（エンティテ
 ### 形式と通信
 
 - `format_version`：触れない（保存データと編集 Op は描画の経路から独立）。
-- `PROTOCOL`：Worker の初期化要求に `vectorPreview`（新規）が増えるなら**上げる**（要割り当て）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：Worker の初期化要求に `vectorPreview`（新規）が増えるなら**上げる**（13。段階4の回）。README と RELEASING を同じ PR で更新する。
 - 描画の版：v3 のまま。正本の画素は変えない（共通規則1）。vello は表示だけの別経路で、parity の対象外。
 - シェーダー：`vello-import-q14.wgsl` は効果のモード番号を使わない（ノード内容の入力変換）。
 

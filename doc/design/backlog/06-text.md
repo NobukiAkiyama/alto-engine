@@ -26,9 +26,9 @@
 ### 追加するフィールドの扱い
 
 - `TextContent` に足すフィールドはすべて `#[serde(default, skip_serializing_if = ...)]` とし、既定値のときは JSON に出さない。既存の文書は保存、ジャーナルのダイジェスト、`text_entry` の鍵（`serde_json` で直列化した内容）が1バイトも変わらない。試験 `new_text_fields_serialize_as_before`（新規）（既存の3つの parity テキストの直列化が追加前と同じ）で固定する。
-- 新しいフィールドは `deny_unknown_fields` の型へ入るので、旧版は新しい文書を開けない。共通規則3により `format_version` を上げる（値は要割り当て）。同じ時期の PR は1回の番号にまとめる。案：TXT-4、5、6、7 を1回、TXT-1、2 を1回、TXT-8 を1回、TXT-3 を1回。TXT-10 の文書属性は RV4-1 の `render_version` と同じ回にする。
+- 新しいフィールドは `deny_unknown_fields` の型へ入るので、旧版は新しい文書を開けない。共通規則3により `format_version` を上げる。値は 00-ROADMAP の番号の表：TXT-4、5、6、7 が 6、TXT-1、2 が 9、TXT-8 が 10、TXT-3 と TXT-9 が 12、TXT-10 は RV4-1 の `render_version` と同じ 13。回 6 は全文書で最初に番号を上げる回なので、その最初の PR が 01 の「共通の設計：形式番号を上げる経路」（`FORMAT_VERSION`、`SUPPORTED_FORMATS`（新規）、manifest の `document_format`、読み込みの受け入れ、`gc.rs`、`merge.rs`）を入れる。
 - `format_version` を上げるときは、パッケージの manifest も変える。`crates/alto-store/src/lib.rs` は `document_format: 5` を固定で書き、読み込みは 5 以外を `StoreError::Unsupported("package format")` で拒否する。したがって各回の作業手順に、書き出す値と受け入れる値の更新（`alto-store` の定数化を含む）、`crates/alto-doc/src/lib.rs` の `DocumentMeta` の 5 の更新、`document.rs` の形式の試験の更新を入れる。
-- `PROTOCOL` は、新しい要求（TXT-8 の `fontAxes`（新規））を足すときだけ上げる（値は要割り当て）。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけの項目は上げない。
+- `PROTOCOL` は、新しい要求（TXT-8 の `fontAxes`（新規））を足すときだけ上げる（TXT-8 は 10。段階2の回）。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけの項目は上げない。
 - ALTB（焼き込みの形式）は TXT-1〜9、11 で変えない（`BAKER_VERSION` を上げるのは、既存の入力の出力が変わる TXT-11 だけ）。ルビ、圏点、下線、色層はすべて既存の `BakeGlyph`（輪郭への参照、行列、位置、色）で表せる。したがって `decodeTextBake`（JS 参照）、`TextBake::decode`、WGSL は触れない。`BAKER_VERSION` も、既存の入力の出力が変わらないので上げない。
 
 ### 範囲の追従
@@ -131,7 +131,7 @@ pub struct RubyRange {
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-1、2 で1回。値は要割り当て）。`deny_unknown_fields` の `TextContent` に `ruby` が加わる。
+- `format_version`：上げる（TXT-1、2 で回 9）。`deny_unknown_fields` の `TextContent` に `ruby` が加わる。
 - `PROTOCOL`：上げない。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけ。
 - ALTB と描画：変えない。render v3。`text-bake.txt` に新しい行 `text-v3-ruby-horizontal`、`text-v3-ruby-vertical`（新規）を足す。既存3行は不変。
 - 差分：`ContentDetail::Text` に `ruby: bool`（新規）を足し、`describe`（`alto-git`）に「ルビ」を足す。
@@ -189,7 +189,7 @@ pub struct EmphasisRange { pub start: u32, pub end: u32, pub mark: EmphasisMark,
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-1 と同じ回。値は要割り当て）。
+- `format_version`：上げる（TXT-1 と同じ回 9）。
 - `PROTOCOL`：上げない。ALTB と描画：変えない。`text-bake.txt` に `text-v3-emphasis`（新規）を足す。
 - 差分：`ContentDetail::Text` に `emphasis: bool`（新規）。
 
@@ -247,7 +247,7 @@ SDK：`doc.text.setWarichu(id, start, end, on = true)`。意図は `"text.warich
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-3 の回。値は要割り当て）。TXT-3a は形式を変えない。
+- `format_version`：上げる（TXT-3 の回 12。TXT-9 と同じ）。TXT-3a は形式を変えない。
 - `PROTOCOL`：上げない。ALTB と描画：変えない。`text-bake.txt` に `text-v3-warichu`（新規）。
 - 差分：`ContentDetail::Text` に `warichu: bool`（新規）。
 
@@ -290,7 +290,7 @@ SDK：`doc.text.setWarichu(id, start, end, on = true)`。意図は `"text.warich
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-4、5、6、7 で1回。値は要割り当て）。
+- `format_version`：上げる（TXT-4、5、6、7 で回 6）。最初に入る PR が番号の基盤（01 の「共通の設計：形式番号を上げる経路」）も入れる。
 - `PROTOCOL`：上げない。ALTB と描画：変えない。`text-bake.txt` に `text-v3-hanging`（新規）。
 - 差分：`ContentDetail::Text` に `hanging: bool`（新規）。
 
@@ -341,7 +341,7 @@ pub struct ParagraphAttr {
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-4、5、6、7 の回。値は要割り当て）。
+- `format_version`：上げる（TXT-4、5、6、7 の回 6）。
 - `PROTOCOL`：上げない。ALTB と描画：変えない。`text-bake.txt` に `text-v3-paragraph`（新規）。
 - 差分：`ContentDetail::Text` に `paragraphs: bool`（新規）。
 
@@ -397,7 +397,7 @@ pub struct Underline {
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-4、5、6、7 の回。値は要割り当て）。`TextStyle` と `StylePatch` に項目が加わる。
+- `format_version`：上げる（TXT-4、5、6、7 の回 6）。`TextStyle` と `StylePatch` に項目が加わる。
 - `PROTOCOL`：上げない。ALTB と描画：変えない。`text-bake.txt` に `text-v3-underline`、`text-v3-underline-vertical`（新規）。
 - 差分：`ContentDetail::Text.style` は `x.style != y.style || x.spans != y.spans` なので追加は不要。
 
@@ -442,7 +442,7 @@ pub struct Underline {
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-4、5、6、7 の回。値は要割り当て）。
+- `format_version`：上げる（TXT-4、5、6、7 の回 6）。
 - `PROTOCOL`：上げない。ALTB と描画：変えない（行列に入るだけ）。`text-bake.txt` に `text-v3-skew`、`text-v3-skew-vertical`（新規）。
 
 ### 作業手順
@@ -493,8 +493,8 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 
 ### 形式と通信
 
-- `format_version`：上げる（TXT-8 で1回。値は要割り当て）。
-- `PROTOCOL`：上げる。新しい要求 fontAxes（値は要割り当て）。README と RELEASING を同じ PR で更新する（共通規則3）。
+- `format_version`：上げる（TXT-8 で回 10）。
+- `PROTOCOL`：上げる。新しい要求 fontAxes（10。段階2の回）。README と RELEASING を同じ PR で更新する（共通規則3）。
 - ALTB と描画：変えない。`text-bake.txt` に `text-v3-variable`（新規）。
 - 差分：`ContentDetail::Text.style` が拾う。
 
@@ -537,7 +537,7 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 
 ### 形式と通信
 
-- `format_version`：上げる（`palette` を足すとき。TXT-8 と同じ回にしてよい。値は要割り当て）。
+- `format_version`：上げる（`palette` を足すとき。段階3なので TXT-3 と同じ回 12）。
 - `PROTOCOL`：上げない（警告は既存の `warnings` に載る）。ALTB と描画：変えない。`text-bake.txt` に `text-v3-colr`（新規）。依存の版を変えるとき以外、`BAKER_VERSION` は上げない。
 - 試験用の COLR v0 フォントを `tests/fonts` に OFL で足す。
 
@@ -589,9 +589,9 @@ pub struct TextRendering {
 
 ### 形式と通信
 
-- `format_version`：上げる（文書属性を足す。RV4-1 と同じ回。値は要割り当て）。
-- `render_version` は 4（RV4-1 が定義）。`PROTOCOL`：上げる（文書の作成や変換の引数にこの属性を足すとき。値は要割り当て）。
-- シェーダーのモード番号：文字のシェーダーは別ファイルなので、効果のモード番号（34 から）は使わない。必要になれば `glyph-q30.wgsl`（新規。01 に合わせた名前）に独自の番号を持つ（要割り当て）。
+- `format_version`：上げる（文書属性を足す。RV4-1 と同じ回 13）。
+- `render_version` は 4（RV4-1 が定義）。`PROTOCOL`：上げる（文書の作成や変換の引数にこの属性を足すとき。12。v4 の項目と同じ回）。
+- シェーダーのモード番号：文字のシェーダーは別ファイルなので、効果のモード番号（34〜43 は 02 が使う）は使わない。`glyph-q30.wgsl`（新規。01 に合わせた名前）は `glyph-q14.wgsl` と同じくモードの分岐を持たないので、番号は要らない。
 - v3 の文書は、ヒンティングなどの有無にかかわらず今のハッシュを保つ（試験は作業手順）。
 
 ### 作業手順

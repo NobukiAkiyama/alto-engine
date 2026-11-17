@@ -293,7 +293,7 @@ pub fn selection_ops(
 
 ### 依存
 
-- 先に要る項目：SEL-1（型）。`feather > 0` の実装は SEL-2。
+- 先に要る項目：SEL-1（型）。`feather > 0` の実装は SEL-2。IMG-3（05）は `crates/alto-wasm/src/image_versions.rs` の同じ閉包（`Rasterizers`（新規））を変えるので、IMG-3 を先に入れ、本項目はその後に引数を足す（00-ROADMAP の重なりの表）。
 - 後に続く項目：なし。VEC-1（グラデーション）、VEC-4（vello）はベクターの描画を変えるが、選択は `raster_q8` の被覆（塗りの α）だけを使うので、塗りの色やグラデーションは影響しない。`raster_q8` の被覆の計算が変わる項目（VEC-2 の破線は線だけ）が現れたら、この選択の試験を再確認する。
 
 ## SEL-4 被写体選択

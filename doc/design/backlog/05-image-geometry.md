@@ -102,7 +102,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 形式と通信
 
 - `format_version`：上げない。結果は通常のラスターで、新しいフィールドは無い。
-- `PROTOCOL`：上げる（新要求 `layerBake`）。値は要割り当て。`crates/alto-wasm/src/lib.rs` の `protocol_version`（`protocolVersion`）と `packages/alto-sdk/src/protocol.ts` の両方に反映する。（新規）
+- `PROTOCOL`：上げる（新要求 `layerBake`）。値は 10（段階2の回。00-ROADMAP の番号の表）。`crates/alto-wasm/src/lib.rs` の `protocol_version`（`protocolVersion`）と `packages/alto-sdk/src/protocol.ts` の両方に反映する。（新規）
 - 描画：v3 の画素は変えない。GPU の新しい段は作らない。`tests/parity/` に行は足さない。
 
 ### 作業手順
@@ -220,7 +220,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 形式と通信
 
 - `format_version`：上げない。
-- `PROTOCOL`：要求は増えない。結果の `LayerEditResult` に `missing` が増えるので、IMG-1 と同じ PR にまとめるなら一緒に上げる。単独なら上げない（SDK の型だけ増える）。要割り当て。
+- `PROTOCOL`：要求は増えない。結果の `LayerEditResult` に `missing` が増えるので、IMG-3 は段階1で IMG-1 より先に入るので、上げない（SDK の型だけ増える。古い SDK は増えた欄を読まない）。
 - 描画：v3 の画素は変えない。`glyph_q8.rs` の新しい関数は描画経路から呼ばない。
 
 ### 作業手順
@@ -244,7 +244,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 依存
 
 - 先に要る項目：なし（IMG-2 の前に入れる）。
-- 後に続く項目：IMG-2（`Rasterizers` と `tiles_from_q14` を再利用）、IMG-1（テキストの属性付き焼き込み）。TXT-1〜11 が組版を変えても、焼き込みはバイト列から作るので影響しない。（新規）
+- 後に続く項目：IMG-2（`Rasterizers` と `tiles_from_q14` を再利用）、IMG-1（テキストの属性付き焼き込み）、SEL-3（04。同じ閉包を変えるので後に入れる（00-ROADMAP の重なりの表））。06 の焼き込みの `Result` 化（`bake_ops`、`bake_text`。持ち主は 06）とは関数を共有しないので、順序の制約は無い。TXT-1〜11 が組版を変えても、焼き込みはバイト列から作るので影響しない。（新規）
 
 ## IMG-4 コンテンツミップマップ
 
@@ -327,8 +327,8 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 **候補が残った場合の形。**
 
 - CPU の結果が正本である。GPU 経路はその加速で、一致しない入力は CPU 経路に落とす。
-- 非同期にする必要がある（読み戻しは `await`）。IMG-1 の「計画（同期）・合成（非同期）・確定（同期）」の機構を再利用し、`imageEditGpu`（要求名は要割り当てでなく、新規）として別の要求にする。同期の `imageEdit` は変えない。（新規）
-- シェーダー：`crates/alto-gpu/shaders/image-edit-q14.wgsl`（新規）。モード番号は既存のシェーダーと別なので、効果の番号（要割り当て）とは無関係。
+- 非同期にする必要がある（読み戻しは `await`）。IMG-1 の「計画（同期）・合成（非同期）・確定（同期）」の機構を再利用し、`imageEditGpu`（新規）として別の要求にする。同期の `imageEdit` は変えない。（新規）
+- シェーダー：`crates/alto-gpu/shaders/image-edit-q14.wgsl`（新規）。モード番号は既存のシェーダーと別なので、効果の番号（34〜43。02）とは無関係。
 - 整数の定義域：WGSL は 64 ビット整数を持たない。`resize_pixel` は座標の計算を i128 で行う（`origin * 256 * 2 * new + …`）。GPU 経路は、すべての中間値が i32／u32 に収まる入力（辺長と原点の積が `2^31 / 512` 未満）に限り、それ以外は CPU に落とす。
 - GPU 喪失・予算超過・`GPU_UNSUPPORTED`・定義域外は、エラーでなく CPU への切り替え。文書は変わらない。
 - 3 つの GPU（Metal、lavapipe、SwiftShader）で CPU と全バイト一致しなければ採用しない。
@@ -336,7 +336,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 形式と通信
 
 - `format_version`：上げない。
-- `PROTOCOL`：測定で採用が決まり、新要求を足す場合は上げる。要割り当て。見送りなら上げない。
+- `PROTOCOL`：測定で採用が決まり、新要求を足す場合は上げる（13。段階4の回）。見送りなら上げない。
 - 描画：v3 の画素は変えない。結果は CPU と同じ画素で、`tests/parity/` に行は足さない。
 
 ### 作業手順
@@ -416,7 +416,7 @@ doc.image.warp(node, { kind: "displace", field: Int16Array /* Q4 の dx, dy を�
 ### 形式と通信
 
 - `format_version`：上げない（結果は通常のラスター）。
-- `PROTOCOL`：上げる。変位場の転送に新要求 `imageWarp: Q<{ edit: Record<string, unknown>; field?: ArrayBuffer }, { state: WireState; result: ImageEditResult }>` を足す。遠近とメッシュも同じ要求で通し、`imageEdit` の JSON に変位場を載せない。値は要割り当て。
+- `PROTOCOL`：上げる。変位場の転送に新要求 `imageWarp: Q<{ edit: Record<string, unknown>; field?: ArrayBuffer }, { state: WireState; result: ImageEditResult }>` を足す。遠近とメッシュも同じ要求で通し、`imageEdit` の JSON に変位場を載せない。値は 13（段階4の回）。
 - 描画：v3 の画素は変えない。CPU の確定編集のみ。
 
 ### 作業手順

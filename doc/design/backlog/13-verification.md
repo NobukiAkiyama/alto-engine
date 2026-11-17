@@ -388,7 +388,7 @@
    - 判定：復旧した状態が、**編集の列の何番目かの接頭辞**と完全に一致する（snapshot hash を編集ごとに記録しておく）。`durable()` が解決した編集は必ず含まれる。含まれない編集があれば欠陥。
    - 反復数：1回の実行で 50 回（seed 固定。失敗した seed と時刻を出力する）。CI では 10 回（SwiftShader で時間が長い。測ってから決める）。
    - 不安定なときに再実行で隠さない。失敗は seed つきで記録し、再現できなければ「未再現」と書く。
-2. **Worker が例外なく終わる場合。** Worker が `close()` で自分を終わらせても、`error` イベントも再起動の合図も出ない。`packages/alto-sdk/src/engine.ts` の再起動は `worker.onerror` のほか `retry()`、`recoverAfterStorageFailure`、bfcache からの復帰でも呼ばれるが、無言の終了を検出して起こす経路はない。したがって現状は検出されない見込みで、試験は先に「今は検出されず、要求が返らない」ことを確かめる欠陥の再現になる。直すなら、要求の無応答を監視して `WORKER_CRASHED` で拒否し再起動する設計を別に書く（SDK の変更。Worker との要求を増やすなら `PROTOCOL` を上げる必要がある。値は要割り当て）。判定条件：修正後は `restarting` から `ready` に戻り、確定済みの内容が残る。
+2. **Worker が例外なく終わる場合。** Worker が `close()` で自分を終わらせても、`error` イベントも再起動の合図も出ない。`packages/alto-sdk/src/engine.ts` の再起動は `worker.onerror` のほか `retry()`、`recoverAfterStorageFailure`、bfcache からの復帰でも呼ばれるが、無言の終了を検出して起こす経路はない。したがって現状は検出されない見込みで、試験は先に「今は検出されず、要求が返らない」ことを確かめる欠陥の再現になる。直すなら、要求の無応答を監視して `WORKER_CRASHED` で拒否し再起動する設計を別に書く（SDK の変更。Worker との要求を増やすなら `PROTOCOL` を上げる必要がある。値はその時期の回。00-ROADMAP の番号の表）。判定条件：修正後は `restarting` から `ready` に戻り、確定済みの内容が残る。
 3. **実機の GPU 喪失。** `destroyGpu` では起こせない。QA-3 の実機で、ブラウザの GPU プロセスを OS から落とす（`scripts/gpu-process-crash.mjs` が数える種類のクラッシュ）手順を手で試し、結果を GPU-MATRIX に書く。自動化しない。
 4. **マージ後の保存と "ours" の競合解決。** D-6 の記録の「試していない」を、`.altoproj` の保存の3時点（D-4）をマージ後の文書で繰り返し、解決を "ours" と明示値にして足す。
 

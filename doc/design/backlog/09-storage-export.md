@@ -170,7 +170,7 @@ pub enum ObjectTarget {
 ### 形式と通信
 
 - `format_version`、manifest の `format`：上げない。保存の形は変えない。
-- `PROTOCOL`：上げる（要割り当て）。`provideObjects` の対象 `resident`、`readStored`（Storage Worker 側）、`open` の `tiles: "on-demand"`、`createEngine` の `memory`、エラーの読み直しの往復。（新規）
+- `PROTOCOL`：上げる（11。段階3の回）。`provideObjects` の対象 `resident`、`readStored`（Storage Worker 側）、`open` の `tiles: "on-demand"`、`createEngine` の `memory`、エラーの読み直しの往復。（新規）
 - ジャーナル：変えない。チェックポイントの `lazy-objects.json` を使う。`loadCandidate` に選択肢を足す（Storage Worker の内部の要求）。
 - 描画の版：触れない。画素は変わらない（未完成の表示タイルは表示だけ）。
 
@@ -219,7 +219,8 @@ Files：Modify `packages/alto-sdk/src/storage-core.ts`（`readStored`、`loadCan
 ### 依存
 
 - 先に要る項目：STO-5（`ZipIndex` を作る。`.alto` の範囲読みに使う）。QA-5（実装済み。クラッシュ試験の仕組み）。STO-9 は必須ではない（同じ `lazy.rs`、`gc.rs` を変えるので、先に入れると衝突が減る）。（新規）
-- 後に続く項目：IMG-4（05。ミップの鍵はタイルの取得経路に依る）、STO-6（派生キャッシュは STO-1 の後に測る）、STO-10（読み戻した破損の扱い）、PERF-3（10。冷えた描画の測定の前提が変わる）。
+- 先に入れる項目（同じファイル）：STO-10（`upload.rs` の目印と `TileStore::is_damaged`（新規）。段階2で先に入る）、VER-1（08。`ObjectTarget::Merge` を広げる。段階2）。本項目はその後に `wanted`、`pending`、`ObjectTarget` の `Nodes`、`Region` を足す（00-ROADMAP の重なりの表）。
+- 後に続く項目：IMG-4（05。ミップの鍵はタイルの取得経路に依る）、STO-6（派生キャッシュは STO-1 の後に測る）、STO-10 の追加分（部分読み込みで読み戻した破損を damaged に入れる）、PERF-3（10。冷えた描画の測定の前提が変わる）。
 
 ## STO-2 文書別ジャーナル
 
@@ -263,7 +264,7 @@ Interfaces：Produces `EngineOptions.storage.namespace: "auto" | string`、`Engi
 ### 依存
 
 - 先に要る項目：なし。
-- 後に続く項目：STO-8（最近使ったファイルと復旧の一覧を同じ画面で使う場合）。工数は 11-04 版の M より小さい（S）見込み。Task 14 で見直す。
+- 後に続く項目：STO-8（最近使ったファイルと復旧の一覧を同じ画面で使う場合）。工数は 11-04 版の M から S に見直した（00-ROADMAP）。
 
 ## STO-3 JPEG、TIFF 書き出し
 
@@ -329,7 +330,7 @@ pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（要割り当て）。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
+- `PROTOCOL`：上げる（9。段階1の回）。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
 - 描画の版：触れない。
 
 ### 作業手順
@@ -347,7 +348,7 @@ Interfaces：Produces `alto_store::tiff::rgba8_header`、`TiffCompression`、`Ti
 ### 依存
 
 - 先に要る項目：なし。
-- 後に続く項目：COL-6（01。`tiff.rs` に CMYK とプロファイルの埋め込みを足す）、COL-1、COL-2、COL-3（01。同じ `ExportImageOptions` を広げる）、STO-4（逐次の経路を PNG から TIFF に広げる場合）。`ExportImageOptions` は STO-3 を先に入れ、01 の項目が後から足す順にする（Task 14 で確定）。
+- 後に続く項目：COL-6（01。`tiff.rs` に CMYK とプロファイルの埋め込みを足す。画素が WASM を通る見積りは 01 で直す）、COL-1、COL-2、COL-3（01。同じ `ExportImageOptions` を広げる。型と `tiff.rs` の持ち主は本項目で、段階1で先に入る（00-ROADMAP の重なりの表））、STO-4（逐次の経路を PNG から TIFF に広げる場合）。`ExportImageOptions` は STO-3 を先に入れ、01 の項目が後から足す順にする（00-ROADMAP の重なりの表で確定）。
 
 ## STO-4 逐次エンコーダー
 
@@ -377,7 +378,7 @@ Interfaces：Produces `alto_store::tiff::rgba8_header`、`TiffCompression`、`Ti
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（要割り当て）。要求3つ。
+- `PROTOCOL`：上げる（10。段階2の回）。要求3つ。
 - 描画の版：触れない。
 
 ### 作業手順
@@ -394,7 +395,7 @@ Interfaces：Produces `DocumentHandle.exportImageStream`、`PngStreamEncoder`。
 ### 依存
 
 - 先に要る項目：なし（STO-3 の型の後に入れると `ExportImageOptions` の衝突が減る）。
-- 後に続く項目：COL-2（01。16bit の PNG を逐次にする場合）。
+- 後に続く項目：COL-2（01。16bit の PNG を逐次にする場合）。COL-1、COL-5（01。`png.ts` に cICP、iCCP を足す。本項目の `PngStreamEncoder`（新規）の後に入る（00-ROADMAP の重なりの表））。
 
 ## STO-5 保存ファイルへのプレビュー格納
 
@@ -434,7 +435,7 @@ Interfaces：Produces `DocumentHandle.exportImageStream`、`PngStreamEncoder`。
 ### 形式と通信
 
 - manifest の `format`：上げない（manifest を変えない）。`format_version`：触れない。今の読み手は新しいエントリを無視する。
-- `PROTOCOL`：上げる（要割り当て）。`save` の要求の `preview`。
+- `PROTOCOL`：上げる（10。段階2の回）。`save` の要求の `preview`。
 - 描画の版：触れない。
 
 ### 作業手順
@@ -481,7 +482,7 @@ COLD-RENDERING-DESIGN の C をそのまま採る。ここでは今のコード�
 ### 形式と通信
 
 - `format_version`、manifest：触れない。保存ファイルに何も足さない。
-- `PROTOCOL`：Engine Worker への要求は増えない見込み（Cache Worker は Engine Worker が起こす）。ページから有効・無効を切り替える選択肢 `createEngine({ cache: { derived: boolean } })`（新規）を足すなら上げる（要割り当て）。
+- `PROTOCOL`：Engine Worker への要求は増えない見込み（Cache Worker は Engine Worker が起こす）。ページから有効・無効を切り替える選択肢 `createEngine({ cache: { derived: boolean } })`（新規）を足すなら上げる（11。段階3の回）。
 - 描画の版：触れない。キャッシュの画素は合成結果の写しで、鍵に描画の経路を含める。
 
 ### 作業手順
@@ -665,9 +666,9 @@ impl Document {
 
 ### 形式と通信
 
-- `format_version`：上げる（要割り当て）。スナップショットの意味（表の参照）が増える。manifest の `document_format` も同じ値にする。
-- manifest の `format`（2／3）：上げない案を既定にする。新しいエントリ `tables/` は今の読み手が無視するが、`document_format` の検査で先に拒まれるので、黙って壊れた文書として開かれることは無い。Task 14 で `format_version` を上げる他の項目と1回にまとめる。
-- `PROTOCOL`：上げる（要割り当て）。`openFolder` の読み込みで `tables/` を渡す、版の操作で表を渡す。
+- `format_version`：上げる（11。00-ROADMAP の番号の表）。スナップショットの意味（表の参照）が増える。manifest の `document_format` も同じ値にする。
+- manifest の `format`（2／3）：上げない案を既定にする。新しいエントリ `tables/` は今の読み手が無視するが、`document_format` の検査で先に拒まれるので、黙って壊れた文書として開かれることは無い。`format_version` は回 11（00-ROADMAP の番号の表）。manifest の `format` を上げないことは統合で確かめた。
+- `PROTOCOL`：上げる（10。段階2の回）。`openFolder` の読み込みで `tables/` を渡す、版の操作で表を渡す。
 - 描画の版：触れない。
 - 共通規則3と 13 の QA-1：`format_version` を上げる PR で、`fuzz/seeds/snapshot/`、`tests/fixtures/*.alto`、`verification/*.alto` の seed を作り直す。
 
@@ -735,7 +736,7 @@ Interfaces：Produces `SnapshotParts`、`Document::snapshot_parts`、`Document::
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（要割り当て）。`open`／`openFolder` の `onCorrupt`、`inspectDamaged`、`openProposal`、`save` の `dropDamaged`。（新規）
+- `PROTOCOL`：上げる（10。段階2の回）。`open`／`openFolder` の `onCorrupt`、`inspectDamaged`、`openProposal`、`save` の `dropDamaged`。（新規）
 - 描画の版：触れない（表示だけ。目印は正本と書き出しの契約の外）。
 
 ### 作業手順
@@ -753,7 +754,7 @@ Interfaces：Produces `decode_entries_tolerant`、`TileStore::is_damaged`、`Eng
 ### 依存
 
 - 先に要る項目：なし。STO-1 の後なら、部分読み込みで読み戻したオブジェクトの破損も damaged に入れられる（後から足す）。
-- 後に続く項目：なし。
+- 後に続く項目：STO-1（同じ `upload.rs` と `TileStore` を変える。本項目を段階2で先に入れる。00-ROADMAP の重なりの表）。
 
 ## STO-11 PSD 往復
 
@@ -805,7 +806,7 @@ Interfaces：Produces `decode_entries_tolerant`、`TileStore::is_damaged`、`Eng
 ### 形式と通信
 
 - `format_version`、manifest：触れない（PSD は文書の形式ではない）。
-- `PROTOCOL`：上げる（要割り当て）。`openPsd`、`exportPsd`。（新規）
+- `PROTOCOL`：上げる（13。段階4の回）。`openPsd`、`exportPsd`。（新規）
 - 描画の版：触れない。
 
 ### 作業手順

@@ -10,7 +10,7 @@
 
 **ブラシは v3 の整数経路ではない。** 11-04 版は `stroke_q8.rs` を「v3 のストロークのカバレッジ」と書いたが誤りで、`crates/alto-gpu/src/stroke_q8.rs` はベクターパスの線の輪郭（`alto_vector::Stroke`）を整数で作る。ブラシは通らない。ブラシの検証は、WGSL と Rust の `cpu_paint` を ±2 の許容で比べる試験（`tests/e2e/browser-tests.js` の `GPU brush / pressure / tile boundary / exact Undo-Redo / eraser`）で行う。`tests/parity/*.txt` にブラシの行はない。
 
-**共通規則2の例外。** ROADMAP 共通規則2（描画の3実装、全バイト一致、v3 のシェーダーに浮動小数の演算を入れない）は、ブラシのストローク（`brush.wgsl`、f32）には適用しない。理由：ストロークの画素は GPU のスタンプ結果を読み戻して `Op::SetTiles` の正本にするので、GPU 間の差は文書へ混ざらず、履歴は結果で持つ。範囲：`brush.wgsl` と `cpu_paint`（ストロークの確定タイル）だけ。表示の合成（`effects-q14.wgsl` など）と、`tests/e2e/cpu-composite.js` を通る v3 の画素は例外に含めない。この例外は 00-ROADMAP の共通規則2に注記として記録する（Task 14）。
+**共通規則2の例外。** ROADMAP 共通規則2（描画の3実装、全バイト一致、v3 のシェーダーに浮動小数の演算を入れない）は、ブラシのストローク（`brush.wgsl`、f32）には適用しない。理由：ストロークの画素は GPU のスタンプ結果を読み戻して `Op::SetTiles` の正本にするので、GPU 間の差は文書へ混ざらず、履歴は結果で持つ。範囲：`brush.wgsl` と `cpu_paint`（ストロークの確定タイル）だけ。表示の合成（`effects-q14.wgsl` など）と、`tests/e2e/cpu-composite.js` を通る v3 の画素は例外に含めない。この例外は 00-ROADMAP の共通規則2に注記として記録した。
 
 ## 決定が要る点
 
@@ -55,7 +55,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 
 - `format_version`：触れない。ストロークは `Op::SetTiles` で保存され、ダブは保存されない。
 - render v3 の画素：触れない（表示の合成は変えない）。既存の丸いダブは従来と同じ式を通る。
-- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、現在 8）：`beginBrush` の `config` が増えるので上げる（値は要割り当て）。BR-4〜BR-5 の `dynamics` と同じ PR なら1回で足りる。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、現在 8）：`beginBrush` の `config` が増えるので上げる（10。00-ROADMAP の番号の表の段階2の回）。BR-4、BR-5 は段階1の回（9）で先に上げる。BR-1〜BR-3 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
 - シェーダー：`brush.wgsl` の既存モードの変更で、新しいモード番号は不要。
 
 ### 作業手順
@@ -81,7 +81,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 ### 依存
 
 - 先に要る項目：なし。
-- 後に続く項目：BR-2（楕円の変形を画像先端が共有する）、BR-4（`angle` を傾きから決める）。
+- 後に続く項目：BR-2（楕円の変形を画像先端が共有する）、BR-4（`angle` を傾きから決める）。COL-2（01。`brush.wgsl` の 16bit 版は BR-1〜BR-3 の後に足す（00-ROADMAP の重なりの表））。
 
 ## BR-2 画像の先端
 
@@ -125,9 +125,9 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 ### 形式と通信
 
-- `format_version`：案 A は触れない。案 B は `AssetKind` が `deny_unknown_fields` の型なので、`BrushTip { width, height }` への変更で上げる（値は要割り当て）。
+- `format_version`：案 A は触れない。案 B は `AssetKind` が `deny_unknown_fields` の型なので、`BrushTip { width, height }` への変更で上げる（案 B を選んだときだけ。そのとき作業中の回の番号に入れ、回が無ければ次の空き番号を取る。00-ROADMAP の番号の表）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（BR-1 と同じ PR なら1回。値は要割り当て）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
+- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（10。BR-1 と同じ段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -184,7 +184,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない（BR-2 の決定が要る点と同じ）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（BR-2 と同じ PR なら1回。値は要割り当て）。
+- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（10。BR-1 と同じ段階2の回）。
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -233,7 +233,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ）。
-- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので上げる（BR-1 と同じ PR なら1回。値は要割り当て）。
+- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので上げる（9。段階1の回。BR-5 と同じ回）。
 - シェーダー：変更なし（`angle` は BR-1 の `extra` で渡る）。
 
 ### 作業手順
@@ -300,7 +300,7 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ。既定のカーブは今の出力と同じ）。
-- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので上げる（BR-1 と同じ PR なら1回。値は要割り当て）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので上げる（9。段階1の回。BR-4 と同じ回）。README と RELEASING を同じ PR で更新する。
 - 公開 API：`BrushOptions.pressureSize` / `pressureOpacity` を削除する破壊的変更（決定が要る点）。`packages/alto-sdk/api/alto-engine.api.md` を更新する。
 - シェーダー：変更なし。
 
@@ -360,7 +360,7 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 
 - `format_version`：触れない（`max_undo` は保存しない）。
 - render v3：触れない。
-- `PROTOCOL`：`init` の要求が増えるので上げる（値は要割り当て）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`init` の要求が増えるので上げる（9。段階1の回。BR-4、BR-5 と同じ回）。README と RELEASING を同じ PR で更新する。
 - シェーダー：変更なし。
 
 ### 作業手順

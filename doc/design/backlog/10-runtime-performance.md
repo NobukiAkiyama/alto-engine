@@ -80,7 +80,7 @@
 ### 形式と通信
 
 - 文書の形式（`format_version`）：変えない。
-- `PROTOCOL`：Worker の `init` に利用する版（またはスレッド数）を渡す場合は上げる（要割り当て）。Worker が自分で `crossOriginIsolated` を見て選ぶなら上げない。
+- `PROTOCOL`：Worker の `init` に利用する版（またはスレッド数）を渡す場合は上げる（11。段階3の回）。Worker が自分で `crossOriginIsolated` を見て選ぶなら上げない。
 - 描画の版：変えない。共通規則1のとおり既存の画素を変えない。
 - 公開 API：変えない。`doc/embedding.md` 第4章に、「COOP / COEP は要らない。付けると速くなる場合がある」と1行足す。
 
@@ -133,7 +133,7 @@
 ### 形式と通信
 
 - 文書の形式：変えない。書き出す `.alto` のバイト列も変えない（同じ入力から同じバイト列。圧縮の結果は LZ4 の決定的な出力を使う）。
-- `PROTOCOL`：変えない。Compute プールとの要求は Engine Worker と Compute Worker の間の内部の枠で、SDK と Worker の間ではない。`setDecodeWorkers` の意味も変えない。診断のために `unstable` へ項目を足す場合だけ、要求が増えるので `PROTOCOL` を上げる（要割り当て）。
+- `PROTOCOL`：変えない。Compute プールとの要求は Engine Worker と Compute Worker の間の内部の枠で、SDK と Worker の間ではない。`setDecodeWorkers` の意味も変えない。診断のために `unstable` へ項目を足す場合だけ、要求が増えるので `PROTOCOL` を上げる（11。段階3の回）。
 - 配布：`alto_decode_bg.wasm` が変わるので、`wasm/SHA256SUMS` と `verification/build.json` を更新する。
 
 ### 作業手順
@@ -260,7 +260,7 @@
 ### 依存
 
 - 先に要る：なし。
-- 後に続く：VEC-4（vello の readback の整理と競合しうる）。RUN-5 の export の待ちの契約。
+- 後に続く：VEC-4（vello の readback の整理と競合しうる）。RUN-5 の export の待ちの契約。`FRAME_FIELDS`（`crates/alto-wasm/src/lib.rs`）は PERF-1 も足す。両方とも末尾に足し、JS は名前で読む。順序の制約は無い（00-ROADMAP の重なりの表）。
 
 ## RUN-5 他 queue、外部 GPU API との所有権移譲
 
@@ -297,7 +297,7 @@
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`exportBitmap`（新規）の要求を足すので上げる（要割り当て）。既存の `exportImage` は変えない。
+- `PROTOCOL`：`exportBitmap`（新規）の要求を足すので上げる（13。段階4の回）。既存の `exportImage` は変えない。
 - 公開 API：`Document.exportBitmap`（新規）を足す。`pnpm --dir packages/alto-sdk api` で `packages/alto-sdk/api/` の報告を更新する。
 
 ### 作業手順
@@ -365,7 +365,7 @@
 ### 依存
 
 - 先に要る：PERF-5（時刻計測）、PERF-2（シーン索引。計画の費用を先に下げる）。
-- 後に続く：IMG-4（再測定の前提）、VEC-4（判定は後）。
+- 後に続く：IMG-4（再測定の前提）、VEC-4（判定は後）。`FRAME_FIELDS` は RUN-4 と同じ規則（末尾に足す）（00-ROADMAP の重なりの表）。
 
 ## PERF-2 シーン索引
 
@@ -518,8 +518,8 @@
 
 ### 依存
 
-- 先に要る：PERF-5。PERF-1 の判定（ジョブの形を共有する）。
-- 後に続く：PERF-7（測定を判断材料にする）。
+- 先に要る：PERF-5。PERF-1 の判定（ジョブの形を共有する）。02 の段階2の効果（FX-1〜FX-6、FX-9）を先に入れ、本項目がそれらの段を含めて `stages.rs`、`graph.rs` の再帰を明示タスクに直す（00-ROADMAP の重なりの表）。
+- 後に続く：PERF-7（測定を判断材料にする）。RV4-1（01）と FX-8（02）は、本項目を実装するならその後に、明示タスクの形で段を足す（00-ROADMAP の重なりの表）。
 
 ## PERF-5 復旧内部の段階別計時
 
@@ -561,7 +561,7 @@
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`recoveryStages`（新規）の要求を足すので上げる（要割り当て）。
+- `PROTOCOL`：`recoveryStages`（新規）の要求を足すので上げる（9。段階1の回）。
 - 公開 API：`@alto/engine/unstable` に1関数。互換の約束の外（`doc/embedding.md` 第1章）。
 
 ### 作業手順

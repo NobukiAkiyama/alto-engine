@@ -34,12 +34,12 @@ VER-4（stash）、VER-6（リモート）、GIT-1（Git から取り込んだ�
 - 根を2種類に分ける。`VersionRefs::roots`（今のまま）は「Git に写す、共有する根」。新しい `VersionRefs::local_roots`（新規）は stash とリモートの先頭。GC、開くときの必須コミット、`validate_graph`、`store_roots_contained` は両方を使う（`VersionRefs::all_roots`（新規）= `roots` + `local_roots`）。`alto-git` の写像と `log_dag` の `all_branches` は `roots` だけを使う。
 - `alto-git` の `mirror_manifest` は、Git に写すコミットの manifest から `local_roots` の参照を外す。外さないと、取り出した木が「参照されたコミットが無い」で開けない。（新規）
 - manifest の `format`：`Manifest` は `deny_unknown_fields` で、`refs: VersionRefs` を `flatten` している。serde_derive はこの組み合わせでも残りのキーを検査するので、**今の読み手は refs に増えたキー（例：`stashes`）を持つ manifest を拒否する**（`unknown field`。`decode_entries_impl` では `CORRUPT_DATA`（`manifest: …`））。旧版が黙ってキーを捨て、GC で stash やリモートの版を消す危険は無い。それでも新しいフィールドを書く manifest の `format` は上げる。旧版が「壊れたパッケージ」ではなく `UNSUPPORTED`（`decode_entries_impl` の format の照合）を返し、新版が形式で読み方を分けられるようにするため。試験 `old_reader_refuses_unknown_ref_keys`（新規）で今の拒否を固定し、`new_ref_fields_raise_the_manifest_format`（新規）で format が上がることを固定する。
-  - したがって新しいフィールドを持つ manifest は `format` を上げる（値は要割り当て）。今の `format` は「2＝完全、3＝薄い」の2値で意味を持つので、組み合わせが増える。
+  - したがって新しいフィールドを持つ manifest は `format` を上げる（値は 4。下の案 B。案 A なら 4 と 5）。今の `format` は「2＝完全、3＝薄い」の2値で意味を持つので、組み合わせが増える。
   - 案 A：新しい番号を2つ（完全、薄い）割り当てる。
   - 案 B：新しい番号を1つ割り当て、その番号では `external_history` の有無で薄いかどうかを判定する。`decode_entries_impl` は `(2, なし)`、`(3, あり)`、`(新, どちらでも)` を受ける。`decode_folder`、`prepare_gc`、`adopt_gc` の `format != 2` の検査を「完全である」の検査に書き換える。
-  - 既定：案 B。番号の決定は ROADMAP の統合でまとめる。番号は「新しいフィールドのどれかが空でないか」だけで決める：stash、リモート、Git の先頭のどれか1つでもあれば新しい番号、すべて空なら旧番号（2 または 3）のまま書き、バイト列も今と同じ。どのフィールドがあるかで番号を分けない。
+  - 既定：案 B。番号は 4（00-ROADMAP の番号の表）。今の試験 `crates/alto-store/src/lib.rs` の、format 4 を拒否すると確かめる行は、未知の番号（例：99）に変える。番号は「新しいフィールドのどれかが空でないか」だけで決める：stash、リモート、Git の先頭のどれか1つでもあれば新しい番号、すべて空なら旧番号（2 または 3）のまま書き、バイト列も今と同じ。どのフィールドがあるかで番号を分けない。
 - `DocumentMeta::format_version`（文書の形式）は、この文書のどの項目でも上げない。文書の意味（ノード、効果）を変えないため。
-- `PROTOCOL`：`historyCommand` の新しいコマンドと新しい要求を足す項目は上げる（値は要割り当て）。Worker が知らないコマンドは `INVALID_ARGUMENT` になるので、SDK と Worker の版の食い違いを接続時に止める。
+- `PROTOCOL`：`historyCommand` の新しいコマンドと新しい要求を足す項目は上げる（VER-4 は 9、VER-5 は 10、GIT-2 は 11、VER-6 は 13。00-ROADMAP の番号の表）。Worker が知らないコマンドは `INVALID_ARGUMENT` になるので、SDK と Worker の版の食い違いを接続時に止める。
 
 ## VER-1 複数の共通祖先
 
@@ -216,7 +216,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 ### 依存
 
 - 先に：TXT-5（06。`remap_range` と `Edit`、`RangePolicy`）。06 の `bake_ops` を `Result` にする変更（TXT の焼き込みの上限）。（新規）
-- 後に：TXT-1、TXT-2、TXT-3、TXT-6、TXT-7 など、06 で `TextContent` に範囲を足す項目は、`merge_text` の範囲の一覧に足す。COLLAB-1（同じ文字の差分を使う）。（新規）
+- 後に：TXT-1、TXT-2、TXT-3、TXT-6、TXT-7 など、06 で `TextContent` に範囲を足す項目は、`merge_text` の範囲の一覧に足す。COLLAB-1（12。`merge_text` を呼び、`Result` を `.ok()` で包む）。（新規）
 
 ## VER-4 stash
 
@@ -269,9 +269,9 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 ### 形式と通信
 
-- manifest：`stashes` を持つ manifest は `format` を上げる（値は要割り当て。「共通の設計」の案 B が既定）。stash が空なら今の形式のまま書く。
+- manifest：`stashes` を持つ manifest は `format` を上げる（4。「共通の設計」の案 B が既定）。stash が空なら今の形式のまま書く。
 - `format_version`（文書）：上げない。描画の版：触れない。
-- `PROTOCOL`：上げる（値は要割り当て）。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
+- `PROTOCOL`：上げる（9。段階1の回）。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
 - SDK の型：`VersionRefs.stashes`（`packages/alto-sdk/src/image-types.ts`）、`StashEntry`、`MergePlan.kind` に `"stash"`。API 報告を更新する。（新規）
 
 ### 作業手順
@@ -293,8 +293,8 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 ### 依存
 
-- 先に：なし（manifest の形式の規則を最初に入れる項目になりうる）。
-- 後に：VER-6、GIT-1（同じ `local_roots` と manifest の形式を使う）。（新規）
+- 先に：なし。manifest の `format` 4 と `local_roots`（新規）を最初に入れる項目である（段階1の独立項目ではなく、VER-6、GIT-1 の基盤）。`crates/alto-engine/src/versions/gc.rs` の `format != 2` の検査は本項目が書き換え、同じ行の `document_format != 5` は回 6 の PR（06）が書き換える（00-ROADMAP の重なりの表）。
+- 後に：VER-6、GIT-1（同じ `local_roots` と manifest の形式を使う）。COLLAB-1（12。`stash_apply` に `collab-active` の拒否を足す）。（新規）
 
 ## VER-5 履歴の打ち切り
 
@@ -351,7 +351,7 @@ doc.versions.saveTrimmed(  // 新規
 
 ### 形式と通信
 
-保存の形は完全な `.alto` かフォルダ。manifest の `format` は、出力に stash かリモートが残るとき VER-4、VER-6 の新しい番号（要割り当て）、残らなければ 2。この項目で新しい番号を作らない。`format_version`、描画の版は上げない。`PROTOCOL` は上げる（値は要割り当て）：打ち切ったパッケージを作る要求 `trimmedPackage`（新規）を足す。
+保存の形は完全な `.alto` かフォルダ。manifest の `format` は、出力に stash かリモートが残るとき VER-4、VER-6 の新しい番号 4、残らなければ 2。この項目で新しい番号を作らない。`format_version`、描画の版は上げない。`PROTOCOL` は上げる（10。段階2の回）：打ち切ったパッケージを作る要求 `trimmedPackage`（新規）を足す。
 
 ### 作業手順
 
@@ -449,9 +449,9 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
 
 ### 形式と通信
 
-- manifest：`remotes` を持つ manifest は `format` を上げる（値は要割り当て。VER-4 と同じ番号にまとめる。「共通の設計」）。
+- manifest：`remotes` を持つ manifest は `format` を上げる（4。VER-4 と同じ番号。「共通の設計」）。
 - `format_version`（文書）、描画の版：触れない。
-- `PROTOCOL`：上げる（値は要割り当て）。`fetchPlan`、`fetchCheck`、`pushEntries`（いずれも新規の要求）と、`historyCommand` の `fetch_apply`、`remove_remote`（新規）を足す。
+- `PROTOCOL`：上げる（13。段階4の回）。`fetchPlan`、`fetchCheck`、`pushEntries`（いずれも新規の要求）と、`historyCommand` の `fetch_apply`、`remove_remote`（新規）を足す。
 - `ObjectStorageProvider` の型は変えない。
 
 ### 作業手順
@@ -511,7 +511,7 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
 
 ### 形式と通信
 
-- Alto の manifest：`remotes` を使うので、VER-6 と同じ形式の規則（manifest の `format` を上げる。値は要割り当て）。
+- Alto の manifest：`remotes` を使うので、VER-6 と同じ形式の規則（manifest の `format` を上げる。値は 4）。
 - `SyncState`：`STATE_FORMAT` を 1 から 2 へ（Git の中の `alto-git` 専用の blob。Alto の形式番号の割り当ての対象外）。
 - `format_version`（文書）、描画の版、`PROTOCOL`：触れない（CLI だけ）。
 
@@ -535,7 +535,7 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
 ### 依存
 
 - 先に：VER-6 の `RemoteRefs`（無ければこの項目で作る）、VER-4 の manifest の形式。（新規）
-- 後に：GIT-3（同じ規則を TypeScript で持つ）。FX-8（02）は `Document::object_hashes` に `DisplacementMap` を足す。どちらが先でも、後の PR が列挙を揃える。（新規）
+- 後に：GIT-3（同じ規則を TypeScript で持つ）。FX-8（02、段階4）は本項目の後に入り、`Document::object_hashes` に `DisplacementMap` を足す（00-ROADMAP の重なりの表）。（新規）
 
 ## GIT-2 rebase、cherry-pick
 
@@ -587,7 +587,7 @@ SDK：`doc.versions.cherryPick(hash)`、`rebase(onto)`、`rebaseContinue()`、`r
 
 ### 形式と通信
 
-保存の形は変わらない（新しいコミットは普通のコミット。`RebaseState` は保存しない）。`format_version`、manifest、描画の版は上げない。`PROTOCOL` は上げる（値は要割り当て）：`historyCommand` に `cherry_pick`、`rebase_finish` を、要求に `rebaseStart`、`rebaseContinue`、`rebaseAbort`（新規）を足す。
+保存の形は変わらない（新しいコミットは普通のコミット。`RebaseState` は保存しない）。`format_version`、manifest、描画の版は上げない。`PROTOCOL` は上げる（11。段階3の回）：`historyCommand` に `cherry_pick`、`rebase_finish` を、要求に `rebaseStart`、`rebaseContinue`、`rebaseAbort`（新規）を足す。
 
 ### 作業手順
 

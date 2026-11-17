@@ -2,7 +2,7 @@
 
 基点：main `bdf26a9`（2026-11-17 書き直し）
 
-全項目の表と共通規則は [00-ROADMAP.md](00-ROADMAP.md)。追加の経路は本書の「追加の経路」（00 の「効果と描画の追加手順」の表は古いので、本書を正とする。Task 14 で 00 を直す）。
+全項目の表と共通規則は [00-ROADMAP.md](00-ROADMAP.md)。追加の経路は本書の「追加の経路」（00 の「効果と描画の追加手順」は本書に合わせた要約。詳細は本書を正とする）。
 
 **Goal:** シャープ、移動ぼかし、ノイズ、ハイパス、ドロップシャドウ、境界線、自動補正、置き換えマップ、非破壊グラデーションを既存の効果スタックへ載せる。
 
@@ -35,14 +35,14 @@
 | 描画用の型 | `crates/alto-engine/src/selection.rs`：`render_effect`、`effect_hashes`。`crates/alto-scene/src/lib.rs`：`REffectKind` |
 | v3 の採否 | `crates/alto-gpu/src/renderer/geometry.rs` の `v3_gap`、`tests/e2e/cpu-composite.js` の `isIntegerEffect` |
 | GPU の段 | `crates/alto-gpu/src/renderer/tile_renderer/stages.rs`（`stage`、`stack`、`effects`、`input_roi_v3`）、`graph.rs`（調整レイヤー）、`params.rs`（`q14_params`、`blur_params`） |
-| シェーダー | `crates/alto-gpu/shaders/effects-q14.wgsl` の `main` の分岐。連結順は `integer_effects_shader`（`crates/alto-gpu/src/lib.rs`）。使用中のモードは 8、17〜33（ほかのシェーダーは別の番号を持つ）。新規は「要割り当て」 |
+| シェーダー | `crates/alto-gpu/shaders/effects-q14.wgsl` の `main` の分岐。連結順は `integer_effects_shader`（`crates/alto-gpu/src/lib.rs`）。使用中のモードは 8、17〜33（ほかのシェーダーは別の番号を持つ）。新規は 34〜43（下の割り当て。00-ROADMAP の表）。モード 6 は v3 で分岐が無く 0 を書く（`targets.rs` の `zero`）ので使わない |
 | float の禁止 | `crates/alto-gpu/src/renderer/tile_renderer/pool_tests.rs` の `v3_stages_call_no_f32_coordinate_helper` が、`main` から届く全関数の float トークンを禁じる。新しい段もこれに通る |
 | CPU 参照 | Rust：`crates/alto-gpu/src/cpu_composite/effect_reference.rs`（新規。整数の独立実装と既知の値）。GPU との比較は `v3_tests.rs` の流儀。JS：`tests/e2e/cpu-composite.js` に BigInt で独立に実装（新規） |
 | parity | `tests/e2e/parity-tests.js` に症例、`tests/parity/v3-browser.txt` に行（`ALTO_WRITE_V3_BROWSER=1 node scripts/verify-browser.mjs --suite=parity`。追記のみ）。`tests/parity/cpu-reference.txt` は render v2 の合成の固定なので触れない |
 | SDK | `packages/alto-sdk/src/types.ts` の `Effect`、`packages/alto-sdk/api/alto-engine.api.md`（`pnpm --dir packages/alto-sdk api`） |
 | キャンバス編集 | `crates/alto-engine/src/canvas.rs` の `scale_effects`（下の表） |
 
-モードの割り当て：本書の新規モードは次の10個（番号は「要割り当て」）。ハイパスの結合、シャープの結合、移動ぼかし、ノイズ、距離場の初期化、距離場の1歩、距離から被覆、色つき平面、勾配の平面、置き換え。結合の合成には既存のモード 19（`layer_q14`：dst = A、src = B、不透明度、合成モード）、27（`clip_layer_q14`：基底のアルファを保つ）、22（選択）、25（再標本）、24（ぼかし）を使う。
+モードの割り当て：本書の新規モードは次の10個。34 ハイパスの結合、35 シャープの結合、36 移動ぼかし、37 ノイズ、38 距離場の初期化、39 距離場の1歩、40 距離から被覆、41 色つき平面、42 勾配の平面、43 置き換え。番号は段の働きに固定し、PR の順が変わっても変えない。結合の合成には既存のモード 19（`layer_q14`：dst = A、src = B、不透明度、合成モード）、27（`clip_layer_q14`：基底のアルファを保つ）、22（選択）、25（再標本）、24（ぼかし）を使う。
 
 ### ぼかしを内部に使う効果（FX-1、FX-2、FX-4、FX-5、FX-6）
 
@@ -145,10 +145,10 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 ### 形式と通信
 
-- `format_version`：**上げる**（要割り当て）。新しい `type` を持つ文書を古い実装は読めない。manifest の `document_format` は `crates/alto-store/src/lib.rs` が 5 を固定で書き、読み込みも 5 以外を `package format` で拒否するので、同じ番号へ上げる変更をこの作業に含める（FX-4 の作業手順の Modify に `crates/alto-store/src/lib.rs`）。FX-1〜FX-9 の新しい type は1回の番号上げにまとめる（ROADMAP で単位を決める）。
+- `format_version`：**上げる**（8。00-ROADMAP の番号の表）。新しい `type` を持つ文書を古い実装は読めない。manifest の `document_format` は `crates/alto-store/src/lib.rs` が 5 を固定で書き、読み込みも 5 以外を `package format` で拒否するので、同じ番号へ上げる変更をこの作業に含める（FX-4 の作業手順の Modify に `crates/alto-store/src/lib.rs`）。FX-1〜FX-6、FX-9 の新しい type は回 8 にまとめる。FX-8 は段階4なので別の回（16）。番号を上げる基盤（`FORMAT_VERSION` など）は回 6 の PR（06）が先に入れるので、この PR は `SUPPORTED_FORMATS` に 8 を足す。（新規）
 - `PROTOCOL`：上げない。`setEffects` のペイロードは `unknown[]` のまま。
 - 描画の版：v3 のまま。既存の画素と既存の parity 行は変わらない（`REffectKind` の追加だけ）。
-- シェーダーのモード番号：ハイパスの結合 1 つ（要割り当て）。
+- シェーダーのモード番号：ハイパスの結合 1 つ（34）。
 
 ### 作業手順
 
@@ -169,7 +169,7 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 ### 依存
 
 - 先に要る項目：なし（QA-1、QA-5 が先に入っていると形式変更をファザーが検査する）。
-- 後に続く項目：FX-1（結合段とぼかしの枝を共用）、FX-2、FX-5、FX-6（`smoothing_radius_q8`、`effect_growth_q8` を使う）、FX-8（`RoiQ::grow`）。（新規）
+- 後に続く項目：FX-1（結合段とぼかしの枝を共用）、FX-2、FX-5、FX-6（`smoothing_radius_q8`、`effect_growth_q8` を使う）、FX-8（`RoiQ::grow`）。（新規）PERF-4（10）は段階2の効果（FX-1〜FX-6、FX-9）の後に入り、`stages.rs`、`graph.rs` の再帰を明示タスクに直す（00-ROADMAP の重なりの表）。
 
 ## FX-1 シャープ（アンシャープマスク）
 
@@ -179,7 +179,7 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 ### 11-04 からの変化
 
-- FX-4 と同じ（パスの改名・分割、`Effect` の移動）。11-04 は結合のモードを 35 と書いていたが、番号は要割り当てに変えた。
+- FX-4 と同じ（パスの改名・分割、`Effect` の移動）。11-04 は結合のモードを 35 と書いていたが、番号は 35（シャープの結合）とし、ハイパスの結合を 34 にした（00-ROADMAP の表）。
 
 ### 設計
 
@@ -195,8 +195,8 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。`PROTOCOL`：上げない。描画の版：v3 のまま。
-- シェーダーのモード番号：シャープの結合 1 つ（要割り当て）。
+- `format_version`：FX-4 と同じ回 8。`PROTOCOL`：上げない。描画の版：v3 のまま。
+- シェーダーのモード番号：シャープの結合 1 つ（35）。
 
 ### 作業手順
 
@@ -247,8 +247,8 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。`PROTOCOL`：上げない。描画の版：v3 のまま。
-- シェーダーのモード番号：移動ぼかし 1 つ（要割り当て）。`hue_sincos_q14` は `main` から届くので float 禁止の検査に通る（現にある）。
+- `format_version`：FX-4 と同じ回 8。`PROTOCOL`：上げない。描画の版：v3 のまま。
+- シェーダーのモード番号：移動ぼかし 1 つ（36）。`hue_sincos_q14` は `main` から届くので float 禁止の検査に通る（現にある）。
 
 ### 作業手順
 
@@ -307,8 +307,8 @@ v3 のレベル 1 以上は子の縮小で作る（`compose_from_children`）の
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。`PROTOCOL`：上げない。描画の版：v3 のまま。
-- シェーダーのモード番号：ノイズ 1 つ（要割り当て）。
+- `format_version`：FX-4 と同じ回 8。`PROTOCOL`：上げない。描画の版：v3 のまま。
+- シェーダーのモード番号：ノイズ 1 つ（37）。
 
 ### 作業手順
 
@@ -375,8 +375,8 @@ v3 のレベル 1 以上は子の縮小で作る（`compose_from_children`）の
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。`PROTOCOL`：上げない。描画の版：v3 のまま。
-- シェーダーのモード番号：距離場の初期化、1歩、距離から被覆、色つき平面の4つ（要割り当て。FX-6 が使う）。
+- `format_version`：FX-4 と同じ回 8。`PROTOCOL`：上げない。描画の版：v3 のまま。
+- シェーダーのモード番号：距離場の初期化（38）、1歩（39）、距離から被覆（40）、色つき平面（41）の4つ（FX-6 も使う）。
 
 ### 作業手順
 
@@ -432,7 +432,7 @@ v3 のレベル 1 以上は子の縮小で作る（`compose_from_children`）の
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。`PROTOCOL`：上げない。描画の版：v3 のまま。
+- `format_version`：FX-4 と同じ回 8。`PROTOCOL`：上げない。描画の版：v3 のまま。
 - シェーダーのモード番号：新規なし（FX-5 の距離場の3つと色つき平面、既存の 19、27 を使う）。
 
 ### 作業手順
@@ -541,10 +541,10 @@ pub struct DisplacementMap { pub bounds: ImageBounds, pub tiles: TileMap }   // 
 
 ### 形式と通信
 
-- `format_version`：**上げる**（要割り当て、FX-4 と同じ番号にまとめる）。`DisplacementMap` が RGBA8 のタイルのハッシュを持つので、保存・版・GC の経路が「効果が持つタイル」を知っている必要がある。`effect_hashes` と `crates/alto-engine/src/lib.rs` の全ハッシュの列挙（`Op::SetProps` の経路）を、新しい型へ広げる。（新規）
-- `PROTOCOL`：マップを SDK から渡す経路のために、`setEffects` の `effects: unknown[]` のままでよいか、RGBA を取り込む既存の `importRgba` の結果（`tiles`）を `Effect` の `map` として渡せるかを確かめる。渡せるなら上げない。新しい要求が要るなら上げる（要割り当て）。
+- `format_version`：**上げる**（16。段階4なので FX-4 の回 8 とは分ける。00-ROADMAP の番号の表）。`DisplacementMap` が RGBA8 のタイルのハッシュを持つので、保存・版・GC の経路が「効果が持つタイル」を知っている必要がある。GIT-1（08、段階3）が先に入り、`node_hashes` と `effect_hashes` を `Document::object_hashes`（新規、alto-doc）へ移す。本項目はその関数と `crates/alto-engine/src/lib.rs` の全ハッシュの列挙（`Op::SetProps` の経路）を新しい型へ広げる。GIT-1 より先に入る場合は `effect_hashes` を広げ、GIT-1 が移す。（新規）
+- `PROTOCOL`：マップを SDK から渡す経路のために、`setEffects` の `effects: unknown[]` のままでよいか、RGBA を取り込む既存の `importRgba` の結果（`tiles`）を `Effect` の `map` として渡せるかを確かめる。渡せるなら上げない。新しい要求が要るなら上げる（13。段階4の回）。
 - 描画の版：v3 のまま。
-- シェーダーのモード番号：置き換え 1 つ（要割り当て）。
+- シェーダーのモード番号：置き換え 1 つ（43）。
 
 ### 作業手順
 
@@ -564,7 +564,7 @@ pub struct DisplacementMap { pub bounds: ImageBounds, pub tiles: TileMap }   // 
 
 ### 依存
 
-- 先に要る項目：FX-4（`RoiQ::grow`）、FX-5（`effect_growth_q8`、`effect_output_bounds`）。形式の番号は STO 系と衝突しないよう ROADMAP で割り当てる。（新規）
+- 先に要る項目：FX-4（`RoiQ::grow`）、FX-5（`effect_growth_q8`、`effect_output_bounds`）。形式の番号は 16（00-ROADMAP の番号の表）。GIT-1（08。`Document::object_hashes`（新規））と STO-9（09。`tile_maps_mut`）が先に入り、本項目は両方に `DisplacementMap` を足す。PERF-4（10）を実装するなら、その明示タスクの形で段を足す（00-ROADMAP の重なりの表）。（新規）
 - 後に続く項目：なし。
 
 ## FX-9 非破壊グラデーション
@@ -615,9 +615,9 @@ pub struct DisplacementMap { pub bounds: ImageBounds, pub tiles: TileMap }   // 
 
 ### 形式と通信
 
-- `format_version`：FX-4 と同じ番号にまとめる（要割り当て）。VEC-1 の `Paint` が同じ `Gradient` を使うので、07 の番号上げとも同じ単位にまとめるか ROADMAP で決める。
+- `format_version`：FX-4 と同じ回 8。`Gradient` は VEC-1（07、回 7）が先に作るので、VEC-1 の回とは分ける（00-ROADMAP の重なりの表）。
 - `PROTOCOL`：上げない。描画の版：v3 のまま。
-- シェーダーのモード番号：勾配の平面 1 つ（要割り当て）。`gradient_q14` は `crates/alto-gpu/shaders/gradient-q14.wgsl`（新規、VEC-1 と共有）に置き、`integer_effects_shader` の連結に足す。（新規）
+- シェーダーのモード番号：勾配の平面 1 つ（42）。`gradient_q14` は `crates/alto-gpu/shaders/gradient-q14.wgsl`（新規、VEC-1 と共有）に置き、`integer_effects_shader` の連結に足す。（新規）
 
 ### 作業手順
 
@@ -634,7 +634,7 @@ pub struct DisplacementMap { pub bounds: ImageBounds, pub tiles: TileMap }   // 
 
 ### 依存
 
-- 先に要る項目：07 の VEC-1（`Gradient`、`gradient-q14.wgsl`。先に着手した側が作る。順序は ROADMAP で決める）、FX-4 の基盤（調整レイヤーの判定の述語は不要だが、`REffectKind` の追加経路を共用する）。
+- 先に要る項目：07 の VEC-1（`Gradient`、`gradient-q14.wgsl`、停止点の格納 `GradientRecord`。持ち主は VEC-1 で、VEC-1 → FX-9 の順に入れる（00-ROADMAP の重なりの表）。本項目は案 A のとおり VEC-1 の型を使う）、FX-4 の基盤（調整レイヤーの判定の述語は不要だが、`REffectKind` の追加経路を共用する）。（新規）
 - 後に続く項目：なし。
 
 ## Review Focus

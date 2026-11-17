@@ -59,14 +59,14 @@
 
 ## 共通の設計：形式番号を上げる経路
 
-この文書の項目のうち `format_version` を上げるもの（RV4-1、COL-2、COL-4、COL-3、COL-6）は、最初に上げる PR で次をまとめて変える。文書の型だけを上げると、`.alto` に保存して開けない（manifest の `document_format` が 5 に固定され、読み込みが 5 以外を拒否するため）。
+`format_version` を上げる PR のうち、全文書で最初にマージされるもの（計画では回 6。06 の TXT-4〜TXT-7）が次をまとめて変える。この文書の項目（RV4-1、COL-2、COL-4、COL-3、COL-6）は、その後に番号を足すだけである。文書の型だけを上げると、`.alto` に保存して開けない（manifest の `document_format` が 5 に固定され、読み込みが 5 以外を拒否するため）。
 
 - `alto_doc::FORMAT_VERSION`（新規）（現在の値）と `alto_doc::SUPPORTED_FORMATS`（読める値の組。5 と新しい値）を置き、上に挙げた固定の 5 をすべてこれに置き換える。
-- 文書は、新しい形式の意味（`render_version` 4、`Rgba16`、`blend_space`（新規）など）を使うときだけ新しい番号で書く。使わない文書は 5 のまま書き、今の読み手でも開ける（共通規則3の「最初のリリースまでは移行を作らない」に従い、5 の文書を新しい番号へ書き換える処理は作らない）。
-- manifest の `document_format` は、保存するスナップショットの `format_version` を書く（`manifest_bytes` と `manifest_bytes_with_refs` の引数に足す）。読み込みと `gc.rs` は `SUPPORTED_FORMATS`（新規）に含まれれば受ける。manifest 自体の `format`（2 / 3）は変えない。
-- `merge.rs` の検査は「対象の `format_version` が `SUPPORTED_FORMATS`（新規）に含まれ、両方の版で等しい」にする。
+- 文書は、新しい形式の意味（`render_version` 4、`Rgba16`、`blend_space`（新規）など）を使うときだけ新しい番号で書く。番号は、文書が使う意味のうち最も新しい回の番号で、`Document::required_format`（新規）が求め、スナップショットを書くときに `DocumentMeta.format_version` に入れる。使わない文書は 5 のまま書き、今の読み手でも開ける（共通規則3の「最初のリリースまでは移行を作らない」に従い、5 の文書を新しい番号へ書き換える処理は作らない）。
+- manifest の `document_format` は、保存するスナップショットの `format_version` を書く（`manifest_bytes` と `manifest_bytes_with_refs` の引数に足す）。読み込みと `gc.rs` は `SUPPORTED_FORMATS`（新規）に含まれれば受ける。manifest 自体の `format` はこの経路では変えない（2 / 3。08 の VER-4 が 4 を足す）。
+- `merge.rs` の検査は「両方の版の `format_version` が `SUPPORTED_FORMATS`（新規）に含まれる」にする。片方だけが新しい意味を使うマージ（例：片方が 5、片方が 6）は断らない。結果の番号は `Document::required_format`（新規）で求め直す。試験 `merge_of_format_5_and_6_writes_6`（新規）。
 - 試験（新規）：`new_format_document_saves_and_reopens`（`.alto` とフォルダ、版の外置き）、`format_5_documents_still_save_as_5`、`unknown_document_format_is_unsupported`。
-- 値は要割り当て。Task 14 でこの文書の項目と 06 の TXT-10 の回をまとめる。
+- 値は 00-ROADMAP の番号の表で決めた。この基盤は最初に番号を上げる PR（回 6、06 の TXT-4〜TXT-7）が入れる。本書の項目は RV4-1・COL-2・COL-4 と 06 の TXT-10 が 13、COL-3 が 14、COL-6 が 15。RV4-1 は基盤を作らず、`SUPPORTED_FORMATS` に 13 を足す。（新規）
 
 ## COL-1 Display P3
 
@@ -156,8 +156,8 @@ export interface DisplayColor {
 
 ### 形式と通信
 
-- `format_version`：上げない（既定）。`color: "display_p3"` は形式 5 の型に既にある値で、今の読み手は `INVALID_ARGUMENT` で拒否するので誤って読まない。リリース済みの形式も無い。Task 14 で「意味を増やす変更」とみなすなら、RV4-1 の回にまとめる。
-- `PROTOCOL`：上げる（`createDocument` の引数。値は要割り当て）。COL-5 の `import` の応答と同じ時期なら1回にまとめる。README と RELEASING を同じ PR で更新する。
+- `format_version`：上げない（既定）。`color: "display_p3"` は形式 5 の型に既にある値で、今の読み手は `INVALID_ARGUMENT` で拒否するので誤って読まない。リリース済みの形式も無い。「意味を増やす変更」とみなすなら、RV4-1 の回 13 にまとめる（00-ROADMAP の番号の表は、上げない既定で書いた）。
+- `PROTOCOL`：上げる（`createDocument` の引数。11。段階3の回で、COL-5 と同じ番号）。README と RELEASING を同じ PR で更新する。
 - render v3 の画素：変えない。`tests/parity/*.txt` は不変。
 - シェーダーのモード番号：不要（`present-p3-srgb.wgsl` は提示の段で、効果のモードではない）。
 - manifest：触れない。
@@ -260,7 +260,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 **埋め込みの抽出（`embedded_profile`（新規））。** 結果は `Embedded::{ None, Builtin(Profile), Icc(Vec<u8>), Invalid(&'static str) }`。
 
-- PNG：iCCP（zlib で圧縮）を展開する。展開後が `MAX_PROFILE_BYTES`（新規）を超えたら打ち切って `Invalid`。展開器は VEC-3 が足す `png` crate（07）か、`fdeflate` の直接利用（Task 14 で 07 と揃える。どちらも新しい依存の追加）。cICP が色域 12・伝達 13 なら `display_p3()`、色域 1・伝達 13 か `sRGB` chunk なら `srgb()`。gAMA と cHRM だけのものは `None`（sRGB とみなす）。
+- PNG：iCCP（zlib で圧縮）を展開する。展開後が `MAX_PROFILE_BYTES`（新規）を超えたら打ち切って `Invalid`。展開器は VEC-3 が足す `png` crate（07）か、`fdeflate` の直接利用（00-ROADMAP の重なりの表：直接依存の `png` は VEC-3 が足し、本項目は共有する。展開器もそのとき決める）。cICP が色域 12・伝達 13 なら `display_p3()`、色域 1・伝達 13 か `sRGB` chunk なら `srgb()`。gAMA と cHRM だけのものは `None`（sRGB とみなす）。
 - JPEG：`APP2` の `ICC_PROFILE\0` の断片を番号順につなぐ。番号の欠けと重複は `Invalid`。
 - WebP：RIFF の `ICCP` chunk（非圧縮）。
 - そのほか（GIF、BMP、AVIF など）：`None`。
@@ -278,7 +278,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げない。文書の型は変わらず、変換後の画素が入るだけ。
-- `PROTOCOL`：上げる（`import` の応答に `profile`。値は要割り当て）。COL-1 と同じ時期なら1回にまとめる。
+- `PROTOCOL`：上げる（`import` の応答に `profile`。11。COL-1 と同じ段階3の回）。
 - render v3 の画素：触れない。
 - 依存：`alto-color` は新しいワークスペースのメンバー。PNG の展開器の扱いは 07 と揃える。
 
@@ -317,7 +317,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 - 先に要る項目：COL-1（文書の色空間）、QA-1（実装済み。ファザーの枠）。
 - 後に続く項目：COL-6（LUT、CMYK）、COL-2（16bit の変換 `apply_rgba16`（新規））。
-- 同じものを使う項目：VEC-3（07。PNG の展開器）。
+- 同じものを使う項目：VEC-3（07。PNG の展開器）。直接依存の `png` crate は、先に入る VEC-3（段階2）が足し、本項目は共有する（00-ROADMAP の重なりの表）。
 
 ## RV4-1 render v4 の基盤
 
@@ -419,16 +419,16 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 形式と通信
 
-- `format_version`：上げる（`render_version` 4 を読めるようにする。値は要割り当て）。最初に上げる項目なので、「共通の設計：形式番号を上げる経路」の manifest、`gc.rs`、`merge.rs` の変更をこの PR に含める。06-text の TXT-10（`DocumentMeta.text_rendering`（新規））と COL-4（`blend_space`）と同じ回にまとめる案。COL-1 を「意味を増やす変更」とみなす場合も同じ回。
-- `PROTOCOL`：上げる（`createDocument` の `renderVersion: 4`。値は要割り当て）。段8でだけ上げる。
+- `format_version`：上げる（`render_version` 4 を読めるようにする。13）。「共通の設計：形式番号を上げる経路」の基盤は回 6 の PR が先に入れるので、この PR は `SUPPORTED_FORMATS` に 13 を足すだけ。06-text の TXT-10（`DocumentMeta.text_rendering`（新規））、COL-2、COL-4（`blend_space`）と同じ回 13。COL-1 を「意味を増やす変更」とみなす場合も 13。
+- `PROTOCOL`：上げる（`createDocument` の `renderVersion: 4`。12。段8でだけ上げ、COL-2 以降の v4 の項目と同じ回）。
 - render v3 の画素：変えない。`v3_shader_sources_are_pinned` と既存の parity が通ること。
-- シェーダーのモード番号：新しい番号は要らない。v4 は v3 と同じ番号の空間を使い、各番号の Q30 版を持つ。02、07 が v3 に足すモード（34 から）は、v4 にも同じ番号で Q30 版を足す。
+- シェーダーのモード番号：新しい番号は要らない。v4 は v3 と同じ番号の空間を使い、各番号の Q30 版を持つ。02 が v3 に足すモード（34〜43。07 はモードを使わない）は、v4 にも同じ番号で Q30 版を足す。
 - manifest：`document_format` を文書の `format_version` から書く（共通の設計）。manifest の `format` は変えない。
 
 ### 作業手順
 
 **Files:**
-- Modify `crates/alto-store/src/lib.rs`（manifest の `document_format`）、`crates/alto-engine/src/versions/gc.rs`、`crates/alto-engine/src/versions/merge.rs`（共通の設計の形式番号の経路）。
+- Modify `crates/alto-store/src/lib.rs`（manifest の `document_format`）、`crates/alto-engine/src/versions/gc.rs`、`crates/alto-engine/src/versions/merge.rs`（共通の設計の形式番号の経路。経路は回 6 の PR が入れたものを使い、`SUPPORTED_FORMATS` に 13 を足す）。
 - Modify `crates/alto-core/src/lib.rs`（`RENDER_VERSION_Q30`、`RenderPath`）、`crates/alto-doc/src/lib.rs`、`crates/alto-doc/src/document.rs`（試験）。
 - Modify `crates/alto-engine/src/lib.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-scene/src/damage.rs`（`plain_scene` を含む）、`crates/alto-gpu/src/sample.rs`、`crates/alto-gpu/src/renderer/geometry.rs`（`WorldTransform::root`）、`crates/alto-wasm/src/lib.rs`（ストロークの `fixed_world`、`create_document_for_testing`）、`packages/alto-sdk/src/testing.ts`（`RenderPath` への置き換えと試験用の入口。段1）。
 - Modify `crates/alto-gpu/src/lib.rs`（`integer_effects_shader_v4`）、`crates/alto-gpu/src/renderer.rs`（`shader_tests`）、`crates/alto-gpu/src/renderer/scene.rs`、`renderer/compose.rs`、`renderer/uniform.rs`、`renderer/geometry.rs`（`v4_gap`）、`renderer/tile_renderer/mod.rs`、`tile_renderer/stages.rs`、`tile_renderer/paint.rs`、`tile_renderer/targets.rs`、`tile_renderer/params.rs`、`crates/alto-gpu/src/raster_q8.rs`。
@@ -458,7 +458,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 依存
 
-- 先に要る項目：COL-1（`CreateOptions`（新規）、`DocumentMeta::new`、不変の検査）。ROADMAP の順序では COL-5 の後。
+- 先に要る項目：COL-1（`CreateOptions`（新規）、`DocumentMeta::new`、不変の検査）。ROADMAP の順序では COL-5 の後。形式番号の基盤（`FORMAT_VERSION`、`SUPPORTED_FORMATS`（新規））は回 6 の PR（06）が先に入れる。PERF-4（10）を実装するなら RV4-1 の前に入れ、v4 の段は PERF-4 の明示タスクの形で足す（00-ROADMAP の重なりの表）。
 - 後に続く項目：COL-2、COL-4、COL-3、TXT-10（06）。
 - 影響を受ける項目：RV4-1 より前に v3 へ入る描画の項目（02 の FX、07 の VEC-1 など）は、段5〜7で Q30 版も作る。RV4-1 より後に入る描画の項目は、v3 と v4 の両方を作る（ROADMAP「描画経路の二重化」）。
 
@@ -509,7 +509,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 **読み込み。** ブラウザーの 2D canvas は 8bit なので、16bit の PNG は Rust で復号する。
 
-- 復号器は VEC-3（07）が足す `png` crate を使う（Task 14 で 07 と揃える）。16bit の PNG は `Engine` で直接タイルにし、ICC の変換は COL-5 の `apply_rgba16`（新規）で行う。
+- 復号器は VEC-3（07）が足す `png` crate を使う（00-ROADMAP の重なりの表）。16bit の PNG は `Engine` で直接タイルにし、ICC の変換は COL-5 の `apply_rgba16`（新規）で行う。
 - 8bit の画像を 16bit の文書へ読み込むときは `v × 257`。
 - 上限：16bit の文書の読み込みは 32M 画素（決定が要る点）。超えたら `RESOURCE_LIMIT`。
 
@@ -521,8 +521,8 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 形式と通信
 
-- `format_version`：上げる（`PixelFormat::Rgba16`（新規）、tag 8 のオブジェクト。値は要割り当て）。RV4-1 と同じ回にまとめられるなら1回。
-- `PROTOCOL`：上げる（`createDocument` の `depth`、`exportImage` の `depth`、`readTiles` の大きさ。値は要割り当て）。
+- `format_version`：上げる（`PixelFormat::Rgba16`（新規）、tag 8 のオブジェクト。13。RV4-1 と同じ回）。
+- `PROTOCOL`：上げる（`createDocument` の `depth`、`exportImage` の `depth`、`readTiles` の大きさ。12。RV4-1 段8と同じ回）。
 - render：v4 のみ。v3 の画素は変えない。
 - manifest：`document_format` は共通の設計の経路で新しい番号を書く。オブジェクトの tag は manifest の外。
 
@@ -555,7 +555,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 - 先に要る項目：RV4-1（Q30 と測定の判定）、COL-5（16bit の ICC 変換。無ければ 16bit の読み込みは sRGB とみなす）。
 - 後に続く項目：COL-3（`Rgba16` の格納を共有）、COL-4（16bit でのリニア合成）。
-- 同じものを使う項目：VEC-3（07。`png` crate）、STO-3（09。`ExportImageOptions` を同時に拡張する）、IMG-1（05。焼き込みの出力形式）、BR-1〜BR-5（03。`brush.wgsl` を同時に変える）。
+- 同じものを使う項目：VEC-3（07。`png` crate）、STO-3（09。`ExportImageOptions` を同時に拡張する）、IMG-1（05。焼き込みの出力形式）、BR-1〜BR-5（03。`brush.wgsl` を同時に変える。BR-1〜BR-3 の binding 6/7 と `GpuDab.extra` が先に入り、本項目はその上に 16bit 版を足す（00-ROADMAP の重なりの表））。
 
 ## COL-4 リニア合成
 
@@ -595,8 +595,8 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 形式と通信
 
-- `format_version`：上げる（`blend_space`（新規）。値は要割り当て）。RV4-1、TXT-10 と同じ回にまとめる案。
-- `PROTOCOL`：上げる（`createDocument` の `blendSpace`（新規）。値は要割り当て）。
+- `format_version`：上げる（`blend_space`（新規）。13。RV4-1、TXT-10 と同じ回）。
+- `PROTOCOL`：上げる（`createDocument` の `blendSpace`（新規）。12）。
 - render：v4 のみ。v4 の `Gamma` の文書の画素は変えない。
 - シェーダーのモード番号：要らない（取得と解決の段の分岐で、モードではない）。
 
@@ -652,8 +652,8 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 形式と通信
 
-- `format_version`：上げる（`depth: f16` の意味を定める。値は要割り当て）。COL-2 と同じ回にまとめられるなら1回。
-- `PROTOCOL`：上げる（`createDocument` の `depth: "f16"`、EXR の読み込みと書き出し。値は要割り当て）。
+- `format_version`：上げる（`depth: f16` の意味を定める。14）。COL-2 と TXT-10 の後に入るので、回 13 とは分ける。
+- `PROTOCOL`：上げる（`createDocument` の `depth: "f16"`、EXR の読み込みと書き出し。12。v4 の項目と同じ回）。
 - render：v4 のみ。
 
 ### 作業手順
@@ -728,8 +728,8 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 形式と通信
 
-- `format_version`：上げる（`LayerProps.spot`。値は要割り当て）。プロファイルは文書に保存しないので、ソフトプルーフと書き出しは形式に触れない。
-- `PROTOCOL`：上げる（`setProof`（新規）、`exportImage` の `colorSpace`、CMYK の読み込み。値は要割り当て）。
+- `format_version`：上げる（`LayerProps.spot`。15）。プロファイルは文書に保存しないので、ソフトプルーフと書き出しは形式に触れない。
+- `PROTOCOL`：上げる（`setProof`（新規）、`exportImage` の `colorSpace`、CMYK の読み込み。12。v4 の項目と同じ回）。
 - render：v3 と v4 のどちらの文書でも使える（特色の表示は既存の着色の段）。既存の parity の行は変えない。特色を持つ文書の行は新しく足す。
 
 ### 作業手順
@@ -761,7 +761,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 ### 依存
 
-- 先に要る項目：COL-5（`alto-color`）、STO-3（09。TIFF の符号化器）。v4 の文書での特色は RV4-1 の後。
+- 先に要る項目：COL-5（`alto-color`）、STO-3（09。TIFF の符号化器）。v4 の文書での特色は RV4-1 の後。STO-3 の `tiff.rs` は「Rust はヘッダーだけ、画素は JS」の形なので、CMYK の変換を `alto-color`（Rust）で行うと画素が WASM を通る。最初の手順で、64M 画素の CMYK の書き出しを帯ごとに流したときの WASM メモリと作業量（512 MiB）を見積もり直す（00-ROADMAP の重なりの表）。
 - 後に続く項目：なし。
 
 ## Review Focus
