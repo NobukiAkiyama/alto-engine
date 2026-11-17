@@ -36,14 +36,14 @@
 - `Op::SetMeta` はキャンバスの拡縮（`crates/alto-engine/src/canvas.rs`）と `restore_ops`（`crates/alto-doc/src/version.rs`）が使い、`Document::apply` で `validate` を通る。`color`、`depth`、`render_version` を変える要求は今は無いが、`SetMeta` はそれを拒否しない。
 - `crates/alto-doc/src/version.rs` の `diff` は `color`、`depth`、`render_version` の差を `MetaChanged` にする。`crates/alto-engine/src/versions/merge.rs` は文書の `root` が違えば `UNRELATED_HISTORY`。
 - 作成：`crates/alto-wasm/src/lib.rs` の `Runtime::create_document(w, h, render_version)` は `None | Some(3)` だけを受け、`DocumentMeta::srgb_u8` を使う。辺は 1〜65536（`INVALID_ARGUMENT`）。SDK は `createDocument({ width, height, renderVersion?: 3 })`（`packages/alto-sdk/src/engine.ts`、`protocol.ts`）。`PROTOCOL` は 8。SDK の `DocumentMeta.color` と `depth` は `string`（`packages/alto-sdk/src/types.ts`）。
-- 画素の正本：RGBA8 は直線（非乗算）アルファ、R8 はマスクと選択。タイル 256×256。ハッシュは `ContentHash::of_tagged(tag, pixels)` で、tag は 4（RGBA8）か 1（R8）（`crates/alto-raster/src/lib.rs` の `TileData::hash`）。パッケージのオブジェクトは `ALTOOBJ1` + tag + LZ4 で、`crates/alto-store/src/lib.rs` の `object_header` は tag 0、1、4 だけを受け、大きさも tag ごとに固定（262144、65536）。復号 Worker（`crates/alto-decode/src/lib.rs` の `decode_batch`）は形式のバイトが 1 なら R8、それ以外を RGBA8 とみなす。
+- 画素の正本：RGBA8 は直線（非乗算）アルファ、R8 はマスクと選択。タイル 256×256。ハッシュは `ContentHash::of_tagged(tag, pixels)` で、tag は 4（RGBA8）か 1（R8）（`crates/alto-raster/src/lib.rs` の `TileData::hash`）。パッケージのオブジェクトは `ALTOOBJ1` + tag + LZ4 で、`crates/alto-store/src/lib.rs` の `object_header` は tag 0、1、4 だけを受ける。大きさが固定なのは tag 4（262144）と tag 1（65536）で、tag 0（一般のバイト列）は 268,435,456 バイトまで任意。復号 Worker（`crates/alto-decode/src/lib.rs` の `decode_batch`）は形式のバイトが 1 なら R8、それ以外を RGBA8 とみなす。
 - 描画（render v3）：内容のアトラスは `Rgba8Unorm`、表示タイルは `Rgba8Uint`（乗算済み）。
   - 平易な文書は `integer_composite_shader`（`crates/alto-gpu/src/lib.rs`。`composite-v3-layout.wgsl`、`q14.wgsl` の一部、`composite-v3-fetch.wgsl`、`blend-q14.wgsl`、`composite-q14.wgsl`）。
   - 効果、マスク、クリップ、ベクター、文字のある文書は `tile_renderer` の段（`integer_effects_shader`：`q14.wgsl`、`blend-q14.wgsl`、`effects-v3-wide.wgsl`、`effects-q14.wgsl`）。中間は `rgba16uint` の乗算済み Q14（`target_format(exact)`）。`effects-resolve-q14.wgsl` が `rgba8uint` に戻す。使用中のモードは 8、17〜33。
   - ベクターと文字は、CPU の整数ラスタライザ（`crates/alto-gpu/src/raster_q8.rs`、`glyph_q8.rs`）の被覆を `glyph-q14.wgsl` が塗る。
   - ピラミッドは `downsample-q14.wgsl`、提示は `present-q14.wgsl`（f32、表示だけ。ハッシュの外）。
   - `v3_shader_sources_are_pinned` が、組み立てた2つのシェーダーのハッシュを固定する。
-- 版の分岐：`render_version` を見る箇所は `>= RENDER_VERSION_EXACT` と `== 3` が混在する。`crates/alto-engine/src/lib.rs`（文字の `RContent`）、`crates/alto-engine/src/text.rs`、`crates/alto-gpu/src/renderer/compose.rs`、`renderer/scene.rs` の `prepare_scene`、`renderer/tile_renderer/mod.rs` の `compose_tiles`、`renderer/uniform.rs` の `uniform_subtree`、`crates/alto-scene/src/damage.rs`、`crates/alto-gpu/src/sample.rs` の `pack_inverse`。v3 で整数の定義が無い機能は `renderer/geometry.rs` の `v3_gap` が `GPU_UNSUPPORTED` にする。
+- 版の分岐：`render_version` を見る箇所は `>= RENDER_VERSION_EXACT` と `== 3` が混在する。`crates/alto-engine/src/lib.rs`（文字の `RContent`）、`crates/alto-engine/src/text.rs`、`crates/alto-gpu/src/renderer/compose.rs`、`renderer/scene.rs` の `prepare_scene`、`renderer/tile_renderer/mod.rs` の `compose_tiles`、`renderer/uniform.rs` の `uniform_subtree`、`crates/alto-scene/src/damage.rs`、`crates/alto-gpu/src/sample.rs` の `pack_inverse`、`renderer/geometry.rs` の `WorldTransform::root`（引数名は `version`。`== 3` のときだけ整数の変換 `V3`、ほかは f64 の `Legacy`）、`crates/alto-wasm/src/lib.rs` のストロークの変換（`fixed_world`、`== 3` のときだけ `FixedAffine`）。描く経路の選択（`compose.rs` が `damage::plain_scene` で平易な合成器か `compose_tiles` かを決める）は版を見ず、機能だけを見る。v3 で整数の定義が無い機能は `renderer/geometry.rs` の `v3_gap` が `GPU_UNSUPPORTED` にする。
 - 描画の CPU 参照：`crates/alto-gpu/src/cpu_composite/`（`q14.rs`、`q14_stages.rs`、`color_adjust.rs`、`mask_programs.rs`、`reference.rs`）。JS の参照は `tests/e2e/cpu-composite.js`（Q24 の和は BigInt）と、Rust の試験（`reference_tests.rs`）が node で呼ぶ `tests/e2e/composite-v3-reference.mjs`、`m5-v3-renderer-reference.mjs`、`mask-v3-reference.mjs`、`mask-v3-origin-reference.mjs`。固定は `tests/parity/v3-browser.txt`（ブラウザー）と Rust の `cases.rs`。
 - 製品の CPU 経路にも v3 の式がある。`Rasterize` は `raster_q8::vector_pixels_q14`（`crates/alto-wasm/src/image_versions.rs` の `layer_edit`）。`MergeDown` は `canvas.rs` の `composite_into`（RGBA8 だけ、独自の Normal）。画像編集（`crates/alto-engine/src/image/`）は RGBA8 だけを扱う。グラデーションは `image/pixels.rs` の `linear`、`srgb`（f64）で補間し、文書の合成とは無関係。
 - ブラシは `brush.wgsl` の f32 スタンプ（出力 `rgba8unorm`）と読み戻しが正本で、共通規則2の外（03-brush の冒頭）。
@@ -167,7 +167,7 @@ export interface DisplayColor {
 **Files:**
 - Modify `crates/alto-doc/src/lib.rs`（`validate`、`DocumentMeta::new`）、`crates/alto-doc/src/document.rs`（`Op::SetMeta` の不変の検査）、`crates/alto-engine/src/versions/merge.rs`。
 - Modify `crates/alto-wasm/src/lib.rs`（`create_document` の `CreateOptions`）、`crates/alto-gpu/src/renderer/device.rs`（`set_surface_color`）、`crates/alto-gpu/src/renderer.rs`（`shader_tests` に新しいシェーダー）。Create `crates/alto-gpu/shaders/present-p3-srgb.wgsl`（新規）。
-- Modify `packages/alto-sdk/src/engine.ts`（`createDocument`、`assets.importImage`、`display`）、`worker.ts`（`createDocument`、`exportImage`、面の設定）、`png.ts`、`types.ts`、`image-types.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`packages/alto-sdk/src/testing.ts`（画面の色域を差し替える試験用の入口）。
+- Modify `packages/alto-sdk/src/engine.ts`（`createDocument`、`assets.importImage`、`display`）、`worker.ts`（`createDocument`、`exportImage`、面の設定）、`png.ts`、`types.ts`、`image-types.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`packages/alto-sdk/src/testing.ts`（画面の色域を差し替える試験用の入口）、`doc/design/EXPORT-CONTRACT.md`（P3 の文書は sRGB chunk の代わりに cICP、表示タイルは文書の色空間）。
 - Modify `packages/alto-sdk/test/png.test.js`、`tests/e2e/image-version-tests.js`、`crates/alto-engine/src/versions_tests.rs`。
 
 **試験：**
@@ -345,7 +345,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 **定数と型。**
 
 - `alto_core::RENDER_VERSION_Q30: u32 = 4`（新規）。
-- `alto_core::RenderPath { Q14, Q30 }`（新規）と `RenderPath::of(render_version: u32) -> Option<RenderPath>`（新規）。`render_version` を直接比べている箇所（共通の現状の一覧）を、すべてこれに置き換える。`>= RENDER_VERSION_EXACT` のままだと v4 が v3 の経路に入るので、置き換えを最初の PR にする。
+- `alto_core::RenderPath { Q14, Q30 }`（新規）と `RenderPath::of(render_version: u32) -> Option<RenderPath>`（新規）。`render_version` を直接比べている箇所（共通の現状の一覧。`WorldTransform::root` とストロークの `fixed_world` を含む）を、すべてこれに置き換える。`WorldTransform::root(path)` は Q30 でも `V3`（整数の変換）を返し、ストロークの変換も Q30 で `FixedAffine` を使う。`>= RENDER_VERSION_EXACT` のままだと v4 が v3 の経路に入るので、置き換えを最初の PR にする。
 - `DocumentMeta::validate`：`render_version` は 3 か 4。3 は U8 だけ（`INVALID_ARGUMENT: render version 3 is 8-bit only`）。
 
 **Q30 の定義。** 1.0 = 2^30。値は `i32`、乗算済み。
@@ -355,11 +355,11 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 | バイト → Q30 | `(b × 2^30 + 127) / 255`（`u64`、切り捨て） |
 | u16 → Q30 | `(v × 2^30 + 32767) / 65535`（`u64`） |
 | 積 | `round_half_away(a × b / 2^30)`。`a × b` は 2^62 未満で `i64`（WGSL は `Wide`） |
-| 非乗算（`c / a`） | `round_half_away(c × 2^30 / a)`。64bit ÷ 32bit（WGSL は `wide_div_u32`（新規）。32 回の引き戻し除算） |
+| 非乗算（`c / a`） | `c × 2^30 / a`。丸めは v3 の同じ箇所の規則に従う（下記）。64bit ÷ 32bit（WGSL は `wide_div_u32`（新規）。32 回の引き戻し除算） |
 | Q30 → バイト | `min((q × 255 + 2^29) >> 30, 255)`（`q` は 0〜2^30 に切ってから） |
 | Q30 → u16 | `min((q × 65535 + 2^29) >> 30, 65535)` |
 
-- 丸めの規則は v3 と同じ（符号付きは 0 から遠い方、符号なしは上へ）。v3 の各式を、Q14 を Q30 に置き換えた形で定義する。v3 の式の Q 値を含む中間（たとえば不透明度とマスクの積の Q28）は、Q30 では `i64` で同じ順序に丸める。
+- 丸めは式ごとに v3 の同じ箇所と同じにする。v3 は箇所ごとに違う：`div_q` と `wide_div_q14` は 0 から遠い方へ四捨五入し、色調整の非乗算（`effects-q14.wgsl` の `color_adjust_q14`、`(v << 14) / qa`）は切り捨てる。上の表は丸めの無い形の式で、各段の Q30 版はその段の v3 の式の丸め（切り捨てか四捨五入か）をそのまま写す。v3 の各式を、Q14 を Q30 に置き換えた形で定義する。v3 の式の Q 値を含む中間（たとえば不透明度とマスクの積の Q28）は、Q30 では `i64` で同じ順序に丸める。
 - 位置と標本化（Q8 の位置、Q16 の逆行列、整数の 4 タップ）は色と無関係なので v3 と同じ。`effects-v3-wide.wgsl` の Q8 の補助をそのまま含める。
 - ホストで作る表（トーンカーブ、レベル補正のガンマなど `color_adjust` の表）は Q30 版を作る。値は v3 と同じ f32 のビットから整数で求める（`q14_round` と同じ方法で Q30 へ）。
 
@@ -375,7 +375,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 
 - 組み立て：`integer_effects_shader_v4()`（新規。`q30.wgsl`、`blend-q30.wgsl`、`effects-v3-wide.wgsl`、`effects-q30.wgsl`）。試験 `v4_shader_sources_are_pinned`（新規）でハッシュを固定する。
 - 中間の形式：`rgba32sint`。`target_format(path: RenderPath)`（引数を変える）が Q14 は `Rgba16Uint`、Q30 は `Rgba32Sint` を返す。1画素 16 バイトで v3 の2倍。
-- 経路：段1では v4 の全シーンを `tile_renderer` の段（M5 と同じ組）で描き、平易な合成器（`integer_composite_shader` の v4 版）は作らない。判定条件：Normal の測定（下記）で、v4 の平易な文書の B1 または B2 が v3 の同じ文書の2倍を超えたら、平易な合成器の v4 版（`composite-q30.wgsl`）を作る。
+- 経路：段1では v4 の全シーンを `tile_renderer` の段（M5 と同じ組）で描き、平易な合成器（`integer_composite_shader` の v4 版）は作らない。今の選択は `plain_scene` が機能だけで決めるので、そのままだと平易な v4 の文書が v3 でない古い経路（`Rgba8Unorm` の表示タイルと f32 の標本化）に入り、黙って違う画素になる。`plain_scene(scene)` を `plain_scene(scene, path)`（引数を足す）にし、`RenderPath::Q30` では常に false を返す。`prepare_scene` の `integer`（表示タイルを `Rgba8Uint` にするか）と `compose_from_children`（ピラミッドの整数の縮小）の条件は「`RenderPath`（新規）が Q14 か Q30」にする。判定条件：Normal の測定（下記）で、v4 の平易な文書の B1 または B2 が v3 の同じ文書の2倍を超えたら、平易な合成器の v4 版（`composite-q30.wgsl`）を作る。
 - `prepare_scene`：v4 の文書で、まだ Q30 の定義が無い機能を `GPU_UNSUPPORTED`（`v4 {gap} has no integer definition yet`）にする。`v4_gap`（新規）を `v3_gap` の隣に置き、移行の段ごとに項目を外す。
 - 一様な部分木の最適化（`uniform_subtree`）は v4 では無効のまま始める。
 
@@ -403,6 +403,8 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 7. テキスト。
 8. `createDocument({ renderVersion: 4 })` を SDK に公開する（`v4_gap`（新規）が空になってから）。
 
+段1〜7の試験と測定には v4 の文書が要るので、段1で試験用の入口を作る。`DocumentMeta::validate` は段1から 4 を受ける。WASM は `Runtime::create_document_for_testing`（新規）（js_name `createDocumentForTesting`）だけが `render_version: 4` を受け、公開の `create_document` は段8まで `INVALID_ARGUMENT: render version must be 3` のまま。SDK は `testing(engine).createDocument({ ..., renderVersion: 4 })`（新規。`packages/alto-sdk/src/testing.ts`）からだけ呼ぶ。未定義の機能は `v4_gap` が `GPU_UNSUPPORTED` にするので、試験用の文書でも黙って違う画素にはならない。`.alto` を開く経路は段1から 4 を受ける（`validate` を通るため）。段8で公開の入口へ移し、試験用の入口は残す。
+
 **測定と判定条件（ROADMAP「測定で実装の形が変わる項目」）。** 段2の試作で、4K・20層（`tests/e2e/browser-tests.js` の B1〜B6 と同じ文書）を Metal で3回測る。
 
 - 測るもの：B1、B2、B6。B6 は GPU の計上値（`gpuBytes` と `operationPeak`）、WASM と復号プールの和、メインスレッドの JS heap を分けて記録する。GPU の計上値を VRAM と呼ばない。
@@ -428,7 +430,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 **Files:**
 - Modify `crates/alto-store/src/lib.rs`（manifest の `document_format`）、`crates/alto-engine/src/versions/gc.rs`、`crates/alto-engine/src/versions/merge.rs`（共通の設計の形式番号の経路）。
 - Modify `crates/alto-core/src/lib.rs`（`RENDER_VERSION_Q30`、`RenderPath`）、`crates/alto-doc/src/lib.rs`、`crates/alto-doc/src/document.rs`（試験）。
-- Modify `crates/alto-engine/src/lib.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-scene/src/damage.rs`、`crates/alto-gpu/src/sample.rs`（`RenderPath` への置き換え）。
+- Modify `crates/alto-engine/src/lib.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-scene/src/damage.rs`（`plain_scene` を含む）、`crates/alto-gpu/src/sample.rs`、`crates/alto-gpu/src/renderer/geometry.rs`（`WorldTransform::root`）、`crates/alto-wasm/src/lib.rs`（ストロークの `fixed_world`、`create_document_for_testing`）、`packages/alto-sdk/src/testing.ts`（`RenderPath` への置き換えと試験用の入口。段1）。
 - Modify `crates/alto-gpu/src/lib.rs`（`integer_effects_shader_v4`）、`crates/alto-gpu/src/renderer.rs`（`shader_tests`）、`crates/alto-gpu/src/renderer/scene.rs`、`renderer/compose.rs`、`renderer/uniform.rs`、`renderer/geometry.rs`（`v4_gap`）、`renderer/tile_renderer/mod.rs`、`tile_renderer/stages.rs`、`tile_renderer/paint.rs`、`tile_renderer/targets.rs`、`tile_renderer/params.rs`、`crates/alto-gpu/src/raster_q8.rs`。
 - Create `crates/alto-gpu/shaders/q30.wgsl`、`blend-q30.wgsl`、`effects-q30.wgsl`、`effects-resolve-q30.wgsl`、`glyph-q30.wgsl`（いずれも新規）、`crates/alto-gpu/src/cpu_composite/q30.rs`、`q30_stages.rs`（新規）、`tests/e2e/m5-v4-renderer-reference.mjs`（新規）、`tests/parity/cpu-reference-v4.txt`、`tests/parity/v4-browser.txt`（新規）、`doc/verification/RV4-Q30-MEASURE.md`（新規）。
 - Modify `crates/alto-gpu/src/cpu_composite/mod.rs`、`cases.rs`、`reference_tests.rs`、`gpu_parity_tests.rs`、`tests/e2e/cpu-composite.js`、`tests/e2e/parity-tests.js`、`tests/e2e/browser-tests.js`（測定）。
@@ -437,7 +439,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 **インターフェース：** Produces `RENDER_VERSION_Q30`、`RenderPath`、`integer_effects_shader_v4`、`target_format(path)`、`v4_gap`、`vector_pixels_q30`。Consumes COL-1 の `CreateOptions`、`DocumentMeta::new`、不変の検査。
 
 **試験：**
-- [ ] 段1：`v3_documents_keep_every_hash`（`git diff tests/parity` が空、`v3_shader_sources_are_pinned` が通る）。振る舞いの試験：`v3_scene_selects_q14_resources` と `v4_scene_selects_q30_resources`（v3 と v4 の同じシーンを描き、`tile_renderer` の資源の `RenderPath` と中間の形式（`Rgba16Uint` / `Rgba32Sint`）、表示タイルの形式、`uniform_subtree` が v4 で使われないこと、文字が焼き込みの経路に入ることを確かめる）。`damage_treats_v3_and_v4_by_path`（`alto-scene` の損傷の計算）。補助として、`render_version >=` と `render_version ==` が `RenderPath::of` の中にしか無いことを `git grep` で確かめる（これだけでは振る舞いを保証しない）。
+- [ ] 段1：`v3_documents_keep_every_hash`（`git diff tests/parity` が空、`v3_shader_sources_are_pinned` が通る）。振る舞いの試験：`v3_scene_selects_q14_resources` と `v4_scene_selects_q30_resources`（v3 と v4 の同じシーンを描き、`tile_renderer` の資源の `RenderPath` と中間の形式（`Rgba16Uint` / `Rgba32Sint`）、表示タイルの形式、`uniform_subtree` が v4 で使われないこと、文字が焼き込みの経路に入ることを確かめる）。`damage_treats_v3_and_v4_by_path`（`alto-scene` の損傷の計算）。`plain_v4_scene_is_not_plain`（ラスターだけの v4 の文書が `compose_tiles` に入り、`Rgba8Unorm` の表示タイルを作らない）。`v4_world_transform_is_fixed`（`WorldTransform::root` とストロークの変換が v4 で整数の変換になる）。補助として、`render_version >=` と `render_version ==` が `RenderPath::of` の中にしか無いことを `git grep` で確かめる（これだけでは振る舞いを保証しない）。
 - [ ] `crates/alto-doc`：`render_version_four_validates_and_three_is_eight_bit_only`。`only_render_version_three_and_format_five_load` を、4 を受ける形に直す。
 - [ ] `q30_conversions_roundtrip_bytes_and_u16`：全バイトと全 u16 が Q30 を経て元に戻る。
 - [ ] `wide_div_u32_matches_u64_division`：境界値（0、1、2^32−1、2^62 付近）と乱数でない固定の列。
@@ -511,7 +513,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 - 8bit の画像を 16bit の文書へ読み込むときは `v × 257`。
 - 上限：16bit の文書の読み込みは 32M 画素（決定が要る点）。超えたら `RESOURCE_LIMIT`。
 
-**書き出し。** `exportImage({ depth?: 8 | 16 })`（新規の選択肢、既定は文書の深さ）。16bit の PNG は `encodePng` に `bitDepth: 16`（big-endian のサンプル）を足す。8bit の書き出しは `(v × 255 + 32767) / 65535`。拡大縮小と WebP は 8bit に落としてから canvas。Worker の作業量の見積りは1画素のバイト数を形式から取る（上限 64M 画素、512 MiB は変えない）。
+**書き出し。** `exportImage({ depth?: 8 | 16 })`（新規の選択肢、既定は文書の深さ）。16bit の表示タイル（乗算済み u16）は Worker で非乗算に戻す：`a = 0` は (0, 0, 0, 0)、それ以外は `round(c × 65535 / a)`（0.5 は切り上げ、整数で `(c × 65535 × 2 + a) / (2a)`）、`a` はそのまま。結果は `Uint16Array`。16bit の PNG は `encodePng` に `bitDepth: 16`（big-endian のサンプル）を足す。8bit の書き出しは、非乗算の u16 を `(v × 255 + 32767) / 65535` で落とす。`pickComposite` も同じ規則にする。`doc/design/EXPORT-CONTRACT.md` の「出力の画素」に 16bit の式と保証を足す。拡大縮小と WebP は 8bit に落としてから canvas。Worker の作業量の見積りは1画素のバイト数を形式から取る（上限 64M 画素、512 MiB は変えない）。
 
 **メモリ。** 同じ画素数で、WASM のタイル、復号キャッシュに入るタイルの数、`.alto` の大きさ、GPU の計上値（アトラス、表示タイル）が倍になる。`.alto` の 512 MiB の上限には半分の画素数で届く（F-9 の版の外置きで過去の版は外へ出せる）。RV4-1 の判定が「1 GiB を超える」なら `MAX_DEEP_EDGE = 8192`（新規）を `validate` と `CanvasEdit::Resize` に入れ、超えたら `INVALID_ARGUMENT`（今の辺 65536 と同じコード）。
 
@@ -530,6 +532,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 - Modify `crates/alto-core/src/lib.rs`（`PixelFormat`）、`crates/alto-raster/src/lib.rs`、`crates/alto-raster/src/brush.rs`（`cpu_paint` の u16 版）、`crates/alto-store/src/lib.rs`、`crates/alto-decode/src/lib.rs`、`crates/alto-doc/src/lib.rs`、`crates/alto-doc/src/node.rs`。
 - Modify `crates/alto-engine/src/lib.rs`、`crates/alto-engine/src/canvas.rs`、`crates/alto-engine/src/image/mod.rs`、`pixels.rs`、`resample.rs`、`stroke.rs`、`selection.rs`、`crates/alto-engine/Cargo.toml`（`png`）。
 - Modify `crates/alto-gpu/shaders/brush.wgsl` か Create `crates/alto-gpu/shaders/brush16.wgsl`（新規）、Create `downsample-u16.wgsl`、`present-u16.wgsl`（新規）。Modify `crates/alto-gpu/src/renderer/memory.rs`、`renderer/device.rs`、`renderer/gpu.rs`、`renderer/scene.rs`、`renderer/stroke.rs`、`renderer/readback.rs`、`renderer/pyramid.rs`、`renderer/frame.rs`。
+- Modify `doc/design/EXPORT-CONTRACT.md`（16bit の表示タイルと PNG）。
 - Modify `crates/alto-wasm/src/lib.rs`、`crates/alto-wasm/src/image_versions.rs`、`packages/alto-sdk/src/engine.ts`、`worker.ts`、`document.ts`、`png.ts`、`transaction.ts`、`types.ts`、`image-types.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`packages/alto-sdk/src/decode-worker.ts`。
 - Modify `fuzz/fuzz_targets/package.rs`、`snapshot.rs`（tag 8 を種に足す）。
 
@@ -658,7 +661,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 **Files:**
 - Modify `crates/alto-doc/src/lib.rs`、`crates/alto-gpu/shaders/q30.wgsl`（新規）、`effects-q30.wgsl`、`blend-q30.wgsl`、`effects-resolve-q30.wgsl`、`present-u16.wgsl`（RV4-1、COL-2 の新規ファイル）、`crates/alto-gpu/src/cpu_composite/q30.rs`、`q30_stages.rs`、`tests/e2e/cpu-composite.js`、`crates/alto-gpu/src/renderer/device.rs`。
 - Create `crates/alto-store/src/exr.rs`（新規）、`fuzz/fuzz_targets/exr.rs`（新規）。
-- Modify `crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/engine.ts`、`document.ts`、`worker.ts`、`protocol.ts`、`types.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
+- Modify `crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/engine.ts`、`document.ts`、`worker.ts`、`protocol.ts`、`types.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`doc/design/EXPORT-CONTRACT.md`（EXR と Q3.13 の書き出し）。
 
 **インターフェース：** `createDocument({ depth: "f16" })`、`exportImage({ type: "image/x-exr" })`、`engine.assets.importImage` が EXR を受ける。Consumes RV4-1、COL-2。
 
