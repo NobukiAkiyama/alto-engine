@@ -29,7 +29,7 @@
 - 新しいフィールドは `deny_unknown_fields` の型へ入るので、旧版は新しい文書を開けない。共通規則3により `format_version` を上げる（値は要割り当て）。同じ時期の PR は1回の番号にまとめる。案：TXT-4、5、6、7 を1回、TXT-1、2 を1回、TXT-8 を1回、TXT-3 を1回。TXT-10 の文書属性は RV4-1 の `render_version` と同じ回にする。
 - `format_version` を上げるときは、パッケージの manifest も変える。`crates/alto-store/src/lib.rs` は `document_format: 5` を固定で書き、読み込みは 5 以外を `StoreError::Unsupported("package format")` で拒否する。したがって各回の作業手順に、書き出す値と受け入れる値の更新（`alto-store` の定数化を含む）、`crates/alto-doc/src/lib.rs` の `DocumentMeta` の 5 の更新、`document.rs` の形式の試験の更新を入れる。
 - `PROTOCOL` は、新しい要求（TXT-8 の `fontAxes`（新規））を足すときだけ上げる（値は要割り当て）。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけの項目は上げない。
-- ALTB（焼き込みの形式）は TXT-1〜9、11 で変えない。ルビ、圏点、下線、色層はすべて既存の `BakeGlyph`（輪郭への参照、行列、位置、色）で表せる。したがって `decodeTextBake`（JS 参照）、`TextBake::decode`、WGSL は触れない。`BAKER_VERSION` も、既存の入力の出力が変わらないので上げない。
+- ALTB（焼き込みの形式）は TXT-1〜9、11 で変えない（`BAKER_VERSION` を上げるのは、既存の入力の出力が変わる TXT-11 だけ）。ルビ、圏点、下線、色層はすべて既存の `BakeGlyph`（輪郭への参照、行列、位置、色）で表せる。したがって `decodeTextBake`（JS 参照）、`TextBake::decode`、WGSL は触れない。`BAKER_VERSION` も、既存の入力の出力が変わらないので上げない。
 
 ### 範囲の追従
 
@@ -108,7 +108,7 @@ pub struct RubyRange {
 // TextContent.ruby: Vec<RubyRange>  — 始点順、重ならない
 ```
 
-- 検証：親は空でなく、MAX_RUBY_BASE_UTF16 以下で、改行を含まない。サロゲートの途中は拒否。各項目は MAX_RUBY_TEXT_UTF16 以下で制御文字を含まず、合計が MAX_RUBY_TOTAL_UTF16 以下（定数は上の表）。`Mono`、`Jukugo` で `text.len()` が親の書記素の数と違えば拒否。縦中横と重なる場合は、縦中横が親に完全に含まれるときだけ許し、部分的な重なりは拒否する。割注の範囲（TXT-3）と重ならない。
+- 検証：親は空でなく、MAX_RUBY_BASE_UTF16 以下で、改行を含まない。サロゲートの途中は拒否。各項目は MAX_RUBY_TEXT_UTF16 以下で制御文字を含まず、合計が MAX_RUBY_TOTAL_UTF16 以下（定数は上の表）。`Mono`、`Jukugo` で `text.len()` が親の書記素の数と違えば拒否。縦中横と重なる場合は、縦中横が親に完全に含まれるときだけ許し、部分的な重なりは拒否する。割注との重なりの検査は、`warichu` を足す TXT-3 の検証に置く（TXT-1 の時点では割注が無い）。
 - 範囲の追従は `RangePolicy::Group`。
 - ルビは親のスタイルを使う。`size` を `RUBY_SIZE_RATIO`（新規）の 0.5 倍にし、`letter_spacing` は 0、`fonts`、`features`、`language`、`color`、`scale` は親と同じ。親の途中でスタイルが変わるときは、ルビ1項目ごとに、対応する親の先頭文字のスタイルを使う。ルビ専用のスタイルは持たない（フォントの参照が増えないので、フォント削除の検査は `font_ids()` のままでよい）。
 
@@ -183,6 +183,7 @@ pub struct EmphasisRange { pub start: u32, pub end: u32, pub mark: EmphasisMark,
 - 字形の出所：その範囲の文字のスタイルのフォールバックの順に `font_for` で探す。どれにも無ければ円の輪郭を合成する（`Custom` を含む）。合成する円は 1000 単位の箱の中心 (500, 500)、半径 400 の4本の3次ベジェ（制御点は半径の 0.5523 倍を整数に丸める）。白は半径 300 の逆向きの円を足してリングにする（`placeholder_outline` が穴を逆回りで作るのと同じ）。三角などもこの円で代用する。
 - 大きさと位置：印の大きさは親の RUBY_SIZE_RATIO（TXT-1。0.5）倍。親字ごとに、その `ClusterBox` の中央に置き、ブロック方向は親の em の外側（`Over` は横組みで親の字形の上端、縦組みで右端）へ接する。縦組みの `Under` は左。
 - 行の余白：印の高さがあるとき、ルビと同じ `extra` の計算に加える。同じ側にルビと圏点と傍線（TXT-6）があるときは、親字、傍線、圏点、ルビの順に外へ積む（ルビを圏点の高さだけ外へ寄せる）。
+- 合成の輪郭：`GlyphRef { font: None, glyph }` は今、どの `glyph` でも `placeholder_outline` の箱になる（`bake_text` と `OutlineCache::outline` が `font: None` を箱へ写す）。これでは円が焼けないので、`glyph` の予約値 `SYNTH_CIRCLE`（0xFF00。塗り）、`SYNTH_RING`（0xFF01。白）、`SYNTH_RULE`（0xFF02。TXT-6 の箱）（新規）を決める。`glyph == 0` は従来の箱のまま。`bake_text` の輪郭の鍵 `(Option<AssetId>, u16)` は予約値ごとに別の鍵になり、`bake_text` と `OutlineCache` が予約値を合成の輪郭へ写す。フォントの実際の字形の番号は 0xFF00 以上でも `font: Some` なので衝突しない。
 - 焼き込み：本文、ルビの後ろに焼く（共通の設計）。
 - SDK：`doc.text.setEmphasis(id, start, end, spec | null)`。意図は `"text.emphasis"`。
 
@@ -194,7 +195,7 @@ pub struct EmphasisRange { pub start: u32, pub end: u32, pub mark: EmphasisMark,
 
 ### 作業手順
 
-**Files:** TXT-1 と同じファイルに加えて Modify `crates/alto-text/src/outline.rs`（円の輪郭を `raw_outline` の外で作るので変更は無い見込み。確認する）。
+**Files:** TXT-1 と同じファイルに加えて Modify `crates/alto-text/src/outline.rs`（`OutlineCache` が合成の輪郭を返す。下の「合成の輪郭」）。
 
 **Interfaces:** Consumes `remap_range`、TXT-1 の行の余白の計算。Produces `EmphasisRange`、`doc.text.setEmphasis`。
 
@@ -281,7 +282,7 @@ SDK：`doc.text.setWarichu(id, start, end, on = true)`。意図は `"text.warich
 
 `TextContent.hanging: bool`（既定 `false`、`skip_serializing_if`）。`true` のとき、`、`、`。`、`，`、`．` の `Cluster` を 1 つだけ、行末に残してよい。
 
-- 判定（`layout` の貪欲な走査）：クラスター `c` がこの4字で、そこまでの `width <= avail` のとき、`width + c.advance > avail` でも行を切らない。ぶら下げた字の送りは `width` に足さない（次のクラスターは必ず新しい行になる）。連続する句読点の2つ目は禁則で行頭に来られないので、2つ目が溢れると今と同じ追い出しになる（ぶら下げは1字まで）。
+- 判定（`layout` の貪欲な走査）：クラスター `c` がこの4字で、そこまでの `width <= avail` のとき、`width + c.advance > avail` でも行を切らない。ぶら下げた字の送りは `width` に足さず、その字の直後で行を終える（`end = i + 1`。足さないだけでは次のクラスターが同じ行に入ってしまうので、終わりを明示する）。判定は今の `i > start && !c.space` の条件の内側で行い、行頭の字と空白は対象にしない。連続する句読点の2つ目は禁則で行頭に来られないので、2つ目が溢れると今と同じ追い出しになる（ぶら下げは1字まで）。
 - 揃え：ぶら下げた字は `measured` から除く。`Justify` の `gaps` と `extra` もぶら下げた字を除いて計算する。`End`、`Center` では、ぶら下げた字を除いた文字列を枠に揃え、ぶら下げた字は枠の外へ出る。
 - 縦組みでも同じ（行の長さは高さ）。
 - `LineBox.inline` と `TextLayout.bounds` はぶら下げた字を含める（描画される範囲）。枠（`TextFrame::Area`）の外へ出るぶん、`bounds` が枠より広がる。
@@ -335,7 +336,7 @@ pub struct ParagraphAttr {
 
 - em は `content.style.size`（スタイルの基準サイズ）。範囲は各 −20〜20。`indent_start + indent_first >= 0`。`index` は段落数未満。
 - 折り返し幅は avail から indent_start と indent_end を引いた値、1行目はさらに indent_first を引く値。揃えは、この幅の中で行う（Center はその中央）。行頭の位置は indent_start（1行目は indent_first を加える）。右から左の段落では行頭側が右になるので、左の余白が indent_end になる。点テキストでは indent_end を無視する。`align` が `None` の段落は `TextContent.align` を使う。
-- 編集時の追従：remap_paragraphs（新規。`model.rs` と `text-edit.ts`）。編集 [start, end) を置き換えるとき、k を start の前の改行数とし、削除範囲の改行数を R、挿入文字列の改行数を A とする。段落 k から k + R までが1つに合わさり、先頭の k の属性が残る。そこから A 個に分かれるとき、新しい段落は k の属性を複製する。それ以降の添字は A − R だけずれる。
+- 編集時の追従：remap_paragraphs（新規。`model.rs` と `text-edit.ts`）。編集 [start, end) を置き換えるとき、k を start の前の改行数とし、削除範囲の改行数を R、挿入文字列の改行数を A とする。段落 k から k + R までが1つに合わさり、先頭の k の属性が残る。そこから A + 1 個の段落に分かれ（改行 A 個で A + 1 段落）、新しい段落は k の属性を複製する。それ以降の添字は A − R だけずれる。削除で段落が減ったときは、k + 1 から k + R の属性を捨て、さらに新しい段落数以上の添字の属性を残さない（`replace_range` が最後に検証するので、範囲外の添字は拒否になる。span と縦中横を刈るのと同じ）。
 - SDK：`doc.text.setParagraph(id, start, end, patch)`（新規）。`[start, end]` と重なるすべての段落（`end` が段落の途中でもその段落を含む）に `patch` を適用する。`patch` は `{ align?, indent_first?, indent_start?, indent_end? }` で、値 `null` で既定へ戻す。意図は `"text.paragraph"`。`doc.text.replace` は `remap_paragraphs` を通す。`doc.text.set` と `doc.text.setParagraph` は1回の `setText` で、Undo 1回に対応する。
 
 ### 形式と通信
@@ -390,7 +391,7 @@ pub struct Underline {
 - 検証：`position` は −1〜1、`thickness` は 0.005〜0.5、色は 0〜1。`patched` と `validate` が扱う。
 - 値の決め方：`position` と `thickness` が `None` なら、そのクラスターのフォントの Face::underline_metrics（ttf-parser）を size / upem 倍する（position は post の underlinePosition。上向き正なので符号を反転して下向き正にする）。`post` が無いフォントは `UNDERLINE_POSITION_EM`（新規）= 0.12 と `UNDERLINE_THICKNESS_EM`（新規）= 0.05。
 - 配置（`layout`）：行ごとに、同じ `Underline` と同じ `size` が連続するクラスターを1本の線にまとめる（行末の空白を除く）。`TextLayout.rules: Vec<PlacedRule>`（新規）（`rect: [f64; 4]` ノード座標、`color`）に入れる。横組み：線の中心は `baseline + position`、長さはクラスターの `inline` の端から端まで。縦組みは右側の傍線で、`x = baseline + size / 2 + VERTICAL_RULE_GAP_EM（新規）（0.1 em） × size`、`y` は同じく `inline` の範囲。ルビが同じ側にあるとき（縦組み）、ルビの内端を傍線の外縁まで寄せる。
-- 焼き込み：矩形は輪郭 1 個（1000 単位の箱。`Move`、`Line` ×3、`Close`。`font` は `PLACEHOLDER_FONT`、`glyph` は 0）を共有し、各線を `m = [w / 1000, 0, 0, -h / 1000]`（Q24）、`t` = 左上、色 Q14 の `BakeGlyph` として足す。`bake_text` の輪郭の重複除去の鍵は `(Option<AssetId>, u16)` で、箱の `(None, 0)` と衝突するので、箱用に別の鍵（`Rule`）を足す。線の描画はアトラスか直接ラスタ化かを字形と同じ判定で選ぶ。描画の3実装は変わらない。
+- 焼き込み：矩形は輪郭 1 個（1000 単位の箱。`Move`、`Line` ×3、`Close`。`font` は `PLACEHOLDER_FONT`、`glyph` は 0）を共有し、各線を `m = [w / 1000, 0, 0, -h / 1000]`（Q24）、`t` = 左上、色 Q14 の `BakeGlyph` として足す。`bake_text` の輪郭の重複除去の鍵は `(Option<AssetId>, u16)` で、箱の `(None, 0)` と衝突するので、TXT-2 の「合成の輪郭」の予約値 SYNTH_RULE を使う。線の描画はアトラスか直接ラスタ化かを字形と同じ判定で選ぶ。描画の3実装は変わらない。
 - 下線を持たない文書の `rules` は空で、焼き込みは変わらない。
 - SDK：`StylePatch.underline`（`types.ts` に `Underline` を足す）。`doc.text.style(id, start, end, { underline })` を使う。新しい関数は足さない。
 
@@ -465,12 +466,12 @@ pub struct Underline {
 - 可変フォントの軸を設定する処理は無い。set_variation を呼ぶ箇所は無い（`doc/design/2026-10-28-v3-integer-text.md` の「範囲」も対象外としている）。
 - 依存：rustybuzz 0.20.1 の Face::set_variations（引数は Variation { tag, value: f32 } の列）が使える。ttf-parser 0.25.1 は variable-fonts 機能が有効で、variation_axes（fvar）、set_variation（タグと値）、outline_glyph（gvar と CFF2 の補間）を持つ。ただし ttf-parser の座標は最大 64 軸。
 - 顔は `layout` の `Itemizer.faces: HashMap<AssetId, rustybuzz::Face>`（フォント1つにつき1つ）と、`raw_outline`（`crates/alto-text/src/outline.rs`）の `ttf_parser::Face::parse`、`OutlineCache` の `(AssetId, u16)` が作る。
-- v3 の字形アトラスの鍵は輪郭のバイト列の blake3 で（`glyph_q8::atlas_key`）、軸の値で輪郭が変われば鍵も変わる。`BakeFont` は描画が読まない。
+- v3 の描画は焼き込みの輪郭だけから字形を作る。`glyph_q8::atlas_key` は輪郭のバイト列の blake3 だが試験でしか使われず、描画（`paint.rs`）は切り出しごとの仮の鍵で詰める。軸の値は補間後の輪郭に現れるので、描画側に軸の知識は要らない。`BakeFont` は描画が読まない。
 - 輪郭の重複除去は `bake_text` の `outline_index: HashMap<(Option<AssetId>, u16), u32>`。
 
 ### 11-04 からの変化
 
-- 旧設計は「字形アトラスの鍵に軸値（Q16）を追加」「`BakeFont` に同じ値を載せる」と書いた。v3 のアトラスの鍵は輪郭の内容から作る（`atlas_key`）ので、補間後の輪郭が違えば自然に別の鍵になる。`BakeFont` は描画が読まない。どちらも変更しない。変えるのは `bake_text` の重複除去の鍵と `OutlineCache` の鍵（情報用の経路）。
+- 旧設計は「字形アトラスの鍵に軸値（Q16）を追加」「`BakeFont` に同じ値を載せる」と書いた。v3 の描画は補間後の輪郭だけを読み、軸の知識を持たない（`atlas_key` は輪郭の内容から作るが、試験でしか使われない）。`BakeFont` は描画が読まない。どちらも変更しない。変えるのは `bake_text` の重複除去の鍵と `OutlineCache` の鍵（情報用の経路）。
 - 旧設計の `FontVariation { axis: [u8; 4], ... }` は `FontFeature` と同じ `tag: String`（4文字の ASCII）に改めた。
 
 ### 設計
@@ -504,7 +505,7 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 **Interfaces:** Produces `FontVariation`、`FontInfo.axes`、`engine.fonts.axes`。
 
 - [ ] 試験 `variation_changes_the_outline`（軸の値で焼いた輪郭が違う）、`axis_out_of_range_is_refused`（状態が変わらない）、`unknown_axis_is_refused`、`axis_missing_in_one_fallback_font_is_ignored`、`no_variation_bakes_the_same_bytes`。
-- [ ] 試験 `atlas_key_differs_per_axis_value`（`glyph_q8::atlas_key` が別の鍵を返す）、`same_axes_share_an_outline`（2つの span が同じ軸値なら輪郭を共有）。
+- [ ] 試験 `variation_bakes_a_different_outline_record`（`text_bake::outline_record` のバイト列が軸の値で変わる。実際に `layout` と `bake_text` が軸を適用したことを確かめる）、`same_axes_share_an_outline`（2つの span が同じ軸値なら輪郭を共有）。
 - [ ] 試験 `variation_advances_follow_the_axis`（`HVAR`/`gvar` の送りが整形に反映される）。
 - [ ] 完了条件・検証：TXT-4 と同じ。ネイティブと WASM で `text-v3-variable` が一致。PR。
 
@@ -519,7 +520,7 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 
 - カラーフォントは対象外で、単色の `outline_glyph` だけを使う（`raw_outline`）。ttf-parser 0.25.1 は Face::is_color_glyph、color_palettes、paint_color_glyph（字形、パレット、前景色、Painter。COLR v0 と v1）、glyph_raster_image（sbix、CBDT など）を持つ。
 - 色層のベイクは `BakeGlyph.color`（字形ごとの Q14 の色）で既に可能。同じ位置に色の違う字形を複数並べればよい。
-- 輪郭が空の字形（ビットマップだけのフォントの字）は `bake_placed` が偽にして飛ばす。警告は `Engine::font_warnings`（`FONT_EMBEDDING_RESTRICTED`、`FONT_MISSING`）が出す。
+- 輪郭が空の字形（ビットマップだけのフォントの字）は `bake_placed` が偽にして飛ばす。警告は `Engine::font_warnings`（`FONT_EMBEDDING_RESTRICTED`、`FONT_MISSING`）が出すが、これは `doc.assets` のフォントの属性と blob の有無だけを見る関数で、字形やレイアウトを入力に持たない。
 
 ### 11-04 からの変化
 
@@ -531,7 +532,7 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 - `TextStyle.palette: u16`（既定 0。`skip_serializing_if`）。範囲外のパレットは 0。
 - 焼き込み（`bake_text`）：字形が `is_color_glyph` のとき、`Face::paint_color_glyph` に `Painter` を渡す。`Painter` は `outline_glyph` + `push_clip` + 単色の `paint` + `pop_clip` の並びだけを層として受け取り、それ以外の呼び出しを見たら全体を単色に戻す。層ごとに `BakeGlyph`（層の字形の輪郭、親の `m`、`t`、色 = 層の色 × 文字色のアルファ。パレットの前景色（0xFFFF）は文字色）を層の順に足す。1字形あたり最大 `MAX_COLOR_LAYERS`（新規）（64）、合計は `MAX_BAKE_GLYPHS`。
 - 新しいシェーダーは要らない：単色の字形の経路を色ごとに通すのと同じ。`TextInfo.glyphs` は層を数えない（レイアウトの字形数のまま）。
-- ビットマップの字形（`sbix`、`CBDT`、`EBDT`、`bdat`）：表示サイズに依存するので扱わない。`glyph_raster_image` が値を返す字形で輪郭が空のものは、`placeholder_outline` の箱を焼き、`font_warnings` に `FONT_COLOR_BITMAP_ONLY`（新規）（`family` を持つ）を出す。
+- ビットマップの字形（`sbix`、`CBDT`、`EBDT`、`bdat`）：表示サイズに依存するので扱わない。`glyph_raster_image` が値を返す字形で輪郭が空のものは、`placeholder_outline` の箱を焼く。警告 `FONT_COLOR_BITMAP_ONLY`（新規。`family` を持つ）は、`font_warnings` に節を足して出す：文書の各テキストノードの `text_entry` のレイアウトで使われた字形（`glyphs`）のうち、輪郭が空で `glyph_raster_image` が値を返すものがあるフォントを、フォントごとに1回数える（面の顔は `Engine.text.fonts` のキャッシュ）。`COLOR_FONT_UNSUPPORTED`（新規）も同じ節で、色層の字形が受理できない塗りを含むフォントを数える。警告は計算で出すだけで、文書には保存しない。
 - 可変軸（TXT-8）と合わせるとき、色層の字形にも同じ軸を適用する。
 
 ### 形式と通信
@@ -581,7 +582,7 @@ pub struct TextRendering {
 ```
 
 - **ヒンティング。** `glyph_map_q` の後、字形の行列が軸に平行（`b = c = 0`、`a > 0`、`d < 0`。横組みの水平の字形）のとき、原点の y（`t_y`）をレベルの整数画素に丸める。TrueType の命令は実行しない。x 方向と送りは変えず、組版の位置は変えない。x-height の揃えは、案として `d` を x-height が整数画素になる倍率に補正する（x-height はフォントの `OS/2` から焼き込み時でなく描画時に必要なので、`BakeFont` の情報では足りない。判定条件：ベースラインの丸めだけで画質が足りるかを測ってから x-height を足すか決める。既定は丸めだけ）。
-- **ステム強調。** 表示サイズ（em）が 24 px 未満の字形だけ。輪郭の点を、両隣の辺の法線の和の方向へ最大 `stem_darken / 64` px（ミターの上限は 2 倍）動かす。整数の計算（`isqrt`）で、Q8 の点に対して行う。ラスタ化（`glyph_q8`）の入口で適用する。
+- **ステム強調。** 表示サイズ（em）が 24 px 未満の字形だけ。輪郭の点を、両隣の辺の法線の和の方向へ最大 `stem_darken / 64` px（ミターの上限は 2 倍）動かす。整数の計算（`isqrt`）で、Q8 の点に対して行う。ラスタ化（`glyph_q8`）で適用する。ただし `glyph_bitmaps(bake, world, level, roi)` は焼き込み、変換、レベル、ROI だけを受け取り、v3 と v4 が同じ焼き込みと同じ関数を共有する（01 の RV4-1）。文書の text_rendering（新規）はここに届かず、そのまま入れると v3 の画素も変わる。v4 専用の引数 `TextRenderParams`（新規。hint_y、stem_darken、coverage_gamma。v3 は None）を `glyph_bitmaps` と `glyph_map_q` に通し、`paint.rs` が文書の `render_version` と text_rendering から作る。`None` のとき処理は今と同じ。ヒンティングとガンマも同じ引数で渡す。
 - **ガンマ補正。** カバレッジのバイトを、固定の 256 点の整数表で変換してから合成する。表は `crates/alto-gpu/src/glyph_gamma.rs`（新規）に生成物としてコミットする。指定できるのは上記6つだけ（他は `INVALID_ARGUMENT`）。
 - **LCD。** 下地が不透明でないと成立せず、編集可能な合成と両立しない。表示経路の専用処理（文書のハッシュの対象外）とし、ノードの直下が不透明と判定できる場合だけ、提示の段で3倍の横カバレッジを使う。表示タイルのキャッシュを別に持つため、最後に実装し、測定で高価なら既定を無効にする。書き出しでは使わない。
 - 3実装：Rust の参照（`crates/alto-gpu/src/cpu_composite/` の文字の参照）、JS の参照（`tests/e2e/cpu-composite.js`）、WGSL（01 が RV4-1 で作る `glyph-q30.wgsl`（新規））。Rust の参照は試験専用（`cpu_composite/text_tests.rs`）で、本番の経路は `renderer/tile_renderer/paint.rs` と `glyph_q8`。ガンマ表は3つで同じ表を使う。
