@@ -20,7 +20,7 @@
 - 線の輪郭は `stroke_q8.rs` の中で閉じている：`flatten_stroke`（`raster_q8.rs`、整数の曲線分割、1サブパス 2^18 線分まで）→ 線分ごとに本体の四角形 → 線端と結合の多角形（`round_wedge`、`miter`）→ ワールド行列で Q8 へ。輪郭の命令は 2^20 まで（`MAX_OUTLINE_COMMANDS`）。超えると `RasterError::CurveRange`（全タイルで同じくそのパスの線を飛ばす）。
 - CPU 参照：Rust は `raster_q8::vector_pixels_q14`（`stroke_q8::rasterize_stroke` を呼ぶ。IMG-2 の `canvas.rs` の `VectorRasterizer` 注入と `crates/alto-wasm/src/image_versions.rs` から使われる）と `cpu_composite/v3_tests.rs`。JS 参照 `tests/e2e/cpu-composite.js` の `renderVectorV3` は**塗りだけ**で、線は持たない。ベクターのブラウザー parity は `tests/e2e/parity-tests.js` の `vector-v3-*` で、すべて塗りである。
 - lyon は legacy の経路：`alto_vector::LyonRasterizer`（`renderer/vector.rs`）。render v1・v2 は非対応になったので、v3 の文書はここを通らない。vello は `vello-probe` feature（`crates/alto-wasm/src/vector_probe.rs`）の比較用だけ。
-- SVG：`crates/alto-engine/src/svg.rs` の `Engine::prepare_svg_import`。要素は `svg`、`g`、`path`、`rect`、`circle`、`ellipse`、`line`、`polyline`、`polygon` だけ。属性は `id`、`fill`、`stroke`、`fill-opacity`、`stroke-opacity`、`stroke-width`、`stroke-linecap`、`stroke-linejoin`、`stroke-miterlimit`、`fill-rule`、`opacity`、`transform` と形ごとの幾何属性。色は `#rgb`、`#rrggbb`、`black`、`white`、`none`。未対応は位置付き（`UNSUPPORTED`、バイト・行・列）で全体を拒否する。上限：4 MiB、`roxmltree` の `nodes_limit` 30000、要素 10000、深さ 64、合計命令 65536（`RESOURCE_LIMIT`）。DTD は無効（`allow_dtd: false`）。円弧は kurbo ではなく `svgtypes` の `SimplifyingPathParser` で Cubic にする（10倍に拡大して 0.1 の許容を 0.01 にしている）。
+- SVG：`crates/alto-engine/src/svg.rs` の `Engine::prepare_svg_import`。要素は `svg`、`g`、`path`、`rect`、`circle`、`ellipse`、`line`、`polyline`、`polygon` だけ。属性は `id`、`fill`、`stroke`、`fill-opacity`、`stroke-opacity`、`stroke-width`、`stroke-linecap`、`stroke-linejoin`、`stroke-miterlimit`、`fill-rule`、`opacity`、`transform` と形ごとの幾何属性。色は `#rgb`、`#rrggbb`、`black`、`white`、`none`。未対応は位置付き（`UNSUPPORTED`、バイト・行・列）で全体を拒否する。上限と、超えたときのコード：4 MiB は `RESOURCE_LIMIT`。`roxmltree` の `nodes_limit` 30000（XML の解析エラー）、事前検査の要素 10000、深さ 64、合計命令 65536 は `UNSUPPORTED`（`error()` を通る）。`Builder::push` のノード数 10000 は `RESOURCE_LIMIT`。DTD は無効（`allow_dtd: false`）。円弧は kurbo ではなく `svgtypes` の `SimplifyingPathParser` で Cubic にする（10倍に拡大して 0.1 の許容を 0.01 にしている）。
 - キャンバス編集：`canvas.resize`・`rotate`・`flip` はルートノードの変形、リンクしていないマスクの変形、選択の画素を書き換え、パス、勾配、破線は触らない（`crates/alto-engine/src/canvas.rs` の `prepare_canvas_edit`）。文書画素の単位を持つ値（ぼかし半径）だけ `scale_effects` で更新する。
 - 差分：`diff`（`crates/alto-doc/src/version.rs`）はベクターの変更を `ContentDetail::Vector { paths, commands }`（本数と命令数）で返す。SDK は `packages/alto-sdk/src/types.ts` の `ContentDetail`。
 - SDK：`packages/alto-sdk/src/types.ts` の `StyledPath`、`VectorStroke`。編集は `doc.vectors.set`（`document.ts`）と `tx.addVector`・`tx.setVector`（`transaction.ts`）。SVG は `doc.importSvg`。
@@ -67,19 +67,20 @@ pub enum Paint { Solid(Color), Gradient(Gradient) }
 単色は従来どおり4要素の配列で直列化されるので、勾配を使わない文書の `fingerprint` とハッシュは変わらない。untagged の誤りは不明瞭な文言になるので、`Deserialize` を手で書き、配列なら `Solid`、オブジェクトなら `Gradient` として、失敗は `INVALID_ARGUMENT: paint` にする。
 - `transform` を持つのは、SVG の gradientTransform と objectBoundingBox（縦横比が違う図形の放射は楕円）を、端点だけでは写せないからである。FX-9 は単位行列のままでよい。
 - 検証（`Gradient::validate`（新規））：`from` と `to` は有限で ±1048576 以内、距離 ≥ 1/256（二乗距離 ≥ 2^-16）。停止点は 2〜16 個、`offset` は 0..=1 で**非減少**（同じ offset は硬い境目を作り、その点では後ろの色を使う）、色は `color()` と同じ検査。`transform` は有限で `FixedAffine::from_affine` が成功し、逆行列がある。`StyledPath::validate` が塗りと線の両方に適用する。
-- FX-9 との差：既存のラスター勾配は offset の重複を拒否する。FX-9 の試験名 stops_must_increase は、ここの「非減少」に合わせて変える必要がある（衝突として 00-ROADMAP に表で残す）。
+- FX-9 との差：既存のラスター勾配は offset の重複を拒否する。FX-9（`02-effects.md`）は同じ `Gradient` を案 A で使い、試験名は stops_must_not_decrease である。FX-9 の案が変われば、ここの「非減少」と合わせる。
 
 **評価（整数のみ）。** ホストが画素から勾配の位置 t（Q16）への写像を整数係数で渡し、シェーダーは係数と画素座標だけで t を求める。
 
 1. ホスト（`raster_q8::gradient_plan`（新規））：ワールド行列（Q32、`FixedAffine`）とレベルから「窓の画素中心 → ノード座標」の逆写像を作り、`transform` の逆と `from`、`to` を合成する。この計算は f64 の四則だけで行い（sqrt、三角関数を使わない）、係数は既存の `alto_core::q_from_f64_bits(x.to_bits(), 32)` で Q32 の整数にする。f64 の四則は IEEE で決まるので、機種によらず同じビットになる。
-2. 線形：`t_q16 = clamp(floor((ax*px + ay*py + a0) / 2^16), 0, 65536)` の形（`px`、`py` は窓の画素中心の Q8）。放射：画素の二次式 `S = cxx*px^2 + cxy*px*py + cyy*py^2 + cx*px + cy*py + c0`（ホストが同じ手順で量子化）を Q32 の `s^2` として、`t_q16 = isqrt(min(S, 2^32))`。`isqrt` は 16 回の二分法（符号なし 32 ビット）で、ニュートン法を使わない（収束の回数を固定して、FX-9 の「ニュートン法」と合わせるかは FX-9 側で決める）。
+2. 線形：`t_q16 = clamp(floor((ax*px + ay*py + a0) / 2^24), 0, 65536)`。`px`、`py` は窓の画素中心の Q8。係数 `ax`、`ay`、`a0` は「t_q16 / Q8 単位」を Q24 にした整数（Q8 の座標と Q16 の t のスケール差を係数に含める）。放射：画素の二次式 `S = cxx*px^2 + cxy*px*py + cyy*py^2 + cx*px + cy*py + c0` を Q32 の `s^2` とし、`t_q16 = isqrt(min(S, 2^32))`。`isqrt` は 16 回の二分法（符号なし 32 ビット）で、ニュートン法は使わない（FX-9 と回数を固定する点だけ合わせる）。
+   窓の隅で `S` を厳密に評価する：`S0 = S(窓の原点)` と、窓内の差分 `d`（0 以上 256 未満）の項 `L·d + Q(d)` を、ホストが i128 で厳密に求めて渡す。`S0` は 2^40 で飽和させる。ノード単位の検査（5）で `|L·d + Q(d)| < 2^39` を保証するので、飽和した画素は必ず `S >= 2^32`（端の色）になり、飽和の有無は窓によらない。シェーダーは `S0` と小さな差分項だけを `Wide` で足す。
 3. 色：停止点の色を `color_q14` で Q14 の straight に、offset を Q16 にする。`t` が属する区間 `i`（`offset[i] <= t` を満たす最大の `i`。同じ offset が並ぶ場合は後ろ）を探し、先頭より前と末尾以降は端の色（`spreadMethod=pad`）。区間内では `w = div_half_away((t - o_i) << 16, o_{i+1} - o_i)`（分子は 2^32 未満で u32 に収まる）、各チャンネル `c = c_i + div_half_away((c_{i+1} - c_i) * w, 65536)`。補間は straight のまま（SVG と同じ）。
 4. 重ね：得た straight の Q14 色を、既存の式 `source_over_q14`（被覆バイト → `k = (cov*16384+127)/255`、`f = k*color.a`、…）の `color` として画素ごとに使う。式は変えない。
-5. 範囲：係数や中間値が `Wide`（`q14.wgsl` の64ビット擬似整数）に収まらない写像は、`VECTOR_TRANSFORM_RANGE` と同じく**ノード全体が透明**にする（タイルごとに決まらない）。この判定はノードとレベルだけで決まる。
+5. 範囲：量子化した係数から、窓内の差分の項 `|L·d + Q(d)|` の上界を i128 で求め、2^39 以上になる写像、または係数が i128 に収まらない写像は、`VECTOR_TRANSFORM_RANGE` と同じく**ノード全体が透明**にする（タイルごとに決まらない）。この判定は係数だけで決まり、窓にもタイルにも依存しない。中心が遠い小さい円（中心 2^20、半径 1/64）では `S0` が 2^40 を超えるが、差分の項は小さいので範囲内で、原点のタイルは端の色になる。
 
 **GPU。** crop に勾配番号を持たせた別の dispatch にする。
 
-- 新規ファイル：`crates/alto-gpu/shaders/gradient-q14.wgsl`（新規）は FX-9 のモード37と共有する関数 `gradient_q14(t_q16, stops) -> vec4u`（新規）の本体。`crates/alto-gpu/shaders/vector-gradient-q14.wgsl`（新規）は `glyph-q14.wgsl` と同じ構成で、色を画素ごとに `gradient_q14`（新規）から取る。浮動小数は `unorm_byte` だけ。
+- 新規ファイル：`crates/alto-gpu/shaders/gradient-q14.wgsl`（新規）は FX-9 の勾配の平面と共有する関数 `gradient_q14(t_q16, stops)`（新規）の本体。戻り値の型は `02-effects.md` の定義（現状 `vec4i`）に合わせ、`glyph-q14.wgsl` の `vec4u` へは呼び出し側で変換する。`crates/alto-gpu/shaders/vector-gradient-q14.wgsl`（新規）は `glyph-q14.wgsl` と同じ構成で、色を画素ごとに `gradient_q14`（新規）から取る。浮動小数は `unorm_byte` だけ。
 - `paint_crops` は単色の crop と勾配の crop が混ざるとき、種類が変わる所で `pending` を流して順序を保つ。勾配の記録（係数と停止点16個）は storage buffer に入れ、`need` の予算に加える。パイプラインは `glyph_q14` と同様に `Resources` へ（`vector_gradient_q14`（新規））。`renderer.rs` のシェーダー一覧と `pool_tests.rs` にも登録する。
 - `uniform.rs` の近道：勾配の塗りは画素ごとに色が変わり、端から離れた葉の画素が同じバイトになる前提が崩れるので、`edges` は勾配の塗りまたは線を見つけたら `None`（近道を取らない）にする。
 - 線の勾配は、塗りと同じ勾配空間（ノード座標）を使う。SVG も線に同じ座標系を使う。
@@ -112,19 +113,19 @@ export type VectorPaint = Color | VectorGradient;
 
 ### 形式と通信
 
-- `format_version`：**上げる**（要割り当て）。`fill` と `stroke.color` に新しい形が入り、古い実装は `deny_unknown_fields` で読めない。VEC-2 の `dash` と同じ番号にまとめる。単色のままの文書のバイト列は変わらない（試験で固定）。
+- `format_version`：**上げる**（要割り当て）。`fill` と `stroke.color` に新しい形が入り、古い実装は `deny_unknown_fields` で読めない。VEC-2 の `dash` と同じ番号にまとめる。`DocumentMeta.format_version` は全スナップショットに入るので、文書全体のバイト列は変わる（単色だけの文書も）。変わらないのは `StyledPath` の直列化と `fingerprint` で、試験で固定する。
 - `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は要割り当て）。
 - `PROTOCOL`：上げない。新しい要求は無く、`setVector` のペイロードの型が広がるだけである。
 - 描画の版：v3 のまま。既存の画素と `tests/parity/` の既存行は変わらない（共通規則1）。勾配は新しい行を足すだけである。
-- シェーダーのモード番号：使わない（効果の段ではなく crop の着色 dispatch）。FX-9 のモード37（要割り当て）と `gradient-q14.wgsl` を共有する。
+- シェーダーのモード番号：使わない（効果の段ではなく crop の着色 dispatch）。FX-9 の勾配の平面（モード番号は要割り当て）と `gradient-q14.wgsl` を共有する。
 
 ### 作業手順
 
 **Files:**
 - Create `crates/alto-core/src/gradient.rs`（新規。FX-9 が先に作った場合は Modify）、`crates/alto-gpu/shaders/gradient-q14.wgsl`（新規。FX-9 と共有）、`crates/alto-gpu/shaders/vector-gradient-q14.wgsl`（新規）。
-- Modify `crates/alto-core/src/lib.rs`、`crates/alto-vector/src/lib.rs`、`crates/alto-gpu/src/raster_q8.rs`、`crates/alto-gpu/src/renderer/tile_renderer/paint.rs`、`crates/alto-gpu/src/renderer/tile_renderer/mod.rs`、`crates/alto-gpu/src/renderer.rs`、`crates/alto-gpu/src/renderer/tile_renderer/pool_tests.rs`、`crates/alto-gpu/src/renderer/uniform.rs`、`crates/alto-gpu/src/cpu_composite/v3_tests.rs`、`crates/alto-doc/src/version.rs`、`crates/alto-doc/src/lib.rs`（`format_version` 検査）、`crates/alto-store/src/lib.rs`（manifest の `document_format` の書き出しと受け入れ。試験 `package_with_new_document_format_roundtrips`、旧番号は拒否）、`crates/alto-engine/src/svg.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-text/src/outline.rs`（`Paint::Solid` への置き換え）、`tests/e2e/cpu-composite.js`、`tests/e2e/parity-tests.js`、`tests/parity/v3-browser.txt`（追記のみ）、`packages/alto-sdk/src/types.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`examples/browser-playground/vector-ui.js`。
+- Modify `crates/alto-core/src/lib.rs`、`crates/alto-vector/src/lib.rs`、`crates/alto-vector/src/glyph.rs`、`crates/alto-engine/src/vector_tests.rs`、`crates/alto-engine/examples/create-vector-sample.rs`、`crates/alto-gpu/src/cpu_composite/known_value_tests.rs`、`crates/alto-wasm/src/vector_probe.rs`、`crates/alto-gpu/src/raster_q8.rs`、`crates/alto-gpu/src/renderer/tile_renderer/paint.rs`、`crates/alto-gpu/src/renderer/tile_renderer/mod.rs`、`crates/alto-gpu/src/renderer.rs`、`crates/alto-gpu/src/renderer/tile_renderer/pool_tests.rs`、`crates/alto-gpu/src/renderer/uniform.rs`、`crates/alto-gpu/src/cpu_composite/v3_tests.rs`、`crates/alto-doc/src/version.rs`、`crates/alto-doc/src/lib.rs`（`format_version` 検査）、`crates/alto-store/src/lib.rs`（manifest の `document_format` の書き出しと受け入れ。試験 `package_with_new_document_format_roundtrips`、旧番号は拒否）、`crates/alto-engine/src/svg.rs`、`crates/alto-engine/src/text.rs`、`crates/alto-text/src/outline.rs`（`Paint::Solid` への置き換え）、`tests/e2e/cpu-composite.js`、`tests/e2e/parity-tests.js`、`tests/parity/v3-browser.txt`（追記のみ）、`packages/alto-sdk/src/types.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`examples/browser-playground/vector-ui.js`。
 
-**Interfaces:** Produces `Paint`、`Gradient`、`GradientKind`、`GradientStop`、`Gradient::validate`、`raster_q8::gradient_plan`、`raster_q8::gradient_q14`、`vector_gradient_q14` パイプライン。Consumes FX-9 の `gradient_q14` WGSL（先に着手した側が作る）。
+**Interfaces:** Produces `Paint`、`Gradient`、`GradientKind`、`GradientStop`、`Gradient::validate`、`raster_q8::gradient_plan`、`raster_q8::gradient_q14`、`vector_gradient_q14` パイプライン。Consumes FX-9 と共有する `gradient_q14` の WGSL（先に着手した側が作る）。
 
 - [ ] 手順1：`Paint` と `Gradient` を入れ、`fill` と `stroke.color` の型を変えて全呼び出し元（上の Modify の一覧）を `Paint::Solid` でビルドが通るようにする。この時点で描画の挙動は変えない。
 - [ ] 試験（`alto-vector`）`solid_paint_serializes_as_before`（既存のスナップショットの `fingerprint` が不変）、`gradient_roundtrips_through_json`、`paint_array_and_object_are_told_apart`。
@@ -217,7 +218,7 @@ pub struct Dash { pub pattern: Vec<f32>, #[serde(default)] pub offset: f32 }
 
 ### 依存
 
-- 先に：なし。
+- 先に：`ContentDetail::Vector.style`（`crates/alto-doc/src/version.rs`）は VEC-1 が足す。VEC-2 が先に入る場合は VEC-2 が足し、VEC-1 は再利用する（先に着手した側が作る）。それ以外は無し。
 - 後に：VEC-3 段階3（`stroke-dasharray`）、IMG-2（破線の確定）。VEC-1 とは `format_version` の番号を共有する。
 
 ## VEC-3 SVG の CSS、画像、文字、外部参照
@@ -320,13 +321,13 @@ XML の展開攻撃には、`roxmltree` の `allow_dtd: false`（エンティテ
 - vello は比較用の `vello-probe` feature だけ：`crates/alto-wasm/Cargo.toml`（`vello = "=0.11.0"`、`wgpu = "30.0.1"`）、`crates/alto-wasm/src/vector_probe.rs`（`compareVectorBackends`、`verifyVectorOptimization`）、ビルドは `scripts/build-vector-comparison.sh`（`--features vello-probe` で**エンジン全体**の WASM をもう一つ作る）、ページは `examples/vector-comparison/`。`alto_vector::VectorRasterizer` の `prepare` を lyon と vello（`VelloPreparation`）が実装している。
 - リリースのパッケージは vello を含まない：`scripts/check.sh` が `alto_wasm.d.ts` に `compareVectorBackends` と `verifyVectorOptimization` が無いことを検査する（d2718f1）。
 - 比較結果 `doc/verification/VECTOR-COMPARISON.md`：100パス、512×512、warm の中央値は lyon（旧 float の経路）25.9 ms、vello 0.8 ms。**比較相手は lyon で、現在の整数経路ではない。**
-- 整数経路の速度：`doc/verification/ENGINE-HARDENING-RESULTS.md` E-5〜E-7 の text-vector（3840×2160、125パスのベクター層8枚）で fit のコールド表示が約8秒（修正前は約61秒）。被覆の CPU 計算が支配的（`vector_q14` の自己時間、`raster_q8` の線分処理）。
+- 整数経路の速度：`doc/verification/ENGINE-HARDENING-RESULTS.md` の text-vector（3840×2160、125パスのベクター層8枚）で fit のコールド表示は、E-7 の約8秒を経て、最後の記録（E-10）で 2187〜2267 ms（最初の main は約61秒）。被覆の CPU 計算が支配的（`vector_q14` の自己時間、`raster_q8` の線分処理）。
 - 表示の段階：`DisplayReport.phase`（0 準備、1 保持、2 粗い／精緻化、3 exact）と `requested_level`、`admitted_level`（`crates/alto-gpu/src/renderer/presentation.rs`）。タイルのキャッシュは `crates/alto-gpu/src/renderer/cache.rs`。
 - `EngineOptions`（`packages/alto-sdk/src/engine.ts`）に `gpu: { powerPreference, memoryBudgetMB }` はあるが、ベクターの経路を選ぶ設定は無い。
 
 ### 11-04 からの変化
 
-- 判定の基準が変わった。11-04 は「VECTOR-COMPARISON と同じ条件で、整数経路の2倍以上速くなければ」と書いたが、その比較は旧 float の lyon 経路との比較で、整数経路との比較ではない。整数経路は堅牢化 E の後に大きく速くなり（fit のコールドが約61秒から約8秒）、PERF-1〜3 でさらに変わる。判定は**整数経路に対して新しく測り直す**。
+- 判定の基準が変わった。11-04 は「VECTOR-COMPARISON と同じ条件で、整数経路の2倍以上速くなければ」と書いたが、その比較は旧 float の lyon 経路との比較で、整数経路との比較ではない。整数経路は堅牢化 E の後に大きく速くなり（fit のコールドが約61秒から E-10 で約2.2秒）、PERF-1〜3 でさらに変わる。判定は**整数経路に対して新しく測り直す**。
 - 「別の WASM パッケージ」の実体は、エンジン全体を feature 付きで作り直した WASM である（`scripts/build-vector-comparison.sh`）。vello の `Scene` を描く wgpu のデバイスとテクスチャは WASM モジュールごとに別物で、二つのモジュールのあいだで GPU のテクスチャを渡す仕組みは確認していない。したがって、本体 WASM から vello 専用の小さな WASM を呼ぶ設計は採らず、**選んだときだけエンジン全体の別ビルドを読み込む**。
 - `check.sh` に、リリースが vello の公開関数を含まない検査が入った。VEC-4 の別ビルドはこの検査を保ったまま作る（同じ名前を使わないか、検査の対象に別ビルドを含めない）。
 
