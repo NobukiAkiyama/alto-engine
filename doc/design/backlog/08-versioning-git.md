@@ -12,7 +12,7 @@
 
 - 版の型：`VersionStore`（`crates/alto-engine/src/versions.rs`）が `commits`、`commit_bytes`、`snapshots`、`head`、`refs: alto_store::VersionRefs`、GC の根になるオブジェクトの集合 `retained`、進行中のマージ `merge: Option<MergeSession>` を持つ。`VersionRefs`（`crates/alto-store/src/lib.rs`）は `current_branch`、`branches`、`tags`、`pinned`、`generation`、`gc_generation`。`VersionRefs::roots` がブランチの先頭、タグ、pin を返し、GC（`VersionStore::root_commits`）、開くときの必須コミット（`open_decoded_package`）、`log_dag`、`alto-git` の写像、置き場の検査（`store_roots_contained`）がすべてこれを使う。
 - コミット：`Commit`（`crates/alto-doc/src/version.rs`）。`Commit::validate` は `format == 2`、親は2つまで、「親が2つ」と「`merge_base` が Some」が同値、メッセージは `MAX_MESSAGE` = 4096 文字まで。コミットのハッシュは正規化した JSON のバイト列のハッシュ。
-- 参照名：`ref_name`（`crates/alto-engine/src/versions/branches.rs`）は NFC に正規化し、空、128バイト超、`/` `\` `~` `^` `:` `?` `*` `[`、空白、制御文字、`..`、`@{`、末尾の `.` と `.lock` を拒否する。名前空間を `/` で区切れない。
+- 参照名：`ref_name`（`crates/alto-engine/src/versions/branches.rs`）は NFC に正規化し、空、128バイト超、先頭の `-`、`/` `\` `~` `^` `:` `?` `*` `[`、空白、制御文字、`..`、`@{`、末尾の `.` と `.lock` を拒否する。名前空間を `/` で区切れない。
 - マージ：`Engine::prepare_merge` が、現在の HEAD（`clean_head`：未コミットの変更があれば `CONFLICT`）と指定ブランチの共通祖先から「最良」の集合を求め、1つでなければ `MULTIPLE_MERGE_BASES`、無ければ `UNRELATED_HISTORY`。`merge_value` は値を再帰的に 3-way で比べる。`content`、`paths`、`effects`、`selection`、`transform`、`vector_mask`、`clip_path` は分けずに1つの値として比べる。ラスターで範囲（`bounds`）と画素（`tiles`）が両側で変わると `geometry` の競合。競合の種類は `conflict_kind` が決める（`pixels`、`asset`、`existence`、`parent`、`order`、`geometry`、`content`、`kind`、`property`）。統合した結果が `result_doc` を通らないときは、競合が無くても `prepare_merge` が文書全体の `structure` の競合を1つ足す。解決は `ours`、`theirs`、`explicit` の3種（`finish_merge`）。結果は `result_doc` で検証し、失敗は `INVALID_MERGE_RESULT`。
 - プランは `MergeSession` に保持し、トークン、参照のダイジェスト、文書の版、作業文書のハッシュで古さを判定する（`STALE_MERGE`）。プランはジャーナルに残らない（再読み込みで消える）。確定（`finish_merge`）は `historyCommand` の `finish_merge` で行い、ジャーナルに残る。
 - 必要な分だけ読む：`LazyObjects`（`crates/alto-engine/src/versions/lazy.rs`）が、フォルダに在ると分かっているオブジェクト `known`、操作中だけメモリに留める `pinned`、薄い `.alto` から開いたかの `external_history` を持つ。操作は `ObjectTarget`（`Commit`、`Branch`、`Merge`、`MergePlan`、`All`）を `require_objects` に渡し、足りなければ `STORAGE`（`objects-unavailable`）で何も変えずに断る。SDK の `withObjects` が `missingObjects` で足りないパスを聞き、フォルダから読んで `provideObjects` で渡す。`ObjectTarget::Merge` は両方の先頭と最良の共通祖先すべて（1段だけ）を読む。共通祖先の共通祖先は読まない（VER-1 で広げる）。
@@ -33,11 +33,11 @@ VER-4（stash）、VER-6（リモート）、GIT-1（Git から取り込んだ�
 - `VersionRefs` に足すフィールドは `#[serde(default, skip_serializing_if = …)]` で、空のとき manifest に出さない。既存のパッケージの manifest は1バイトも変わらない。
 - 根を2種類に分ける。`VersionRefs::roots`（今のまま）は「Git に写す、共有する根」。新しい `VersionRefs::local_roots`（新規）は stash とリモートの先頭。GC、開くときの必須コミット、`validate_graph`、`store_roots_contained` は両方を使う（`VersionRefs::all_roots`（新規）= `roots` + `local_roots`）。`alto-git` の写像と `log_dag` の `all_branches` は `roots` だけを使う。
 - `alto-git` の `mirror_manifest` は、Git に写すコミットの manifest から `local_roots` の参照を外す。外さないと、取り出した木が「参照されたコミットが無い」で開けない。（新規）
-- manifest の `format`：`Manifest` は `deny_unknown_fields` だが、`refs: VersionRefs` を `flatten` している。`VersionRefs` には `deny_unknown_fields` が無く、serde は `flatten` を持つ型で外側の未知キーの検査をしない。したがって**今の読み手は、manifest に増えた refs のキーを拒否せず黙って捨てる**。旧版のエンジンが新しいフィールドを持つフォルダを開いて GC すると、stash やリモートの版のオブジェクトを消す。新しいフィールドを書く manifest の `format` は必ず上げる。旧版は `decode_entries_impl` の format の照合で `UNSUPPORTED` になる。試験 `old_reader_drops_unknown_ref_keys`（新規）で今の振る舞いを記録し、`new_ref_fields_raise_the_manifest_format`（新規）で format が上がることを固定する。
+- manifest の `format`：`Manifest` は `deny_unknown_fields` で、`refs: VersionRefs` を `flatten` している。serde_derive はこの組み合わせでも残りのキーを検査するので、**今の読み手は refs に増えたキー（例：`stashes`）を持つ manifest を拒否する**（`unknown field`。`decode_entries_impl` では `CORRUPT_DATA`（`manifest: …`））。旧版が黙ってキーを捨て、GC で stash やリモートの版を消す危険は無い。それでも新しいフィールドを書く manifest の `format` は上げる。旧版が「壊れたパッケージ」ではなく `UNSUPPORTED`（`decode_entries_impl` の format の照合）を返し、新版が形式で読み方を分けられるようにするため。試験 `old_reader_refuses_unknown_ref_keys`（新規）で今の拒否を固定し、`new_ref_fields_raise_the_manifest_format`（新規）で format が上がることを固定する。
   - したがって新しいフィールドを持つ manifest は `format` を上げる（値は要割り当て）。今の `format` は「2＝完全、3＝薄い」の2値で意味を持つので、組み合わせが増える。
   - 案 A：新しい番号を2つ（完全、薄い）割り当てる。
   - 案 B：新しい番号を1つ割り当て、その番号では `external_history` の有無で薄いかどうかを判定する。`decode_entries_impl` は `(2, なし)`、`(3, あり)`、`(新, どちらでも)` を受ける。`decode_folder`、`prepare_gc`、`adopt_gc` の `format != 2` の検査を「完全である」の検査に書き換える。
-  - 既定：案 B。番号の決定は ROADMAP の統合でまとめる。stash だけでリモートが無い文書でも新しい番号にする（中身で番号を変えない。新しいフィールドが空なら旧番号のまま書く）。
+  - 既定：案 B。番号の決定は ROADMAP の統合でまとめる。番号は「新しいフィールドのどれかが空でないか」だけで決める：stash、リモート、Git の先頭のどれか1つでもあれば新しい番号、すべて空なら旧番号（2 または 3）のまま書き、バイト列も今と同じ。どのフィールドがあるかで番号を分けない。
 - `DocumentMeta::format_version`（文書の形式）は、この文書のどの項目でも上げない。文書の意味（ノード、効果）を変えないため。
 - `PROTOCOL`：`historyCommand` の新しいコマンドと新しい要求を足す項目は上げる（値は要割り当て）。Worker が知らないコマンドは `INVALID_ARGUMENT` になるので、SDK と Worker の版の食い違いを接続時に止める。
 
@@ -61,7 +61,7 @@ VER-4（stash）、VER-6（リモート）、GIT-1（Git から取り込んだ�
 - 最良の共通祖先 B1…Bn（n ≥ 2）をハッシュの昇順に並べ、V1 = B1、Vk = 3-way(base = `virtual_base(Vk-1 と Bk の最良の共通祖先)`, ours = Vk-1, theirs = Bk) と順に畳む。共通祖先の共通祖先が複数なら同じ手順で再帰する。共通祖先が無いペアは、空の基準（`Document` の値を持たない `None`）で比べる代わりに、`MULTIPLE_MERGE_BASES` を返す（関係のない履歴を混ぜない）。
 - 仮想マージの競合は確定させない。`merge_value` に方針の引数を足し、`ConflictPolicy::Collect`（新規。今の振る舞い）と `ConflictPolicy::TakeBase`（新規。競合した値は基準の値を採る。基準に無ければ値を除く）を分ける。仮想マージは `TakeBase` で行う。結果が `result_doc` を通らなければ `MULTIPLE_MERGE_BASES`（理由 `virtual-base-invalid`）。（新規）
 - 上限（`merge.rs` に置く）：`MAX_MERGE_BASES`（新規）= 8（各段の最良の共通祖先の数）、`MAX_VIRTUAL_DEPTH`（新規）= 8（再帰の深さ）。超えたら今と同じ `MULTIPLE_MERGE_BASES`（理由 `too-many-bases`）。計算は祖先の集合を求める `VersionStore::ancestors` の繰り返しで、版の数に比例する。
-- 仮想ベースはコミットにしない。値（`serde_json::Value`）として `MergeSession` に持つ。VER-2 の画素マージを仮想マージの中でも行うと、新しいタイルができる。そのタイルは `Engine::begin_tile_stage` の段に入れて GC から守る。段の持ち主は `Engine::staged_tiles` で、`MergeSession` は段の番号 `stage: u64`（新規）を持つだけ。今は `VersionStore::bump`、`Engine::commit`、`invalidate_merge`、`cancel_merge`、`finish_merge` が `merge = None` で `MergeSession` を直接捨てるが、`VersionStore` からは `Engine::release_staged_tiles` を呼べない。そこで `MergeSession` を捨てる処理を `Engine::drop_merge(h)`（新規。段を `release_staged_tiles` で外してから `merge = None`）に集め、上の5か所はすべてこれを通す。`bump` は `merge` を触らず、呼び出し側（`Engine` のメソッド）が `drop_merge` を呼ぶ。試験で、どの経路の後も `staged_tiles` に段が残らないことを確かめる。
+- 仮想ベースはコミットにしない。値（`serde_json::Value`）として `MergeSession` に持つ。VER-2 の画素マージを仮想マージの中でも行うと、新しいタイルができる。そのタイルは `Engine::begin_tile_stage` の段に入れて GC から守る。段の持ち主は `Engine::staged_tiles` で、`MergeSession` は段の番号 `stage: u64`（新規）を持つだけ。今 `merge = None` で `MergeSession` を直接捨てる場所は6か所ある：`VersionStore::bump`（`branches.rs`）、`Engine::commit` と `invalidate_merge`（`versions.rs`）、`adopt_gc`（`gc.rs`）、`cancel_merge` と `finish_merge`（`merge.rs`）。`VersionStore` からは `Engine::release_staged_tiles` を呼べない。そこで捨てる処理を `Engine::drop_merge(h)`（新規。段を `release_staged_tiles` で外してから `merge = None`）に集め、6か所すべてがこれを通す。`bump` は `merge` を触らず、呼び出し側（`Engine` のメソッド）が `drop_merge` を呼ぶ。試験で、どの経路の後も `staged_tiles` に段が残らないことを確かめる。
 - 確定したコミットの `merge_base` は B1（ハッシュが最小の最良の共通祖先）。どれも両方の親の祖先なので `validate_graph` を通る。`MergePlan` に `bases: Vec<ContentHash>`（新規）を足し、全部を返す。`base` は互換のため B1 を入れる。
 - 遅延読み込み：`ObjectTarget::Merge` の `target_docs` を、仮想ベースの計算が読むすべての共通祖先（再帰の各段）へ広げる。上限で打ち切る段では読まない。`MergeSession::roots` も同じ集合を返し、GC の根にする。
 
@@ -92,7 +92,7 @@ SDK：`MergePlan.bases: string[]`（新規）。
 - [ ] 試験 `virtual_base_conflict_takes_the_base_value`：仮想マージで競合した値が、利用者に競合として出ず、基準の値になる。
 - [ ] 試験 `too_many_bases_is_refused`：`MAX_MERGE_BASES` を超えると `MULTIPLE_MERGE_BASES`、版の状態のダイジェストが変わらない。
 - [ ] 試験 `virtual_base_tiles_survive_maintain_until_the_plan_ends`：仮想マージで画素を統合した後に `maintain` しても、プランのタイルが残る。`cancel_merge` の後は消える。
-- [ ] 試験 `every_path_that_drops_a_plan_releases_its_stage`：`cancel_merge`、`finish_merge`、`commit`、ブランチの操作（`bump`）、Undo（`invalidate_merge`）の後に `staged_tiles` に段が残らない。
+- [ ] 試験 `every_path_that_drops_a_plan_releases_its_stage`：`cancel_merge`、`finish_merge`、`commit`、ブランチの操作（`bump`）、Undo（`invalidate_merge`）、GC の確定（`adopt_gc`）の後に `staged_tiles` に段が残らない。
 - [ ] 試験（`lazy.rs`）`merge_targets_cover_every_virtual_base`：遅延読み込みの文書で、共通祖先の共通祖先が `missing_objects` に入る。
 - [ ] ブラウザ試験：十字マージを SDK から確定し、保存して開き直す。
 - 完了条件：上の試験と共通規則7の検証がすべて通る。既存のマージの試験の結果が変わらない。
@@ -249,7 +249,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 - `Engine::stash(h, message, created_at, author)`（新規）：HEAD が要る（無ければ `NO_COMMIT`）。detached でもよい（ブランチを動かさないため）。作業文書が HEAD と同じなら `INVALID_ARGUMENT`（`"nothing to stash"`）。HEAD の版のオブジェクトが要る（`require_objects(Commit { head })`。無ければ `STORAGE`）。コミットを作って `stashes` の先頭に入れ、作業文書を HEAD の内容に戻す（`install_version_document`。Undo 履歴は空になる）。進行中のマージは捨てる（`bump`）。
 - `Engine::stash_apply(h, commit, drop)`（新規）：作業文書が HEAD と同じであること（`clean_head`）。base = stash の親、ours = HEAD、theirs = stash のスナップショットで、マージと同じ 3-way（`merge_value`、VER-2、VER-3 を含む）。
   - 競合が無ければ、結果を作業文書へ1つの可逆トランザクションで適用する（`restore_version` と同じく `alto_doc::restore_ops` → `transact`。意図は `version.stash_apply`（新規））。1回の Undo で戻せる。`drop` なら stash を外す。
-  - 競合があれば、`MergePlan`（`kind: "stash"`（新規））を返し、`MergeSession` の行き先を `MergeTarget::Stash { commit, drop }`（新規）にする。`finish_merge` の確定はコミットを作らず、上と同じトランザクションで適用する。確定まで stash を外さない。
+  - 競合があれば、`MergePlan`（`kind: "stash"`（新規））を返し、`MergeSession` の行き先を `MergeTarget::Stash { commit, drop }`（新規）にする。`finish_merge` は行き先で分岐する。今の確定の経路（`current_branch` が無ければ `STALE_MERGE`（`detached`）、コミットを作ってブランチと HEAD を動かす、`install_version_document`）は `MergeTarget::Branch` だけが通る。`MergeTarget::Stash` はブランチも HEAD も動かさず、コミットも作らず、上と同じトランザクション（`restore_ops` → `transact`）で作業文書に適用する。したがって detached でも確定できる。結果の検証（`result_doc`、`format_version == 5`、オブジェクトの存在、`validate_node_content`）は共通に行う。確定まで stash を外さない。
   - stash の親が HEAD の祖先でなくてもよい（3-way の base は stash の親）。共通祖先を求めない。
 - `Engine::stash_drop(h, commit)`（新規）：参照を外すだけ。オブジェクトは次の GC で消える。
 - SDK（`doc.versions`）：
@@ -280,12 +280,12 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 **Interfaces:** Produces `StashEntry`、`VersionRefs.stashes`、`VersionRefs::local_roots`、`VersionRefs::all_roots`、`Engine::stash`、`Engine::stash_apply`、`Engine::stash_drop`、`MergeTarget`、`ObjectTarget::Stash`、`doc.versions.stash`、`stashList`、`stashApply`、`stashPop`、`stashDrop`。
 
-- [ ] 試験 `old_reader_drops_unknown_ref_keys`（`alto-store`。今の読み手が未知の refs キーを捨てることを記録する）、`new_ref_fields_raise_the_manifest_format`（stash を持つ manifest の format が新しい番号で、今の照合では `UNSUPPORTED`）。
+- [ ] 試験 `old_reader_refuses_unknown_ref_keys`（`alto-store`。今の読み手が未知の refs キーを持つ manifest を拒否することを固定する）、`new_ref_fields_raise_the_manifest_format`（stash を持つ manifest の format が新しい番号で、今の照合では `UNSUPPORTED`）。
 - [ ] 試験 `stash_restores_head_and_keeps_the_work`、`stash_pop_reapplies_the_work_as_one_undo`。
 - [ ] 試験 `stash_with_nothing_to_save_is_refused`、`stash_in_detached_state_returns_to_the_detached_head`、`too_many_stashes_is_refused`。
 - [ ] 試験 `gc_keeps_stashed_objects`、`prune_keeps_stashes`、`stash_survives_save_reopen_and_journal_replay`。
 - [ ] 試験 `stash_survives_a_thin_save_and_reopen_with_the_store`：薄い `.alto` と置き場で保存し、置き場ありで開き直して `stashPop` できる。置き場なしでは `STORAGE`。
-- [ ] 試験 `conflicting_pop_keeps_the_stash_until_finish`。
+- [ ] 試験 `conflicting_pop_keeps_the_stash_until_finish`、`conflicting_pop_finishes_while_detached`（detached で競合を解決しても `STALE_MERGE` にならず、ブランチと HEAD が動かない）。
 - [ ] 試験（`alto-git`）`stashes_are_not_mirrored_to_git`：stash のある文書を `sync` し、取り出した木が開ける。
 - [ ] 試験 `a_manifest_without_stashes_keeps_its_bytes`：stash が無い文書の manifest が今と同じバイト列。
 - 完了条件：上の試験、共通規則7の検証、`PROTOCOL` の更新と README、RELEASING の更新。
@@ -317,9 +317,9 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
   2. `keep.commits = n`（1以上）：各根から親を幅優先で辿った距離が n 未満のコミット。`keep.since = t`（ミリ秒）：`created_at >= t` のコミット。両方を指定したら、両方を満たすものだけ。根から K の中だけを辿って届くものに限る。
   3. マージの閉包：K のマージコミット c（親が2つ）について、`merge_base` B を K に入れ、両方の親から B までのすべての経路のコミット（`ancestors(親) - ancestors(B) + {B}`）を K に入れる。`Commit::validate`（親が2つなら `merge_base` が要る）と `validate_graph`（`merge_base` が両方の親の祖先）を保つため。閉包で K が大きくなることを報告に書く。
   4. 片親だけが K の外にあるマージコミットは、3. で両親を入れるので生じない。
-- 書き直し：K の中で、親が K の外にあるコミットは親を外す（根のコミットになる）。親が変わったコミットとその子孫は、親のハッシュを新しいものに置き換えて作り直す（ハッシュが変わる）。親が変わらないコミットはハッシュも変わらない。スナップショットとオブジェクトは変えない。
+- 書き直し：K の中で、親が K の外にあるコミットは親を外す（根のコミットになる）。親が変わったコミットとその子孫は、親のハッシュを新しいものに置き換えて作り直す（ハッシュが変わる）。親が変わらないコミットはハッシュも変わらない。スナップショットとオブジェクトは変えない。書き直しは親より子が後になる順（`log_dag` の逆順）で行い、元のハッシュ → 新しいハッシュの表 `mapping` を作る。
 - 元のハッシュの記録：作り直したコミットのメッセージの末尾に `Alto-Trimmed-From: <元のハッシュ>` を足す。`MAX_MESSAGE` を超えるなら足さず、報告の `mapping` にだけ残す（警告 `trailer-omitted`）。
-- 参照：K に無いコミットを指す参照は無い（根は K に入る）。stash とリモート（`local_roots`）は出力に残すかを選べる（`keepLocal`、既定は残す）。（新規）
+- 参照：K に無いコミットを指す参照は無い（根は K に入る）。出力の `head`、ブランチの先頭、タグ、pin、残す stash の `commit`、残すリモートの先頭は、すべて `mapping` で新しいハッシュに置き換える。置き換えないと `open_decoded_package`（`referenced commit is missing`）と `validate_graph` が出力を拒否する。stash とリモート（`local_roots`）は出力に残すかを選べる（`keepLocal`、既定は残す）。（新規）
 - 同じ文書：出力の文書の root NodeId は元と同じ。親が変わらなかったコミット（境界より上で、祖先がすべて K に入るもの）は元と同じハッシュなので、元との共通の祖先になる。そうしたコミットが無ければ元とのマージは `UNRELATED_HISTORY`。在れば元とマージでき、書き直したコミットは元と別の版として並ぶ。
 - 出力先：
   - `target: ArchiveTarget`：完全な `.alto`。上限は `MAX_PACKAGE_BYTES`。manifest の `format` は「共通の設計」に従う：`keepLocal` で stash やリモートを残すなら新しい番号、残すものが無ければ 2。（新規）
@@ -359,7 +359,7 @@ doc.versions.saveTrimmed(  // 新規
 
 **Interfaces:** Produces `TrimKeep`、`TrimReport`、`trimmed_parts`、`ObjectTarget::Commits`、`doc.versions.saveTrimmed`。
 
-- [ ] 試験 `trimmed_export_reopens_with_new_hashes`：残したコミットの数、根のコミットに親が無いこと、スナップショットのハッシュが変わらないこと。
+- [ ] 試験 `trimmed_export_reopens_with_new_hashes`：残したコミットの数、根のコミットに親が無いこと、スナップショットのハッシュが変わらないこと、`head`・ブランチ・タグ・pin・stash が `mapping` どおりの新しいハッシュを指すこと。
 - [ ] 試験 `untouched_roots_keep_their_hashes`：K の中で親が変わらないコミットのハッシュが同じ。
 - [ ] 試験 `merge_closure_keeps_the_base`：十字でないマージで、境界の外の `merge_base` と経路が K に入り、開き直した文書の `validate_graph` が通る。
 - [ ] 試験 `original_document_is_unchanged`：元の文書の版の状態のダイジェスト、保存済みの状態が変わらない。
@@ -504,8 +504,8 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
   - `document.json`（比較用の写し）は読まない。スナップショットと違えば警告（`document.json は正本ではありません`）を返す。
   - どれかが満たせなければ `CONFLICT` で、ローカルのフォルダも Git の ref も変えない。
 - 書き込み：取り込む版のコミット、スナップショット、オブジェクトを、ローカルのフォルダへ `folder::LockedFolder` の排他の中で書く。manifest には、そのブランチの先頭を `remotes["git"].branches[<Alto のブランチ名>]` として足す（VER-6 の型）。ローカルの Alto のブランチは動かさない。統合は Alto で `prepareMerge({ remote: "git", branch })` を行う。
-- 対応表：取り込んだ Git コミットを `SyncState.adopted: BTreeMap<String, ContentHash>`（新規。Git の oid → その木の manifest の head）に記録し、ブランチの行の `git` をその oid に進める。`verify_table` は `adopted` の行を、トレーラではなく「木の `commits/<hash>.json` のハッシュが一致し、木の manifest の head が同じ」で確かめる。`STATE_FORMAT` を 2 に上げ、1 の状態を読める（`adopted` は空）。
-- 次の `sync`：Alto のブランチが取り込んだ先頭の子孫になるまで、`check_mapped` の `fast_forward_only` が `CONFLICT` を返す（Git の「push の前に pull」と同じ）。統合した後の `sync` は、取り込んだ先頭の Git の親として `adopted` の oid を使う。取り込んだ先頭の祖先で、`adopted` からしか届かない Alto のコミットは Git に作らない（どの ref からも届かず、`git gc` で消えて表が壊れるため）。
+- 対応表：取り込んだ Git コミットを `SyncState.adopted: BTreeMap<String, ContentHash>`（新規。Git の oid → その木の manifest の head h）に記録する。そのブランチの行（`RefEntry`）は `git` を oid に、`alto` を h に進める（h は取り込んだ版としてローカルの Alto の DAG に入っている）。`verify_table` は `adopted` の行を、トレーラではなく「木の `commits/<h>.json` のハッシュが h と一致し、木の manifest の head が h」で確かめ、親の順序の検査はしない（Git の親は利用者が作ったもので、Alto の親と対応しない）。`STATE_FORMAT` を 2 に上げ、1 の状態を読める（`adopted` は空）。
+- 次の `sync`：行の `alto` が h なので、Alto のブランチの先頭が h の子孫になるまで、`check_mapped` の `fast_forward_only`（`ancestors(先頭).contains(e.alto)`）が `CONFLICT` を返す（Git の「push の前に pull」と同じ）。行の `git` も oid に進めてあるので、Git の ref の照合（`e.git` との比較）は通る。`pull` が `git` だけを進めて `alto` を前のままにすると、この検査が働かず、`sync` が取り込んだ Git コミットを飛ばしてトランクを動かす。統合した後の `sync` は、h の Git の親として `adopted` の oid を使う。h の祖先で、`adopted` からしか届かない Alto のコミットは Git に作らない（どの ref からも届かず、`git gc` で消えて表が壊れるため）。
 - 冪等：同じ状態で2回 `pull` しても何も書かない。
 - 薄い `.alto`：`pull` も `sync` もフォルダだけを受ける。薄い `.alto` の置き場（`.altoproj`）は完全なフォルダなので対象になる。
 
@@ -526,6 +526,7 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
 - [ ] 試験 `pull_refuses_an_incomplete_tree`、`pull_refuses_another_document`、`pull_refuses_a_thin_package`。
 - [ ] 試験 `pull_ignores_a_hand_edited_document_json`：警告が出て、取り込む内容はスナップショットのまま。
 - [ ] 試験 `pull_is_idempotent`、`a_forced_git_ref_is_a_conflict_and_nothing_moves`。
+- [ ] 試験 `pull_moves_both_git_and_alto_of_the_row`：`pull` の後の行の `git` が取り込んだ oid、`alto` がその木の head。
 - [ ] 試験 `sync_after_pull_needs_the_merge`、`sync_after_merge_uses_the_adopted_commit_as_parent`：取り込んだ後のマージを `sync` し、Git の親が `adopted` の oid。`git fsck --strict` が通る。
 - [ ] 試験 `state_format_1_still_reads`。
 - 完了条件：上の試験と既存の `alto-git` の試験が通る。`MILESTONES.md` の上限15を更新。
@@ -662,7 +663,7 @@ SDK：`doc.versions.cherryPick(hash)`、`rebase(onto)`、`rebaseContinue()`、`r
 ## Review Focus
 
 - 遅延読み込みと薄い `.alto`：自動マージ（VER-1〜3）、stash、打ち切り、fetch、cherry-pick が、要るタイルを `ObjectTarget` で先に読み、無ければ `STORAGE`（`objects-unavailable`）で何も変えないこと。置き場なしで開いた薄い `.alto` で確かめる。
-- 新しい参照（stash、リモート）が GC、開くときの必須コミット、`store_roots_contained` の根に入り、`alto-git` の写像に入らないこと。今の読み手は未知の refs キーを黙って捨てるので、新しい参照を書く manifest の `format` が必ず上がっていること。
+- 新しい参照（stash、リモート）が GC、開くときの必須コミット、`store_roots_contained` の根に入り、`alto-git` の写像に入らないこと。新しい参照を書く manifest の `format` が上がり、旧版が `CORRUPT_DATA` ではなく `UNSUPPORTED` を返すこと。
 - マージや rebase が作るタイルが、プランの間 `staged_tiles` で守られ、終われば外れること。
 - マージ結果のタイルとテキストの焼き込みが、ジャーナル復旧で同じになること。
 - 計算量の上限：仮想ベース（8×8）、画素マージ（4096タイル）、rebase（1024）、同期（65536コミット）。
