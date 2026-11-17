@@ -50,9 +50,9 @@
 - 次の兄弟が `clip_to_below` ならその旨で拒否する（`prepare_merge_down` と同じ）。
 - 祖先のロックは `INVALID_ARGUMENT`（`unlocked`）。
 
-**一時シーン。** 根（恒等、Isolated）の下にノード 1 つ。ノードは不透明度 1、合成モード Normal、`clip_to_below` なし、変形は「祖先の平行移動 ∘ 自身の変形」、効果・マスク・クリップパス・ベクターマスクはそのまま。祖先グループの不透明度・合成モード・マスク・効果は焼かない（文書に明記する）。`Engine::render_scene` の内部関数 `append` を、任意の 1 ノードを根の子にして作れる形に分ける（`Engine::bake_scene`（新規））。`scene.canvas` は `region` にする。
+**一時シーン。** 根（恒等、Isolated）の下にノード 1 つ。ノードは不透明度 1、合成モード Normal、`clip_to_below` なし、変形は「祖先の平行移動 ∘ 自身の変形」、効果・マスク・クリップパス・ベクターマスクはそのまま。祖先グループの不透明度・合成モード・マスク・効果は焼かない（文書に明記する）。`Engine::render_scene` の内部関数 `append` を、任意の 1 ノードを根の子にして作れる形に分ける（`Engine::bake_scene`（新規））。一時シーンは `region` の左上が (0, 0) になるよう `-region.origin` だけ平行移動して作り、`scene.canvas` は `{ x0: 0, y0: 0, x1: region の幅, y1: region の高さ }` にする。描画は `canvas.x1`／`canvas.y1` だけを上限に使い、`canvas.x0`／`canvas.y0` は ROI の切り詰めにしか効かないので、負の原点の `region`（文書の左・上へはみ出す効果）は平行移動しないと透明で返る。確定で原点を足し戻す。
 
-**範囲。** `region` ＝ ノードの文書座標の外接矩形 ∪ 効果の出力範囲。効果の出力範囲は FX-5 の `effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>`（新規。02 の FX-5 が作る）を使う。`None`（桁あふれ）は `RESOURCE_LIMIT`。FX-5 が入るまでは、ぼかしの `radius`（0〜64 文書 px）で広げた矩形を使う。上限は `MAX_IMAGE_PIXELS` と、タイル数 `MAX_BAKE_TILES = 512`（新規、128 MiB。読み戻しと確定の作業領域で `EDIT_BUDGET` に収める）。超えたら `RESOURCE_LIMIT`。範囲は文書の外へ広がってよい。（新規）
+**範囲。** `region` ＝ ノードの文書座標の外接矩形 ∪ 効果の出力範囲。効果の出力範囲は FX-5 の `effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>`（新規。02 の FX-5 が作る）を使う。`None`（桁あふれ）は `RESOURCE_LIMIT`。FX-5 が入るまでは、ぼかしの `radius`（0〜64 文書 px）で広げた矩形を使う。上限は `MAX_IMAGE_PIXELS` と、タイル数 `MAX_BAKE_TILES = 256`（新規、64 MiB。読み戻しのバッファ、straight の出力タイル、`stage_tile` の分で `EDIT_BUDGET` に収める。マージダウンは 2 バッファを数えるので、`region` のタイル数 × 2 も 256 以下にする）。超えたら `RESOURCE_LIMIT`。範囲は文書の外へ広がってよい。（新規）
 
 **読み戻し。** `Renderer::read_scene_tiles_uncached(scene, store, keys)`（新規。`crates/alto-gpu/src/renderer/tile_read.rs`）が、`prepare_scene` のあとタイルごとに `compose_tiles` で描き、表示キャッシュの `cache_map` へは登録しない。既定：同じキーの既存エントリを先に `cache_map` から外してスロットを解放し、読んだ後にも外す（実画面のタイルは次のフレームで描き直す）。代案：予約した専用スロットを 1 つ持つ。`cache_slot` の割り当てを読んで、どちらが小さい変更かを実装者が選ぶ。1 回の呼び出しで読むタイルは `readbackCapacity()`（`crates/alto-wasm/src/lib.rs`）以下。GPU の失敗（`GPU_LOST`、`INVALID_ARGUMENT` の予算超過）はそのまま返す。この時点で文書は変わっていない。
 
@@ -64,8 +64,8 @@
 
 - 従来の CPU 経路（両方 Normal・効果なし・マスクなし）は変えない。同期のまま、画素も変えない。
 - 新しい条件：上が Normal 以外の合成モード、またはどちらかに効果・マスクがある場合は、GPU 経路にする。一時シーンは根の下に「下、上」の順（各々の属性つき、ただし下の不透明度 1・Normal に読み替える）を置く。次を満たすときだけ許す。
-  - 下が Normal で、不透明度 1（効果・マスクは焼かれた結果で見る）。
-  - 上が Normal 以外のとき、上の出力範囲のすべての画素で、下の読み戻しのアルファが 255。背後の合成と畳み込み後の合成が一致するのはこのときだけだからである。透明な範囲に Normal 以外の上が掛かると、画面上は下の層との合成が変わる。
+  - 下が Normal で、不透明度 1（効果・マスクは焼かれた結果で見る）、`clip_to_below` なし（`plain_props` と同じく `bake does not apply clipping` で拒否。下の基底が消えるため）。
+  - 上が Normal 以外のとき、上の出力範囲のすべての画素で、下だけを描いた読み戻しのアルファが 255。この判定のため、マージの `bake_read` は「下だけ」と「下＋上」の 2 シーンを順に読み、2 つのバッファを返す。`region` は下と上の `region` の和で、`bake_plan` が計算する（判定そのものは読み戻しの後の `bake_finish` が行い、満たさなければ `UNSUPPORTED`）。背後の合成と畳み込み後の合成が一致するのはこのときだけだからである。透明な範囲に Normal 以外の上が掛かると、画面上は下の層との合成が変わる。（新規）
   - 満たさないときは `UNSUPPORTED`（`merge down would look different`）で、文書は変わらない。
 - 結果は下のノードを残し、上を `Op::RemoveNode` で消す（従来と同じ）。下のノードは `bake_finish` と同じく、効果・マスク・ベクターマスク・クリップパスを空にし、不透明度 1・Normal にして置き換える。一時シーンは永続の属性から作られるので、空にしないと焼いた結果へ二重に掛かる。（新規）
 
@@ -119,8 +119,8 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 - [ ] 試験 `merge_down_refuses_when_it_would_look_different`（Rust）：下が透明を含み上が Multiply なら `UNSUPPORTED`。下が全面不透明なら通る。
 - [ ] ブラウザ試験 `baking a blurred masked layer looks the same`：焼く前の `pickComposite` の列と、焼いた後の列が各チャンネル 1 以内で一致（アルファ 255 の画素は全バイト一致）。ぼかしの外へ広がった範囲も含める。
 - [ ] ブラウザ試験 `baking refuses a clipped layer`：`UNSUPPORTED`、`snapshotHash` 不変。
-- [ ] ブラウザ試験 `GPU loss during a bake leaves the document unchanged`：`injectReadbackFailure` で読み戻しを失敗させ、`snapshotHash` 不変。
-- [ ] 試験 `baking does not disturb the visible tiles`：文書の範囲内の同じタイル `(0, tx, ty)` を、焼く前に表示で描いておき、効果つきノードを焼いた後に同じタイルを読み戻す。焼く前と全バイト一致し、一時シーンの内容が混ざっていない（衝突は同じキーでしか起きないので、別領域では検出できない）。
+- [ ] ブラウザ試験 `GPU loss during a bake leaves the document unchanged`：`injectReadbackFailure` はストローク終了の読み戻しにしか配線されていない（`crates/alto-gpu/src/renderer/readback.rs` の `fail_after`）。同じ `readback_fault` を `read_scene_tiles_uncached`（新規）も消費するよう配線し、これで読み戻しを失敗させ、`snapshotHash` 不変。
+- [ ] 試験 `baking does not disturb the visible tiles`：文書の範囲内の同じタイル `(0, tx, ty)` を、焼く前に表示で描いておき、効果つきノードを焼いた後に同じタイルを読み戻す。焼いた後のタイルが、新しい `Renderer`（キャッシュ空）で同じ文書を描いた同じタイルと全バイト一致する。焼く前と比べない（文書が変わり、量子化の差も出るため）。衝突は同じキーでしか起きないので、同じ `(0, tx, ty)` で比べる。
 - [ ] 実装、PR。
 
 **完了条件：** 上の試験が通る。既存の `rasterize` と `mergeDown` の試験が無修正で通る。`tests/parity/cpu-reference.txt`、`tests/parity/v3-browser.txt` が不変。
@@ -151,7 +151,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 整数位置・等倍の制限を、「祖先が整数平行移動」に緩める。ノード自身の変形は任意の `FixedAffine` を許す。
 
 - **配置。** `Placement { world: FixedAffine, offset: (i32, i32) }`（新規）。`offset` は祖先の変形の合成の整数平行移動（そうでなければ `UNSUPPORTED`：`a vector's ancestors must be whole-pixel translations`）。`world` は `world(self, h, id)`（祖先とノードの合成）。`pixel_aligned_world` を `placement` に作り直し、ノード自身が整数平行移動のときは従来と同じ結果（`offset` ＝全体の平行移動、ノードに変形を残す）を返す。
-- **画素。** ノード自身の変形が整数平行移動でないときは新しい枝にする。範囲＝`vector_extent` の矩形の 4 隅を、ノード自身の変形で文書へ写した外接矩形。線幅と miter の余白は、変形の最大拡大率（`max(√(a²+b²), √(c²+d²))` の切り上げ）を掛けて足す。範囲は十分に大きくてよい（結果の画像範囲が画素を含めばよい）。`ImageBounds::validate` が `RESOURCE_LIMIT`、`budget` がタイル数の上限（`EDIT_BUDGET`）を見る。ウィンドウは従来どおり「タイル位置 ＋ `offset`」の 1:1 で、`world` をそのまま `VectorRasterizer` へ渡す。
+- **画素。** ノード自身の変形が整数平行移動でないときは新しい枝にする。範囲＝`vector_extent` の矩形の 4 隅を、ノード自身の変形で親の座標へ写した外接矩形（文書座標から `offset` を引いた局所座標。`vector_tiles` の `bounds` は局所、ウィンドウは「タイル位置 ＋ `offset`」の文書座標なので、文書座標のまま入れると `offset` が二重になる）。線幅と miter の余白は、変形の最大拡大率（`max(√(a²+b²), √(c²+d²))` の切り上げ）を掛けて足す。範囲は十分に大きくてよい（結果の画像範囲が画素を含めばよい）。`ImageBounds::validate` が `RESOURCE_LIMIT`、`budget` がタイル数の上限（`EDIT_BUDGET`）を見る。ウィンドウは従来どおり「タイル位置 ＋ `offset`」の 1:1 で、`world` をそのまま `VectorRasterizer` へ渡す。
 - **確定。** 新しい枝ではノードの `transform` を恒等にする。局所座標のマスク類は、ノードの変形で写して持ち越す。`bake_relocate(node, m: Affine2)`（新規）が次を行う：`mask_linked` かつマスクありなら `mask_transform = m.concat(mask_transform)`、`vector_mask.transform` と `clip_path.transform` も同様。その後 `validate()`（失敗は `UNSUPPORTED`）。リンクされていないマスク（文書座標）は変えない。効果の選択（`Effect::selection_mut`、ノード局所の R8 で変形を持たない）が 1 つでもあれば、画素を再標本せずには移せないので `UNSUPPORTED`（`a layer with a limited effect cannot be rasterized under a transform`）。
 - **範囲外。** `FixedAffine::from_affine` が失敗する変形は `INVALID_ARGUMENT`（`world` が返す既存のエラー）。`vector_pixels_q14` の `Range` は `UNSUPPORTED`。
 - **グループの子。** 従来どおり整数平行移動だけを許す（グループの平坦化は対象にしない）。
@@ -208,7 +208,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 テキストを、v3 の描画と同じ被覆でラスターにする。
 
 - **関数（新規）。** `crates/alto-gpu/src/glyph_q8.rs` に次を足す。
-  - `text_extent(bake: &[u8], world: FixedAffine) -> Result<Option<[i64; 4]>, RasterError>`：各グリフの箱の和。被覆は作らない。`atlas_band` ならば `place_q` の `dst`・`w`・`h`。そうでなければ、有限の ROI `[-2^24, -2^24, 2^25, 2^25]` での `direct_window`（ROI との交わりを返すので、ROI より外へ出る箱は切られる）。座標の加算は `checked_add` で行い、溢れたら `RasterError::Range`、ROI に切られた結果が文書の範囲上限を超えるなら `RESOURCE_LIMIT`。
+  - `text_extent(bake: &[u8], world: FixedAffine) -> Result<Option<[i64; 4]>, RasterError>`：各グリフの箱の和。被覆は作らない。描画と同じ分岐を写す：`atlas_band(..).then(|| place_q(..)).flatten()` が `Some` なら `place_q` の `dst`・`w`・`h`。`atlas_band` が偽、または `place_q` が `None`（退化した帯、`MAX_GLYPH_PX` の範囲外）なら直接帯として、有限の ROI `[-2^24, -2^24, 2^25, 2^25]` での `direct_window`（ROI との交わりを返すので、ROI より外へ出る箱は切られる）。座標の加算は `checked_add` で行い、溢れたら `RasterError::Range`、ROI に切られた結果が文書の範囲上限を超えるなら `RESOURCE_LIMIT`。
   - `text_pixels_q14(bake: &[u8], world: FixedAffine, window: [i64; 4]) -> Result<Vec<[u16; 4]>, RasterError>`：試験専用の `text_q14` と同じ手順で、`glyph_bitmaps`（レベル 0）の各切り抜きを `source_over_q14` で順に重ねる。結果は premultiplied Q14。
 - **注入。** `canvas.rs` に `pub struct Rasterizers<'a> { pub vector: VectorRasterizer<'a>, pub text_extent: TextExtent<'a>, pub text: TextRasterizer<'a> }`（新規）を置き、`prepare_layer_edit` の第 3 引数を `VectorRasterizer` からこれへ替える。wasm の `layer_edit` が 3 つを作って渡す。呼び出し元は `canvas.rs` の試験（`&|_, _, _| Err("no rasterizer".into())`）と `layer_edit`。
 - **処理。** `prepare_rasterize` に `NodeKind::Text` の枝を足す。`Engine::text_bake` でバイト列を得る（無ければ `UNSUPPORTED`：`the text has no bake`。画面は bake の無いテキストを透明に描くので、これは意図した差である。透明な空のラスターを黙って作らず、利用者に知らせる）。`world` は IMG-2 の `Placement`（IMG-2 より前に入る場合は従来の `pixel_aligned_world`）。範囲＝`text_extent` の矩形（`offset` を引いて局所座標へ）。タイルごとに `text_pixels_q14` を呼び、`vector_tiles` の straight への変換を共有関数 `tiles_from_q14`（新規。`vector_tiles` から切り出す）で行う。（新規）
@@ -391,7 +391,7 @@ Warp {
 pub enum WarpKind {
     Perspective { corners: [[f64; 2]; 4] },                  // 元の範囲の左上・右上・右下・左下の行き先（局所座標）
     Mesh { cols: u32, rows: u32, points: Vec<[f64; 2]> },    // (cols + 1) × (rows + 1) 個の行き先
-    Displace { region: ImageBounds, width: u32, height: u32 }, // 変位場はバイナリで別に渡す
+    Displace { region: ImageBounds, width: u32, height: u32 }, // 変位場の画素は serde に載せず、準備関数の別引数で渡す
 }
 ```
 
@@ -423,7 +423,7 @@ doc.image.warp(node, { kind: "displace", field: Int16Array /* Q4 の dx, dy を�
 
 **Files:** Create `crates/alto-engine/src/image/warp.rs`（新規）、`packages/alto-sdk/src/liquify.ts`（新規）。Modify `crates/alto-engine/src/image/mod.rs`（`ImageEdit::Warp`、`intent`）、`crates/alto-engine/src/image/resample.rs`（`sample_q8`）、`crates/alto-wasm/src/image_versions.rs`（`image_warp`）、`packages/alto-sdk/src/protocol.ts`、`packages/alto-sdk/src/worker.ts`、`packages/alto-sdk/src/document.ts`、`packages/alto-sdk/src/image-types.ts`、`packages/alto-sdk/src/intents.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
 
-**Interfaces:** `ImageEdit::Warp`、`WarpKind`、`sample_q8`、`doc.image.warp`。
+**Interfaces:** `ImageEdit::Warp`、`WarpKind`、`sample_q8`、`doc.image.warp`。`Engine::prepare_image_edit_with(h, edit, aux: Option<&[i16]>)`（新規。`prepare_image_edit` は `aux` を `None` にして呼ぶ）が変位場を受け取る。wasm の `image_warp(request, field: &[u8])`（新規）が `Int16Array` のバイト列を `i16` に直して渡す。
 
 - [ ] 試験 `sample_q8_keeps_resize_bytes`：`sample_q8` へ切り出した後も、`image_bench.rs` の resize 4 種と既存の `reference_validation_tests.rs` が全バイト同じ。
 - [ ] 試験 `identity_perspective_is_identity`、`identity_mesh_is_identity`、`zero_displacement_is_identity`（Nearest と Bilinear で、出力が入力と全バイト一致）。
