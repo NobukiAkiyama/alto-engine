@@ -24,7 +24,7 @@
 
 - `engine.open(source, { history? })`：`ArchiveSource.read()` の Blob を全部 `arrayBuffer()` にして Worker へ渡す。薄い `.alto` は `history`（版の置き場）を確かめてつなぐ。満たさなければ警告 `HISTORY_STORE_UNAVAILABLE`（reason `missing`、`other-document`）で開く。
 - `engine.openFolder(provider, { history: "all" | "on-demand" })`：`on-demand` は作業文書のオブジェクトだけを読み、`list("objects/")` を known として渡す。
-- `doc.save(target, { history: "all" | "omit" | { folder } })`、`doc.saveFolder(provider)`、`doc.packageSize({ history })`。どれも編集キュー（`edit`）の中で動く。`saveFolder` を編集キューの中で行う修正（PR #124）で、保存の途中に commit が割り込まない。
+- `doc.save(target, { history: "all" | "omit" | { folder } })`、`doc.saveFolder(provider)`、`doc.packageSize({ history })`。`save` の既定と `{ folder }`、`saveFolder`、`packageSize` は編集キュー（`edit`）の中で動く。`save(target, { history: "omit" })` だけは `saveWithoutHistory` を編集キューの外で直接要求する（`document.ts`）。`saveFolder` を編集キューの中で行う修正（PR #124）で、保存の途中に commit が割り込まない。
 - `withObjects(target, run)`：`missingObjects` → 置き場から読む → `provideObjects`（全件を検証してから取り込み、pin）→ `run` → `releaseObjects`。置き場が無ければ `STORAGE`（reason `objects-unavailable`）。`ObjectTarget` は `commit`、`branch`、`merge`、`merge_plan`、`all` の5つ（`crates/alto-engine/src/versions/lazy.rs`、serde の `type` タグ）。
 - 置き場の共有ロック：`ObjectStorageProvider.holdObjects` を開いている間持ち、他の文書の GC から守る。`gcCapabilities` が無い保存先は GC が確認だけになる。
 
@@ -148,7 +148,11 @@ pub enum ObjectTarget {
 
 **7. 保存。**
 
-- 同じ置き場への `saveFolder`：今の `folder_entries_keeping_external` と同じ。外した作業文書のオブジェクトは known なので読まない。`external_objects` を「known にあって常駐していない現在のオブジェクト」まで広げる。
+- 外した作業文書のオブジェクトは `external_objects` に入れない。`external_objects` は、復旧のチェックポイントが「外にあるので持たない、一覧からも外す」集合として使う（`recovery_checkpoint`。`checkpoint_parts` はこれを `stored_objects` から消す）。`check_history_store`（薄い `.alto` の置き場の確認）と `package_bytes`（空でなければ大きさ不明）も使う。広げると、チェックポイントが作業文書を持たなくなり、健全な薄い `.alto` に `HISTORY_STORE_UNAVAILABLE` が出る。代わりに `Residency` が外した集合 `evicted: BTreeMap<ContentHash, u64>`（新規。値は `encoded_len`）を別に持つ。
+- 復旧のストアがあるエンジンでは、外せるのは `stored_objects` にあるものだけにする（チェックポイントは `stored` のバイトを飛ばし、一覧には残すので、自己完結のまま）。復旧のストアが無いエンジン（チェックポイントを書かない）だけ、known にあるものも外せる。
+- `package_bytes` と `thin_package_bytes` の `fetch_plan` は、外したオブジェクトの長さを `evicted` から読む（新規）。
+- 同じ置き場への `saveFolder`：`folder_entries_keeping_external` に渡す集合を、`external_objects` と「`evicted` のうちその置き場の known にあるもの」の和にする（新規）。外したものは置き場にあるので読まない。
+- `save(target, { history: "omit" })`：今は編集キューの外で `save_without_history` が全ての `doc_hashes` を `encode_fetching` するので、外したオブジェクトがあると `MissingTile` で失敗する。編集キューの中に移し、`withObjects` の `nodes`（作業文書の全ノード）で外したものを読み戻してから実行する（新規）。
 - 別の置き場への `saveFolder` と `.alto` への `save`：今は `withObjects({ type: "all" })` で全部を読む。`.alto` は 512 MiB が上限なので今のままでよい。別の置き場へは、`MAX_OBJECTS_PER_READ` 件ずつ読んで書き、pin を外してから次へ進む形にする（`Engine::folder_copy_plan`（新規）が書く順のパスを返す）。
 - 薄い `.alto` の保存（F-9）：作業文書のオブジェクトを `.alto` に入れるので、外したものは読み戻す。`.alto` の上限は作業文書の大きさで決まる（F-9 と同じ）。
 
@@ -193,6 +197,8 @@ Files：Create `crates/alto-engine/src/residency.rs`（新規）。Modify `crate
 - [ ] 試験 `evict_removes_from_tiles_and_cold`（`crates/alto-raster/src/lib.rs`）：`separate` の後に `evict` した hash が `object` で `None`、`reachable` が偽。
 - [ ] 試験 `eviction_only_drops_readable_objects`：known にも `stored_objects` にも無いものは外れない。
 - [ ] 試験 `required_objects_cover_every_read_of_an_edit`：読み取りを記録するストアで各編集を実行し、`required_objects` の対象から漏れた読み取りが無い（編集の種類ごとに1件）。
+- [ ] 試験 `checkpoint_lists_evicted_objects`：外した後のチェックポイントの `checkpoint.json` に外したオブジェクトが残り、`stored_objects` から消えない。`check_history_store` と `package_bytes` の結果が外す前と同じ。
+- [ ] ブラウザ試験 `save with history omit reads evicted objects back`：外した状態で `save(target, { history: "omit" })` が成功する。
 - [ ] 試験 `save_keeps_evicted_objects_reachable`：外した後に同じ置き場へ `saveFolder` し、GC の dry-run が何も消さず、開き直すと同じ `snapshotHash`。
 
 **Task STO-1c：読み出しの元と SDK。**
@@ -235,7 +241,7 @@ Files：Modify `packages/alto-sdk/src/storage-core.ts`（`readStored`、`loadCan
 - `createEngine({ storage: { namespace: "auto" } })`：`auto/<crypto.randomUUID()>` を名前空間にする。`auto/` の接頭辞は予約し、ホストが `auto/` で始まる名前を明示で渡すことは許す（復旧のため）。生成した名前は `engine.namespace`（公開に変える）で読める。ページを読み直すと別の名前になるので、復旧するホストは `listRecoveryNamespaces()` で選んで明示で渡す。これを API の説明に書く。
 - 見出し：`engine.recovery.setLabel(label: string)`（新規）。1〜256文字の文字列、範囲外は `INVALID_ARGUMENT`。ページの側で名前空間のフォルダに `label.json`（新規。`{ "label": string, "width": number, "height": number, "updated": number }`）を書く。`width`、`height` は今の文書から、`updated` は書いた時刻（ms）。文書を開いた時とチェックポイントの後に書き直す。書けなくても編集とジャーナルを失敗にしない（警告もしない）。
 - 一覧：`listRecoveryNamespaces()` の要素に `label?: string`、`width?: number`、`height?: number` を足す（`label.json` が読めて形が正しいときだけ）。
-- `storage-core.ts` の `discard` と起動時の片付けが `label.json` を消さないこと、`deleteRecovery` が消すことを確かめる（フォルダごと消すので消える）。
+- `storage-core.ts` の `discard` は名前空間のフォルダごと消す（`removeEntry` の `recursive`）ので、`label.json` も消える。これを正しい振る舞いとする（見出しは捨てたジャーナルの説明なので一緒に消えてよい）。次に文書を開くかチェックポイントを書いたときに書き直す。起動時の片付けは pack と `objects/` だけを消すので `label.json` に触れない。`deleteRecovery` もフォルダごと消す。
 - 1エンジンで複数の文書を開く案は採らない（Worker、GPU の予算、描画が1文書を前提にしている）。
 
 ### 形式と通信
@@ -306,13 +312,15 @@ pub struct TiffStrip { pub rows: u32, pub bytes: u32 } // （新規）
 /// 8bit RGBA、straight alpha（ExtraSamples = 2）、PlanarConfiguration 1、リトルエンディアン。
 /// ヘッダー、IFD、StripOffsets／StripByteCounts を返す。画素の帯は戻り値の後に順に置く。
 pub fn rgba8_header(width: u32, height: u32, compression: TiffCompression, strips: &[TiffStrip])
-    -> Result<Vec<u8>, StoreError>;           // （新規）
+    -> Result<Vec<u8>, TiffError>;            // （新規）
+/// Display は今のエラーと同じ「CODE: detail」。alto-wasm はそのまま JS のエラーにする。
+pub enum TiffError { InvalidArgument(String), ResourceLimit(String) } // （新規）
 pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが32ビットに収まる上限
 ```
 
 - 帯の高さは 256 行（表示タイルの行と同じ）。無圧縮は各帯 `width × rows × 4` バイト。Deflate（Compression 8）は Worker が帯ごとに `CompressionStream("deflate")`（zlib の形。TIFF の Adobe Deflate と同じ）で圧縮し、長さを `rgba8_header` に渡す。Rust に Deflate の依存を足さない。（新規）
 - タグ：ImageWidth、ImageLength、BitsPerSample（8,8,8,8）、Compression（1 か 8）、PhotometricInterpretation 2、StripOffsets、SamplesPerPixel 4、RowsPerStrip 256、StripByteCounts、PlanarConfiguration 1、ExtraSamples 2、SampleFormat 1。タグは番号の昇順。
-- 帯の合計とヘッダーが `MAX_TIFF_BYTES` を超えたら `RESOURCE_LIMIT`。64M 画素の無圧縮（256 MiB）は収まる。（新規）
+- エラー：`StoreError` には `UNSUPPORTED`、`CORRUPT_DATA`、`STORAGE` しか無いので、TIFF は専用の `TiffError`（新規）を持つ。幅か高さが 0、帯の行の合計が高さと違う、帯の長さが無圧縮の値と違うものは `INVALID_ARGUMENT`。帯の合計とヘッダーが `MAX_TIFF_BYTES` を超えたら `RESOURCE_LIMIT`。64M 画素の無圧縮（256 MiB）は収まる。（新規）
 - `rgba8_header` は `alto-wasm` の新しい関数 `tiffHeader`（新規）から呼ぶ。`alto-wasm` に `alto-store` の依存（同じリポジトリの crate）を足す。新しい外部の依存は足さない。
 - 出力は `new Blob([header, ...strips], { type: "image/tiff" })`。画素の写しは Blob の組み立ての1回だけで、作業量の見積りは今の式に収まる。
 
@@ -328,7 +336,7 @@ pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが
 
 Files：Create `crates/alto-store/src/tiff.rs`（新規）。Modify `crates/alto-store/src/lib.rs`（`pub mod tiff`）、`crates/alto-wasm/Cargo.toml`（`alto-store` の依存）、`crates/alto-wasm/src/lib.rs`（`tiffHeader`）、`packages/alto-sdk/src/document.ts`（型と検査）、`packages/alto-sdk/src/worker.ts`（JPEG の合成、TIFF の組み立て）、`packages/alto-sdk/src/protocol.ts`、`packages/alto-sdk/src/errors.ts`（reason）、`packages/alto-sdk/api/alto-engine.api.md`、`doc/design/EXPORT-CONTRACT.md`（JPEG と TIFF の契約）。
 
-Interfaces：Produces `alto_store::tiff::rgba8_header`、`TiffCompression`、`TiffStrip`、`exportImage({ type: "image/jpeg" | "image/tiff", quality, background, compression })`。
+Interfaces：Produces `alto_store::tiff::rgba8_header`、`TiffCompression`、`TiffStrip`、`TiffError`、`exportImage({ type: "image/jpeg" | "image/tiff", quality, background, compression })`。
 
 - [ ] Rust 試験（`tiff.rs`）：`tiff_header_fields_are_valid`（タグの値と昇順、オフセットの和）、`tiff_strip_rows_must_cover_the_height`（帯の行の合計が高さと違うと `INVALID_ARGUMENT`）、`tiff_over_4_gib_is_refused`。
 - [ ] node 試験（`packages/alto-sdk/test/`、新規 `tiff.test.js`）：ヘッダーと帯を自作の最小の TIFF 読み取りで読み、画素が入力と一致する（無圧縮と Deflate）。
@@ -515,7 +523,7 @@ COLD-RENDERING-DESIGN の C をそのまま採る。ここでは今のコード�
   "samples": [x, y, pressure, tiltX, tiltY, tMs, ...] }
 ```
 
-- `samples` は文書の座標（`input_inverse` を掛けた後）。`begin` は `seq` 0 だけが持つ。設定（`config`）は `beginBrush` に渡った JSON をそのまま入れる（BR-1〜BR-5 の欄が増えても記録の形は変わらない）。
+- `samples` は `brush_input` が受けたままの値（`input_inverse` を掛ける前）。`begin_brush` はレイヤーの変形から `input_inverse` を毎回作り直し、`brush_input` と選択の変換（`stamp`）がそれを使う。復旧で描き直すときの文書は `beginBrush` の時点と同じ（3.）なので同じ `input_inverse` が作られ、変換を2回掛けない。`begin` は `seq` 0 だけが持つ。設定（`config`）は `beginBrush` に渡った JSON をそのまま入れる（BR-1〜BR-5 の欄が増えても記録の形は変わらない）。
 - 書く時：Worker が入力を `STROKE_JOURNAL_MS = 250`（新規）ごと、または 512 サンプルごとにまとめて `enqueue({ kind: "append" })` する。`durable()` はこれも待つ。
 - 閉じる：`endBrush` の Transaction 記録の `transaction.json` に `"stroke": "<uuid>"` を足す。`cancelBrush` は `stroke.json` に `"cancel": true` の記録を書く。
 - 上限：1ストローク `MAX_JOURNALED_STROKE_SAMPLES = 65536`（新規）。超えた分は記録せず、最後の記録に `"truncated": true` を書く（復旧は記録した分だけ描く）。チェックポイントは開いたストロークの記録を消さない（チェックポイントの後の追記として残す。自動チェックポイントはストローク中に走らない今の条件を確かめる）。
@@ -523,7 +531,7 @@ COLD-RENDERING-DESIGN の C をそのまま採る。ここでは今のコード�
 **2. 復旧。**
 
 - `Engine::replay_record` は `stroke.json` を読んだら、文書を変えずに `Engine` の外（`Runtime`）へ返す（`Replayed::Stroke`（新規））。`Runtime::replay_records` は、閉じた（Transaction か cancel が後に来た）ストロークを捨て、最後に開いたままのストロークだけを残す。
-- 全記録の再生の後、開いたストロークがあれば、`Runtime::replay_open_stroke()`（新規、async）が `begin_brush` → `brush_input`（記録した座標。`input_inverse` は単位行列にして通す）→ `end_brush` を実行する。結果は新しい Transaction（intent `recovered.stroke`（新規））としてジャーナルに書く。Undo で戻せる。
+- 全記録の再生の後、開いたストロークがあれば、`Runtime::replay_open_stroke()`（新規、async）が `begin_brush` → `brush_input`（記録した値をそのまま渡す。新しい WASM の入口は要らない）→ `end_brush` を実行する。結果は新しい Transaction（intent `recovered.stroke`（新規））としてジャーナルに書く。Undo で戻せる。
 - 復旧の結果に警告 `RECOVERED_STROKE`（新規）を `WarningCode` に足して付け、`details.samples` に描いた数、`details.truncated` を入れる。
 - 当時の画面と同じ画素である保証は無い（GPU の f32 の違い、筆圧の時刻の扱い）。同じ GPU では同じ入力から同じ画素になるはずだが、試験は構造で確かめる（下）。
 - 復旧で描き直さない場合：対象のレイヤーが無い（`NOT_FOUND`）、設定が今の SDK で無効、BR-2／BR-3 の画像の先端・テクスチャが文書の外（SDK から渡す形）にある（03 の決定による）。このときは描かずに警告 `RECOVERED_STROKE`（`details.skipped` に理由）を出す。復旧そのものは失敗にしない。（新規）
@@ -550,6 +558,7 @@ Interfaces：Produces 記録 `stroke.json`、`Replayed::Stroke`、`Runtime::repl
 - [ ] Rust 試験（`crates/alto-engine/src/lib.rs`）：`stroke_records_do_not_change_the_document_on_replay`、`a_closed_stroke_is_not_replayed`（Transaction で閉じたストロークと cancel したストロークは返らない）。
 - [ ] ブラウザ試験（`tests/e2e/image-version-tests.js`）：`a recovered stroke is one undoable transaction`（`restartWorker` の試験用の入口で再起動し、Undo で直前の状態と一致）。
 - [ ] クラッシュ試験：`stroke-open` の期待を変える。新しい期待は「(1) 復旧後の Undo の深さが1つ増え、(2) Undo すると直前の durable な状態（今の期待）と snapshot hash が一致し、(3) 対象のレイヤーのタイルが、記録したサンプルの外接矩形の外で変わらず、内側で少なくとも1枚変わる、(4) 警告 `RECOVERED_STROKE` が1件」。Metal と SwiftShader で `ALTO_CRASH_ONLY=stroke-open ALTO_CRASH_REPEAT=10`。
+- [ ] クラッシュ試験 `stroke-open-transformed`（新規）：回転と拡縮を持つレイヤー（親のグループにも変形）で同じ期待。描き直したタイルの変化が、記録したサンプルを `input_inverse` で写した外接矩形の内側だけにある（変換を2回掛けると外れる）。
 - [ ] クラッシュ試験に `stroke-open-textured`（新規）：画像の先端・テクスチャを SDK から渡す形（03 の決定が「SDK から渡す」の場合）のストロークは描き直さず、直前の durable な状態と `details.skipped`。
 - [ ] 13-verification の QA-5 の表の1行目の期待を「確定前のストロークは、記録した入力から描き直して1つの Transaction として戻る（画素は当時の画面と同一でない）」に直す。
 - [ ] 完了条件：上の試験。`durable()` を待ったストロークの入力が復旧で失われない。
@@ -577,7 +586,7 @@ Interfaces：Produces 記録 `stroke.json`、`Replayed::Stroke`、`Runtime::repl
 - API（`@alto/engine/browser`、すべて新規）：
   - `rememberFile(handle: FileSystemFileHandle | FileSystemDirectoryHandle, options?: { history?: FileSystemDirectoryHandle }): Promise<RecentFile>`。同じハンドル（ブラウザの isSameEntry）は1件にまとめ、`opened` を更新する。
   - `recentFiles(): Promise<RecentFile[]>`：新しい順。権限は確かめない（一覧に出すだけ）。
-  - `openRecent(id): Promise<{ source: ArchiveSource | ObjectStorageProvider, history?: ObjectStorageProvider }>`：ブラウザの queryPermission、なければ requestPermission（readwrite）（利用者の操作の中で呼ぶ必要がある、と説明に書く）。拒否は `STORAGE`（reason なし、メッセージ `permission denied`）で、要素は消さない。
+  - `openRecent(id): Promise<{ kind: "file", source: ArchiveSource, history?: ObjectStorageProvider } | { kind: "folder", source: ObjectStorageProvider }>`：`kind` で `engine.open` か `engine.openFolder` かを選べるようにする。ファイルは `fileSource(handle)`、フォルダと `history` は `FileSystemDirectoryProvider`（`pickFolder` と同じ包み方）で包んで返す。ブラウザの queryPermission、なければ requestPermission（readwrite）（利用者の操作の中で呼ぶ必要がある、と説明に書く）。拒否は `STORAGE`（reason なし、メッセージ `permission denied`）で、要素は消さない。
   - `forgetFile(id): Promise<void>`。
 - 上限：`MAX_RECENT_FILES = 32`（新規）。超えたら古いものから消す。
 - 本体（`@alto/engine`）には入れない。外部への送信は無い。IndexedDB が使えない環境では `recentFiles` が空、`rememberFile` が `UNSUPPORTED`。（新規）
@@ -664,7 +673,7 @@ impl Document {
 
 ### 作業手順
 
-Files：Modify `crates/alto-doc/src/document.rs`（`snapshot_parts`、`from_snapshot_parts`、`tile_maps_mut`）、`crates/alto-doc/src/lib.rs`（`format_version`）、`crates/alto-store/src/lib.rs`（`PackageParts.tables`、`package_sources`、`decode_entries`、`folder_entries`）、`crates/alto-engine/src/versions.rs`（`table_hashes`、保存と読み込み）、`crates/alto-engine/src/versions/gc.rs`、`crates/alto-engine/src/versions/lazy.rs`、`crates/alto-git/src/mirror.rs`、`packages/alto-sdk/src/engine.ts`（`openFolder` の `tables/`）、`packages/alto-sdk/src/document.ts`（GC の `readAll` に `tables/`）。
+Files：Modify `crates/alto-doc/src/document.rs`（`snapshot_parts`、`from_snapshot_parts`、`tile_maps_mut`）、`crates/alto-doc/src/lib.rs`（`format_version`）、`crates/alto-store/src/lib.rs`（`PackageParts.tables`、`package_sources`、`decode_entries`、`folder_entries`）、`crates/alto-engine/src/versions.rs`（`table_hashes`、保存と読み込み、`open_decoded_package` が表を渡す）、`crates/alto-engine/src/lib.rs`（`install_package` と `open_snapshot` がスナップショットだけでなく表も受け、`from_snapshot_parts` で読む）、`crates/alto-engine/src/versions/gc.rs`、`crates/alto-engine/src/versions/lazy.rs`（`target_docs` などスナップショットを読む箇所）、`crates/alto-git/src/lib.rs`（`from_snapshot_bytes` の3か所）、`crates/alto-git/src/mirror.rs`、`packages/alto-sdk/src/engine.ts`（`openFolder` の `tables/`）、`packages/alto-sdk/src/document.ts`（GC の `readAll` に `tables/`）。
 
 Interfaces：Produces `SnapshotParts`、`Document::snapshot_parts`、`Document::from_snapshot_parts`、`PackageParts.tables`、`table_hashes`、`TILE_TABLE_INLINE_MAX`。
 
@@ -834,7 +843,7 @@ Interfaces：Produces `alto_psd::read`、`alto_psd::write`、`PsdWarning`、`eng
 - 別パッケージ `packages/alto-storage-gdrive`（新規）。npm 名は `@alto/storage-gdrive`（要確認）。`@alto/engine` を peer 依存にし、`ObjectStorageProvider` を実装するだけで、エンジンを変えない。
 - 生成：`createDriveProvider({ folderId: string, getAccessToken: () => Promise<string>, fetch?: typeof fetch })`（新規）。トークンの取得と OAuth は呼び出し側が行う。
 - 対応：`objects/…`、`snapshots/…`、`commits/…` はフォルダ内のファイル名（パスの `/` を `__` に置き換えた名前）。`manifest.json`、`document.json` などは ref。
-- 冪等：`putObjects` は同じ名前があれば内容ハッシュ（`objects/` は名前のハッシュ、`snapshots/`、`commits/` は SHA-256 の名前ではないので BLAKE3 を JS で持てない。Drive の `md5Checksum` ではなく、読み直して `bytes_match_name` 相当の検査を SDK 側の関数で行う）で確かめ、一致すれば飛ばす。
+- 冪等：`putObjects` は同じ名前のファイルがあれば、その中身を読んで、書こうとするバイト列と全バイトで比べ、一致すれば飛ばす。名前は内容アドレス（BLAKE3）だが、SDK に BLAKE3 は無い（`sha256Hex` だけ）ので、ハッシュは計算しない。一致しない同名のファイルは書き直さず `CORRUPT_DATA`。名前と中身の対応はエンジンが読むときに今どおり確かめる（`provide_objects` など）。
 - 同名の重複：Drive は同じ名前のファイルを複数作れる。`list` と `getObject` は重複を見つけたら、名前に合う内容のものを1つ選び、どれも合わなければ `CORRUPT_DATA`。
 - manifest の置き換え：`writeRef("manifest.json", data, expectHash)` は、期待ハッシュの比較と書き込みを不可分にできる場合だけ満たせる。Drive API でそれができるか（条件付きの更新）を実装の前に確かめる。できない場合は、書き込みの後に読み直して食い違いを `CONFLICT` にする弱い検出にとどめ、README にその旨を書く。どちらでも `exclusive` と `gcCapabilities` は持たない。
 - GC：`gcCapabilities` を持たないので確認だけ。`holdObjects` も持たない（他の端末の GC を止められない）。版の置き場として使う場合も同じで、F-9 の「置き場の GC で古い薄い `.alto` の版が消えうる」は、Drive では GC を実行しないので起きない。
