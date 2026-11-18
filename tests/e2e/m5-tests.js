@@ -185,6 +185,41 @@ export async function runM5Tests(engine, log) {
       assert(await doc.snapshotHash() === before && doc.getSnapshot().selection !== null,
         "a rejected color selection changed the document");
     });
+    await test("selection modification applies all four operations through the SDK", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      await doc.selection.apply({ kind: "modify", operation: "grow", radius: 1 }).then(
+        () => { throw Error("modify accepted an absent selection"); },
+        error => assert(error.code === "INVALID_ARGUMENT", String(error)),
+      );
+      await doc.selection.apply({ kind: "rectangle", x: 250, y: 100, width: 6, height: 20 });
+      const before = doc.getSnapshot().selection;
+      const original = JSON.stringify(before);
+      for (const operation of ["grow", "shrink", "border", "smooth"]) {
+        await doc.selection.apply({ kind: "modify", operation, radius: 4 });
+        const selection = doc.getSnapshot().selection;
+        assert(selection?.format === "r8" && JSON.stringify(selection) !== original, operation + " did not change coverage");
+        if (operation === "shrink") assert(Object.keys(selection.tiles).length === 0, "shrink did not keep an empty selection");
+        if (operation === "grow") assert(selection.tiles["1,0"], "grow did not cross the tile boundary");
+        await doc.undo();
+        assert(JSON.stringify(doc.getSnapshot().selection) === original, operation + " undo did not restore the selection");
+      }
+    });
+    await test("selection grow at radius 64 has a bounded Worker workload", async () => {
+      const measure = async (tiles) => {
+        doc = await engine.createDocument({ width: tiles * 256, height: 256 });
+        await doc.selection.apply({ kind: "rectangle", x: 0, y: 64, width: tiles * 256, height: 128 });
+        await unstable(engine).settle();
+        const start = performance.now();
+        await doc.selection.apply({ kind: "modify", operation: "grow", radius: 64 });
+        return performance.now() - start;
+      };
+      const modify64Ms = await measure(31);
+      await measure(32).then(
+        () => { throw Error("grow exceeded its Worker workload limit"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /too large/.test(error.message), String(error)),
+      );
+      return { modify64Ms, candidateTiles: 31 };
+    });
     await test("document-space selection restricts GPU brush on a transformed layer", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await doc.transact("transformed layer", (tx) => {

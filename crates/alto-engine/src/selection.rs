@@ -1,4 +1,6 @@
 //! Selection and mask commands operate on canonical R8 content, never on GPU caches.
+mod modify;
+
 use super::*;
 use alto_core::{Affine2, NodeId, PixelFormat, TileKey};
 use alto_doc::{DocError, NodeKind, PropPatch};
@@ -476,6 +478,9 @@ impl Engine {
         let w = doc.meta.width as i32;
         let height = doc.meta.height as i32;
         let kind = spec["kind"].as_str().unwrap_or("rectangle");
+        if kind == "modify" {
+            return modify::modify_selection(self, h, spec);
+        }
         if kind == "clear" {
             return Ok(vec![Op::SetSelection { selection: None }]);
         }
