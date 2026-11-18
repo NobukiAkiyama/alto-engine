@@ -1183,6 +1183,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("simultaneous Worker restart requests share one recovery", async () => {
+      await doc.durable();
       const hash = (await doc.snapshotHash());
       const canvas = engine.element;
       const container = canvas.parentElement;

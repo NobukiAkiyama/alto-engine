@@ -1284,6 +1284,10 @@ export type SelectionSpec = {
 } | {
     kind: "clear";
 } | {
+    kind: "modify";
+    operation: "grow" | "shrink" | "border" | "smooth";
+    radius: number;
+} | {
     kind: "color";
     layer: NodeId;
     r: number;
