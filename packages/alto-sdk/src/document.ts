@@ -74,6 +74,12 @@ export type SelectionSpec =
   | { kind: "all" | "invert"; mode?: SelectionMode }
   | { kind: "clear" }
   | {
+      kind: "modify";
+      operation: "grow" | "shrink" | "border" | "smooth";
+      /** Integer radius in document pixels, from 1 to 64. */
+      radius: number;
+    }
+  | {
       kind: "color";
       /** Raster layer with a translation-only world transform. */
       layer: NodeId;

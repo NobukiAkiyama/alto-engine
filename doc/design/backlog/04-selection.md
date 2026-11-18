@@ -109,7 +109,7 @@ export type SelectionSpec =
 
 ## SEL-2 拡大、縮小、境界
 
-### 現状
+### 実装前の状態
 
 - 加工の手段は無い。`selection_ops` の `kind` は `rectangle`、`ellipse`、`lasso`、`all`、`invert`、`clear`、`color`、`contiguous` のみ。それ以外は `"Unknown selection shape"`（`INVALID_ARGUMENT`）。
 - 選択の読み出し：`decode(map, store)` が R8 タイルを `BTreeMap<TileKey, Arc<TileData>>`（`Decoded`）に展開し、`sample(&Decoded, x, y)` が1画素を読む（どちらも `crates/alto-engine/src/selection.rs`）。範囲外とタイルの無い所は 0。
@@ -132,7 +132,7 @@ export type SelectionSpec =
 - 現在の選択が `None` のとき `INVALID_ARGUMENT`（`"There is no selection to modify"`）。`Some` で空の選択は、結果も空の選択（`Some` の空）で、エラーにしない。
 - 入力は現在の選択の R8（0〜255）。全画素の外側（タイルの無い所、文書の外）は 0 として扱う。
 
-**アルゴリズム（整数、CPU）。** 出力タイルごとに、近傍のタイルから `(256 + 2r) × (256 + 2r)` の窓（`u8`）を作り、窓の中だけで計算する。`r ≤ 64 < 256` なので必要な入力タイルは出力タイルと周囲の8タイルだけ。窓は最大 `384 × 384` で、全体の大きなバッファは作らない。
+**アルゴリズム（整数、CPU）。** 出力タイルごとに、近傍のタイルから `(256 + 2r) × (256 + 2r)` の窓（`u8`）を作り、窓の中だけで計算する。`r ≤ 64 < 256` なので必要な入力タイルは出力タイルと周囲の8タイルだけ。窓は最大 `384 × 384`。出力はタイル単位で保持し、全候補の処理が成功してからタイルストアへ書き込む。作業上限で保持できる出力画素列は最大約86 MiB。
 
 - 構造要素：半径 r の円盤。行ごとの半幅の表 `w[dy] = isqrt(r*r - dy*dy)`（`dy = -r..=r`、整数）。`r = 1` は十字になる。
 - `grow`：灰色膨張。`out(x, y) = max over dy of rowmax(y+dy, x, w[dy])`。ぼかしのある選択の柔らかさを保つ。
@@ -143,8 +143,8 @@ export type SelectionSpec =
 
 **出力の範囲と上限。**
 - 出力は文書の範囲 `[0, width) × [0, height)` に切り取る。文書の外は 0。長方形などの既存の生成と同じ範囲に揃える。
-- 出力タイルの候補：`grow`／`border`／`smooth` は入力の占有タイルとその8近傍を、文書の範囲に切り取った集合（`r ≤ 64 < 256` なので影響は隣のタイルまで）。外接矩形は使わない（離れた2隅の小さな選択が、間の全タイルを候補にしてしまう）。`shrink` は入力の占有タイルの集合。候補が4096を超えるなら、計算の前に `INVALID_ARGUMENT`（`"Selection/mask exceeds 4096 tiles"`）で拒否する。文書の範囲に切り取るので、文書全体を覆う選択の `grow` は候補が増えず拒否されない。
-- 作業量の上限 `MAX_MODIFY_WORK: u64 = 1 << 31`（新規。既定値で、測定で調整する）：作業量 = `候補タイル数 × 65536 × k` が `MAX_MODIFY_WORK`（新規） を超えるなら、計算の前に `INVALID_ARGUMENT`（`"Selection modification is too large; reduce the radius or the area"`）で拒否する。`k` は `grow`／`shrink` が `2r + 1`、`border` が `2 × (2r + 1)`（膨張と収縮の2回）、`smooth` が 4（横と縦の移動和）。操作ごとに実際の演算の形に合わせ、1つの定数で足りるように式を分ける。
+- 出力タイルの候補：`grow`／`border`／`smooth` は入力の占有タイルとその8近傍を、文書の範囲に切り取った集合（`r ≤ 64 < 256` なので影響は隣のタイルまで）。外接矩形は使わない（離れた2隅の小さな選択が、間の全タイルを候補にしてしまう）。`shrink` は入力の占有タイルの集合。候補が4096を超えるなら、計算の前に `INVALID_ARGUMENT`（`"Selection/mask exceeds 4096 tiles"`）で拒否する。文書の範囲に切り取るので、文書全体を覆う不透明な選択の `grow` では、全面のタイルを確認して既存のタイルを再利用する。文書外のタイルは結果から除く。
+- 作業量の上限 `MAX_MODIFY_WORK: u64 = 1 << 28`：作業量 = `候補タイル数 × 65536 × k` が `MAX_MODIFY_WORK`（新規） を超えるなら、計算の前に `INVALID_ARGUMENT`（`"Selection modification is too large; reduce the radius or the area"`）で拒否する。`k` は `grow`／`shrink` が `2r + 1`、`border` が `2 × (2r + 1)`（膨張と収縮の2回）、`smooth` が 4（横と縦の移動和）。操作ごとに実際の演算の形に合わせ、1つの定数で足りるように式を分ける。
 - 結果のタイルは `put_tile` で保存し、全画素 0 のタイルは作らない。結果にタイルが無いときも `SetSelection { selection: Some(空の TileMap) }` を返す。`None` にしない（「空の選択」と「選択なし」を区別する既存の規則。`shrink` で消えた選択は、どこにも描けない）。
 - 計算は検証してから行い、エラーのとき文書を変えない。保存したタイルは `Op` が適用されるまで文書から参照されない。
 
@@ -156,37 +156,14 @@ export type SelectionSpec =
 
 ### 作業手順
 
-**Files:**
-- Modify `crates/alto-engine/src/selection.rs`（`kind == "modify"` の分岐、`modify_selection`（新規）、窓の計算）
-- Modify `packages/alto-sdk/src/document.ts`（`SelectionSpec` に枝）
-- Modify `packages/alto-sdk/api/alto-engine.api.md`
-- Modify `tests/e2e/m5-tests.js`
+実装は `crates/alto-engine/src/selection/modify.rs` に置き、既存の `select` から呼び出す。SDK の公開型と API 報告を更新した。
 
-**Interfaces:** Produces `fn modify_selection(engine: &mut Engine, h: DocHandle, spec: &Value) -> Result<Vec<Op>, EngineError>`（新規、`selection.rs`）、`fn modify_window(window: &[u8], side: usize, operation: Modify, radius: u32) -> Vec<u8>`（新規。窓を受け取り、窓の中央 256×256 を返す純粋な関数。試験しやすくする）、`enum Modify`（新規）。Consumes `decode`、`sample`、`Engine::put_tile`。
+**試験：**
+- Rust で円盤と箱平均を画素ごとの直接計算と比較する。最大半径、タイルの継ぎ目、部分タイルの境界、文書外の入力、空選択と無効な入力を確認する。
+- タイル上限と作業量上限による拒否、離れたタイルだけを候補にすること、全面選択の再利用、Undo・Redo・ジャーナル復旧で同じタイルに戻ることを確認する。
+- ブラウザで SDK から4操作を実行し、半径64では非一様な31タイルを処理でき、32タイルを拒否することを確認する。
 
-- [ ] Rust 試験（`crates/alto-engine/src/selection.rs` の `mod tests`。`layer_doc` と `commit` を使う）：
-  - `grow_then_shrink_of_a_rect_is_the_rect`：長方形を `grow` して `shrink` すると、辺の中央が元の値に戻る。角は丸まるので、角を除いて確かめる。
-  - `border_is_empty_inside_and_outside`：`border` の内側の深い所と外側の遠い所が 0。縁の近くが 0 より大きい。
-  - `grow_crosses_tile_boundaries`：タイルの境の近くの小さな選択を `grow` すると、隣のタイルにタイルが増え、画素が連続している。
-  - `shrink_to_nothing_clears_the_selection`：消えるまで縮めると `Some` で空の選択になり、`None` ではない。その後の `image.fill` 相当が `EMPTY_SELECTION` になる。
-  - `modify_without_selection_is_invalid`：選択なしで `INVALID_ARGUMENT`。
-  - `modify_keeps_soft_edges`：ぼかしのある長方形で、`grow` の各画素が入力以上、`shrink` の各画素が入力以下、どちらも 0 と 255 以外の値が残る。`smooth` の結果も 0 と 255 以外の値を含む。
-  - `modify_stays_inside_the_document`：端に接する選択の `grow` が文書の外にタイルを作らない。
-  - `modify_radius_and_operation_are_validated`：`radius` が 0、65、1.5、省略、`operation` が不明で `INVALID_ARGUMENT`。いずれも文書を変えない。
-  - `grow_past_the_tile_limit_is_refused_atomically`：互いに離れた500個ほどの占有タイル（占有タイル＋8近傍が4096を超える）の `grow` が、計算の前に拒否され、`document.selection` もタイルストアも変わらない。
-  - `grow_of_a_full_canvas_selection_is_not_refused`：64×64タイルの文書の全体選択の `grow` は、候補が文書の範囲に切り取られて4096以下になり、拒否されず、結果が入力と同じ。
-  - `modify_of_two_far_corners_uses_only_occupied_tiles`：離れた2隅の小さな選択の `grow` が、候補を占有タイルとその8近傍だけに保ち、間のタイルを作らない。
-  - `modify_of_an_empty_selection_stays_empty`：`Some(空)` への各 `operation` が `Some(空)` を返す（エラーにも `None` にもならない）。
-  - `modify_window_distinguishes_disc_from_square`：1画素を `grow`（`radius = 3`）して、円盤の外の角 `(3, 3)` が 0、`smooth` では 0 でない。`grow_then_shrink_of_a_rect_is_the_rect` は角を除くので、円盤と正方形を見分けられない。
-  - `modify_work_limit_is_refused_before_any_work`：作業量の上限を超える入力が計算の前に拒否される。`border` が同じ入力の `grow` の2倍の作業量で数えられる（`smooth` は半径に依存しない）。
-  - `modify_window_matches_a_brute_force_reference`：小さな窓で、各 `operation` と `radius` 1、2、5、8 の結果が、素朴な二重ループ（円盤または正方形を直接走査）と全バイト一致する。総当たりは半径8までに限る（半径64では1回あたり約19億回の比較になる）。`radius = 64` は、窓の端での最大・最小が両側の窓の外を 0 として扱うことだけを、小さな入力で確かめる。
-  - `modify_is_one_undo_step`：`transact` 後に Undo で元の選択に戻り、Redo で同じタイルのハッシュになる。ジャーナルを通した再オープンでも同じ（共通規則4）。
-- [ ] ブラウザ試験 `selection modify grows, shrinks and borders through the SDK`（`tests/e2e/m5-tests.js`）：SDK の `doc.selection.apply({ kind: "modify", ... })` を4つの `operation` で呼び、`getSnapshot().selection` が変わる。選択なしでの `modify` が `INVALID_ARGUMENT`。
-- [ ] 実装する。窓の作成、横方向の van Herk、縦の結合、箱平均の順に作り、各段で上の試験を通す。
-- [ ] 完了条件：4つの `operation` が動き、上の試験が通り、既存の選択の試験とブラウザ試験が変わらない。
-- [ ] 検証：`cargo test -p alto-engine selection`、`sh scripts/check.sh native`、`pnpm --dir packages/alto-sdk build`、`pnpm --dir packages/alto-sdk api:check`、`node scripts/verify-browser.mjs --functional`。PR を出して opencode でレビューする。
-
-**測定で形が変わる点。** `MAX_MODIFY_WORK` は、Chrome（SwiftShader と Metal）の Worker で `radius = 64` の `grow` が、拒否されない最大の入力でも他の要求を著しく待たせない値に調整する。待たせすぎる場合は、`grow`／`shrink` を円盤の厳密な計算から、八角形の分解（正方形と菱形の合成。画素あたりの演算が半径に依存しない）へ変える案を出して、利用者に決めてもらう。この変更は形（円か八角形か）を変えるので、先に決めずに測定結果を示す。
+**測定：** Chrome 157 で半径64の `grow` を実行し、SDK の `selection.apply` が解決するまでを計測した。候補31タイルの横長の選択で、3回の測定で Metal は約296〜308 ms、SwiftShader は約299〜310 ms。入力形状と環境で時間は変わる。円盤を維持し、作業上限を `1 << 28` に設定した。
 
 ### 依存
 
