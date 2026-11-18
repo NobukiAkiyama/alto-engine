@@ -674,6 +674,108 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
         "an invalid curve prevented the next valid stroke");
     });
+    await test("a reusable image tip stamps rotated coverage and saves as ordinary tiles", async () => {
+      const c = new OffscreenCanvas(32, 16);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(5, 2, 4, 12);
+      ctx.fillRect(5, 11, 22, 3);
+      ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, 1, 1);
+      const imported = await engine.assets.importBrushTip(await c.convertToBlob());
+      assert(imported.width === 32 && imported.height === 16 && imported.pixels[0] === 27 &&
+        imported.pixels[1] === 0 && imported.pixels[11 * 32 + 26] === 255, "tip coverage conversion");
+      // A caller can pass an R8 subarray and retain its backing buffer across strokes.
+      const backing = new Uint8Array(imported.pixels.length + 2);
+      backing.set(imported.pixels, 1);
+      const image = { ...imported, pixels: backing.subarray(1, -1) };
+      const color = [0, 0, 0, 1];
+      const draw = async (angle) => {
+        doc = await engine.createDocument({ width: 512, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const tool = doc.tools.begin("brush", { layer, color, tip: { size: 64, angle, image } });
+        tool.input({ x: 250.5, y: 128.5 });
+        await tool.end();
+        const tiles = [];
+        for (const tileX of [0, 1]) {
+          const gpu = await unstable(engine).readTile(tileX, 0);
+          const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+            config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle, roundness: 1 },
+            tipImage: { width: image.width, height: image.height, pixels: image.pixels.slice().buffer },
+            color,
+            samples: [250.5 - tileX * 256, 128.5, 1, 0, 0, 0],
+          }));
+          assert(close(gpu, cpu), `tile ${tileX} differs from the CPU tip reference at ${angle}°`);
+          tiles.push(gpu);
+        }
+        return tiles;
+      };
+      const straight = await draw(0);
+      assert(pixel(straight[1], 8, 138)[3] > 200, "image tip did not cross the tile boundary");
+      const rotated = await draw(90);
+      assert(pixel(rotated[0], 240, 142)[3] > 200 && pixel(rotated[1], 8, 138)[3] === 0,
+        "image did not rotate with roundness 1");
+      assert(same(image.pixels, imported.pixels), "beginBrush changed the reusable image");
+      const saved = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([saved]));
+      assert(doc.getSnapshot().assets.length === 0, "a stroke kept its brush tip as a document asset");
+      for (const tileX of [0, 1]) {
+        assert(same(rotated[tileX], await unstable(engine).readTile(tileX, 0)), "reopen changed tipped pixels");
+      }
+    });
+    await test("invalid image tips cannot start a stroke", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      for (const [width, height, length] of [[8, 16, 128], [2048, 16, 32768], [32, 16, 511]]) {
+        let code;
+        try {
+          doc.tools.begin("brush", { layer, tip: { image: { width, height, pixels: new Uint8Array(length) } } });
+        } catch (e) { code = e.code; }
+        assert(code === "INVALID_ARGUMENT", "SDK accepted an invalid image tip");
+        await testing(engine).request("beginBrush", {
+          layer, color: [0, 0, 0, 1], erase: false, mask: false,
+          config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+          tipImage: { width, height, pixels: new ArrayBuffer(length) },
+        }).then(
+          () => { throw Error("the Worker accepted an invalid image tip"); },
+          e => assert(e.code === "INVALID_ARGUMENT" && /brush tip/.test(e.message), String(e)),
+        );
+      }
+      const small = new OffscreenCanvas(8, 16);
+      small.getContext("2d").fillRect(0, 0, 8, 16);
+      await engine.assets.importBrushTip(await small.convertToBlob()).then(
+        () => { throw Error("the importer accepted an undersized image"); },
+        e => assert(e.code === "INVALID_ARGUMENT", String(e)),
+      );
+      assert(await doc.snapshotHash() === before, "invalid image tip changed the document");
+      const tool = doc.tools.begin("brush", { layer });
+      await tool.cancel();
+    });
+    await test("GPU loss cancels an image-tip stroke and the same tip works after recovery", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      const image = { width: 16, height: 16, pixels: new Uint8Array(256).fill(255) };
+      const start = () => doc.tools.begin("brush", { layer, tip: { image } });
+      const tool = start();
+      tool.input({ x: 128.5, y: 128.5 });
+      await tool.flush();
+      await gpuRestored(engine, () => testing(engine).destroyGpu());
+      await tool.end().then(
+        () => { throw Error("device loss committed an open tipped stroke"); },
+        e => assert(e.code === "GPU_LOST", String(e)),
+      );
+      assert(await doc.snapshotHash() === before, "device loss changed the document");
+      const retry = start();
+      retry.input({ x: 128.5, y: 128.5 });
+      await retry.end();
+      assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
+        "the same tip did not draw after recovery");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });

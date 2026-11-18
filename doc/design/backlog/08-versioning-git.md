@@ -39,7 +39,7 @@ VER-4（stash）、VER-6（リモート）、GIT-1（Git から取り込んだ�
   - 案 B：新しい番号を1つ割り当て、その番号では `external_history` の有無で薄いかどうかを判定する。`decode_entries_impl` は `(2, なし)`、`(3, あり)`、`(新, どちらでも)` を受ける。`decode_folder`、`prepare_gc`、`adopt_gc` の `format != 2` の検査を「完全である」の検査に書き換える。
   - 既定：案 B。番号は 4（00-ROADMAP の番号の表）。今の試験 `crates/alto-store/src/lib.rs` の、format 4 を拒否すると確かめる行は、未知の番号（例：99）に変える。番号は「新しいフィールドのどれかが空でないか」だけで決める：stash、リモート、Git の先頭のどれか1つでもあれば新しい番号、すべて空なら旧番号（2 または 3）のまま書き、バイト列も今と同じ。どのフィールドがあるかで番号を分けない。
 - `DocumentMeta::format_version`（文書の形式）は、この文書のどの項目でも上げない。文書の意味（ノード、効果）を変えないため。
-- `PROTOCOL`：`historyCommand` の新しいコマンドと新しい要求を足す項目は上げる（VER-4 は 9、VER-5 は 11、GIT-2 は 12、VER-6 は 14。00-ROADMAP の番号の表）。Worker が知らないコマンドは `INVALID_ARGUMENT` になるので、SDK と Worker の版の食い違いを接続時に止める。
+- `PROTOCOL`：`historyCommand` の新しいコマンドと新しい要求を足す項目は上げる（VER-4 は 9、VER-5 は 12、GIT-2 は 13、VER-6 は 15。00-ROADMAP の番号の表）。Worker が知らないコマンドは `INVALID_ARGUMENT` になるので、SDK と Worker の版の食い違いを接続時に止める。
 
 ## VER-1 複数の共通祖先
 
@@ -351,7 +351,7 @@ doc.versions.saveTrimmed(  // 新規
 
 ### 形式と通信
 
-保存の形は完全な `.alto` かフォルダ。manifest の `format` は、出力に stash かリモートが残るとき VER-4、VER-6 の新しい番号 4、残らなければ 2。この項目で新しい番号を作らない。`format_version`、描画の版は上げない。`PROTOCOL` は上げる（11。段階2の回）：打ち切ったパッケージを作る要求 `trimmedPackage`（新規）を足す。
+保存の形は完全な `.alto` かフォルダ。manifest の `format` は、出力に stash かリモートが残るとき VER-4、VER-6 の新しい番号 4、残らなければ 2。この項目で新しい番号を作らない。`format_version`、描画の版は上げない。`PROTOCOL` は上げる（12。段階2の回）：打ち切ったパッケージを作る要求 `trimmedPackage`（新規）を足す。
 
 ### 作業手順
 
@@ -451,7 +451,7 @@ interface PushReport { commits: number; objects: number; head: string }  // 新�
 
 - manifest：`remotes` を持つ manifest は `format` を上げる（4。VER-4 と同じ番号。「共通の設計」）。
 - `format_version`（文書）、描画の版：触れない。
-- `PROTOCOL`：上げる（14。段階4の回）。`fetchPlan`、`fetchCheck`、`pushEntries`（いずれも新規の要求）と、`historyCommand` の `fetch_apply`、`remove_remote`（新規）を足す。
+- `PROTOCOL`：上げる（15。段階4の回）。`fetchPlan`、`fetchCheck`、`pushEntries`（いずれも新規の要求）と、`historyCommand` の `fetch_apply`、`remove_remote`（新規）を足す。
 - `ObjectStorageProvider` の型は変えない。
 
 ### 作業手順
@@ -587,7 +587,7 @@ SDK：`doc.versions.cherryPick(hash)`、`rebase(onto)`、`rebaseContinue()`、`r
 
 ### 形式と通信
 
-保存の形は変わらない（新しいコミットは普通のコミット。`RebaseState` は保存しない）。`format_version`、manifest、描画の版は上げない。`PROTOCOL` は上げる（12。段階3の回）：`historyCommand` に `cherry_pick`、`rebase_finish` を、要求に `rebaseStart`、`rebaseContinue`、`rebaseAbort`（新規）を足す。
+保存の形は変わらない（新しいコミットは普通のコミット。`RebaseState` は保存しない）。`format_version`、manifest、描画の版は上げない。`PROTOCOL` は上げる（13。段階3の回）：`historyCommand` に `cherry_pick`、`rebase_finish` を、要求に `rebaseStart`、`rebaseContinue`、`rebaseAbort`（新規）を足す。
 
 ### 作業手順
 

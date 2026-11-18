@@ -433,6 +433,10 @@ impl Renderer {
             .stroke
             .take()
             .ok_or(RenderError::Conflict("no stroke".into()))?;
+        if let Some(texture) = stroke.tip_texture {
+            self.retired.textures.push((texture, MemoryClass::Stroke));
+            self.release_retired();
+        }
         pool.0.completed.store(0, Ordering::Release);
         pool.0.batches.store(0, Ordering::Release);
         control.begin();

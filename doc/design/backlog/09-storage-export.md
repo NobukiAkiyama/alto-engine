@@ -170,7 +170,7 @@ pub enum ObjectTarget {
 ### 形式と通信
 
 - `format_version`、manifest の `format`：上げない。保存の形は変えない。
-- `PROTOCOL`：上げる（12。段階3の回）。`provideObjects` の対象 `resident`、`readStored`（Storage Worker 側）、`open` の `tiles: "on-demand"`、`createEngine` の `memory`、エラーの読み直しの往復。（新規）
+- `PROTOCOL`：上げる（13。段階3の回）。`provideObjects` の対象 `resident`、`readStored`（Storage Worker 側）、`open` の `tiles: "on-demand"`、`createEngine` の `memory`、エラーの読み直しの往復。（新規）
 - ジャーナル：変えない。チェックポイントの `lazy-objects.json` を使う。`loadCandidate` に選択肢を足す（Storage Worker の内部の要求）。
 - 描画の版：触れない。画素は変わらない（未完成の表示タイルは表示だけ）。
 
@@ -378,7 +378,7 @@ Interfaces：Produces `alto_store::tiff::rgba8_header`、`TiffCompression`、`Ti
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（11。段階2の回）。要求3つ。
+- `PROTOCOL`：上げる（12。段階2の回）。要求3つ。
 - 描画の版：触れない。
 
 ### 作業手順
@@ -435,7 +435,7 @@ Interfaces：Produces `DocumentHandle.exportImageStream`、`PngStreamEncoder`。
 ### 形式と通信
 
 - manifest の `format`：上げない（manifest を変えない）。`format_version`：触れない。今の読み手は新しいエントリを無視する。
-- `PROTOCOL`：上げる（11。段階2の回）。`save` の要求の `preview`。
+- `PROTOCOL`：上げる（12。段階2の回）。`save` の要求の `preview`。
 - 描画の版：触れない。
 
 ### 作業手順
@@ -482,7 +482,7 @@ COLD-RENDERING-DESIGN の C をそのまま採る。ここでは今のコード�
 ### 形式と通信
 
 - `format_version`、manifest：触れない。保存ファイルに何も足さない。
-- `PROTOCOL`：Engine Worker への要求は増えない見込み（Cache Worker は Engine Worker が起こす）。ページから有効・無効を切り替える選択肢 `createEngine({ cache: { derived: boolean } })`（新規）を足すなら上げる（12。段階3の回）。
+- `PROTOCOL`：Engine Worker への要求は増えない見込み（Cache Worker は Engine Worker が起こす）。ページから有効・無効を切り替える選択肢 `createEngine({ cache: { derived: boolean } })`（新規）を足すなら上げる（13。段階3の回）。
 - 描画の版：触れない。キャッシュの画素は合成結果の写しで、鍵に描画の経路を含める。
 
 ### 作業手順
@@ -668,7 +668,7 @@ impl Document {
 
 - `format_version`：上げる（11。00-ROADMAP の番号の表）。スナップショットの意味（表の参照）が増える。manifest の `document_format` も同じ値にする。
 - manifest の `format`（2／3）：上げない案を既定にする。新しいエントリ `tables/` は今の読み手が無視するが、`document_format` の検査で先に拒まれるので、黙って壊れた文書として開かれることは無い。`format_version` は回 11（00-ROADMAP の番号の表）。manifest の `format` を上げないことは統合で確かめた。
-- `PROTOCOL`：上げる（11。段階2の回）。`openFolder` の読み込みで `tables/` を渡す、版の操作で表を渡す。
+- `PROTOCOL`：上げる（12。段階2の回）。`openFolder` の読み込みで `tables/` を渡す、版の操作で表を渡す。
 - 描画の版：触れない。
 - 共通規則3と 13 の QA-1：`format_version` を上げる PR で、`fuzz/seeds/snapshot/`、`tests/fixtures/*.alto`、`verification/*.alto` の seed を作り直す。
 
@@ -736,7 +736,7 @@ Interfaces：Produces `SnapshotParts`、`Document::snapshot_parts`、`Document::
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（11。段階2の回）。`open`／`openFolder` の `onCorrupt`、`inspectDamaged`、`openProposal`、`save` の `dropDamaged`。（新規）
+- `PROTOCOL`：上げる（12。段階2の回）。`open`／`openFolder` の `onCorrupt`、`inspectDamaged`、`openProposal`、`save` の `dropDamaged`。（新規）
 - 描画の版：触れない（表示だけ。目印は正本と書き出しの契約の外）。
 
 ### 作業手順
@@ -806,7 +806,7 @@ Interfaces：Produces `decode_entries_tolerant`、`TileStore::is_damaged`、`Eng
 ### 形式と通信
 
 - `format_version`、manifest：触れない（PSD は文書の形式ではない）。
-- `PROTOCOL`：上げる（14。段階4の回）。`openPsd`、`exportPsd`。（新規）
+- `PROTOCOL`：上げる（15。段階4の回）。`openPsd`、`exportPsd`。（新規）
 - 描画の版：触れない。
 
 ### 作業手順

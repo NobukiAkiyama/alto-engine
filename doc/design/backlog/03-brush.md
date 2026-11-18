@@ -81,7 +81,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 
 ## BR-2 画像の先端
 
-### 現状
+### 実装前の状態
 
 - `crates/alto-doc/src/node.rs`：`AssetKind` に `BrushTip` と `Pattern`（どちらも寸法なしの単位バリアント）がある。`crates/alto-doc/src/version.rs` が文字列 `"brush_tip"` / `"pattern"` にするだけで、読み込み・保存・描画の経路はどこにもない。`AssetRecord { id, hash, kind, byte_len, dims }`。
 - `packages/alto-sdk/src/engine.ts`：`engine.assets.importImage(file)`（`createImageBitmap` と `OffscreenCanvas` で画素を取り、Worker の `import` へ送る）、`importFont`、`releaseImport`。
@@ -104,7 +104,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 `luma = (54 r + 183 g + 19 b + 128) >> 8`、`coverage = (luma * a + 127) / 255`（整数除算）。白く不透明な画素が全カバレッジ、透明と黒が 0。辺が 16 未満か 1024 超なら `INVALID_ARGUMENT`（`importBrushTip` は拒否し、状態を変えない）。エンジンは何も保持しないので、`releaseImport` も GC も要らない。（新規）
 
-**ストロークへ渡す。** `BrushOptions.tip.image?: BrushImage`。`ToolSession` が `beginBrush` へ `tipImage: { width, height, pixels: ArrayBuffer } | null` を足して送る（`pixels` は転送）。Worker は `runtime.beginBrush` の引数に足す。`begin_brush` は `pixels.len() == width * height`、辺が 16〜1024 を検証する（違えば `INVALID_ARGUMENT: brush tip`、ストロークは始まらない）。
+**ストロークへ渡す。** `BrushOptions.tip.image?: BrushImage`。`ToolSession` が `beginBrush` へ画像がある場合だけ `tipImage: { width, height, pixels: ArrayBuffer }` を足して送る（`pixels` のコピーを転送し、同じ `BrushImage` を再利用できる）。Worker は `runtime.beginBrush` の引数に足す。`begin_brush` は `pixels.len() == width * height`、辺が 16〜1024 を検証する（違えば `INVALID_ARGUMENT: brush tip`、ストロークは始まらない）。
 
 **描画。**
 - `BrushConfig` には画像を持たせない。`Renderer::begin_stroke` に `tip: Option<BrushImage>`（Rust 側の型は `alto_raster` の `BrushImage`（新規））を足し、`GpuStroke` には CPU 側の画素列を `tip: Option<BrushImage>` で預け、テクスチャ用の欄 `tip_texture`（新規）は空にしておく。`begin_stroke` は確保しない。
@@ -112,7 +112,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 - バインドグループに binding 6（先端）を足す。無いときは `tile.base` のビューを束ね、`config.info.w` のビット0 で使用を示す。
 - `Dab.size` に当たるのは `radius` で、画像の**長辺が直径 `2 × radius`**。短辺は縦横比を保つ。`roundness` と `angle` は BR-1 の変形をそのまま使う（`u` / `v` を求めたあとに画像座標へ写す）。`s = 2·radius / max(w, h)`、`tx = u / s + w/2`、`ty = (v / roundness) / s + h/2`。
 - サンプルは `textureLoad` 4 点の手書きの双線形（texel 中心は `t - 0.5`、範囲外の texel は 0）。ハードウェアのサンプラーを使わないので GPU 間の差が出ない。形は `shape = tip(tx, ty)`（`hardness` は無視）。`v = 1 - (1 - v)(1 - shape × d.opacity)` は既存のまま。
-- 画像先端のダブの外接半径は `radius × 1.4143`（√2）。`Renderer::stamp` のタイル選択と `bounds` / ダメージの計算でこの半径を使う（長方形が回転したときの対角を覆う）。
+- 画像先端のダブの外接半径は `radius × 1.4143 × (1 + 1 / max(w, h))`。双線形補間で画像の外に残る半テクセル分も含める。`Renderer::stamp` のタイル選択と `bounds` / ダメージの計算でこの半径を使う（長方形が回転したときの対角を覆う）。
 - `cpu_paint` に `tip: Option<&BrushImage>` を足し、同じ式でサンプルする。
 
 **注意。** ストローク中のプレビューと確定結果は同じシェーダーの出力で、確定は読み戻しの画素（`begin_finish_stroke`）を正本にする。ブラシは整数経路ではないので、CPU との一致は ±2 の許容で見る（冒頭）。手書きの双線形で ±2 を超えるなら、最近傍（`round(t)`）へ落とす。その判断は測って決め、速度の約束は書かない。
@@ -123,7 +123,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない。案 B は `AssetKind` が `deny_unknown_fields` の型なので、`BrushTip { width, height }` への変更で上げる（案 B を選んだときだけ。そのとき作業中の回の番号に入れ、回が無ければ次の空き番号を取る。00-ROADMAP の番号の表）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（11。段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
+- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（12。段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -134,13 +134,11 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 - Modify `crates/alto-wasm/src/lib.rs`（`begin_brush`）、`packages/alto-sdk/src/worker.ts`、`protocol.ts`、`tools.ts`、`engine.ts`（`importBrushTip`）、`packages/alto-sdk/api/alto-engine.api.md`、`tests/e2e/browser-tests.js`。
 
 **試験：**
-- [ ] `brush.rs`：`a_tip_image_maps_its_long_side_to_the_diameter`、`a_tip_outside_the_image_is_transparent`。
-- [ ] `brush.rs`：`tip_with_roundness_one_and_angle_zero_matches_the_unrotated_sample`。
-- [ ] `browser-tests.js`：`a stamped tip draws its shape`。非対称の画像（L 字）を2つの角度で描き、画素が回転する。`cpuReference` との差が ±2 以内。
-- [ ] `browser-tests.js`：`an invalid tip image is refused before the stroke starts`（辺 8、辺 2048、`pixels` の長さ違い）。文書は変わらない。
-- [ ] `browser-tests.js`：`GPU loss during a tipped stroke ends with GPU_LOST`（既存の `gpu-stroke` の方式）。文書はストローク前のまま、復元後に同じ先端で描ける。
-- [ ] `browser-tests.js`：`a tipped stroke is stored as plain tiles`。先端つきのストロークを描き、保存して開き直したあとの `readTile` が保存前と全バイト一致し、保存した文書の `assets` に `brush_tip` / `pattern` の種類が入っていない（案 A の確認）。
-- [ ] `browser-tests.js`：`a tip that exceeds the GPU budget is refused at the first stamp`。小さい `memoryBudgetMB` で最大の先端を使うと `INVALID_ARGUMENT` で拒否され、文書はストローク前のまま、そのストロークは `cancel` できる。
+- `tip_uses_the_long_side_for_scale_and_blends_to_transparent` は、非正方形の先端の長辺を直径に合わせ、画像の端から透明へ補間することを確認する。
+- `a reusable image tip stamps rotated coverage and saves as ordinary tiles` は、PNG から R8 への変換、同じ画像の再利用、回転した形とタイル境界、CPU 参照との差 ±2、保存・再オープン後の画素一致、アセットが増えないことを確認する。
+- `invalid image tips cannot start a stroke` は、寸法や画素数が不正な入力を SDK と Worker の入口で拒否し、文書が変わらないことを確認する。
+- `GPU loss cancels an image-tip stroke and the same tip works after recovery` は、`GPU_LOST`、文書がストローク前のままであること、GPU 復元後に同じ画像を使えることを確認する。
+- Rust の `brush_tip_budget_is_checked_before_the_first_stamp` は GPU 残予算を固定し、初回のスタンプで先端分を含めた見積もりにより拒否されることを確認する。先端とタイルの確保は起こらず、キャンセル後は画像なしのストロークを描ける。`failed_tip_stamp_retires_its_texture_and_can_be_retried` は、先端を転送した後の失敗からメモリ使用量が戻り、同じストロークを再試行できることを確認する。
 
 **完了条件：** 上の試験が通り、先端なしのストロークの画素が変わらない。
 
@@ -180,7 +178,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない（BR-2 の決定が要る点と同じ）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（11。段階2の回）。
+- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（12。段階2の回）。
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順

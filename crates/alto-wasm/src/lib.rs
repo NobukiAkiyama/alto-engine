@@ -3,7 +3,7 @@ use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat,
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
 use alto_gpu::renderer::{FinishControl, Renderer, Viewport};
-use alto_raster::{BrushConfig, StrokeSample, StrokeSampler, TileData, TileMap};
+use alto_raster::{BrushConfig, BrushImage, StrokeSample, StrokeSampler, TileData, TileMap};
 use alto_scene::RenderScene;
 use serde::Deserialize;
 use serde_json::json;
@@ -131,6 +131,14 @@ fn brush_sampler(config: &str) -> Result<StrokeSampler, JsValue> {
         .map_err(|e| error(format_args!("INVALID_ARGUMENT: brush config: {e}")))?;
     StrokeSampler::new(config).map_err(error)
 }
+fn brush_image(width: u32, height: u32, pixels: &[u8]) -> Result<Option<BrushImage>, JsValue> {
+    if width == 0 && height == 0 && pixels.is_empty() {
+        return Ok(None);
+    }
+    BrushImage::new(width, height, pixels)
+        .map(Some)
+        .map_err(error)
+}
 fn clock() -> f64 {
     js_sys::global()
         .unchecked_into::<web_sys::WorkerGlobalScope>()
@@ -175,7 +183,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        11
+        12
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -646,6 +654,7 @@ impl Runtime {
         self.renderer.set_profiling(enabled);
     }
     #[wasm_bindgen(js_name=beginBrush)]
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_brush(
         &mut self,
         layer: &str,
@@ -653,6 +662,9 @@ impl Runtime {
         color: &[f32],
         erase: bool,
         mask: bool,
+        tip_width: u32,
+        tip_height: u32,
+        tip_pixels: &[u8],
     ) -> Result<(), JsValue> {
         if self.sampler.is_some()
             || color.len() != 4
@@ -661,6 +673,7 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: brush state/color"));
         }
         let id: NodeId = serde_json::from_str(&format!("\"{layer}\"")).map_err(error)?;
+        let tip = brush_image(tip_width, tip_height, tip_pixels)?;
         let sampler = brush_sampler(config)?;
         let cfg = sampler.config();
         let doc = self.engine.document(self.doc).map_err(error)?;
@@ -740,6 +753,7 @@ impl Runtime {
                 mask,
                 world,
                 fixed_world,
+                tip,
             )
             .map_err(error)?;
         self.sampler = Some(sampler);
@@ -1386,10 +1400,14 @@ impl Runtime {
         config: &str,
         color: &[f32],
         samples: &[f32],
+        tip_width: u32,
+        tip_height: u32,
+        tip_pixels: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
         if color.len() != 4 || !samples.len().is_multiple_of(6) {
             return Err(error("INVALID_ARGUMENT: reference input"));
         }
+        let tip = brush_image(tip_width, tip_height, tip_pixels)?;
         let mut s = brush_sampler(config)?;
         let mut dabs = vec![];
         for p in samples.as_chunks::<6>().0 {
@@ -1407,6 +1425,7 @@ impl Runtime {
             s.config().clone(),
             [color[0], color[1], color[2], color[3]],
             false,
+            tip.as_ref(),
         );
         for p in out.as_chunks_mut::<4>().0 {
             for i in 0..3 {

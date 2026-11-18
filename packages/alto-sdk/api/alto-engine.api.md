@@ -97,6 +97,16 @@ export interface BrushDynamics {
     size?: BrushCurve | null;
 }
 
+// @public
+export interface BrushImage {
+    // (undocumented)
+    height: number;
+    // (undocumented)
+    pixels: Uint8Array;
+    // (undocumented)
+    width: number;
+}
+
 // @public (undocumented)
 export interface BrushOptions {
     // (undocumented)
@@ -116,6 +126,7 @@ export interface BrushOptions {
         spacing?: number;
         angle?: number;
         roundness?: number;
+        image?: BrushImage;
     };
 }
 
@@ -516,6 +527,7 @@ export interface Engine {
     // (undocumented)
     readonly assets: {
         importImage(file: Blob): Promise<ImageAsset>;
+        importBrushTip(file: Blob): Promise<BrushImage>;
         importFont(file: Blob, options?: {
             faceIndex?: number;
         }): Promise<FontAsset>;

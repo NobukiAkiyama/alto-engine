@@ -1,7 +1,7 @@
 //! Worker and native renderer. The document remains CPU-owned; all textures are caches.
 use crate::{RContent, RenderBlend, RenderScene};
 use alto_core::{ContentHash, MAX_ISOLATED_GROUPS, NodeId, Rect, TILE, TileKey};
-use alto_raster::{Dab, TileData, TileStore};
+use alto_raster::{BrushImage, Dab, TileData, TileStore};
 use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -341,6 +341,8 @@ pub struct StrokeTile {
 }
 
 pub struct GpuStroke {
+    tip: Option<BrushImage>,
+    tip_texture: Option<wgpu::Texture>,
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
     pub color: [f32; 4],

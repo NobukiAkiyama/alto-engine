@@ -102,7 +102,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 形式と通信
 
 - `format_version`：上げない。結果は通常のラスターで、新しいフィールドは無い。
-- `PROTOCOL`：上げる（新要求 `layerBake`）。値は 11（段階2の回。00-ROADMAP の番号の表）。`crates/alto-wasm/src/lib.rs` の `protocol_version`（`protocolVersion`）と `packages/alto-sdk/src/protocol.ts` の両方に反映する。（新規）
+- `PROTOCOL`：上げる（新要求 `layerBake`）。値は 12（段階2の回。00-ROADMAP の番号の表）。`crates/alto-wasm/src/lib.rs` の `protocol_version`（`protocolVersion`）と `packages/alto-sdk/src/protocol.ts` の両方に反映する。（新規）
 - 描画：v3 の画素は変えない。GPU の新しい段は作らない。`tests/parity/` に行は足さない。
 
 ### 作業手順
@@ -336,7 +336,7 @@ Worker の `execute` は 3 つを続けて呼び、最後の結果に `queueJour
 ### 形式と通信
 
 - `format_version`：上げない。
-- `PROTOCOL`：測定で採用が決まり、新要求を足す場合は上げる（14。段階4の回）。見送りなら上げない。
+- `PROTOCOL`：測定で採用が決まり、新要求を足す場合は上げる（15。段階4の回）。見送りなら上げない。
 - 描画：v3 の画素は変えない。結果は CPU と同じ画素で、`tests/parity/` に行は足さない。
 
 ### 作業手順
@@ -416,7 +416,7 @@ doc.image.warp(node, { kind: "displace", field: Int16Array /* Q4 の dx, dy を�
 ### 形式と通信
 
 - `format_version`：上げない（結果は通常のラスター）。
-- `PROTOCOL`：上げる。変位場の転送に新要求 `imageWarp: Q<{ edit: Record<string, unknown>; field?: ArrayBuffer }, { state: WireState; result: ImageEditResult }>` を足す。遠近とメッシュも同じ要求で通し、`imageEdit` の JSON に変位場を載せない。値は 14（段階4の回）。
+- `PROTOCOL`：上げる。変位場の転送に新要求 `imageWarp: Q<{ edit: Record<string, unknown>; field?: ArrayBuffer }, { state: WireState; result: ImageEditResult }>` を足す。遠近とメッシュも同じ要求で通し、`imageEdit` の JSON に変位場を載せない。値は 15（段階4の回）。
 - 描画：v3 の画素は変えない。CPU の確定編集のみ。
 
 ### 作業手順
