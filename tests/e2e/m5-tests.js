@@ -128,6 +128,63 @@ export async function runM5Tests(engine, log) {
       assert((await at(engine, 64, 64))[3] > 200, "intersection");
       await doc.selection.clear();
     });
+    await test("SDK color and contiguous selections follow color boundaries", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      const source = await image(engine, 256, 256, ctx => {
+        ctx.fillStyle = "#444";
+        ctx.fillRect(0, 0, 256, 256);
+        ctx.fillStyle = "#ff0000";
+        ctx.fillRect(48, 112, 32, 32);
+        ctx.fillRect(112, 112, 32, 32);
+        ctx.fillStyle = "#fa0000";
+        ctx.fillRect(160, 112, 16, 32);
+      });
+      let sourceLayer, marker;
+      await doc.transact("selection fixture", tx => {
+        sourceLayer = tx.addRasterFromAsset(source);
+        marker = tx.addRaster();
+      });
+      const contiguous = { kind: "contiguous", layer: sourceLayer, x: 64, y: 128 };
+      const color = { kind: "color", layer: sourceLayer, r: 255, g: 0, b: 0 };
+      const marked = async (expected) => {
+        await paint(doc, marker, 128, 128, { color: [0, 1, 0, 1], size: 256 });
+        const tile = await unstable(engine).readTile(0, 0);
+        assert([64, 96, 128, 168].every((x, i) => (pixel(tile, x, 128)[1] === 255) === expected[i]),
+          "selection differs from the requested color coverage");
+        await doc.undo();
+      };
+      await doc.selection.apply(contiguous);
+      assert((await doc.selection.outline()).includes("M"), "contiguous selection has no outline");
+      await marked([true, false, false, false]);
+      await doc.undo();
+      assert(doc.getSnapshot().selection === null, "undo did not restore the absent selection");
+
+      await doc.selection.apply(color);
+      await marked([true, false, true, false]);
+      await doc.selection.apply({ ...color, tolerance: 5 });
+      await marked([true, false, true, true]);
+      await doc.selection.apply({ ...contiguous, mode: "subtract" });
+      await marked([false, false, true, true]);
+
+      await doc.selection.apply({ ...color, r: 0, b: 255 });
+      assert(doc.getSnapshot().selection?.format === "r8" && await doc.selection.outline() === "",
+        "no color match must produce an empty selection");
+      await doc.image.fill(marker, [64, 128], [0, 1, 0, 1]).then(
+        () => { throw Error("fill applied through an empty selection"); },
+        error => assert(error.code === "EMPTY_SELECTION", String(error)),
+      );
+
+      await doc.transact("rotate source", tx => tx.setTransform(sourceLayer, {
+        x: 256, y: 0, scaleX: 1, scaleY: 1, rotation: Math.PI / 2,
+      }));
+      const before = await doc.snapshotHash();
+      await doc.selection.apply(color).then(
+        () => { throw Error("color selection accepted a rotated raster"); },
+        error => assert(error.code === "INVALID_ARGUMENT", String(error)),
+      );
+      assert(await doc.snapshotHash() === before && doc.getSnapshot().selection !== null,
+        "a rejected color selection changed the document");
+    });
     await test("document-space selection restricts GPU brush on a transformed layer", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await doc.transact("transformed layer", (tx) => {

@@ -18,7 +18,7 @@
 
 ## SEL-1 色域・連続領域の SDK 公開
 
-### 現状
+### 実装前の状態
 
 - Rust：`generated_selection`（`crates/alto-engine/src/selection.rs`）が `kind` の `color` と `contiguous` を処理する。読むキーは次のとおり。
   - 共通：`layer`（ノード ID の文字列。必須）、`tolerance`（整数 0〜255、既定 0。RGBA の各チャンネルの差の最大値で比べる）、`mode`（`replace`／`add`／`subtract`／`intersect`、既定 `replace`）。
@@ -97,18 +97,10 @@ export type SelectionSpec =
 - Modify `crates/alto-engine/src/selection.rs`（整数検査と、空の結果の決定を実装する場合）
 - Modify `tests/e2e/m5-tests.js`
 
-**Interfaces:** Produces `SelectionSpec`（判別共用体）、`SelectionMode`。
-
-- [ ] `generated_selection` が読むキーと上の型が一致することを、`git grep -n 'spec\["' crates/alto-engine/src/selection.rs` で確かめる。
-- [ ] 型を書き、`pnpm --dir packages/alto-sdk build` が通ることを確かめる。`packages/alto-sdk` 内で `SelectionSpec` を使う箇所（`document.ts` の `selection.apply`）が壊れないことも確かめる。
-- [ ] Rust 試験 `color_selection_rejects_non_integer_components`（`selection.rs`）：`r: 1.5`、`r: 300`、`g: -1`、`x: 1e18`、`x: 1.5` が `INVALID_ARGUMENT`、文書は変わらない（整数検査を入れる場合）。
-- [ ] Rust 試験 `color_selection_matching_nothing_is_an_empty_selection`（`selection.rs`）：どの画素も合わない色で `Some` かつタイルが空になり、`image.fill` 相当の準備が `EMPTY_SELECTION` になる（そろえる場合）。
-- [ ] ブラウザ試験 `a contiguous selection from the SDK stops at the color edge`（`tests/e2e/m5-tests.js`）：ラスターレイヤーに長方形選択と選択付き塗りで色の境界を作り、`doc.selection.apply({ kind: "contiguous", layer, x, y })` が境界で止まる。`doc.selection.outline()` が空でなく、Undo で元の選択（なし）に戻る。
-- [ ] ブラウザ試験 `a color selection selects both separate areas`：同じ色の離れた2か所が1回の `color` で選ばれ、`tolerance` を上げると近い色も選ばれる。`mode: "subtract"` で一方だけ外せる。
-- [ ] ブラウザ試験 `a color selection on a rotated layer is refused`：回転したレイヤーで `INVALID_ARGUMENT`、選択は変わらない。
-- [ ] `RELEASING.md` に従い、公開型の変更を変更履歴に書き、版を決める。
-- [ ] 完了条件：型から3つの `kind` を呼べる。API 報告が更新されている。共通規則7の3つのコマンドが通る。
-- [ ] 検証：`pnpm --dir packages/alto-sdk build`、`pnpm --dir packages/alto-sdk api:check`、`node scripts/verify-browser.mjs --functional`、`sh scripts/check.sh native`。PR を出して opencode でレビューする。
+**試験：**
+- Rust では不正な色成分・許容差・起点を拒否し、範囲外へ変換される起点も文書を変えずに拒否する。一致なしと差し引きで空になった場合は R8 の空選択を保持し、塗りを `EMPTY_SELECTION` で拒否する。
+- ブラウザでは、連続領域の境界と Undo、離れた同色領域と許容差、差し引き、空の結果、回転レイヤーを拒否したときの文書保全を確認する。
+- SDK のビルドと公開 API 報告を検査する。公開型の変更は RELEASING に記録し、SDK の版はリリース準備時に決める。
 
 ### 依存
 

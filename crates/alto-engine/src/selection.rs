@@ -172,11 +172,15 @@ fn generated_selection(
     if !["replace", "add", "subtract", "intersect"].contains(&mode) {
         return Err(invalid("Unknown selection combination"));
     }
-    let tolerance = spec["tolerance"].as_u64().unwrap_or(0);
-    if tolerance > 255 {
-        return Err(invalid("Color tolerance must be 0..255"));
-    }
-    let tolerance = tolerance as u8;
+    let byte = |key, default, message| {
+        spec.get(key).map_or(Ok(default), |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| invalid(message))
+        })
+    };
+    let tolerance = byte("tolerance", 0, "Color tolerance must be an integer 0..255")?;
     let layer = spec["layer"]
         .as_str()
         .ok_or_else(|| invalid("Color selection requires a layer"))?;
@@ -218,35 +222,44 @@ fn generated_selection(
     let close = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= tolerance);
     let mut chosen = Coverage::default();
     if kind == "contiguous" {
-        let sx = spec["x"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
-        let sy = spec["y"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
+        let seed_coord = |key: &str| {
+            spec[key]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| invalid("Seed must be an integer in i32 range"))
+        };
+        let sx = seed_coord("x")?;
+        let sy = seed_coord("y")?;
         let mut pixels = LayerPixels {
             map: &map,
             engine,
             last: None,
         };
-        let seed = pixels
-            .read(sx - offset.0, sy - offset.1)?
-            .ok_or_else(|| invalid("Seed is outside the layer"))?;
+        let mut read = |x: i32, y: i32| match (x.checked_sub(offset.0), y.checked_sub(offset.1)) {
+            (Some(x), Some(y)) => pixels.read(x, y),
+            _ => Ok(None),
+        };
+        let seed = read(sx, sy)?.ok_or_else(|| invalid("Seed is outside the layer"))?;
         // Scanline fill: each stack entry is one pixel; a whole run is claimed per pop.
         let mut stack = vec![(sx, sy)];
         while let Some((x, y)) = stack.pop() {
             let mut fits = |x: i32, y: i32, chosen: &Coverage| -> Result<bool, EngineError> {
-                Ok(!chosen.get(x, y)
-                    && pixels
-                        .read(x - offset.0, y - offset.1)?
-                        .is_some_and(|c| close(c, seed)))
+                Ok(!chosen.get(x, y) && read(x, y)?.is_some_and(|c| close(c, seed)))
             };
             if !fits(x, y, &chosen)? {
                 continue;
             }
             let mut left = x;
-            while fits(left - 1, y, &chosen)? {
-                left -= 1;
+            while let Some(next) = left.checked_sub(1)
+                && fits(next, y, &chosen)?
+            {
+                left = next;
             }
             let mut right = x;
-            while fits(right + 1, y, &chosen)? {
-                right += 1;
+            while let Some(next) = right.checked_add(1)
+                && fits(next, y, &chosen)?
+            {
+                right = next;
             }
             for px in left..=right {
                 chosen.set(px, y);
@@ -254,7 +267,7 @@ fn generated_selection(
             if chosen.tiles.len() > MAX_SELECTION_TILES {
                 return Err(invalid("Selection/mask exceeds 4096 tiles"));
             }
-            for row in [y - 1, y + 1] {
+            for row in [y.checked_sub(1), y.checked_add(1)].into_iter().flatten() {
                 let mut open = false;
                 for px in left..=right {
                     let ok = fits(px, row, &chosen)?;
@@ -266,19 +279,24 @@ fn generated_selection(
             }
         }
     } else {
+        let message = "Color components must be integers 0..255";
         let target = [
-            spec["r"].as_u64().unwrap_or(0) as u8,
-            spec["g"].as_u64().unwrap_or(0) as u8,
-            spec["b"].as_u64().unwrap_or(0) as u8,
-            spec["a"].as_u64().unwrap_or(255) as u8,
+            byte("r", 0, message)?,
+            byte("g", 0, message)?,
+            byte("b", 0, message)?,
+            byte("a", 255, message)?,
         ];
+        let translate = |tile: i32, pixel: usize, shift: i32| {
+            i32::try_from(i64::from(tile) * 256 + pixel as i64 + i64::from(shift))
+                .map_err(|_| invalid("Selection coordinates are outside i32 range"))
+        };
         for (key, hash) in &map.tiles {
             let tile = engine.require_tile(hash)?;
             for (i, px) in tile.pixels.as_chunks::<4>().0.iter().enumerate() {
                 if close(*px, target) {
                     chosen.set(
-                        key.tx * 256 + (i % 256) as i32 + offset.0,
-                        key.ty * 256 + (i / 256) as i32 + offset.1,
+                        translate(key.tx, i % 256, offset.0)?,
+                        translate(key.ty, i / 256, offset.1)?,
                     );
                 }
             }
@@ -314,7 +332,7 @@ fn generated_selection(
         }
     }
     Ok(vec![Op::SetSelection {
-        selection: (!out.tiles.is_empty()).then_some(out),
+        selection: Some(out),
     }])
 }
 pub fn sample(tiles: &Decoded, x: i32, y: i32) -> u8 {
@@ -1011,6 +1029,89 @@ mod tests {
             assert!(e.transact(h, "bad", ops, revision).is_err());
             assert_eq!(before, e.snapshot(h).unwrap());
         }
+    }
+
+    #[test]
+    fn generated_selections_reject_invalid_numbers_without_changing_document() {
+        let (mut e, h, id) = layer_doc(256, 256, |_| Some(vec![255; 262144]));
+        commit(
+            &mut e,
+            h,
+            vec![Op::SetProps {
+                id,
+                patch: PropPatch {
+                    transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 2.0, 0.0])),
+                    ..Default::default()
+                },
+            }],
+        );
+        let layer = id.0.to_string();
+        let before = e.snapshot(h).unwrap();
+        for spec in [
+            json!({"kind":"color","layer":layer,"r":1.5}),
+            json!({"kind":"color","layer":layer,"r":300}),
+            json!({"kind":"color","layer":layer,"g":-1}),
+            json!({"kind":"color","layer":layer,"b":"255"}),
+            json!({"kind":"color","layer":layer,"a":null}),
+            json!({"kind":"color","layer":layer,"tolerance":1.5}),
+            json!({"kind":"contiguous","layer":layer,"x":2,"y":0,"tolerance":256}),
+            json!({"kind":"contiguous","layer":layer,"x":1.5,"y":0}),
+            json!({"kind":"contiguous","layer":layer,"x":1_000_000_000_000_000_000_i64,"y":0}),
+            json!({"kind":"contiguous","layer":layer,"x":i32::MIN,"y":0}),
+        ] {
+            let err = e.selection_ops(h, &spec).unwrap_err();
+            assert!(
+                err.to_string().starts_with("INVALID_ARGUMENT:"),
+                "{spec}: {err}"
+            );
+            assert_eq!(before, e.snapshot(h).unwrap());
+        }
+    }
+
+    #[test]
+    fn empty_generated_selections_block_fill_until_cleared() {
+        use crate::image::{ImageEdit, SelectionMode};
+        let (mut e, h, id) = layer_doc(256, 256, |_| Some(vec![255; 262144]));
+        let layer = id.0.to_string();
+        let fill = || ImageEdit::Fill {
+            node: id,
+            point: [0.0, 0.0],
+            color: [0.0, 0.0, 0.0, 1.0],
+            tolerance: 0,
+            selection: SelectionMode::Current,
+        };
+        let color = json!({"kind":"color","layer":layer,"r":255,"g":0,"b":0});
+        for spec in [
+            color,
+            json!({"kind":"contiguous","layer":layer,"x":0,"y":0,"mode":"subtract"}),
+        ] {
+            let ops = e.selection_ops(h, &spec).unwrap();
+            commit(&mut e, h, ops);
+            assert!(
+                e.document(h)
+                    .unwrap()
+                    .selection
+                    .as_ref()
+                    .unwrap()
+                    .tiles
+                    .is_empty()
+            );
+            assert!(matches!(
+                e.prepare_image_edit(h, fill()),
+                Err(EngineError::Operation {
+                    code: "EMPTY_SELECTION",
+                    ..
+                })
+            ));
+            let ops = e.selection_ops(h, &json!({"kind":"invert"})).unwrap();
+            commit(&mut e, h, ops);
+            assert_eq!(sample(&selected(&e, h), 255, 255), 255);
+        }
+        let ops = e.selection_ops(h, &json!({"kind":"clear"})).unwrap();
+        commit(&mut e, h, ops);
+        assert!(e.document(h).unwrap().selection.is_none());
+        let prepared = e.prepare_image_edit(h, fill()).unwrap();
+        e.release_staged_tiles(prepared.stage);
     }
 
     #[test]

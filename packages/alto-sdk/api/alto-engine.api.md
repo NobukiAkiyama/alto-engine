@@ -1255,23 +1255,45 @@ export interface Rect {
 export function replaceText(content: TextContent, start: number, end: number, insert: string): TextContent;
 
 // @public (undocumented)
-export interface SelectionSpec {
-    // (undocumented)
-    feather?: number;
-    // (undocumented)
-    height?: number;
-    // (undocumented)
-    kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
-    // (undocumented)
-    mode?: "replace" | "add" | "subtract" | "intersect";
-    points?: [number, number][];
-    // (undocumented)
-    width?: number;
-    // (undocumented)
+type SelectionMode_2 = "replace" | "add" | "subtract" | "intersect";
+export { SelectionMode_2 as SelectionMode }
+
+// @public (undocumented)
+export type SelectionSpec = {
+    kind: "rectangle" | "ellipse";
+    mode?: SelectionMode_2;
     x?: number;
-    // (undocumented)
     y?: number;
-}
+    width?: number;
+    height?: number;
+    feather?: number;
+} | {
+    kind: "lasso";
+    mode?: SelectionMode_2;
+    points: [number, number][];
+    feather?: number;
+} | {
+    kind: "all" | "invert";
+    mode?: SelectionMode_2;
+} | {
+    kind: "clear";
+} | {
+    kind: "color";
+    layer: NodeId;
+    r: number;
+    g: number;
+    b: number;
+    a?: number;
+    tolerance?: number;
+    mode?: SelectionMode_2;
+} | {
+    kind: "contiguous";
+    layer: NodeId;
+    x: number;
+    y: number;
+    tolerance?: number;
+    mode?: SelectionMode_2;
+};
 
 // @public (undocumented)
 export function sha256Hex(data: Uint8Array): Promise<string>;

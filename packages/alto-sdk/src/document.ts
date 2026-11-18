@@ -52,17 +52,51 @@ function folderAhead(): AltoError {
   return new AltoError("CONFLICT", "the folder holds versions this document does not have", { reason: "folder-changed" });
 }
 
-export interface SelectionSpec {
-  kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
-  mode?: "replace" | "add" | "subtract" | "intersect";
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  feather?: number;
-  /** Lasso points `[x, y]` in document pixels. */
-  points?: [number, number][];
-}
+export type SelectionMode = "replace" | "add" | "subtract" | "intersect";
+
+export type SelectionSpec =
+  | {
+      kind: "rectangle" | "ellipse";
+      mode?: SelectionMode;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      feather?: number;
+    }
+  | {
+      kind: "lasso";
+      mode?: SelectionMode;
+      /** Lasso points in document pixels. */
+      points: [number, number][];
+      feather?: number;
+    }
+  | { kind: "all" | "invert"; mode?: SelectionMode }
+  | { kind: "clear" }
+  | {
+      kind: "color";
+      /** Raster layer with a translation-only world transform. */
+      layer: NodeId;
+      /** Color components are integers from 0 to 255. Alpha defaults to 255. */
+      r: number;
+      g: number;
+      b: number;
+      a?: number;
+      /** Maximum per-channel difference, an integer from 0 to 255 (default 0). */
+      tolerance?: number;
+      mode?: SelectionMode;
+    }
+  | {
+      kind: "contiguous";
+      /** Raster layer with a translation-only world transform. */
+      layer: NodeId;
+      /** Seed in integer document coordinates. */
+      x: number;
+      y: number;
+      /** Maximum per-channel difference, an integer from 0 to 255 (default 0). */
+      tolerance?: number;
+      mode?: SelectionMode;
+    };
 
 export interface ExportImageOptions {
   type?: "image/png" | "image/webp";

@@ -22,3 +22,7 @@ Protocol 12 carries image brush coverage in `beginBrush`. Rebuild the SDK, Worke
 3. Merge that PR, wait for main CI to pass, then tag the merged main commit. If source changes land before tagging, repeat the update from the latest main artifact.
 
 On tag pushes (`refs/tags/*`), `wasm-release-hashes` requires a clean build to match both committed files. It reports all package and metadata mismatches and fails before the slow tests in that job. To regenerate values locally, use `sh scripts/update-wasm-sums.sh` on aarch64-apple-darwin.
+
+## SDK changes for the next release
+
+`SelectionSpec` is a discriminated union, and `SelectionMode` is exported. Supply `points` for a lasso, omit `mode` for `clear`, and narrow the selection kind when constructing options dynamically. The new `color` and `contiguous` variants use integer inputs and keep an empty selection when nothing matches. Fill rejects that state with `EMPTY_SELECTION`, and inverting it selects the whole document. This is a breaking TypeScript change to record in the SDK release notes.
