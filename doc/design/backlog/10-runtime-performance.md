@@ -80,7 +80,7 @@
 ### 形式と通信
 
 - 文書の形式（`format_version`）：変えない。
-- `PROTOCOL`：Worker の `init` に利用する版（またはスレッド数）を渡す場合は上げる（11。段階3の回）。Worker が自分で `crossOriginIsolated` を見て選ぶなら上げない。
+- `PROTOCOL`：Worker の `init` に利用する版（またはスレッド数）を渡す場合は上げる（12。段階3の回）。Worker が自分で `crossOriginIsolated` を見て選ぶなら上げない。
 - 描画の版：変えない。共通規則1のとおり既存の画素を変えない。
 - 公開 API：変えない。`doc/embedding.md` 第4章に、「COOP / COEP は要らない。付けると速くなる場合がある」と1行足す。
 
@@ -133,7 +133,7 @@
 ### 形式と通信
 
 - 文書の形式：変えない。書き出す `.alto` のバイト列も変えない（同じ入力から同じバイト列。圧縮の結果は LZ4 の決定的な出力を使う）。
-- `PROTOCOL`：変えない。Compute プールとの要求は Engine Worker と Compute Worker の間の内部の枠で、SDK と Worker の間ではない。`setDecodeWorkers` の意味も変えない。診断のために `unstable` へ項目を足す場合だけ、要求が増えるので `PROTOCOL` を上げる（11。段階3の回）。
+- `PROTOCOL`：変えない。Compute プールとの要求は Engine Worker と Compute Worker の間の内部の枠で、SDK と Worker の間ではない。`setDecodeWorkers` の意味も変えない。診断のために `unstable` へ項目を足す場合だけ、要求が増えるので `PROTOCOL` を上げる（12。段階3の回）。
 - 配布：`alto_decode_bg.wasm` が変わるので、`wasm/SHA256SUMS` と `verification/build.json` を更新する。
 
 ### 作業手順
@@ -297,7 +297,7 @@
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`exportBitmap`（新規）の要求を足すので上げる（13。段階4の回）。既存の `exportImage` は変えない。
+- `PROTOCOL`：`exportBitmap`（新規）の要求を足すので上げる（14。段階4の回）。既存の `exportImage` は変えない。
 - 公開 API：`Document.exportBitmap`（新規）を足す。`pnpm --dir packages/alto-sdk api` で `packages/alto-sdk/api/` の報告を更新する。
 
 ### 作業手順

@@ -544,7 +544,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
         await s.end();
         const painted = await unstable(engine).readTile(0, 0);
         const reference = new Uint8Array(await testing(engine).request("cpuReference", {
-          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, pressure_size: true, pressure_opacity: false, angle, roundness },
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle, roundness },
           color,
           samples: [128.5, 128.5, 1, 0, 0, 0],
         }));
@@ -574,7 +574,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       for (const tileX of [0, 1]) {
         const gpu = await unstable(engine).readTile(tileX, 0);
         const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
-          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, pressure_size: true, pressure_opacity: false, angle: 90, roundness: 0.4 },
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle: 90, roundness: 0.4 },
           color: [0, 0, 0, 1],
           samples: [250.5 - tileX * 256, 128.5, 1, 0, 0, 0],
         }));
@@ -591,6 +591,89 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       assert(pixel(rotated, 191, 84)[3] > 200 && pixel(rotated, 211, 64)[3] === 0,
         "the brush's local horizontal axis did not rotate with the layer");
     });
+    await test("pen tilt rotates an elliptical dab while round pixels stay identical", async () => {
+      const draw = async (tiltY, roundness) => {
+        doc = await engine.createDocument({ width: 256, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const s = doc.tools.begin("brush", {
+          layer, tip: { size: 64, roundness }, dynamics: { angleFromTilt: true },
+        });
+        s.input({ x: 128.5, y: 128.5, tiltY });
+        await s.end();
+        return unstable(engine).readTile(0, 0);
+      };
+      const horizontal = await draw(0, 0.4);
+      const vertical = await draw(45, 0.4);
+      assert(pixel(horizontal, 148, 128)[3] > 200 && pixel(horizontal, 128, 148)[3] === 0,
+        "the default tip was not horizontal");
+      assert(pixel(vertical, 128, 148)[3] > 200 && pixel(vertical, 148, 128)[3] === 0,
+        "pen tilt did not rotate the tip");
+      assert(same(await draw(0, 1), await draw(45, 1)), "pen tilt changed a round tip");
+    });
+    await test("pressure-driven opacity and speed-driven flow match the CPU reference", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const opacity = { input: "pressure", points: [[0, 0], [1, 1]] };
+      const flow = { input: "speed", points: [[0, 0.5], [1, 1]] };
+      const color = [0.2, 0.4, 0.8, 1];
+      const s = doc.tools.begin("brush", {
+        layer, tip: { size: 20, spacing: 1 }, color, dynamics: { size: null, opacity, flow },
+      });
+      s.input({ x: 40.5, y: 128.5, pressure: 0.5, time: 0 });
+      s.input({ x: 120.5, y: 128.5, pressure: 1, time: 20 });
+      await s.end();
+      const gpu = await unstable(engine).readTile(0, 0);
+      const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+        config: {
+          size: 20, hardness: 0.8, spacing: 1, opacity: 1, flow: 1,
+          dynamics: { size: { input: "pressure", points: [[0, 1], [1, 1]] }, opacity, flow },
+        },
+        color, samples: [40.5, 128.5, 0.5, 0, 0, 0, 120.5, 128.5, 1, 0, 0, 20],
+      }));
+      assert(Math.abs(pixel(gpu, 40, 128)[3] - 64) <= 2, "opacity and flow did not multiply");
+      assert(pixel(gpu, 47, 128)[3] > 40, "null size did not disable pressure scaling");
+      assert(pixel(gpu, 120, 128)[3] > 245, "faster strokes did not reach full flow");
+      assert(gpu.every((v, i) => Math.abs(v - cpu[i]) <= 2), "CPU/GPU dynamics mismatch");
+    });
+    await test("an invalid curve is refused before the stroke starts", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const empty = await unstable(engine).readTile(0, 0);
+      // The two distinct JS input positions round to the same Rust f32 value.
+      const size = { input: "pressure", points: [[0, 0], [0.5, 0.5], [0.500000001, 0.6], [1, 1]] };
+      let sdkError;
+      try { doc.tools.begin("brush", { layer, dynamics: { size } }); }
+      catch (e) { sdkError = e; }
+      assert(sdkError?.code === "INVALID_ARGUMENT" && /brush curve/.test(sdkError.message),
+        "the SDK did not reject the invalid curve");
+      // Bypass the SDK to check that WASM independently validates both values and shape.
+      const beginRaw = dynamics => testing(engine).request("beginBrush", {
+        layer,
+        config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, dynamics },
+        color: [0, 0, 0, 1], erase: false, mask: false,
+      });
+      for (const [dynamics, message] of [[{ size }, /brush curve/], [{ angleFromTilt: true }, /brush config/]]) {
+        await beginRaw(dynamics).then(
+          () => { throw new Error("invalid wire config started a stroke"); },
+          e => assert(e.code === "INVALID_ARGUMENT" && message.test(e.message), String(e)),
+        );
+      }
+      const s = doc.tools.begin("brush", { layer, tip: { size: 0 } });
+      s.input({ x: 128.5, y: 128.5 });
+      await s.end().then(
+        () => { throw new Error("an invalid brush size started a stroke"); },
+        e => assert(e.code === "INVALID_ARGUMENT" && /brush size/.test(e.message), String(e)),
+      );
+      assert(same(empty, await unstable(engine).readTile(0, 0)), "an invalid curve painted pixels");
+      const valid = doc.tools.begin("brush", { layer });
+      valid.input({ x: 128.5, y: 128.5 });
+      await valid.end();
+      assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
+        "an invalid curve prevented the next valid stroke");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -606,8 +689,6 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
             spacing: 0.1,
             opacity: 1,
             flow: 1,
-            pressure_size: true,
-            pressure_opacity: false,
           },
           color: [0.2, 0.4, 0.8, 1],
           samples: [240, 128, 1, 0, 0, 0, 280, 128, 0.5, 0, 0, 1],

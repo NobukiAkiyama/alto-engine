@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 10;
+export const PROTOCOL = 11;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -33,14 +33,24 @@ export interface RecoveryInfo {
   latestGeneration: number;
   truncated?: boolean;
 }
+/** A piecewise-linear curve with 2–8 points. Input coordinates increase from 0 to 1. */
+export type BrushCurve = {
+  input: "pressure" | "speed" | "tilt";
+  points: [number, number][];
+};
+
 export interface BrushConfig {
   size: number;
   hardness: number;
   spacing: number;
   opacity: number;
   flow: number;
-  pressure_size: boolean;
-  pressure_opacity: boolean;
+  dynamics?: {
+    size?: BrushCurve;
+    opacity?: BrushCurve;
+    flow?: BrushCurve;
+    angle_from_tilt?: boolean;
+  };
   angle: number;
   roundness: number;
 }

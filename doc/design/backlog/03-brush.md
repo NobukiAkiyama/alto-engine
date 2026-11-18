@@ -55,7 +55,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 
 - `format_version`：触れない。ストロークは `Op::SetTiles` で保存され、ダブは保存されない。
 - render v3 の画素：触れない（表示の合成は変えない）。既存の丸いダブは従来と同じ式を通る。
-- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`）：`beginBrush` の `config` が増えるため BR-1 で 10 に更新した（00-ROADMAP の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-1〜BR-5 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`）：`beginBrush` の `config` が増えるため BR-1 で 10 に更新した（00-ROADMAP の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-4/5 で旧設定を削除するため 11 に更新した。README と RELEASING を同じ PR で更新する。
 - シェーダー：`brush.wgsl` の既存モードの変更で、新しいモード番号は不要。
 
 ### 作業手順
@@ -123,7 +123,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない。案 B は `AssetKind` が `deny_unknown_fields` の型なので、`BrushTip { width, height }` への変更で上げる（案 B を選んだときだけ。そのとき作業中の回の番号に入れ、回が無ければ次の空き番号を取る。00-ROADMAP の番号の表）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（10。BR-1 と同じ段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
+- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（11。段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -180,7 +180,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない（BR-2 の決定が要る点と同じ）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（10。BR-1 と同じ段階2の回）。
+- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（11。段階2の回）。
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -205,7 +205,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 ## BR-4 傾きの反映
 
-### 現状
+### 実装前の状態
 
 - `crates/alto-raster/src/brush.rs`：`StrokeSample { pos, pressure, tilt: [f32; 2], t_ms: f64 }`。`tilt` は受け取るが `StrokeSampler::input` が読まない。`input` は `pos` と `pressure` の有限性だけを検査し、`tilt` は検査しない。
 - `crates/alto-wasm/src/lib.rs` の `brush_input` が、6 個ずつ `[x, y, pressure, tiltX, tiltY, t_ms]` の `f32` 列を読む。
@@ -229,21 +229,16 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ）。
-- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので 10 に含める（BR-1 の後）。
+- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので 11 に更新する（BR-1 の後、BR-5 と同時）。
 - シェーダー：変更なし（`angle` は BR-1 の `extra` で渡る）。
 
 ### 作業手順
 
 **Files:** Modify `crates/alto-raster/src/brush.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/tools.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
 
-**試験（`brush.rs`）：**
-- [ ] `angle_from_tilt_sets_the_dab_angle`。
-- [ ] `no_tilt_keeps_the_previous_angle`（`atan2(0, 0)` で角度が跳ばない。最初のサンプルでは `config.angle`）。
-- [ ] `non_finite_tilt_is_treated_as_zero`。
-- [ ] `mouse_input_with_angle_from_tilt_matches_a_fixed_angle`。
-
-**試験（`browser-tests.js`）：**
-- [ ] `tilt rotates an elliptical dab but not a round one`。`roundness 0.4` で `tiltX` 0 と 45 の画素が変わり、`roundness 1` では全バイト一致する。
+**試験：**
+- `brush.rs` の `tilt_rotates_dabs_remembers_the_previous_angle_and_scales_flow` で、ペンの傾きによる角度と流量、直立時の角度保持、非有限な傾きの扱い、同じ入力の再生結果を確認する。`mouse_stroke_with_tilt_enabled_matches_the_fixed_angle` は、マウス入力を固定角度と比較する。
+- `browser-tests.js` の `pen tilt rotates an elliptical dab while round pixels stay identical` は、傾き 0° と 45° で楕円の長軸が入れ替わり、円は全バイト一致することを確認する。
 
 **完了条件：** 上の試験が通り、`angle_from_tilt` なしのストロークの画素が変わらない。
 
@@ -256,7 +251,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 ## BR-5 筆圧カーブ、速度連動
 
-### 現状
+### 実装前の状態
 
 - `StrokeSampler::dab`（`brush.rs`）：半径 = `size × 0.5 × (pressure_size ? max(pressure, 0.05) : 1)`、`opacity = flow × (pressure_opacity ? pressure : 1)`。間隔 `until` も `size × spacing × (pressure_size ? max(pressure, 0.05) : 1)` を `max(0.25)`。サンプル間は Catmull-Rom で 0.5 px ごとに補間し、筆圧は線形補間。
 - `BrushConfig.opacity` は**ストローク全体の上限**（GPU の `min(v, config.params.y)`）。ダブごとの不透明度は `Dab.opacity` があり、`brush.wgsl` が `shape × d.center_radius.w` としてダブごとに掛ける。
@@ -280,13 +275,15 @@ interface BrushDynamics {
 // BrushOptions.dynamics?: BrushDynamics
 ```
 
-Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input: CurveInput, points: Vec<[f32; 2]> }`、`BrushDynamics { size: BrushCurve, opacity: BrushCurve, flow: BrushCurve, angle_from_tilt: bool }`、`BrushConfig.dynamics: BrushDynamics`（`serde(default)`）。`pressure_size` / `pressure_opacity` は削除する。`BrushDynamics::default()` の `size` は `[[0,0.05],[0.05,0.05],[1,1]]`（圧力）で、**今の `max(pressure, 0.05)` と同じ値を返す**。`opacity` と `flow` は一定 `[[0,1],[1,1]]`。SDK は `size` が undefined なら既定のカーブ、`null` なら `[[0,1],[1,1]]` を送る。`opacity` と `flow` は undefined / `null` なら `[[0,1],[1,1]]`。`pressureOpacity: true` に当たるのは `opacity: { input: "pressure", points: [[0,0],[1,1]] }`。検証は `BrushDynamics::validate()` と `BrushConfig::normalized()`（どちらも新規、`brush.rs`）に置き、`begin_brush` が呼ぶ。
+Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input: CurveInput, points: Vec<[f32; 2]> }`、`BrushDynamics { size: BrushCurve, opacity: BrushCurve, flow: BrushCurve, angle_from_tilt: bool }`、`BrushConfig.dynamics: BrushDynamics`（`serde(default)`）。`pressure_size` / `pressure_opacity` は削除する。`BrushDynamics::default()` の `size` は `[[0,0.05],[0.05,0.05],[1,1]]`（圧力）で、**今の `max(pressure, 0.05)` と同じ値を返す**。`opacity` と `flow` は一定 `[[0,1],[1,1]]`。SDK は `size` が undefined なら既定のカーブ、`null` なら `[[0,1],[1,1]]` を送る。`opacity` と `flow` は undefined / `null` なら `[[0,1],[1,1]]`。`pressureOpacity: true` に当たるのは `opacity: { input: "pressure", points: [[0,0],[1,1]] }`。`StrokeSampler::new` は `BrushConfig::normalized()` で設定を検証し、不正な場合は `Err` を返す。SDK はカーブの入力位置を f32 に丸めた後も狭義単調増加であることを確認する。
 
 **カーブ。** 2〜8 点の区分線形。`x` は狭義単調増加、`points[0].x = 0`、`points.last().x = 1`、`y` は 0〜1、すべて有限。違えば `INVALID_ARGUMENT: brush curve`（`begin_brush` が原子的に拒否し、ストロークは始まらない）。入力が `[0, 1]` の外なら端へ丸める。
 
 **半径と間隔。** `factor = max(curve(input), 0.05)`、半径 = `size × 0.5 × factor`、`until = max(size × spacing × factor, 0.25)`。ダブの `opacity` = `config.flow × flow カーブ(入力) × opacity カーブ(入力)`（`Dab.opacity`。`flow` と `opacity` は同じ乗数に入る。API を11-04 版のまま保つための分け方で、積は交換可能）。`config.opacity`（ストロークの上限）は一定のまま。
 
-**速度。** サンプル間 `dt = t_ms - last.t_ms`、`dx = 距離`（レイヤー画素）。`dt > 0` のとき `v = dx / dt`（px/ms）、指数移動平均 `speed = 0.3 v + 0.7 speed`（最初は `v`）。`dt <= 0`（同じ時刻、逆順、非有限）のときは速度を更新せず直前の値を使う（ゼロ除算なし）。入力値 `min(speed / 4, 1)`。補間中のダブは、区間の始めの値から終わりの値へ線形補間する（圧力と同じ）。
+既定のサイズカーブを使う場合、最初のダブから次のダブまでの間隔には従来どおり筆圧を掛けない。以降の間隔には上の式を使う。
+
+**速度。** サンプル間 `dt = t_ms - last.t_ms`、`dx = 距離`（レイヤー画素）。`dt > 0` のとき `v = dx / dt`（px/ms）、指数移動平均 `speed = 0.3 v + 0.7 speed`（最初は `v`）。`dt <= 0`（同じ時刻、逆順、非有限）のときは速度を更新せず直前の値を使う（ゼロ除算なし）。入力値 `min(speed / 4, 1)`。最初のダブの入力値は 0。補間中のダブは、区間の始めの値から終わりの値へ線形補間する（圧力と同じ）。非有限な時刻を含まない次の有効な区間から速度の更新を再開する。
 
 **決定性。** ダブ生成は、サンプル列だけで決まる純粋関数。時刻・乱数・ハードウェアに依らない。`tilt` と `speed` の入力値も、サンプル列だけで決まる。
 
@@ -296,7 +293,7 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ。既定のカーブは今の出力と同じ）。
-- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので 10 に含める（BR-1 の後）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので 11 に更新する（BR-1 の後、BR-4 と同時）。README と RELEASING を同じ PR で更新する。
 - 公開 API：`BrushOptions.pressureSize` / `pressureOpacity` を削除する破壊的変更（決定が要る点）。`packages/alto-sdk/api/alto-engine.api.md` を更新する。
 - シェーダー：変更なし。
 
@@ -307,12 +304,10 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 - Modify `tests/e2e/browser-tests.js`（`cpuReference` の `config` を `pressure_size` から `dynamics` に直す。リポジトリ内の他の `pressureSize` の呼び出しも直す）。Playground の呼び出し（`pressureSize` を使う箇所があれば）。
 
 **試験：**
-- [ ] `brush.rs`：`curve_interpolates_and_clamps`、`curve_rejects_non_increasing_points`（点数 1・9、`x` が増えない、両端が 0・1 でない、`y` が範囲外）。
-- [ ] `brush.rs`：`default_size_curve_equals_the_old_pressure_rule`。圧力 0、0.03、0.05、0.5、1 で、既定の半径が旧式 `size × 0.5 × max(p, 0.05)` と 1e-6 以内で等しい。
-- [ ] `brush.rs`：`speed_curve_uses_smoothed_speed`、`repeated_timestamp_does_not_divide_by_zero`、`reversed_timestamp_keeps_the_previous_speed`。
-- [ ] `brush.rs`：`the_same_samples_make_the_same_dabs`。
-- [ ] `browser-tests.js`：`dynamics opacity by pressure matches the CPU reference`（`pressureOpacity` の代わり）。
-- [ ] `browser-tests.js`：`an invalid curve is refused before the stroke starts`。
+- `curve_interpolates_and_clamps` と `invalid_curves_are_rejected` はカーブの補間・範囲制限と点の並び・値の検証を確認する。
+- `default_size_curve_matches_the_old_pressure_rule_exactly` は既定の半径を従来の筆圧式と比較する。`default_stroke_preserves_pixels_on_both_tiles` は筆圧の異なるダブがタイルをまたぐストロークについて、基点 `a3d4651` の左右両タイルの画素ハッシュとの完全一致を確認する。
+- `speed_curve_interpolates_smoothed_speed_and_handles_invalid_timestamps` は速度の補間・平滑化と、重複・逆順・非有限な時刻の後で更新が再開することを確認する。
+- ブラウザの `pressure-driven opacity and speed-driven flow match the CPU reference` は実際の画素を CPU 参照と比較する。`an invalid curve is refused before the stroke starts` は SDK と WASM の拒否、および続く正常なストロークが描けることを確認する。
 
 **完了条件：** 上の試験が通り、既定の設定のストロークが変更前と ±0 で同じ（既存の `GPU brush / pressure / ...` が通る）。
 

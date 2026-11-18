@@ -126,6 +126,11 @@ fn node_view(node: &alto_doc::Node) -> Result<serde_json::Value, JsValue> {
 fn error(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
+fn brush_sampler(config: &str) -> Result<StrokeSampler, JsValue> {
+    let config: BrushConfig = serde_json::from_str(config)
+        .map_err(|e| error(format_args!("INVALID_ARGUMENT: brush config: {e}")))?;
+    StrokeSampler::new(config).map_err(error)
+}
 fn clock() -> f64 {
     js_sys::global()
         .unchecked_into::<web_sys::WorkerGlobalScope>()
@@ -170,7 +175,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        10
+        11
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -656,8 +661,8 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: brush state/color"));
         }
         let id: NodeId = serde_json::from_str(&format!("\"{layer}\"")).map_err(error)?;
-        let cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
-        let cfg = cfg.normalized().map_err(error)?;
+        let sampler = brush_sampler(config)?;
+        let cfg = sampler.config();
         let doc = self.engine.document(self.doc).map_err(error)?;
         if (!mask && !matches!(doc.node(id).map_err(error)?.kind, NodeKind::Raster { .. }))
             || (mask && doc.node(id).map_err(error)?.props.mask.is_none())
@@ -737,7 +742,7 @@ impl Runtime {
                 fixed_world,
             )
             .map_err(error)?;
-        self.sampler = Some(StrokeSampler::new(cfg));
+        self.sampler = Some(sampler);
         self.layer = Some(id);
         Ok(())
     }
@@ -1382,12 +1387,10 @@ impl Runtime {
         color: &[f32],
         samples: &[f32],
     ) -> Result<Vec<u8>, JsValue> {
-        let cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
         if color.len() != 4 || !samples.len().is_multiple_of(6) {
             return Err(error("INVALID_ARGUMENT: reference input"));
         }
-        let cfg = cfg.normalized().map_err(error)?;
-        let mut s = StrokeSampler::new(cfg);
+        let mut s = brush_sampler(config)?;
         let mut dabs = vec![];
         for p in samples.as_chunks::<6>().0 {
             dabs.extend(s.input(StrokeSample {
@@ -1401,7 +1404,7 @@ impl Runtime {
             &vec![0; 262144],
             [0.0, 0.0],
             &dabs,
-            cfg,
+            s.config().clone(),
             [color[0], color[1], color[2], color[3]],
             false,
         );
