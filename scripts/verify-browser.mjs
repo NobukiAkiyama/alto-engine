@@ -115,9 +115,17 @@ function chromeBin() {
 }
 
 async function startServer() {
+  // Test-only: corrupt decode batches in workers loaded while the switch is on.
+  let corruptDecodeBatches = false;
   const server = createServer(async (req, res) => {
     try {
-      const pathname = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+      const url = new URL(req.url, "http://127.0.0.1");
+      const pathname = decodeURIComponent(url.pathname);
+      if (pathname === "/__alto-test/decode-fault") {
+        corruptDecodeBatches = url.searchParams.get("enabled") === "1";
+        res.writeHead(200).end("ok");
+        return;
+      }
       let path = resolve(root, "." + pathname);
       if (path !== root && !path.startsWith(root + sep)) {
         res.writeHead(403).end();
@@ -125,7 +133,13 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      if ((surfaceRecording || resizeBarrier || presentTiming) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+      if (corruptDecodeBatches && path === join(root, "packages/alto-sdk/dist/decode-worker.js")) {
+        const source = await readFile(path, "utf8");
+        const target = "const out = decodeBatch(new Uint8Array(data.batch));";
+        if (source.split(target).length !== 2) throw Error("decode fault target changed");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(source.replace(target, "const input = new Uint8Array(data.batch).slice(); if (input.length >= 42) new DataView(input.buffer).setUint32(38, 0xffffffff, true); const out = decodeBatch(input);"));
+      } else if ((surfaceRecording || resizeBarrier || presentTiming) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
         let source = await readFile(path, "utf8");
         if (presentTiming) {
           const replace = (before, after) => {
@@ -208,7 +222,7 @@ async function connect(url, onEvent = () => {}) {
 
 const suites = [
   ["image-versions", `const { runImageVersionTests } = await import('../../tests/e2e/image-version-tests.js'); await runImageVersionTests(window.altoEngine, (line) => console.log(line));`],
-  ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line));`],
+  ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line), { decodeFaultInjection: true });`],
   ["m5", `const { runM5Tests } = await import('../../tests/e2e/m5-tests.js'); await runM5Tests(window.altoEngine, (line) => console.log(line));`],
   ["m6", `const { runM6Tests } = await import('../../tests/e2e/m6-tests.js'); await runM6Tests(window.altoEngine, (line) => console.log(line));`],
   ["m7", `const { runM7Tests } = await import('../../tests/e2e/m7-tests.js'); await runM7Tests(window.altoEngine, (line) => console.log(line));`],
