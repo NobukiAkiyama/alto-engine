@@ -1,7 +1,7 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
-import { PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { ToolHost, ToolSession } from "./tools.js";
@@ -23,6 +23,8 @@ export interface EngineOptions {
     /** Set false to keep no recovery journal; unsaved edits are then lost in a crash. */
     recovery?: boolean;
   };
+  /** Maximum number of undoable operations, from 1 to 1000 (default 100). */
+  undo?: { steps?: number };
   gpu?: { powerPreference?: "low-power" | "high-performance"; memoryBudgetMB?: number };
   /** Where `worker.js` and the WASM files are served. Must be the page's origin. */
   assets?: { baseURL?: string | URL };
@@ -272,8 +274,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
   workerURL: URL | string | null;
 
+  private readonly undoSteps: number;
+
   private constructor(private readonly options: EngineOptions) {
     super();
+    this.undoSteps = options.undo?.steps ?? DEFAULT_UNDO_STEPS;
     this.namespace = options.storage?.namespace ?? "default";
     this.pixelRatio = this.currentRatio();
     this.workerURL = options.assets?.baseURL
@@ -310,6 +315,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   static async create(options: EngineOptions): Promise<EngineCore> {
     if (!(options.container instanceof HTMLElement))
       throw new AltoError("INVALID_ARGUMENT", "options.container must be an HTMLElement");
+    const undoSteps = options.undo?.steps ?? DEFAULT_UNDO_STEPS;
+    if (!Number.isInteger(undoSteps) || undoSteps < 1 || undoSteps > MAX_UNDO_STEPS)
+      throw new AltoError("INVALID_ARGUMENT", "undo.steps must be an integer from 1 to 1000", { reason: "undo-steps" });
     const namespace = options.storage?.namespace ?? "default";
     if (!NAMESPACE.test(namespace) || namespace.split("/").some((part) => part === "." || part === ".."))
       throw new AltoError("INVALID_ARGUMENT", "storage.namespace must be 1–128 of A-Z a-z 0-9 . _ - /", {
@@ -447,6 +455,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         sdk: SDK_VERSION,
         canvas: offscreen,
         budget: this.options.gpu?.memoryBudgetMB ?? 512,
+        undoSteps: this.undoSteps,
         namespace: this.namespace,
         journal: this.journaled,
       },
@@ -879,13 +888,14 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.recoveryWaiting = false;
         // Document listeners run inside apply/adopt and may call the engine, so requests
         // are accepted from here on; the status event still follows the recovered state.
-        this.state = Object.freeze({ state: "ready", error: null });
+        const storageFailure = this.storageError();
+        if (!storageFailure) this.state = Object.freeze({ state: "ready", error: null });
         // The same handle carries on; the host's references stay valid.
         if (this.document) {
           this.document.apply(state);
           this.viewport.publish();
         } else this.adopt(state, true, epoch);
-        this.emit("status", this.state);
+        if (!storageFailure) this.emit("status", this.state);
       } else this.setStatus("ready", null);
       this.startLoop();
     } catch (cause) {

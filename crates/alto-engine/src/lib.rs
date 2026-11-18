@@ -64,6 +64,7 @@ pub enum EngineError {
 
 pub struct Engine {
     documents: BTreeMap<DocHandle, Editor>,
+    max_undo: usize,
     next_handle: u64,
     tiles: ObjectStore,
     /// Decoded tiles for CPU edits, which read pixel by pixel. The renderer keeps
@@ -97,6 +98,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             documents: BTreeMap::new(),
+            max_undo: 100,
             next_handle: 1,
             tiles: ObjectStore::default(),
             decoded: std::cell::RefCell::new(DecodeCache::new(128 * 1024 * 1024)),
@@ -117,13 +119,37 @@ impl Engine {
         self.add_document(Document::new(meta)?)
     }
 
+    pub fn max_undo(&self) -> usize {
+        self.max_undo
+    }
+
+    pub fn set_max_undo(&mut self, steps: usize) -> Result<(), EngineError> {
+        if !(1..=1000).contains(&steps) {
+            return Err(EngineError::Operation {
+                code: "INVALID_ARGUMENT",
+                message: "undo steps must be 1 to 1000".into(),
+            });
+        }
+        self.max_undo = steps;
+        for editor in self.documents.values_mut() {
+            editor.set_max_undo(steps);
+        }
+        self.maintain();
+        Ok(())
+    }
+
+    fn install_editor(&mut self, handle: DocHandle, mut editor: Editor) {
+        editor.set_max_undo(self.max_undo);
+        self.documents.insert(handle, editor);
+    }
+
     fn add_document(&mut self, doc: Document) -> Result<DocHandle, EngineError> {
         let handle = DocHandle(self.next_handle);
         self.next_handle = self
             .next_handle
             .checked_add(1)
             .ok_or_else(|| DocError::Invalid("Document handle overflow".into()))?;
-        self.documents.insert(handle, Editor::new(doc));
+        self.install_editor(handle, Editor::new(doc));
         Ok(handle)
     }
 

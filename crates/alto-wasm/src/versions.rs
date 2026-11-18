@@ -184,7 +184,7 @@ impl Runtime {
             .iter()
             .filter_map(|p| p.rsplit('/').next()?.parse().ok())
             .collect();
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine
             .open_entries_on_demand(unframe(framed)?, known)
             .map_err(error)?;
@@ -317,7 +317,7 @@ impl Runtime {
     }
     #[wasm_bindgen(js_name=openFolder)]
     pub fn open_folder(&mut self, framed: &[u8]) -> Result<String, JsValue> {
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine.open_entries(unframe(framed)?).map_err(error)?;
         self.install(engine, doc, warnings)
     }
@@ -385,7 +385,7 @@ impl Runtime {
     ) -> Result<String, JsValue> {
         let opaque: std::collections::BTreeSet<ContentHash> =
             serde_json::from_str(opaque).map_err(error)?;
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine
             .open_recovery_entries(unframe(framed)?, &opaque)
             .map_err(error)?;

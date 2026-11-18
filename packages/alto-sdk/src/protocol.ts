@@ -18,7 +18,9 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 8;
+export const PROTOCOL = 9;
+export const DEFAULT_UNDO_STEPS = 100;
+export const MAX_UNDO_STEPS = 1000;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -86,7 +88,7 @@ type Q<A, R> = { args: A; result: R };
 /** Every request: its arguments and what the reply carries. */
 export interface Requests {
   init: Q<
-    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean },
+    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean; undoSteps: number },
     { protocol: number; recovery: RecoveryInfo }
   >;
   createDocument: Q<{ width: number; height: number; renderVersion?: 3 }, WireState>;
@@ -196,7 +198,7 @@ export interface Requests {
   corruptBothCheckpoints: Q<None, unknown>;
   looseCheckpoint: Q<None, true>;
   legacyCheckpoint: Q<None, true>;
-  injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" }, true>;
+  injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" | "beforeCheckpoint" | "beforeCheckpointParts" }, true>;
   /** Test hook: journal and checkpoint writes stop before the next one until released. */
   partialAppend: Q<{ position: "header" | "payload" | "crc" }, true>;
   partialAppendHeld: Q<None, true>;

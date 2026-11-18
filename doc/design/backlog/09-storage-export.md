@@ -330,7 +330,7 @@ pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：上げる（9。段階1の回）。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
+- `PROTOCOL`：9 に含める（段階1）。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
 - 描画の版：触れない。
 
 ### 作業手順

@@ -561,7 +561,7 @@
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`recoveryStages`（新規）の要求を足すので上げる（9。段階1の回）。
+- `PROTOCOL`：`recoveryStages`（新規）の要求を足すので9 に含める（段階1）。
 - 公開 API：`@alto/engine/unstable` に1関数。互換の約束の外（`doc/embedding.md` 第1章）。
 
 ### 作業手順

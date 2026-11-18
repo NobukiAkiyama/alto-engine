@@ -32,7 +32,7 @@ export function testing(engine: Engine) {
     legacyCheckpoint: () => request("legacyCheckpoint"),
     /** Writes a format 3 checkpoint (one file per object). */
     looseCheckpoint: () => request("looseCheckpoint"),
-    injectStorageFault: (position: "beforeAppend" | "afterAppend") => request("injectStorageFault", { position }),
+    injectStorageFault: (position: "beforeAppend" | "afterAppend" | "beforeCheckpoint" | "beforeCheckpointParts") => request("injectStorageFault", { position }),
     /**
      * Stops journal and checkpoint writes before the next one, which stays in memory
      * until `holdStorage(false)`. Edits still apply; `durable()` waits.

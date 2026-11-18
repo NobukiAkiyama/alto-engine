@@ -1,4 +1,4 @@
-import { PROTOCOL, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -73,7 +73,7 @@ interface Candidate {
 }
 interface CandidateContents {
   base: Uint8Array;
-  metadata: { format: number; opaque: string[]; dirty?: boolean } | null;
+  metadata: { format: number; opaque: string[]; dirty?: boolean; undoSteps?: number } | null;
   records: Uint8Array[];
 }
 interface Write {
@@ -103,7 +103,7 @@ let diagnosticTickMs: number[] | null = null;
 let partialAppend: "header" | "payload" | "crc" | null = null;
 let partialAppendDone = false;
 let partialAppendWaiters: (() => void)[] = [];
-let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
+let injectedStorageFault: Args<"injectStorageFault">["position"] | null = null;
 // Test hook: the next checkpoint ends after its pack ("pack"), after a torn journal
 // write ("journal") or after a complete one whose reply is never taken ("flushed").
 let checkpointStop: "pack" | "journal" | "flushed" | null = null;
@@ -129,6 +129,7 @@ let journaling = true;
 // A document epoch belongs to its SDK handle, not to this Worker's lifetime.
 let documentEpoch = 0;
 let recoveryPending = false;
+let undoSteps: Args<"init">["undoSteps"];
 function checkDocument(epoch: number | undefined) {
   if (epoch !== undefined && epoch !== documentEpoch)
     throw Error("CONFLICT: document-closed: the request belongs to a replaced document");
@@ -457,11 +458,15 @@ function queueCheckpoint() {
 }
 async function write(w: Write) {
   if (w.kind === "checkpoint") {
+    if (injectedStorageFault === "beforeCheckpoint") {
+      injectedStorageFault = null;
+      throw Error("STORAGE: injected failure before checkpoint");
+    }
     // The stop stays armed while the write runs, so checkpointStopped() waits for it.
     const stop = checkpointStop;
     await io(
       "checkpoint",
-      { entries: w.bytes.buffer as ArrayBuffer, dirty: !!w.dirty, ...(stop && stop !== "flushed" ? { stop } : {}) },
+      { entries: w.bytes.buffer as ArrayBuffer, dirty: !!w.dirty, undoSteps, ...(stop && stop !== "flushed" ? { stop } : {}) },
       [w.bytes.buffer],
     );
     if (stop) {
@@ -549,6 +554,10 @@ async function collectPacks() {
 // is built through checkpointParts(), which hands these over first.
 let collectedObjects: string[] = [];
 function checkpointParts() {
+  if (injectedStorageFault === "beforeCheckpointParts") {
+    injectedStorageFault = null;
+    throw Error("STORAGE: injected failure before checkpoint generation");
+  }
   if (collectedObjects.length) {
     runtime.forgetStoredObjectPaths(JSON.stringify(collectedObjects));
     collectedObjects = [];
@@ -747,13 +756,15 @@ async function execute(m: Queued): Promise<unknown> {
       await init();
       postMessage({ t: "diagnostic", value: { initPhase: "runtime-create" } });
       runtime = await Runtime.create(canvas, budget);
+      if (runtime.protocolVersion?.() !== PROTOCOL)
+        throw Error("CONFLICT: SDK/WASM version mismatch");
+      undoSteps = m.undoSteps;
+      runtime.setMaxUndo(undoSteps);
       postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
       finishAbort=runtime.finishAbortHandle();
       frameFields = runtime.frameFields();
       adapterName = runtime.adapterName();
       startDecoders();
-      if (runtime.protocolVersion?.() !== PROTOCOL)
-        throw Error("CONFLICT: SDK/WASM version mismatch");
       journaling = m.journal !== false;
       if (!journaling) {
         postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
@@ -1029,24 +1040,38 @@ async function execute(m: Queued): Promise<unknown> {
           : "NOT_FOUND: recovery journal");
       }
       let recovery: Candidate | null = null;
+      let checkpointUndoSteps = DEFAULT_UNDO_STEPS;
       let lastError: unknown;
       for (const candidate of candidates) {
+        // Transient storage failures propagate so the caller can retry without replacing a generation.
+        const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents | { damaged: string };
+        if ("damaged" in full) {
+          lastError = full.damaged;
+          continue;
+        }
+        // Out of memory says nothing about this candidate: it must not select an older generation.
+        const framedRecords = frameRecords(full.records);
         try {
-          // A candidate that cannot be read (a missing object) is skipped like one that
-          // cannot be opened; it does not stop storage.
-          const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents;
+          // Saved undo records can depend on more history than the new session exposes.
+          const savedUndoSteps = full.metadata?.undoSteps ?? DEFAULT_UNDO_STEPS;
+          if (!Number.isInteger(savedUndoSteps) || savedUndoSteps < 1 || savedUndoSteps > MAX_UNDO_STEPS)
+            throw Error("CORRUPT_DATA: invalid checkpoint undo limit");
+          runtime.setMaxUndo(savedUndoSteps);
           if (full.metadata && full.metadata.format >= 3)
             runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
           else if (full.metadata)
             runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
           else runtime.openPackage(full.base);
-          runtime.replayRecords(frameRecords(full.records));
+          runtime.replayRecords(framedRecords);
+          runtime.setMaxUndo(undoSteps);
           if (full.metadata?.dirty) runtime.markUnsaved();
+          checkpointUndoSteps = savedUndoSteps;
           recovery = candidate;
           break;
         } catch (error) {
           // A trap is not a damaged candidate: trying the next one would run on a broken Runtime.
           if (error instanceof WebAssembly.RuntimeError) throw error;
+          runtime.setMaxUndo(undoSteps);
           lastError = error;
         }
       }
@@ -1054,13 +1079,24 @@ async function execute(m: Queued): Promise<unknown> {
         recoveryPending = false;
         throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
       }
-      await io("activate", { generation: recovery.generation });
+      const forgotten = await io<string[]>("activate", { generation: recovery.generation });
+      if (forgotten.length) runtime.forgetStoredObjectPaths(JSON.stringify(forgotten));
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
         s.warnings.push({ code: "RECOVERED_OLDER_GENERATION", details: {} });
       if (recovery.truncated)
         s.warnings.push({ code: "RECOVERED_TRUNCATED", details: {} });
       adoptDocument(m.nextDocumentEpoch);
+      // Rebase before appending to a journal that was replaced or only partly replayed.
+      const diverged = s.warnings.some((warning: { code: string }) => warning.code === "RECOVERY_DIVERGED");
+      if (checkpointUndoSteps !== undoSteps || recovery.generation !== recovery.latestGeneration || diverged) {
+        try {
+          queueCheckpoint();
+        } catch (error) {
+          if (error instanceof WebAssembly.RuntimeError) throw error;
+          freezeStorage(Error("STORAGE: recovery checkpoint failed: " + String((error as Error).message || error)));
+        }
+      }
       return s;
     }
     case "validateFrame":
@@ -1097,7 +1133,7 @@ async function execute(m: Queued): Promise<unknown> {
     case "looseCheckpoint": {
       await writesIdle();
       const entries = checkpointParts();
-      await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer }, [entries.buffer]);
+      await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer, undoSteps }, [entries.buffer]);
       return true;
     }
     case "legacyCheckpoint": {
@@ -1147,7 +1183,7 @@ async function execute(m: Queued): Promise<unknown> {
       if (heldWrite) return heldWrite;
       return new Promise<Write["kind"]>((resolve, reject) => heldWaiters.push({ resolve, reject }));
     case "injectStorageFault":
-      if (m.position !== "beforeAppend" && m.position !== "afterAppend")
+      if (m.position !== "beforeAppend" && m.position !== "afterAppend" && m.position !== "beforeCheckpoint" && m.position !== "beforeCheckpointParts")
         throw Error("INVALID_ARGUMENT: storage fault position");
       injectedStorageFault = m.position;
       return true;

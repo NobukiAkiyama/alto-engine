@@ -18,6 +18,8 @@
 
 ## 2. 最小の組み込み
 
+Undo の保持件数は `createEngine` の `undo.steps` で指定できます。1〜1000 の整数で、既定は 100 です。
+
 ```ts
 import { createEngine, isSupported } from "@alto/engine";
 import { downloadTarget } from "@alto/engine/browser";
@@ -93,7 +95,7 @@ container.addEventListener("pointerdown", event => {
 
 公開済みの `presentedViewport` / `presentedViewVersion` と要求中の version を別々に読めます。Snapshot と内部の center は読み取り専用です。GPU 完了による論理的な確認で、OS の scanout 時刻を表しません。`viewport.get()`・座標変換は従来通り要求中の view を同期的に使います。付属 pointer adapter は未準備の画面入力をエラーにし、ストローク中の viewport 送信を終了まで保留します。文書座標の `InputSample` やプログラマティックな編集 API は表示準備を待つ必要がありません。
 
-確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 8 になり、必ず同じ配布物を組み合わせます。
+確定前の読み戻し失敗・キャンセルは、文書と履歴を変更しません。CPU 確定後に保存記録を作れなかった場合は、確定した編集を Snapshot に反映したうえで `storage-failed` を通知します。再送せず、緊急書出しまたは保存障害の復旧操作へ進んでください。SDK・Worker・WASM の内部 protocol は 9 になり、必ず同じ配布物を組み合わせます。
 
 ## 5. エンジンの状態
 
@@ -108,6 +110,7 @@ container.addEventListener("pointerdown", event => {
 | `failed` | 立て直せなかった | `engine.retry()` を試す |
 | `disposed` | 終了した | — |
 
+- `recoverAfterStorageFailure()` で文書が復旧しても、チェックポイントの保存が再び失敗した場合は `storage-failed` が続きます。編集を再開する前に `engine.status` を確認してください。
 - **文書の操作口（`DocumentHandle`）は、Worker を作り直しても同じオブジェクトのままです。** 入れ替わるのは、`open`、`createDocument`、`recovery.restore` を呼んだときだけです。そのとき `document` イベントが届きます。
 - **文書の切り替えと編集は、同じキューで順番に処理します。** 切り替えより後に予約された旧文書への編集は、`CONFLICT`（`reason: "document-closed"`）で失敗します。Worker も文書の世代を確認するため、旧文書の要求が新文書を読み書きすることはありません。切り替え前に開始したストロークは、旧文書で確定してから切り替えます。
 - **表示位置も、作り直しの前後で変わりません。**

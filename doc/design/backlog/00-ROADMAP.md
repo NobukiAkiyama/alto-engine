@@ -237,13 +237,13 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 - STO-5（プレビュー）は manifest の外のエントリなので上げない。STO-9 は `tables/` を足すが上げない。今の読み手は `document_format` の照合（`decode_entries_impl`）で 11 を先に拒否するので、`tables/` を黙って無視して開くことは無い。
 - 今の試験（`crates/alto-store/src/lib.rs` の、薄い manifest の組み合わせを拒否する試験）は format 4 を未知の値として使っている。VER-4 で未知の値を別の番号（例：99）に変える。
 
-### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 8）
+### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 9）
 
 段階ごとに1回上げる。回の中で後から入る PR は上げない（最初のリリースまで）。
 
 | 値 | 回 | 項目 |
 |---|---|---|
-| 9 | 段階1 | BR-4、BR-5（`beginBrush` の `dynamics`）、BR-6（`init` の `undo`）、STO-3（`exportImage` の選択肢）、VER-4（`historyCommand` の stash）、PERF-5（`recoveryStages`（新規）） |
+| 9 | 段階1 | BR-4、BR-5（`beginBrush` の `dynamics`）、BR-6（`init` の `undoSteps`）、STO-3（`exportImage` の選択肢）、VER-4（`historyCommand` の stash）、PERF-5（`recoveryStages`（新規）） |
 | 10 | 段階2 | BR-1、BR-2、BR-3（`beginBrush`）、IMG-1（`layerBake`（新規））、TXT-8（`fontAxes`（新規））、STO-4、STO-5、STO-9、STO-10、VER-5（`trimmedPackage`（新規）） |
 | 11 | 段階3 | COL-1（`createDocument`）、COL-5（`import` の `profile`）、STO-1、GIT-2、STO-6（`cache` を足すときだけ）、RUN-1（`init` に版を渡すときだけ）、RUN-2（`unstable` に診断を足すときだけ） |
 | 12 | 段階4の v4 | RV4-1 の段8（`renderVersion: 4` の公開）、COL-2、COL-4、COL-3、COL-6、TXT-10（作成の引数に属性を足すとき） |
