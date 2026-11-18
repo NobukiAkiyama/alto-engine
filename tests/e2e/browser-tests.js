@@ -109,7 +109,7 @@ async function decodeFixture(engine) {
   };
   return { doc, cold };
 }
-export async function runTests(engine, benchmark, log) {
+export async function runTests(engine, benchmark, log, { decodeFaultInjection = false } = {}) {
   const results = [];
   let activeTest = null;
   async function test(name, fn) {
@@ -447,6 +447,58 @@ export async function runTests(engine, benchmark, log) {
       }
       await testing(engine).request("enablePrefetch");
     });
+    if (decodeFaultInjection) {
+      await test("malformed decode requests stop the pool and retry every tile inline", async () => {
+        const toggle = async (enabled) => {
+          const result = await fetch(`/__alto-test/decode-fault?enabled=${enabled ? 1 : 0}`, { cache: "no-store" });
+          assert(result.ok, "decode fault injection unavailable");
+        };
+        const startPool = async () => {
+          for (let i = 0; i < 100; i++) {
+            if (await testing(engine).request("setDecodeWorkers", { enabled: true })) return;
+            await delay(20);
+          }
+          throw Error("decode worker pool did not start");
+        };
+        await startPool();
+        let cold;
+        ({ doc, cold } = await decodeFixture(engine));
+        let off;
+        let injected = false;
+        let poolStopped = false;
+        try {
+          // Disabling the pool retains Workers. Stop it before changing the script
+          // so the replacement Workers load the fault-injected version.
+          assert((await testing(engine).request("stallDecodeWorkers")) > 0, "no existing decode workers");
+          await cold(true, { keepPool: true });
+          const inline = await cold(false);
+          injected = true;
+          await toggle(true);
+          await startPool();
+          off = unstable(engine).onDiagnostic((event) => {
+            if (String(event?.message).includes("invalid decode request frame")) poolStopped = true;
+          });
+          const recovered = await cold(true, { keepPool: true });
+          assert(poolStopped, "no diagnostic for the malformed decode request");
+          recovered.tiles.forEach((tile, i) => assert(same(tile, inline.tiles[i]), `tile ${i} differs after invalid batch`));
+        } finally {
+          off?.();
+          try {
+            if (injected) await toggle(false);
+          } finally {
+            try {
+              if (injected && !poolStopped && await testing(engine).request("stallDecodeWorkers"))
+                await cold(true, { keepPool: true });
+              await startPool();
+            } finally {
+              await testing(engine).request("enablePrefetch");
+            }
+          }
+        }
+      });
+    } else {
+      log("SKIP malformed decode request injection: requires the browser verification server");
+    }
     await test("full display cache can yield and replace tiles without orphaning slots", async () => {
       doc = await engine.createDocument({ width: 300, height: 300 });
       const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);

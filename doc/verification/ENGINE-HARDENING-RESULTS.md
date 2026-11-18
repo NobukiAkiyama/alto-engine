@@ -1465,3 +1465,13 @@ exit 0。クラッシュ入力は発生せず、`fuzz/artifacts/` には何も�
 PR 時の native CI に `cargo check --manifest-path fuzz/Cargo.toml --bins --locked` を追加し、全 fuzz target のコンパイルを検査する。新しい週次 matrix の CI 実行は未確認。
 
 ローカルでは同じ fuzz target のコンパイル、`sh scripts/check.sh native`、SDK の Node 試験57件が成功した（`verification/out/decode-review/native.log`、`sdk-tests.log`）。CI での実行結果はまだない。
+
+#### エンジンから不正な要求を送った場合
+
+ブラウザ検証用サーバーだけで decode Worker の入力を変異させ、エンジンが作ったバッチの長さを不正にした。Worker のエラー通知、プールの停止、保留中タイルの inline 復号まで実行し、正常な inline 復号と表示タイルの全バイトを比較した。試験後は注入を解除する。最初の実行は異常の通知を待ってタイムアウトした。既存 Worker が再利用された可能性があった（`verification/out/decode-fallback/run.log`）。Worker を停止してから注入版を起動するよう試験を修正し、Chrome 157.0.8103.79 / Apple Metal の functional 40 件が成功した（`verification/out/decode-fallback/run-r2.log`、集計は `verification/out/decode-fallback-r2/summary.json`）。
+
+レビュー後、異常注入を検証用サーバーから起動した functional 試験だけで有効にし、試験終了時に通常の Worker プールと先読みを復元するようにした。Chrome 157.0.8103.79 / Apple Metal で注入試験を含む 40 件が成功した（`verification/out/decode-fallback-review/run.log`、同ディレクトリの `summary.json`）。
+
+再レビュー後、専用サーバーで Worker プールを起動できない場合は試験を失敗扱いにした。Chrome 157.0.8103.79 / Apple Metal で注入試験を含む 40 件が成功した（`verification/out/decode-fallback-strict/summary.json`）。
+
+2026-11-18 に main `67ed8aea188c03cab6dd98f2066206944d80be63` で [Fuzz を手動実行](https://github.com/NobukiAkiyama/alto-engine/actions/runs/44219331657) した。各 target に 600 秒を指定し、10 ジョブすべて成功した。これは workflow_dispatch の結果であり、変更後の週次 schedule の実行結果ではない。
