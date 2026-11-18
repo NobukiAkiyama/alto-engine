@@ -76,11 +76,13 @@ doc.exportRegionPixels({ region, source: "layer" | "composite", node? }): Promis
 ```rust
 // crates/alto-doc/src/collab.rs（新規）
 pub struct CollabTx {
-    pub id: String,                      // "<client>:<連番>"。再送の重複排除に使う
+    pub id: String,                      // "<接続をまたぐ参加者ID>:<連番>"。再送の重複排除に使う
+    pub kind: CollabKind,                // Edit または Undo（新規）
     pub intent: String,
     pub label: Option<String>,
     pub ops: Vec<Op>,                    // SetSelection と SetMeta を含まない
     pub bases: BTreeMap<usize, OpBase>,  // ops の添字 → 送り手が編集した元の値
+    pub undo_guards: BTreeMap<usize, UndoGuard>, // Undo の期待値と戻す値（新規）
 }
 pub enum OpBase {
     Text(Box<TextContent>),              // SetText の編集前の内容（逆 Op から取る）
@@ -91,7 +93,7 @@ pub enum Applied { Applied(ChangeSet), Void, Rejected(DocError) }  // Void は�
 
 #### 決定的な変換 `plan`
 
-`Editor::collab_plan(&self, tx: &CollabTx, merge_text: &dyn Fn(&TextContent, &TextContent, &TextContent) -> Option<TextContent>) -> Vec<Op>`（新規）は、取引の直前の文書だけから Op の列を作る純粋な関数。Op ごとに次の規則で変える。
+`Editor::collab_plan(&self, tx: &CollabTx, merge_text: &dyn Fn(&TextContent, &TextContent, &TextContent) -> Option<TextContent>) -> Vec<Op>`（新規）は、取引の直前の文書だけから Op の列を作る純粋な関数。Undo の複数の逆 Op は順に仮の文書へ適用し、それぞれの守りをその仮状態に対して判定する。仮状態は外へ公開せず、検証に失敗すれば取引全体を適用しない。Op ごとに次の規則で変える。
 
 | Op | 規則 |
 |---|---|
@@ -134,9 +136,13 @@ pub enum Applied { Applied(ChangeSet), Void, Rejected(DocError) }  // Void は�
   - 値全体の Op（`SetVector`、`SetVectorMask`、`SetClipPath`、`SetAdjustment`、`ReplaceNode`）：今の値が Op の値と同じときだけ戻す。
   - `MoveNode`：ノードと元の親が在り、今の親と位置が Op の移動先のままのときだけ元へ戻す（`index` は切り詰める。循環になるなら戻さない）。
   - `SetAsset`：今の記録が Op の記録と同じときだけ旧い記録へ戻す。
-  - `InsertNode` の逆（削除）：ノードが在り、他者が子を足していなければ。`RemoveNode` の逆（`RestoreSubtree`）：親が在り、復元するノードの id が空いていれば（`index` は切り詰める）。
+  - `InsertNode` の逆（削除）：ノードと親が在り、追加時に記録した内容・属性・親と位置・子孫が確定順の現在値と一致するときだけ削除する。他者が画素や属性を変更した場合も削除しない。`RemoveNode` の逆（`RestoreSubtree`）：親が在り、復元するノードの id が空いていれば（`index` は切り詰める）。
   - 戻せる Op が 1 つも無ければ、積みの項目を外し、`onUndoSkipped({ applied: 0, skipped: n })` を出す。一部だけ戻せたときも同じ通知（`applied` と `skipped`）。
 - Redo は元の `op` をもう一度 `plan` に通した取引。
+
+Undo の守りは、送信前のローカル状態だけで判定してはいけない。Undo が順序付けされる前に他者の編集が入ることがあるため、`UndoGuard`（新規）で Op ごとに期待する現在値と戻す値を取引に含め、**確定順の状態に対して全員が同じ守りを再評価する**。通常の `SetTiles` の `before` 書き換えや、値全体の後勝ちに守りを消させない。守りに合わない部分は飛ばし、その結果を確定時の `onUndoSkipped` に反映する。未確定の再計算でも同じ規則を使う。（新規）
+
+通信の `kind` は通常の `edit` と `undo` を区別する。`undo` では各逆 Op の保護対象に対応する `undoGuards` が必須で、欠落・余剰・型や添字の不一致は順序付け後も全員が取引全体を `Rejected` にする。通常の `edit` では guard を持たない。この区別だけで悪意ある参加者の通常編集を防げるとは扱わない。
 
 休止中の取引の項目は Undo できない（`CONFLICT`、理由 `collab-pending-rejected`（新規））。
 
@@ -155,20 +161,21 @@ commit、ブランチの作成、タグ、`pruneVersions`、保存は使える�
 
 #### オブジェクト（タイル、画像、フォント）
 
-取引の `ops` が参照するハッシュは `crates/alto-engine/src/lib.rs` の `op_hashes`（private）と同じ集合（`submit` の `objects`、送信時に計算）で一覧にし、**順序のチャネルとは別のチャネル**で運ぶ（内容アドレス。VER-6 と同じ符号化 `alto_store::encode_object`）。
+取引の `ops`、`bases`、`undoGuards` が参照する必要なオブジェクトを重複なく `submit` の `objects` に一覧し、**順序のチャネルとは別のチャネル**で運ぶ（内容アドレス。VER-6 と同じ符号化 `alto_store::encode_object`）。`ops` は `crates/alto-engine/src/lib.rs` の `op_hashes`（private）を基に数え、追加の guard と base の参照も検査する。
 
 - 送り手は、取引を送る**前**にオブジェクトを置き場へ置き、完了してから `submit` する。順序係は `seq` を付ける処理でオブジェクトを待たない。
-- 受け手は、`Engine::collab_missing(h, &tx) -> Vec<ContentHash>`（新規）で足りないものを知り、取得して `install_object` し（ハッシュの検証を含む）、**適用の直前まで** `stage_tile` で守る。取得を待つ間、後続の取引の適用は止まる（順序を守るため）。`seq` の付与と通知は止まらない。
+- 受け手は、`Engine::collab_missing(h, &tx) -> Vec<ContentHash>`（新規）で足りないものを知り、取得して `install_object` し（ハッシュの検証を含む）、取引の適用または破棄が完了するまで保持する。既存の `stage_tile` は `TileData` 用で blob を守れず、`install_object` と保持も一体ではないため、タイルと blob の両方を対象に検証・導入・保持を原子的に行う共同編集用の仕組みを新設する。失敗・切断・破棄時にも保持を解放する。取得を待つ間、後続の取引の適用は止まる（順序を守るため）。`seq` の付与と通知は止まらない。欠落が期限内に解消しない場合は同期を停止して明示エラーと復旧方法を示し、同じ不足で自動再参加を繰り返さない。欠けた取引を一部の参加者だけで飛ばさず、オブジェクト復旧後に同じ `seq` から再開する。
 - 大きなタイルが編集の順序を遅らせないことは、2 つのチャネルが別の接続であることと、取得の時間切れ（下の上限）で守る。
 
 #### 接続と通信（`packages/alto-collab/`（新規））
 
 - 順序のチャネル（WebSocket、JSON のテキストフレーム）：
-  - 参加者 → 順序係：`hello { protocol, room, client, documentFormat, renderVersion, engine, mode: "edit" | "view", resume? }`、`submit { id, baseSeq, intent, label?, ops, bases?, objects }`、`digest { seq, hash }`。
+  - 参加者 → 順序係：`hello { protocol, room, client, documentFormat, renderVersion, engine, mode: "edit" | "view", resume? }`、`submit { id, kind, baseSeq, intent, label?, ops, bases?, undoGuards?, objects }`、`digest { seq, hash }`。
   - 順序係 → 参加者：`welcome { baseHash, baseBytes, headSeq, limits }`、`tx { seq, client, id, ... }`（送り主にも）、`reject { id, code }`、`diverged { seq }`。`client` は順序係が接続ごとに付ける。参加者の自己申告は使わない。
 - オブジェクトのチャネル（別の WebSocket、バイナリ）：`put`、`get`、`data`、`missing`。置き場は順序係の実装の中にあり、検証はしない。受け手が必ず検証する。
 - 参加の始め：開く側 `host(doc, { url, room })` は `doc.save(target, { history: "omit" })` が書く作業文書だけの `.alto`（版を含まない）を基点として置く。参加する側 `join({ url, room })` は基点を取って `engine.open` し、`seq` 1 から最新までを適用する。参加者は `documentFormat`（01 の共通の設計で回 6 の PR が入れる `alto_doc::FORMAT_VERSION`（新規）の値）、描画の版、エンジンのビルドが基点と同じでなければ `hello` で断られる（`FORMAT_MISMATCH`）。
 - 切断：未確定の取引はそのまま残り、文書は触れる。再接続で `hello { resume: 最後に適用した seq }` を送り、取りこぼしを受けて rebase し、未確定を順に再送する。`id` が同じ取引は順序係が重複とみなし、前の `seq` を返す。切断中のストロークも同じ（ストロークの確定後、未確定に積まれ、再接続の後に順序が付く）。
+- 再接続時の識別：接続ごとに変わる `client` と取引 ID の発行元を同一視しない。再送の重複排除には接続をまたいで維持する参加者識別子とその所有権を検証する仕組みが必要。再接続の方式・保存期間・なりすましへの対策を実装前に定める。認証のない参照サーバーで所有権を保証できるとは扱わない。
 - 収束の確認：未確定が空のときに `seq` が 64 の倍数を越えたら、`shared_digest`（新規）を `digest` で送る。順序係は同じ `seq` の値が割れたら `diverged` を配る。受けた参加者は基点から取り直す（`rejoin`。未確定は `onDropped` に返す）。
 - 運用向けのサーバー、認証、権限、`view` の強制、ログの圧縮は本リポジトリの範囲外。`examples/collab-relay/`（新規）は順序付けだけをする参照実装（Node の WebSocket、認証なし、ローカル確認用）。
 
@@ -201,14 +208,20 @@ export interface CollabPort {
 |---|---|---|
 | `COLLAB_MAX_OPS_PER_TX`（新規） | 1024 | 送る側は `RESOURCE_LIMIT`、受ける側は `reject`（`TX_TOO_LARGE`） |
 | `COLLAB_MAX_TILES_PER_TX`（新規） | 4096（選択の上限と同じ） | 同上 |
-| `COLLAB_MAX_TX_BYTES`（新規） | 8 MiB（ops の JSON） | 同上 |
-| `COLLAB_MAX_OBJECT_BYTES`（新規） | 64 MiB（符号化後） | 置かない、取得もしない |
+| `COLLAB_MAX_TX_BYTES`（新規） | 8 MiB（取引メッセージ全体の UTF-8 バイト数。`ops`、`bases`、`undoGuards`、`objects` 等を含む） | 送信側は送る前に拒否。受信側は JSON 解析前に拒否 |
+| `COLLAB_MAX_OBJECT_BYTES`（新規） | 64 MiB（正規符号化後の1個） | 取引全体を拒否。実際の受信表現が超える場合は同期を停止 |
+| `COLLAB_MAX_OBJECTS_PER_TX`（新規） | 4096 | 取引全体を拒否 |
+| `COLLAB_MAX_OBJECT_BYTES_PER_TX`（新規） | 256 MiB（正規符号化後の合計） | 取引全体を拒否。実際の受信表現が超える場合は同期を停止 |
+| `COLLAB_MAX_DECODED_BYTES_PER_TX`（新規） | 512 MiB（全参照オブジェクトの展開後サイズの合計） | 取引全体を拒否 |
+| `COLLAB_MAX_STAGED_BYTES_PER_TX`（新規） | 512 MiB（端末で追加保持する量） | 同期を停止し保持を解放。取引を他の参加者だけと異なる結果にはしない |
 | `COLLAB_MAX_PENDING`（新規） | 256 | 新しい編集を `RESOURCE_LIMIT`（理由 `collab-pending`（新規））で断る。文書は変わらない |
-| `COLLAB_OBJECT_TIMEOUT_MS`（新規） | 30000 | 取得を諦め、`diverged` の経路で基点から取り直す |
+| `COLLAB_OBJECT_TIMEOUT_MS`（新規） | 30000 | 取得を諦め同期を停止し、明示エラーを返す |
 | `COLLAB_MAX_CLIENTS`（新規） | 8 | `hello` を断る |
 | `COLLAB_MAX_LOG_TXS`（新規） | 20000 | 部屋を読み取り専用にし、新しい部屋への引き継ぎを促す |
 
-受け側は**すべての取引を、自分の側で検証する**。`Engine::transact` の検証（参照オブジェクトの在否、マスク面、ノードの内容、タイル形式）を `Engine::check_ops(h, &ops)`（新規）に取り出し、`transact` と共同編集の受信が同じ関数を使う。加えて取引の大きさ、Op の数、`NodeId` の重複、`InsertNode` で入ってくる木の深さ（`MAX_TREE_DEPTH`）を、適用前に数える。古い、または悪意のあるクライアントの取引は、`Rejected` として全員が同じく捨てる。エラーは既存の `ErrorCode` を使い、共同編集の理由は `ErrorDetails.reason`（`collab-active`、`collab-pending`、`collab-pending-rejected`。いずれも新規）で区別する。通信の失敗（`FORMAT_MISMATCH`、`TX_TOO_LARGE` など）は `@alto/collab` の `CollabError` にする。
+順序係は通信実装の受信・再組み立てにも上限を設定し、解析前の巨大な確保を防ぐ。ブラウザの WebSocket はアプリに配送する前にメッセージを確保しうるため、受信側の解析前検査だけではその確保を防げない。接続先の順序係が送信上限を守ることを前提とし、その制約を文書化する。取引上限の判定では、手元にある物も含めた全参照 object の内容と tag を検証し、同一ビルドの `alto_store::encode_object` で正規符号化した長さと展開後の長さを重複なく合算し、あふれを検査する。ハッシュは展開後の内容で決まるため、手元の LZ4 表現の長さを使うと参加者ごとに判定が変わりうる。正規符号化の再現性を試験し、同じ build の参加者だけを受け入れる。実際の受信表現のバイト数と端末ごとに異なる追加保持量は別に数え、上限超過時はその端末の同期を停止して保持を解放し、取引の結果を他者と変えない。検証できない object は適用前に同期を停止する。合計上限は暫定値で、実装時に実文書の計測で見直す。
+
+受け側は**すべての取引を、自分の側で検証する**。`Engine::transact` の検証（参照オブジェクトの在否、マスク面、ノードの内容、タイル形式）を `Engine::check_ops(h, &ops)`（新規）に取り出し、`transact` と共同編集の受信が同じ関数を使う。加えて取引の大きさ、Op の数、`bases` と `undoGuards` の件数・添字の範囲と Op の種類との対応、`NodeId` の重複、`InsertNode` で入ってくる木の深さ（`MAX_TREE_DEPTH`）を、適用前に検証する。古い、または悪意のあるクライアントの取引は、`Rejected` として全員が同じく捨てる。エラーは既存の `ErrorCode` を使い、共同編集の理由は `ErrorDetails.reason`（`collab-active`、`collab-pending`、`collab-pending-rejected`。いずれも新規）で区別する。通信の失敗（`FORMAT_MISMATCH`、`TX_TOO_LARGE` など）は `@alto/collab` の `CollabError` にする。
 
 #### 利用者の決定が要る点
 
@@ -227,7 +240,7 @@ export interface CollabPort {
 - 描画の版：触れない。共同編集は描画に触れない。`render_version` は `hello` で一致を見る。v4 が入るのは RV4-1 の後で、その後は v3 と v4 の文書を別の部屋として扱う。
 - `PROTOCOL`：**上げる**（13。段階4の回。00-ROADMAP の番号の表）。要求 `collabAttach`、`collabConfirm`、`collabMissing`、`collabReadObject`、`collabInstallObject`、`collabDigest`、`collabDetach`（新規）と、ワーカーから出る `outgoing` の通知を足す。README と RELEASING を同じ PR で更新する。
 - 通信のプロトコル：`@alto/collab` の `COLLAB_PROTOCOL`（新規）の初版の値。SDK の `PROTOCOL` とは別に持つ。
-- 復旧のジャーナル：共同編集の確定を表す記録 `JournalKind::Collab`（新規）を足す。`transaction.json` に `entry`（`seq`、`client`、`id`、`ops`、`bases`）と、自分の取引の通知かどうか（`own`）を入れる。`journal_record` はオブジェクトも入れる。チェックポイントに `collab.json`（新規。`actor`、確定済みの `seq`、未確定の列、休止中の印）を足す。復旧は同じ関数で再生し、`after` が合わなければ `Replayed::Diverged` を返す（既存の扱い）。復旧後は `resume` で再接続できる。旧い記録を読む必要はない（共通規則3、移行なし）。
+- 復旧のジャーナル：共同編集の確定を表す記録 `JournalKind::Collab`（新規）を足す。`transaction.json` に `entry`（`seq`、`client`、`id`、`kind`、`ops`、`bases`、`undoGuards`）と、自分の取引の通知かどうか（`own`）を入れる。`journal_record` はオブジェクトも入れる。チェックポイントに `collab.json`（新規。`actor`、確定済みの `seq`、未確定の列、休止中の印）を足す。復旧は同じ関数で再生し、`after` が合わなければ `Replayed::Diverged` を返す（既存の扱い）。復旧後は `resume` で再接続できる。旧い記録を読む必要はない（共通規則3、移行なし）。
 - `ErrorCode`：足さない。`ConflictReason` に `collab-active`、`collab-pending-rejected`、`ErrorDetails.reason` に `collab-pending` を足す（`packages/alto-sdk/src/errors.ts`）。
 - ネットワーク処理は SDK 本体に入れない。`packages/alto-sdk/package.json` の依存と `exports` には通信を足さない（`./collab` は取り付け口だけ）。
 
@@ -257,11 +270,19 @@ export interface CollabPort {
 
 - [ ] 試験（Rust）`undo_only_touches_the_local_actors_transactions`：他者の取引が自分の undo 積みに入らず、Undo が他者の変更を戻さない。
 - [ ] 試験（Rust）`undo_skips_tiles_a_peer_overwrote`：他者が上書きしたタイルは戻らず、他のタイルは戻る。`undo_blocked_when_nothing_can_be_reverted`。
+- [ ] 試験（Rust）`sequenced_undo_rechecks_guards_after_remote_edit`：ローカルで Undo を作った後、その確定より先に他者が同じタイルやプロパティを変更する。確定順で守りを再評価し、他者の変更を戻さず、全員が一致する。
+- [ ] 試験（Rust）：追加したレイヤーに他者が描画または属性変更した後、その追加の Undo はレイヤーを削除せず、全員が一致する。
+- [ ] 試験（Rust）：同一取引でグループと子を追加し Undo すると、子を戻した仮状態で親の守りを判定する。途中で失敗しても文書は部分的に変化しない。
 - [ ] 試験（Rust）`undo_text_merges_around_a_peers_edit`。
 - [ ] 試験（Rust）`rebase_of_pending_local_ops_is_invisible_after_the_final_order`：他者の取引が割り込んだ後の確定で、自分の文書の `shared_digest` が一致する。
 - [ ] 試験（Rust）`remote_text_is_rebaked_locally`：描画の版 3 で、統合後の `SetText` が全員同じ `bake` になる。
 - [ ] 試験（Rust）`journal_replay_restores_remote_and_local_order`：local、remote、own の記録を再生して `after` が一致し、不一致なら戻して `Diverged`。
 - [ ] 試験（Rust）`remote_tx_with_unknown_object_waits_and_applies_in_order`、`remote_tx_over_the_limits_is_rejected_atomically`、`restore_and_checkout_are_refused_while_attached`。
+- [ ] 試験（Rust）`remote_objects_remain_rooted_until_applied_or_dropped`：受信したタイルと blob が取得中の GC を越えて使え、適用・破棄後は保持が解放される。
+- [ ] 試験：`bases` や `undoGuards` が上限を超える取引を解析・適用前に拒否し、添字が不正な取引も状態を変えずに拒否する。
+- [ ] 試験：guard の欠けた `undo` は原子的に拒否し、通常の `edit` は guard がなくても受け付ける。オブジェクトの件数・符号化後合計・展開後合計の上限はキャッシュの有無が異なっても全員が同じ結果にする。端末固有の保持量の上限では同期を停止し、保持を解放する。
+- [ ] 試験：同じ hash と内容を持つ異なる長さの LZ4 表現でも正規サイズの判定は一致し、実際の受信表現が端末の上限を超えたときは同期を停止する。
+- [ ] 試験：欠落オブジェクトで同期が停止して無限に再参加せず、オブジェクト復旧後に同じ `seq` から再開できる。
 - [ ] 試験（SDK）`attachCollab does not end an active stroke`、`confirm during a stroke is applied after it ends`。
 - [ ] 試験（SDK）`@alto/engine exports no network`：`dist` のどの入口にも `WebSocket`、`fetch`、`XMLHttpRequest` の呼び出しが無い。
 - [ ] 実装、PR。
