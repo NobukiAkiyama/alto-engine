@@ -138,7 +138,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 - `a reusable image tip stamps rotated coverage and saves as ordinary tiles` は、PNG から R8 への変換、同じ画像の再利用、回転した形とタイル境界、CPU 参照との差 ±2、保存・再オープン後の画素一致、アセットが増えないことを確認する。
 - `invalid image tips cannot start a stroke` は、寸法や画素数が不正な入力を SDK と Worker の入口で拒否し、文書が変わらないことを確認する。
 - `GPU loss cancels an image-tip stroke and the same tip works after recovery` は、`GPU_LOST`、文書がストローク前のままであること、GPU 復元後に同じ画像を使えることを確認する。
-- Rust の `brush_tip_budget_is_checked_before_the_first_stamp` は GPU 残予算を固定し、初回のスタンプで先端分を含めた見積もりにより拒否されることを確認する。先端とタイルの確保は起こらず、キャンセル後は画像なしのストロークを描ける。`failed_tip_stamp_retires_its_texture_and_can_be_retried` は、先端を転送した後の失敗からメモリ使用量が戻り、同じストロークを再試行できることを確認する。
+- Rust の `brush_image_budget_is_checked_before_the_first_stamp` は GPU 残予算を固定し、初回のスタンプで先端分を含めた見積もりにより拒否されることを確認する。先端とタイルの確保は起こらず、キャンセル後は画像なしのストロークを描ける。`failed_stamp_retires_both_images_and_can_be_retried` は、先端を転送した後の失敗からメモリ使用量が戻り、同じストロークを再試行できることを確認する。
 
 **完了条件：** 上の試験が通り、先端なしのストロークの画素が変わらない。
 
@@ -151,7 +151,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 ## BR-3 テクスチャブラシ
 
-### 現状
+### 実装前の状態
 
 - `AssetKind::Pattern`（`crates/alto-doc/src/node.rs`）は単位バリアントで、使われていない。
 - 描画の経路は BR-2 の「現状」と同じ。`brush.wgsl` は、`v = 1 - (1 - v)(1 - shape × d.opacity)` で、ダブごとのカバレッジを累積する。
@@ -167,10 +167,10 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 - `BrushImage`（BR-2 と同じ型）。`engine.assets.importBrushTexture(file: Blob): Promise<BrushImage>`（新規。取り込みは `importBrushTip` と同じ変換）。辺は 16〜1024。（新規）
 - `BrushOptions.tip.texture?: { image: BrushImage; scale?: number; depth?: number }`。`scale` は 0.05〜16（既定 1。texel 座標 = レイヤー画素 × scale）、`depth` は 0〜1（既定 1）。範囲外は `INVALID_ARGUMENT`。
 - 式：ダブごとに `shape' = shape × (1 − depth × (1 − pattern(p × scale)))`。累積は `v = 1 - (1 - v)(1 - shape' × d.opacity)`。パターンは画素ごとに固定なので、重なったダブで同じ画素が何度掛かっても、累積は `v` の飽和で収まる。
-- `pattern` は texel 座標を `floor` の剰余で巻き戻し（負の座標を含む）、手書きの双線形（4 点の `textureLoad`、巻き戻しあり）で求める。ハードウェアのサンプラーを使わない。
-- `GpuStroke.texture_pattern: Option<wgpu::Texture>`（新規。Rgba8Unorm、R を値）、binding 7、`config.info.w` のビット1、`config.params.z = scale`、`config.params.w = depth`。確保と予算の検査、解放は先端と同じ（`stamp` の最初の呼び出し。`begin_stroke` は確保しない）。先端と合わせて `new_bytes` に足す。
+- `pattern` は texel 座標を `floor` の剰余で巻き戻し（負の座標を含む）、手書きの双線形（テクセル中心は `p × scale − 0.5`、4 点の `textureLoad`、巻き戻しあり）で求める。ハードウェアのサンプラーを使わない。
+- `GpuStroke.pattern_texture: Option<wgpu::Texture>`（Rgba8Unorm、R を値）、binding 7、`config.info.w` のビット1、`config.params.z = scale`、`config.params.w = depth`。確保と予算の検査、解放は先端と同じ（`stamp` の最初の呼び出し。`begin_stroke` は確保しない）。先端と合わせて `new_bytes` に足す。`depth = 0` では画像を検証し、SDK からの転送と GPU テクスチャの確保を省く。
 - 空のストローク（ダブが 0 個）は何も描かない（既存の `stamp` の早期 return）。
-- `cpu_paint` に `texture: Option<(&BrushImage, f32, f32)>` を足す。
+- `cpu_paint` に `pattern: Option<&BrushPattern>` を足す。
 
 **上限：** 辺 16〜1024、`scale` 0.05〜16、`depth` 0〜1。先端画像と合わせても GPU テクスチャは最大 2 × 4 MiB。
 
@@ -178,7 +178,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：案 A は触れない（BR-2 の決定が要る点と同じ）。
 - render v3：触れない。
-- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（12。段階2の回）。
+- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（13。段階2の回）。
 - シェーダー：`brush.wgsl` の既存モードの変更。
 
 ### 作業手順
@@ -186,11 +186,10 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 **Files:** BR-2 と同じファイルに、`importBrushTexture`（`engine.ts`）を足す。
 
 **試験：**
-- [ ] `brush.rs`：`depth_zero_leaves_the_coverage_unchanged`、`the_pattern_is_fixed_in_layer_coordinates`（同じ画素を別のダブ位置から描いても、パターンの値が同じ）。
-- [ ] `brush.rs`：`the_pattern_wraps_at_negative_coordinates`。
-- [ ] `browser-tests.js`：`a textured stroke shows the paper grain`。`depth = 1` で、画素のカバレッジが `cpuReference` と ±2 以内。同じレイヤーで2本のストロークを重ねても、パターンの位置がずれない。
-- [ ] `browser-tests.js`：`GPU loss during a textured stroke ends with GPU_LOST`。
-- [ ] `browser-tests.js`：`an out-of-range texture scale or depth is refused`。
+- Rust の `pattern_wraps_at_negative_coordinates_and_blends_at_the_seam` と `pattern_uses_layer_pixels_and_depth_zero_preserves_the_plain_brush` で、負座標と繰り返しの継ぎ目、レイヤー座標での固定、深さ 0 の画素一致を確認する。
+- ブラウザの `brush texture stays fixed across strokes and follows the layer` で、紙目の取り込み、CPU 参照との差 ±2、重ね描きとレイヤーの移動、負のレイヤー座標での繰り返し、画像先端との併用、確定後の GPU メモリの回収を確認する。
+- `invalid brush textures cannot start a stroke` と `GPU loss cancels a textured brush and the texture can be reused` で、不正入力と GPU 喪失時に文書が変わらないことを確認する。
+- GPU の Rust 試験で、先端と紙目を合わせた予算検査、転送後の失敗と確保の回収、再試行、テクスチャの再利用を確認する。
 
 **完了条件：** 上の試験が通り、テクスチャなしのストロークの画素が変わらない。
 

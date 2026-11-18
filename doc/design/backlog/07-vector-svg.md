@@ -351,7 +351,7 @@ XML の展開攻撃には、`roxmltree` の `allow_dtd: false`（エンティテ
 ### 形式と通信
 
 - `format_version`：触れない（保存データと編集 Op は描画の経路から独立）。
-- `PROTOCOL`：Worker の初期化要求に `vectorPreview`（新規）が増えるなら**上げる**（15。段階4の回）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：Worker の初期化要求に `vectorPreview`（新規）が増えるなら**上げる**（16。段階4の回）。README と RELEASING を同じ PR で更新する。
 - 描画の版：v3 のまま。正本の画素は変えない（共通規則1）。vello は表示だけの別経路で、parity の対象外。
 - シェーダー：`vello-import-q14.wgsl` は効果のモード番号を使わない（ノード内容の入力変換）。
 

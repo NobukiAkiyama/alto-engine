@@ -3,7 +3,9 @@ use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat,
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
 use alto_gpu::renderer::{FinishControl, Renderer, Viewport};
-use alto_raster::{BrushConfig, BrushImage, StrokeSample, StrokeSampler, TileData, TileMap};
+use alto_raster::{
+    BrushConfig, BrushImage, BrushPattern, StrokeSample, StrokeSampler, TileData, TileMap,
+};
 use alto_scene::RenderScene;
 use serde::Deserialize;
 use serde_json::json;
@@ -139,6 +141,22 @@ fn brush_image(width: u32, height: u32, pixels: &[u8]) -> Result<Option<BrushIma
         .map(Some)
         .map_err(error)
 }
+fn brush_pattern(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    scale: f32,
+    depth: f32,
+) -> Result<Option<BrushPattern>, JsValue> {
+    if width == 0 && height == 0 && pixels.is_empty() {
+        return Ok(None);
+    }
+    let image = BrushImage::new(width, height, pixels)
+        .map_err(|_| error("INVALID_ARGUMENT: brush texture image"))?;
+    BrushPattern::new(image, scale, depth)
+        .map(Some)
+        .map_err(error)
+}
 fn clock() -> f64 {
     js_sys::global()
         .unchecked_into::<web_sys::WorkerGlobalScope>()
@@ -183,7 +201,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        12
+        13
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -665,6 +683,11 @@ impl Runtime {
         tip_width: u32,
         tip_height: u32,
         tip_pixels: &[u8],
+        pattern_width: u32,
+        pattern_height: u32,
+        pattern_pixels: &[u8],
+        pattern_scale: f32,
+        pattern_depth: f32,
     ) -> Result<(), JsValue> {
         if self.sampler.is_some()
             || color.len() != 4
@@ -674,6 +697,13 @@ impl Runtime {
         }
         let id: NodeId = serde_json::from_str(&format!("\"{layer}\"")).map_err(error)?;
         let tip = brush_image(tip_width, tip_height, tip_pixels)?;
+        let pattern = brush_pattern(
+            pattern_width,
+            pattern_height,
+            pattern_pixels,
+            pattern_scale,
+            pattern_depth,
+        )?;
         let sampler = brush_sampler(config)?;
         let cfg = sampler.config();
         let doc = self.engine.document(self.doc).map_err(error)?;
@@ -754,6 +784,7 @@ impl Runtime {
                 world,
                 fixed_world,
                 tip,
+                pattern,
             )
             .map_err(error)?;
         self.sampler = Some(sampler);
@@ -1395,6 +1426,7 @@ impl Runtime {
 #[wasm_bindgen]
 impl Runtime {
     #[wasm_bindgen(js_name=cpuBrushReference)]
+    #[allow(clippy::too_many_arguments)]
     pub fn cpu_brush_reference(
         &self,
         config: &str,
@@ -1403,11 +1435,23 @@ impl Runtime {
         tip_width: u32,
         tip_height: u32,
         tip_pixels: &[u8],
+        pattern_width: u32,
+        pattern_height: u32,
+        pattern_pixels: &[u8],
+        pattern_scale: f32,
+        pattern_depth: f32,
     ) -> Result<Vec<u8>, JsValue> {
         if color.len() != 4 || !samples.len().is_multiple_of(6) {
             return Err(error("INVALID_ARGUMENT: reference input"));
         }
         let tip = brush_image(tip_width, tip_height, tip_pixels)?;
+        let pattern = brush_pattern(
+            pattern_width,
+            pattern_height,
+            pattern_pixels,
+            pattern_scale,
+            pattern_depth,
+        )?;
         let mut s = brush_sampler(config)?;
         let mut dabs = vec![];
         for p in samples.as_chunks::<6>().0 {
@@ -1426,6 +1470,7 @@ impl Runtime {
             [color[0], color[1], color[2], color[3]],
             false,
             tip.as_ref(),
+            pattern.as_ref(),
         );
         for p in out.as_chunks_mut::<4>().0 {
             for i in 0..3 {

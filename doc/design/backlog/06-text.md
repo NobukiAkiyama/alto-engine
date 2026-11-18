@@ -17,7 +17,7 @@
 - 焼き込み：`Engine::bake_text`、`Engine::bake_ops`（`crates/alto-engine/src/text.rs`）が `layout` の `glyphs` を `TextBake`（`crates/alto-core/src/text_bake.rs`。`fonts`、`outlines`、`glyphs`）にする。`BakeGlyph { outline, m: [i32; 4]（Q24）, t: [i64; 2]（Q30）, color: [u16; 4]（Q14） }`、`BakeOutline { font, glyph, upem, commands（Q6） }`。輪郭は `bake_text` の `(Option<AssetId>, glyph)` で重複を除く。`BakeFont` はフォントの hash と face の記録で、描画は読まない（`glyph_bitmaps`、`tests/e2e/cpu-composite.js` の `decodeTextBake` とも `fonts` を使わない）。ベイクは `Op::SetText { id, content, bake }` に載り、受け取ったベイクは再計算しない（描画は `TextBake::decode` で全範囲を検査し、壊れていれば拒否する）。
 - 描画：`crates/alto-gpu/src/glyph_q8.rs` の `glyph_map_q` が焼き込みの `m`、`t` にノードの変換とレベルを合成し、`atlas_band`（em が 24 px 未満）で字形アトラス（`atlas_key` は輪郭のバイト列の blake3 で、`(font, glyph)` ではない）か直接ラスタ化かを選ぶ。
 - 固定：`tests/parity/text-bake.txt` は3行（`text-v3-latin`、`text-v3-vertical`、`text-v3-placeholder`）。`crates/alto-engine/src/text_bake_tests.rs` が焼いて比べ、`ALTO_WRITE_PARITY=1` で再生成する。同じ試験が `rustybuzz`、`ttf-parser`、`unicode-*` のロック版を固定している（`text_bake_dependencies_are_pinned`）。同じ入力が別のバイトに焼かれるときは `BAKER_VERSION`（`crates/alto-engine/src/text.rs`）を上げて理由を書く。
-- SDK：`TextContent`、`StylePatch`（`packages/alto-sdk/src/types.ts`）、`doc.text.{set, replace, style, setTateChuYoko, info, hitTest, caret, selectionRects, navigate}`（`packages/alto-sdk/src/document.ts`）、意図の名前（`packages/alto-sdk/src/intents.ts`）、API 報告（`packages/alto-sdk/api/alto-engine.api.md`、`alto-engine-browser.api.md`）。Worker の要求は `packages/alto-sdk/src/protocol.ts`（`PROTOCOL` は現在 12）、WASM の入口は `crates/alto-wasm/src/text.rs`。
+- SDK：`TextContent`、`StylePatch`（`packages/alto-sdk/src/types.ts`）、`doc.text.{set, replace, style, setTateChuYoko, info, hitTest, caret, selectionRects, navigate}`（`packages/alto-sdk/src/document.ts`）、意図の名前（`packages/alto-sdk/src/intents.ts`）、API 報告（`packages/alto-sdk/api/alto-engine.api.md`、`alto-engine-browser.api.md`）。Worker の要求は `packages/alto-sdk/src/protocol.ts`（`PROTOCOL` は現在 13）、WASM の入口は `crates/alto-wasm/src/text.rs`。
 - 差分：`crates/alto-doc/src/version.rs` の `content_change` が、テキストノードの内容が違うとき `ContentDetail::Text { text, style, writing_mode, frame, tate_chu_yoko }` を作る。`crates/alto-git/src/lib.rs` の `describe` がこれを日本語にする。内容が違うのにどのフラグも立たない変更は、空の説明になる。マージ（`crates/alto-engine/src/versions/merge.rs`）はノードを JSON の値として3方向で比べ、内容の食い違いを `content` の競合にする。テキスト固有の処理は無い。
 - 試験の場所：組版は `crates/alto-text/tests/layout.rs`（フォントは `tests/fonts/AltoTestJP.otf`、`AltoTestLatin.ttf`。どちらも `post` を持ち、下線は Latin が位置 −100・太さ 50、JP が位置 −125。ヘブライ文字の字形は無く、既存の bidi の試験は欠けた字形のまま並びだけを見る）、焼き込みは `crates/alto-engine/src/text_bake_tests.rs`、エンジン経由は `crates/alto-engine/src/text_tests.rs`、描画は `crates/alto-gpu/src/cpu_composite/text_tests.rs`、ブラウザは `tests/e2e/m7-tests.js`（名前は古いが現役）と `tests/e2e/parity-tests.js`。
 
@@ -28,7 +28,7 @@
 - `TextContent` に足すフィールドはすべて `#[serde(default, skip_serializing_if = ...)]` とし、既定値のときは JSON に出さない。既存の文書は保存、ジャーナルのダイジェスト、`text_entry` の鍵（`serde_json` で直列化した内容）が1バイトも変わらない。試験 `new_text_fields_serialize_as_before`（新規）（既存の3つの parity テキストの直列化が追加前と同じ）で固定する。
 - 新しいフィールドは `deny_unknown_fields` の型へ入るので、旧版は新しい文書を開けない。共通規則3により `format_version` を上げる。値は 00-ROADMAP の番号の表：TXT-4、5、6、7 が 6、TXT-1、2 が 9、TXT-8 が 10、TXT-3 と TXT-9 が 12、TXT-10 は RV4-1 の `render_version` と同じ 13。回 6 は全文書で最初に番号を上げる回なので、その最初の PR が 01 の「共通の設計：形式番号を上げる経路」（`FORMAT_VERSION`、`SUPPORTED_FORMATS`（新規）、manifest の `document_format`、読み込みの受け入れ、`gc.rs`、`merge.rs`）を入れる。
 - `format_version` を上げるときは、パッケージの manifest も変える。`crates/alto-store/src/lib.rs` は `document_format: 5` を固定で書き、読み込みは 5 以外を `StoreError::Unsupported("package format")` で拒否する。したがって各回の作業手順に、書き出す値と受け入れる値の更新（`alto-store` の定数化を含む）、`crates/alto-doc/src/lib.rs` の `DocumentMeta` の 5 の更新、`document.rs` の形式の試験の更新を入れる。
-- `PROTOCOL` は、新しい要求（TXT-8 の `fontAxes`（新規））を足すときだけ上げる（TXT-8 は 12。段階2の回）。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけの項目は上げない。
+- `PROTOCOL` は、新しい要求（TXT-8 の `fontAxes`（新規））を足すときだけ上げる（TXT-8 は 13。段階2の回）。`setText` の内容と `textInfo` の応答に任意のフィールドを足すだけの項目は上げない。
 - ALTB（焼き込みの形式）は TXT-1〜9、11 で変えない（`BAKER_VERSION` を上げるのは、既存の入力の出力が変わる TXT-11 だけ）。ルビ、圏点、下線、色層はすべて既存の `BakeGlyph`（輪郭への参照、行列、位置、色）で表せる。したがって `decodeTextBake`（JS 参照）、`TextBake::decode`、WGSL は触れない。`BAKER_VERSION` も、既存の入力の出力が変わらないので上げない。
 
 ### 範囲の追従
@@ -494,7 +494,7 @@ pub struct FontVariation { pub tag: String, pub value: f32 }
 ### 形式と通信
 
 - `format_version`：上げる（TXT-8 で回 10）。
-- `PROTOCOL`：上げる。新しい要求 fontAxes（12。段階2の回）。README と RELEASING を同じ PR で更新する（共通規則3）。
+- `PROTOCOL`：上げる。新しい要求 fontAxes（13。段階2の回）。README と RELEASING を同じ PR で更新する（共通規則3）。
 - ALTB と描画：変えない。`text-bake.txt` に `text-v3-variable`（新規）。
 - 差分：`ContentDetail::Text.style` が拾う。
 
@@ -590,7 +590,7 @@ pub struct TextRendering {
 ### 形式と通信
 
 - `format_version`：上げる（文書属性を足す。RV4-1 と同じ回 13）。
-- `render_version` は 4（RV4-1 が定義）。`PROTOCOL`：上げる（文書の作成や変換の引数にこの属性を足すとき。14。v4 の項目と同じ回）。
+- `render_version` は 4（RV4-1 が定義）。`PROTOCOL`：上げる（文書の作成や変換の引数にこの属性を足すとき。15。v4 の項目と同じ回）。
 - シェーダーのモード番号：文字のシェーダーは別ファイルなので、効果のモード番号（34〜43 は 02 が使う）は使わない。`glyph-q30.wgsl`（新規。01 に合わせた名前）は `glyph-q14.wgsl` と同じくモードの分岐を持たないので、番号は要らない。
 - v3 の文書は、ヒンティングなどの有無にかかわらず今のハッシュを保つ（試験は作業手順）。
 

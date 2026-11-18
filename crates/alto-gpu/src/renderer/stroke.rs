@@ -14,6 +14,7 @@ impl Renderer {
         world: [f64; 6],
         fixed_world: Option<alto_core::FixedAffine>,
         tip: Option<BrushImage>,
+        pattern: Option<BrushPattern>,
     ) -> Result<()> {
         if self.stroke.is_some() {
             return Err(RenderError::Conflict("stroke already active".into()));
@@ -22,6 +23,8 @@ impl Renderer {
         self.stroke = Some(GpuStroke {
             tip,
             tip_texture: None,
+            pattern: pattern.filter(|pattern| pattern.depth() > 0.0),
+            pattern_texture: None,
             layer,
             tiles: BTreeMap::new(),
             color,
@@ -103,8 +106,16 @@ impl Renderer {
             })
             .sum::<u64>();
         let pending_tip = stroke.tip.as_ref().filter(|_| stroke.tip_texture.is_none());
-        let tip_bytes = pending_tip.map_or(0, |tip| tip.pixels().len() as u64 * 4);
-        let new_bytes = new_tiles as u64 * tile_bytes + command_bytes + tip_bytes;
+        let pending_pattern = stroke
+            .pattern
+            .as_ref()
+            .filter(|_| stroke.pattern_texture.is_none());
+        let image_bytes = pending_tip
+            .into_iter()
+            .chain(pending_pattern.map(BrushPattern::image))
+            .map(|image| image.pixels().len() as u64 * 4)
+            .sum::<u64>();
+        let new_bytes = new_tiles as u64 * tile_bytes + command_bytes + image_bytes;
         let cpu_finish = (stroke.tiles.len() + new_tiles) as u64
             * (TILE_RGBA_BYTES + TILE_RGBA_BYTES / 255 + 256)
             * 4
@@ -121,10 +132,24 @@ impl Renderer {
         let checkpoint = self.governor.checkpoint();
         let old_keys: HashSet<_> = stroke.tiles.keys().copied().collect();
         let mut new_tip_texture = None;
+        let mut new_pattern_texture = None;
         let result = (|| -> Result<()> {
             if let Some(tip) = pending_tip {
-                new_tip_texture = Some(self.upload_brush_tip(tip)?);
+                new_tip_texture = Some(self.upload_brush_image(tip, "brush tip")?);
             }
+            if let Some(pattern) = pending_pattern {
+                new_pattern_texture =
+                    Some(self.upload_brush_image(pattern.image(), "brush texture")?);
+            }
+            let pattern_view = stroke
+                .pattern_texture
+                .as_ref()
+                .or(new_pattern_texture.as_ref())
+                .map(|texture| texture.create_view(&Default::default()));
+            let (scale, depth) = stroke
+                .pattern
+                .as_ref()
+                .map_or((0.0, 0.0), |pattern| (pattern.scale(), pattern.depth()));
             let tip_view = stroke
                 .tip_texture
                 .as_ref()
@@ -289,13 +314,14 @@ impl Renderer {
                     "brush config",
                     &[BrushUniform {
                         color: stroke.color,
-                        params: [stroke.hardness, stroke.opacity, 0.0, 0.0],
+                        params: [stroke.hardness, stroke.opacity, scale, depth],
                         origin: [key.tx as f32 * 256.0, key.ty as f32 * 256.0, 0.0, 0.0],
                         info: [
                             dabs.len() as u32,
                             u32::from(stroke.erase),
                             u32::from(tile.selection.is_some()),
-                            u32::from(tip_view.is_some()),
+                            u32::from(tip_view.is_some())
+                                | (u32::from(pattern_view.is_some()) << 1),
                         ],
                     }],
                     wgpu::BufferUsages::UNIFORM,
@@ -342,6 +368,12 @@ impl Renderer {
                                 tip_view.as_ref().unwrap_or(&base),
                             ),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(
+                                pattern_view.as_ref().unwrap_or(&base),
+                            ),
+                        },
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -362,6 +394,9 @@ impl Renderer {
         }
         if let Some(texture) = new_tip_texture {
             stroke.tip_texture = Some(texture);
+        }
+        if let Some(texture) = new_pattern_texture {
+            stroke.pattern_texture = Some(texture);
         }
         stroke.epoch += 1;
         let damage = crate::damage::layer_rect_damage(stroke.world, bounds);
@@ -384,8 +419,8 @@ impl Renderer {
         }
         Ok(Some(damage))
     }
-    fn upload_brush_tip(&self, tip: &BrushImage) -> Result<wgpu::Texture> {
-        let [width, height] = tip.dimensions();
+    fn upload_brush_image(&self, image: &BrushImage, label: &str) -> Result<wgpu::Texture> {
+        let [width, height] = image.dimensions();
         let size = wgpu::Extent3d {
             width,
             height,
@@ -395,7 +430,7 @@ impl Renderer {
             &self.governor,
             &self.device,
             &wgpu::TextureDescriptor {
-                label: Some("brush tip"),
+                label: Some(label),
                 size,
                 mip_level_count: 1,
                 sample_count: 1,
@@ -406,7 +441,7 @@ impl Renderer {
             },
             Class::Stroke,
         )?;
-        let rgba: Vec<_> = tip
+        let rgba: Vec<_> = image
             .pixels()
             .iter()
             .flat_map(|&v| [v, 255, 255, 255])
@@ -424,14 +459,24 @@ impl Renderer {
         Ok(texture)
     }
 
+    pub(super) fn retire_brush_images(
+        &mut self,
+        tip: Option<wgpu::Texture>,
+        pattern: Option<wgpu::Texture>,
+    ) {
+        self.retired.textures.extend(
+            tip.into_iter()
+                .chain(pattern)
+                .map(|texture| (texture, MemoryClass::Stroke)),
+        );
+    }
+
     pub fn cancel_stroke(&mut self) {
         let Some(stroke) = self.stroke.take() else {
             return;
         };
         let reach = stroke_reach(&stroke);
-        if let Some(texture) = stroke.tip_texture {
-            self.retired.textures.push((texture, MemoryClass::Stroke));
-        }
+        self.retire_brush_images(stroke.tip_texture, stroke.pattern_texture);
         for tile in stroke.tiles.into_values() {
             self.retired
                 .textures
@@ -490,7 +535,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn failed_tip_stamp_retires_its_texture_and_can_be_retried() {
+    fn failed_stamp_retires_both_images_and_can_be_retried() {
         let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -510,6 +555,8 @@ mod tests {
             roundness: 1.0,
         };
         let tip = BrushImage::new(17, 19, &[255; 17 * 19]).unwrap();
+        let pattern =
+            BrushPattern::new(BrushImage::new(19, 17, &[191; 17 * 19]).unwrap(), 1.0, 1.0).unwrap();
         let before = renderer.gpu_bytes().stroke;
         renderer
             .begin_stroke(
@@ -522,6 +569,7 @@ mod tests {
                 [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                 None,
                 Some(tip),
+                Some(pattern),
             )
             .unwrap();
 
@@ -531,7 +579,11 @@ mod tests {
             Err(RenderError::CorruptData(_))
         ));
         let stroke = renderer.stroke.as_ref().unwrap();
-        assert!(stroke.tip_texture.is_none() && stroke.tiles.is_empty());
+        assert!(
+            stroke.tip_texture.is_none()
+                && stroke.pattern_texture.is_none()
+                && stroke.tiles.is_empty()
+        );
         renderer
             .device
             .poll(wgpu::PollType::wait_indefinitely())
@@ -547,7 +599,18 @@ mod tests {
             .tip_texture
             .clone()
             .unwrap();
+        let grain = renderer
+            .stroke
+            .as_ref()
+            .unwrap()
+            .pattern_texture
+            .clone()
+            .unwrap();
         renderer.stamp(&[dab], &tiles, &store, None).unwrap();
+        assert_eq!(
+            renderer.stroke.as_ref().unwrap().pattern_texture.as_ref(),
+            Some(&grain)
+        );
         assert_eq!(
             renderer.stroke.as_ref().unwrap().tip_texture.as_ref(),
             Some(&texture)
@@ -562,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn brush_tip_budget_is_checked_before_the_first_stamp() {
+    fn brush_image_budget_is_checked_before_the_first_stamp() {
         let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -579,9 +642,12 @@ mod tests {
             angle: 0.0,
             roundness: 1.0,
         };
-        let tip = BrushImage::new(1024, 1024, &vec![255; 1024 * 1024]).unwrap();
+        let pixels = vec![255; 1024 * 1024];
+        let tip = BrushImage::new(1024, 1024, &pixels).unwrap();
+        let pattern =
+            BrushPattern::new(BrushImage::new(1024, 1024, &pixels).unwrap(), 1.0, 1.0).unwrap();
         let before = renderer.gpu_bytes();
-        renderer.budget_bytes = before.budget_used + 2 * 1048576;
+        renderer.budget_bytes = before.budget_used + 6 * 1048576;
         let layer = NodeId::new();
         let world = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -596,6 +662,7 @@ mod tests {
                 world,
                 None,
                 Some(tip),
+                Some(pattern),
             )
             .unwrap();
         assert_eq!(renderer.gpu_bytes().stroke, before.stroke);
@@ -604,7 +671,11 @@ mod tests {
             Err(RenderError::Budget(_))
         ));
         let stroke = renderer.stroke.as_ref().unwrap();
-        assert!(stroke.tip_texture.is_none() && stroke.tiles.is_empty());
+        assert!(
+            stroke.tip_texture.is_none()
+                && stroke.pattern_texture.is_none()
+                && stroke.tiles.is_empty()
+        );
         assert_eq!(renderer.gpu_bytes().stroke, before.stroke);
         renderer.cancel_stroke();
 
@@ -617,6 +688,7 @@ mod tests {
                 false,
                 false,
                 world,
+                None,
                 None,
                 None,
             )

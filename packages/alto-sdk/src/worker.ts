@@ -1,4 +1,4 @@
-import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, validBrushTextureParams, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -737,13 +737,24 @@ function rememberSave(entry: { hash: string; revision: number }) {
   while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value!);
   return token;
 }
-function brushTipArgs(image: Args<"beginBrush">["tipImage"]): [number, number, Uint8Array] {
-  if (image === undefined) return [0, 0, new Uint8Array()];
+function brushImageArgs(image: Args<"beginBrush">["tipImage"], label: string): [number, number, Uint8Array] {
   if (!image || !validBrushImageSize(image.width, image.height) ||
       !(image.pixels instanceof ArrayBuffer) || image.pixels.byteLength !== image.width * image.height) {
-    throw new Error("INVALID_ARGUMENT: brush tip");
+    throw new Error(`INVALID_ARGUMENT: ${label}`);
   }
   return [image.width, image.height, new Uint8Array(image.pixels)];
+}
+
+function brushTipArgs(image: Args<"beginBrush">["tipImage"]): [number, number, Uint8Array] {
+  return image === undefined ? [0, 0, new Uint8Array()] : brushImageArgs(image, "brush tip");
+}
+
+function brushTextureArgs(texture: Args<"beginBrush">["texture"]): [number, number, Uint8Array, number, number] {
+  if (texture === undefined) return [0, 0, new Uint8Array(), 1, 0];
+  if (!texture || !validBrushTextureParams(texture.scale, texture.depth)) {
+    throw new Error("INVALID_ARGUMENT: brush texture scale/depth");
+  }
+  return [...brushImageArgs(texture.image, "brush texture image"), texture.scale, texture.depth];
 }
 
 async function execute(m: Queued): Promise<unknown> {
@@ -835,6 +846,7 @@ async function execute(m: Queued): Promise<unknown> {
         m.erase,
         !!m.mask,
         ...brushTipArgs(m.tipImage),
+        ...brushTextureArgs(m.texture),
       );
       return true;
     case "input":
@@ -1118,6 +1130,7 @@ async function execute(m: Queued): Promise<unknown> {
         new Float32Array(m.color),
         new Float32Array(m.samples),
         ...brushTipArgs(m.tipImage),
+        ...brushTextureArgs(m.texture),
       );
     case "recoveryStore": {
       await writesIdle();

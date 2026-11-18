@@ -9,6 +9,31 @@ import type { ImportedImage } from "./transaction.js";
 import type { FontAsset, ImageAsset, PackageSize, PathData } from "./types.js";
 import { ViewportControl, type Viewport } from "./viewport.js";
 
+async function importBrushImage(file: Blob): Promise<BrushImage> {
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new AltoError("INVALID_ARGUMENT", "brush image could not be decoded");
+  });
+  try {
+    const { width, height } = bitmap;
+    if (!validBrushImageSize(width, height)) {
+      throw new AltoError("INVALID_ARGUMENT", "brush image dimensions must be 16–1024 pixels");
+    }
+    const ctx = new OffscreenCanvas(width, height).getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new AltoError("INTERNAL", "no 2D context to decode the brush image");
+    ctx.drawImage(bitmap, 0, 0);
+    const rgba = ctx.getImageData(0, 0, width, height).data;
+    const pixels = new Uint8Array(width * height);
+    for (let i = 0; i < pixels.length; i++) {
+      const s = i * 4;
+      const luma = (54 * rgba[s] + 183 * rgba[s + 1] + 19 * rgba[s + 2] + 128) >> 8;
+      pixels[i] = Math.floor((luma * rgba[s + 3] + 127) / 255);
+    }
+    return { width, height, pixels };
+  } finally {
+    bitmap.close();
+  }
+}
+
 const SDK_VERSION = "0.5.0";
 
 export interface EngineOptions {
@@ -119,6 +144,8 @@ export interface Engine {
     importImage(file: Blob): Promise<ImageAsset>;
     /** Decodes a 16–1024 px image as reusable brush coverage. */
     importBrushTip(file: Blob): Promise<BrushImage>;
+    /** Decodes a repeating brush texture as reusable coverage. */
+    importBrushTexture(file: Blob): Promise<BrushImage>;
     /** An OpenType/TrueType font (.otf/.ttf/.ttc). Add it with `Transaction.addFont`. */
     importFont(file: Blob, options?: { faceIndex?: number }): Promise<FontAsset>;
     /** Drops an imported image or font that no edit used. */
@@ -829,30 +856,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       );
       return { ...asset, id: asset.record.id } as unknown as ImageAsset;
     },
-    importBrushTip: async (file: Blob): Promise<BrushImage> => {
-      const bitmap = await createImageBitmap(file).catch(() => {
-        throw new AltoError("INVALID_ARGUMENT", "brush tip image could not be decoded");
-      });
-      try {
-        const { width, height } = bitmap;
-        if (!validBrushImageSize(width, height)) {
-          throw new AltoError("INVALID_ARGUMENT", "brush tip dimensions must be 16–1024 pixels");
-        }
-        const ctx = new OffscreenCanvas(width, height).getContext("2d", { willReadFrequently: true });
-        if (!ctx) throw new AltoError("INTERNAL", "no 2D context to decode the brush tip");
-        ctx.drawImage(bitmap, 0, 0);
-        const rgba = ctx.getImageData(0, 0, width, height).data;
-        const pixels = new Uint8Array(width * height);
-        for (let i = 0; i < pixels.length; i++) {
-          const s = i * 4;
-          const luma = (54 * rgba[s] + 183 * rgba[s + 1] + 19 * rgba[s + 2] + 128) >> 8;
-          pixels[i] = Math.floor((luma * rgba[s + 3] + 127) / 255);
-        }
-        return { width, height, pixels };
-      } finally {
-        bitmap.close();
-      }
-    },
+    importBrushTip: importBrushImage,
+    importBrushTexture: importBrushImage,
     importFont: async (file: Blob, options: { faceIndex?: number } = {}): Promise<FontAsset> => {
       const bytes = await file.arrayBuffer();
       const font = await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]);
