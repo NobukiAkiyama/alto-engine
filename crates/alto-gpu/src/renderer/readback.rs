@@ -433,8 +433,8 @@ impl Renderer {
             .stroke
             .take()
             .ok_or(RenderError::Conflict("no stroke".into()))?;
-        if let Some(texture) = stroke.tip_texture {
-            self.retired.textures.push((texture, MemoryClass::Stroke));
+        if stroke.tip_texture.is_some() || stroke.pattern_texture.is_some() {
+            self.retire_brush_images(stroke.tip_texture, stroke.pattern_texture);
             self.release_retired();
         }
         pool.0.completed.store(0, Ordering::Release);

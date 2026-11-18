@@ -776,6 +776,102 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
         "the same tip did not draw after recovery");
     });
+    await test("brush texture stays fixed across strokes and follows the layer", async () => {
+      const c = new OffscreenCanvas(17, 16);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 1, 16);
+      const pattern = await engine.assets.importBrushTexture(await c.convertToBlob());
+      assert(pattern.width === 17 && pattern.pixels[0] === 255 && pattern.pixels[1] === 0, "brush texture conversion");
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const color = [0, 0, 0, 1];
+      const paint = async (x, texture, image) => {
+        const tool = doc.tools.begin("brush", { layer, tip: { size: 80, texture, image }, color });
+        tool.input({ x, y: 128.5 });
+        await tool.end();
+        return unstable(engine).readTile(0, 0);
+      };
+      const texture = { image: pattern };
+      const first = await paint(128.5, texture);
+      const second = await paint(135.5, texture);
+      const reference = new Uint8Array(await testing(engine).request("cpuReference", {
+        config: { size: 80, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+        texture: { image: { width: 17, height: 16, pixels: pattern.pixels.slice().buffer }, scale: 1, depth: 1 },
+        color, samples: [128.5, 128.5, 1, 0, 0, 0],
+      }));
+      assert(close(first, reference), "CPU and GPU paper grain differ");
+      for (const pixels of [first, second]) {
+        assert(pixel(pixels, 119, 128)[3] === 255 && pixel(pixels, 120, 128)[3] === 0, "paper grain shifted or filled");
+      }
+      await doc.transact("translate layer", tx => tx.setTransform(layer, { x: 5, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }));
+      const moved = await paint(133.5, texture);
+      assert(pixel(moved, 124, 128)[3] === 255 && pixel(moved, 125, 128)[3] === 0,
+        "paper grain did not move with its layer");
+      const tip = { width: 16, height: 16, pixels: new Uint8Array(256).fill(255) };
+      const plain = await paint(133.5, undefined, tip);
+      await doc.undo();
+      const neutral = await paint(133.5, { image: pattern, depth: 0 }, tip);
+      assert(same(plain, neutral), "a zero-depth texture changed image-tip pixels");
+      await doc.undo();
+      const tinted = await paint(133.5, { image: pattern, scale: 0.5, depth: 1 }, tip);
+      assert(Math.abs(pixel(tinted, 108, 95)[3] - 191) <= 2 && pixel(tinted, 110, 95)[3] === 0,
+        "combining tip and texture lost the non-default scale");
+      assert((await settled(engine)).gpu.stroke === 0, "finished brush retained GPU textures");
+      await doc.transact("move layer past the stamp", tx => tx.setTransform(layer, {
+        x: 145, y: 0, scaleX: 1, scaleY: 1, rotation: 0,
+      }));
+      const negative = await paint(128.5, texture);
+      assert(pixel(negative, 128, 128)[3] === 255 && pixel(negative, 129, 128)[3] === 0,
+        "the GPU did not wrap grain at negative layer coordinates");
+    });
+    await test("invalid brush textures cannot start a stroke", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      for (const [scale, depth, length] of [[0.049, 1, 256], [17, 1, 256], [1, -0.01, 256], [1, 1.01, 256], [NaN, 1, 256], [1, 1, 255], [1, 0, 255]]) {
+        const image = { width: 16, height: 16, pixels: new Uint8Array(length) };
+        let code;
+        try {
+          doc.tools.begin("brush", { layer, tip: { texture: { image, scale, depth } } });
+        } catch (error) { code = error.code; }
+        assert(code === "INVALID_ARGUMENT", "the SDK accepted an invalid brush texture");
+        await testing(engine).request("beginBrush", {
+          layer, color: [0, 0, 0, 1], erase: false, mask: false,
+          config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+          texture: { image: { ...image, pixels: image.pixels.buffer }, scale, depth },
+        }).then(
+          () => { throw Error("the Worker accepted an invalid brush texture"); },
+          error => assert(error.code === "INVALID_ARGUMENT" && /brush texture/.test(error.message), String(error)),
+        );
+      }
+      assert(await doc.snapshotHash() === before, "an invalid brush texture changed the document");
+      await doc.tools.begin("brush", { layer }).cancel();
+    });
+    await test("GPU loss cancels a textured brush and the texture can be reused", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      const image = { width: 16, height: 16, pixels: new Uint8Array(256).fill(125) };
+      const start = () => doc.tools.begin("brush", { layer, tip: { texture: { image } } });
+      const tool = start();
+      tool.input({ x: 128.5, y: 128.5 });
+      await tool.flush();
+      await gpuRestored(engine, () => testing(engine).destroyGpu());
+      await tool.end().then(
+        () => { throw Error("device loss committed a textured stroke"); },
+        error => assert(error.code === "GPU_LOST", String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "device loss changed the document");
+      const retry = start();
+      retry.input({ x: 128.5, y: 128.5 });
+      await retry.end();
+      assert(Math.abs(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] - 125) <= 2,
+        "the textured brush did not draw after recovery");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });

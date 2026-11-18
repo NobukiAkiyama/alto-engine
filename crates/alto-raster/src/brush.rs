@@ -345,19 +345,81 @@ impl BrushImage {
                 f32::from(self.pixels[(y as u32 * self.width + x as u32) as usize]) / 255.0
             }
         };
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let fx = x - x0 as f32;
-        let fy = y - y0 as f32;
-        let mix = |a, b, t| a + (b - a) * t;
-        mix(
-            mix(texel(x0, y0), texel(x0 + 1, y0), fx),
-            mix(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), fx),
-            fy,
-        )
+        bilinear(x, y, None, texel)
     }
 }
 
+fn bilinear(x: f32, y: f32, repeat: Option<[u32; 2]>, texel: impl Fn(i32, i32) -> f32) -> f32 {
+    let base_x = x.floor();
+    let base_y = y.floor();
+    let fx = x - base_x;
+    let fy = y - base_y;
+    // Wrap only the integer texel position. Shifting the fractional coordinate
+    // into the image can round away precision at a repeat boundary.
+    let (x0, y0) = if let Some([width, height]) = repeat {
+        (
+            base_x.rem_euclid(width as f32) as i32,
+            base_y.rem_euclid(height as f32) as i32,
+        )
+    } else {
+        (base_x as i32, base_y as i32)
+    };
+    let mix = |a, b, t| a + (b - a) * t;
+    mix(
+        mix(texel(x0, y0), texel(x0 + 1, y0), fx),
+        mix(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), fx),
+        fy,
+    )
+}
+
+/// A repeated brush image in layer coordinates.
+pub struct BrushPattern {
+    image: BrushImage,
+    scale: f32,
+    depth: f32,
+}
+
+impl BrushPattern {
+    pub fn new(image: BrushImage, scale: f32, depth: f32) -> Result<Self, &'static str> {
+        if !(0.05..=16.0).contains(&scale) || !(0.0..=1.0).contains(&depth) {
+            return Err("INVALID_ARGUMENT: brush texture scale/depth");
+        }
+        Ok(Self {
+            image,
+            scale,
+            depth,
+        })
+    }
+
+    pub fn image(&self) -> &BrushImage {
+        &self.image
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn depth(&self) -> f32 {
+        self.depth
+    }
+
+    fn coverage_at(&self, [x, y]: [f32; 2]) -> f32 {
+        let [width, height] = self.image.dimensions();
+        let value = bilinear(
+            x * self.scale - 0.5,
+            y * self.scale - 0.5,
+            Some([width, height]),
+            |x, y| {
+                let x = x.rem_euclid(width as i32) as u32;
+                let y = y.rem_euclid(height as i32) as u32;
+                f32::from(self.image.pixels()[(y * width + x) as usize]) / 255.0
+            },
+        );
+        1.0 - self.depth * (1.0 - value)
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the parameters of a brush stroke.
 pub fn cpu_paint(
     base: &[u8],
     origin: [f32; 2],
@@ -366,8 +428,10 @@ pub fn cpu_paint(
     color: [f32; 4],
     erase: bool,
     tip: Option<&BrushImage>,
+    pattern: Option<&BrushPattern>,
 ) -> Vec<u8> {
     let mut out = base.to_vec();
+    let pattern = pattern.filter(|pattern| pattern.depth() > 0.0);
     let rotations: Vec<_> = dabs
         .iter()
         .map(|d| (tip.is_some() || d.roundness < 1.0).then(|| d.angle.sin_cos()))
@@ -376,6 +440,7 @@ pub fn cpu_paint(
         for x in 0..256 {
             let mut coverage = 0.0;
             let p = [origin[0] + x as f32 + 0.5, origin[1] + y as f32 + 0.5];
+            let grain = pattern.map_or(1.0, |pattern| pattern.coverage_at(p));
             for (d, rotation) in dabs.iter().zip(&rotations) {
                 let dx = p[0] - d.center[0];
                 let dy = p[1] - d.center[1];
@@ -396,7 +461,7 @@ pub fn cpu_paint(
                         .clamp(0.0, 1.0);
                     1.0 - t * t * (3.0 - 2.0 * t)
                 };
-                coverage = 1.0 - (1.0 - coverage) * (1.0 - shape * d.opacity);
+                coverage = 1.0 - (1.0 - coverage) * (1.0 - (shape * grain) * d.opacity);
             }
             let alpha = coverage.min(config.opacity) * color[3];
             let i = (y * 256 + x) * 4;
@@ -437,6 +502,63 @@ mod tests {
         BrushCurve {
             input,
             points: vec![[0.0, 0.0], [1.0, 1.0]],
+        }
+    }
+
+    fn striped_pattern(depth: f32) -> BrushPattern {
+        let pixels: Vec<_> = (0..16 * 17)
+            .map(|i| if i % 17 == 16 { 255 } else { 0 })
+            .collect();
+        BrushPattern::new(BrushImage::new(17, 16, &pixels).unwrap(), 1.0, depth).unwrap()
+    }
+
+    #[test]
+    fn pattern_wraps_at_negative_coordinates_and_blends_at_the_seam() {
+        let pattern = striped_pattern(1.0);
+        assert_eq!(pattern.coverage_at([-0.5, -0.5]), 1.0);
+        assert_eq!(pattern.coverage_at([16.5, 15.5]), 1.0);
+        assert_eq!(pattern.coverage_at([-17.0, 0.5]), 0.5);
+        assert_eq!(pattern.coverage_at([0.0, 0.5]), 0.5);
+        assert_eq!(pattern.coverage_at([0.5, 0.5]), 0.0);
+        let just_before_first_texel = pattern.coverage_at([0.4999999, 0.5]);
+        assert!(just_before_first_texel > 0.0 && just_before_first_texel < 0.000001);
+    }
+
+    #[test]
+    fn pattern_uses_layer_pixels_and_depth_zero_preserves_the_plain_brush() {
+        let base = vec![0; 256 * 256 * 4];
+        let dab = Dab {
+            center: [16.5, 35.5],
+            radius: 16.0,
+            opacity: 1.0,
+            angle: 0.0,
+            roundness: 1.0,
+        };
+        let paint = |dab, pattern| {
+            cpu_paint(
+                &base,
+                [0.0; 2],
+                &[dab],
+                BrushConfig::default(),
+                [0.0, 0.0, 0.0, 1.0],
+                false,
+                None,
+                pattern,
+            )
+        };
+        let neutral = striped_pattern(0.0);
+        assert_eq!(paint(dab, None), paint(dab, Some(&neutral)));
+        let pattern = striped_pattern(1.0);
+        for x in [16.5, 21.5] {
+            let result = paint(
+                Dab {
+                    center: [x, 35.5],
+                    ..dab
+                },
+                Some(&pattern),
+            );
+            assert_eq!(result[(35 * 256 + 16) * 4 + 3], 255);
+            assert_eq!(result[(35 * 256 + 17) * 4 + 3], 0);
         }
     }
 
@@ -553,6 +675,7 @@ mod tests {
                 sampler.config().clone(),
                 [0.25, 0.5, 0.75, 1.0],
                 false,
+                None,
                 None,
             );
             assert_eq!(alto_core::ContentHash::of(&pixels).to_string(), expected);
@@ -702,6 +825,7 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
             false,
             None,
+            None,
         );
         // BLAKE3 of the RGBA bytes painted by the same dab at 3dc0b48.
         assert_eq!(
@@ -733,6 +857,7 @@ mod tests {
             config,
             [0.0, 0.0, 0.0, 1.0],
             false,
+            None,
             None,
         );
         assert_eq!(pixels[(128 * 256 + 128) * 4 + 3], 255);

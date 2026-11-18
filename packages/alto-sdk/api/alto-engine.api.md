@@ -127,6 +127,11 @@ export interface BrushOptions {
         angle?: number;
         roundness?: number;
         image?: BrushImage;
+        texture?: {
+            image: BrushImage;
+            scale?: number;
+            depth?: number;
+        };
     };
 }
 
@@ -528,6 +533,7 @@ export interface Engine {
     readonly assets: {
         importImage(file: Blob): Promise<ImageAsset>;
         importBrushTip(file: Blob): Promise<BrushImage>;
+        importBrushTexture(file: Blob): Promise<BrushImage>;
         importFont(file: Blob, options?: {
             faceIndex?: number;
         }): Promise<FontAsset>;

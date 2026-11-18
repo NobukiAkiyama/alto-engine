@@ -1,6 +1,6 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
-import { validBrushImageSize, type BrushConfig, type BrushCurve, type StreamMessage } from "./protocol.js";
+import { validBrushImageSize, validBrushTextureParams, type BrushConfig, type BrushCurve, type StreamMessage, type WireBrushImage } from "./protocol.js";
 import type { Color, NodeId } from "./types.js";
 
 export interface BrushDynamics {
@@ -45,6 +45,18 @@ export interface BrushImage {
   pixels: Uint8Array;
 }
 
+function validateBrushImage(image: BrushImage, label: string): void {
+  if (!image || !validBrushImageSize(image.width, image.height) ||
+      !(image.pixels instanceof Uint8Array) || image.pixels.length !== image.width * image.height) {
+    throw new AltoError("INVALID_ARGUMENT", label);
+  }
+}
+
+function snapshotBrushImage(image: BrushImage): WireBrushImage {
+  // Transfer a copy of the view so callers can reuse the image on later strokes.
+  return { width: image.width, height: image.height, pixels: new Uint8Array(image.pixels).buffer };
+}
+
 export interface BrushOptions {
   layer: NodeId;
   /** Paint the layer's pixels or its mask. */
@@ -60,6 +72,14 @@ export interface BrushOptions {
     roundness?: number;
     /** Coverage image stamped at each dab. Its long side follows the tip size. */
     image?: BrushImage;
+    /** Repeating grain fixed to the layer, shared by all dabs. */
+    texture?: {
+      image: BrushImage;
+      /** Texture texels per layer pixel, from 0.05 to 16 (default 1). */
+      scale?: number;
+      /** Coverage modulation, from 0 to 1 (default 1). */
+      depth?: number;
+    };
   };
   color?: Color;
   opacity?: number;
@@ -110,16 +130,23 @@ export class ToolSession {
     const roundness = options.tip?.roundness ?? 1;
     if (!Number.isFinite(angle)) throw new AltoError("INVALID_ARGUMENT", "brush angle must be finite");
     if (!Number.isFinite(roundness)) throw new AltoError("INVALID_ARGUMENT", "brush roundness must be finite");
-    let tipImage;
     const image = options.tip?.image;
-    if (image !== undefined) {
-      if (!image || !validBrushImageSize(image.width, image.height) ||
-          !(image.pixels instanceof Uint8Array) || image.pixels.length !== image.width * image.height) {
-        throw new AltoError("INVALID_ARGUMENT", "brush tip");
+    if (image !== undefined) validateBrushImage(image, "brush tip");
+    const tipImage = image === undefined ? undefined : snapshotBrushImage(image);
+    const grain = options.tip?.texture;
+    let texture;
+    if (grain !== undefined) {
+      if (!grain) throw new AltoError("INVALID_ARGUMENT", "brush texture");
+      const { scale = 1, depth = 1 } = grain;
+      if (!validBrushTextureParams(scale, depth)) {
+        throw new AltoError("INVALID_ARGUMENT", "brush texture scale/depth");
       }
-      // Transfer a snapshot of the view so callers can reuse their image on later strokes.
-      tipImage = { width: image.width, height: image.height, pixels: new Uint8Array(image.pixels).buffer };
+      validateBrushImage(grain.image, "brush texture image");
+      if (depth !== 0) texture = { image: snapshotBrushImage(grain.image), scale, depth };
     }
+    const transfer = [];
+    if (tipImage) transfer.push(tipImage.pixels);
+    if (texture) transfer.push(texture.image.pixels);
     this.ready = host.request("beginBrush", {
       layer: options.layer,
       config: {
@@ -136,7 +163,8 @@ export class ToolSession {
       erase: tool === "eraser",
       mask: options.target === "mask",
       tipImage,
-    }, tipImage ? [tipImage.pixels] : []);
+      texture,
+    }, transfer);
     // A stroke that cannot start ends here, and reports once: the frame loop keeps
     // flushing until the session ends.
     this.ready.catch((e) => {
