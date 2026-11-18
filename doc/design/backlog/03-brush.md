@@ -24,7 +24,7 @@
 
 ## BR-1 先端の角度と丸み
 
-### 現状
+### 実装前の状態
 
 - `crates/alto-raster/src/brush.rs`：`BrushConfig { size, hardness, spacing, opacity, flow, pressure_size, pressure_opacity }`（`Serialize, Deserialize`、`deny_unknown_fields` なし）。`Dab { center, radius, opacity, angle }` の `angle` は `StrokeSampler::dab` が常に 0 を入れ、どこでも読まない。`cpu_paint(base, origin, dabs, config, color, erase)` が CPU の参照で、円の距離だけを見る。
 - `crates/alto-gpu/shaders/brush.wgsl`：`struct Dab { center_radius: vec4f, extra: vec4f }`。距離は `distance(p, d.center_radius.xy) / max(0.01, d.center_radius.z)`、形は `1 - smoothstep(config.params.x, 1.0, dist)`。`extra` は未使用。
@@ -42,7 +42,7 @@
 
 ダブの形を楕円にする。`radius` は長軸の半径で、短軸の半径は `radius × roundness`。
 
-- `BrushConfig` に `angle: f32`（度、既定 0、`serde(default)`）と `roundness: f32`（既定 1、`serde(default)`）を足す。`begin_brush` で `angle` は有限であること（違えば `INVALID_ARGUMENT: brush angle`）、`roundness` は `[0.01, 1]` へ丸める（`hardness` などの既存の丸め方に合わせる）。`angle` は `[-360, 360]` を `rem_euclid(360)` で正規化する。
+- `BrushConfig` に `angle: f32`（度、既定 0、`serde(default)`）と `roundness: f32`（既定 1、`serde(default)`）を足す。`begin_brush` で `angle` は有限であること（違えば `INVALID_ARGUMENT: brush angle`）、`roundness` も有限であることを確認した上で `[0.01, 1]` へ丸める（`hardness` などの既存の丸め方に合わせる）。`angle` は `rem_euclid(360)` で正規化する。
 - `Dab` に `roundness: f32` を足す。`angle` は度から**ラジアン**へ変えてダブに入れる。角度はレイヤー座標（`begin_brush` が `input_inverse` で入力をレイヤー座標にしたあとの座標）で測る。回転した表示やレイヤー変形の下でも、描いたレイヤーの中で同じ向きになる。
 - ホストで `cos`・`sin` を計算し、`GpuDab.extra = [cos, sin, roundness, 0]` に入れる。シェーダーに三角関数を入れない。
 - `brush.wgsl`：`roundness >= 1.0`（`extra.z >= 1.0`）のときは今の `distance(...)` をそのまま使う。丸いダブは円で、回転しても形が変わらないので、**角度は見た目に効かない**（BR-4 の傾きも `roundness < 1` か画像先端のときだけ見える。矛盾ではなく仕様）。この分岐で既存の丸いダブが従来と同じ式を通るため、出力は変わらない（同じ GPU の上で試験する）。それ以外は `q = p - center`、`u = q.x*cos + q.y*sin`、`v = -q.x*sin + q.y*cos`、`dist = length(vec2f(u, v / max(roundness, 0.01))) / max(0.01, radius)`。`roundness` は 0.01 以上に丸め済みでゼロ除算は起きない。
@@ -55,7 +55,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 
 - `format_version`：触れない。ストロークは `Op::SetTiles` で保存され、ダブは保存されない。
 - render v3 の画素：触れない（表示の合成は変えない）。既存の丸いダブは従来と同じ式を通る。
-- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、現在 9）：`beginBrush` の `config` が増えるので上げる（10。00-ROADMAP の番号の表の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-1〜BR-3 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`）：`beginBrush` の `config` が増えるため BR-1 で 10 に更新した（00-ROADMAP の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-1〜BR-5 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
 - シェーダー：`brush.wgsl` の既存モードの変更で、新しいモード番号は不要。
 
 ### 作業手順
@@ -67,12 +67,8 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 - Modify `tests/e2e/browser-tests.js`。
 
 **試験：**
-- [ ] `brush.rs`：`round_dab_with_roundness_one_is_unchanged`。`roundness = 1`（`angle` は任意）の `cpu_paint` の出力が、`roundness` 導入前の式の出力と全バイト一致する（期待値は変更前のコードで生成してテストに埋める）。
-- [ ] `brush.rs`：`config_normalization_clamps_roundness_and_wraps_angle`。`BrushConfig::normalized()`（新規。`begin_brush` が呼ぶ検証と丸め。非有限の `angle` は `Err`）で、`roundness = 0` が 0.01、`angle = -90` と `270` が同じ値になる。
-- [ ] `brush.rs`：`thin_ellipse_has_no_division_by_zero`。`roundness = 0.01` で `cpu_paint` の画素が有限で、中心の画素が覆われる。
-- [ ] `browser-tests.js`：`an elliptical brush is wider along its angle`。`angle` 0 と 90 の楕円で、横に 3 点・縦に 3 点の画素幅が入れ替わる。`cpuReference` との差が ±2 以内。
-- [ ] `browser-tests.js`：`a round dab ignores its angle on the GPU`。`roundness: 1` で `angle: 0` と `angle: 45` のストロークを同じ GPU で描き、`readTile` の全バイトが一致する（この試験は分岐が外れると失敗する）。
-- [ ] `browser-tests.js`：既存の `GPU brush / pressure / tile boundary / exact Undo-Redo / eraser` が変更なしで通る（`config` の `pressure_size` は BR-5 で `dynamics` に直す）。
+- Rust で、基点 `3dc0b48` で実際に生成した円ダブの全画素とハッシュが一致すること、角度と丸みの正規化、細い楕円が中心を塗ることを確認した。
+- Chrome 157 / Apple Metal の functional 48 件が成功した。楕円の長軸が 0 度と 90 度で入れ替わり、CPU 参照との差が各チャンネルで 2 以下だった。丸い先端は 0 度と 45 度で全バイト一致した。楕円が境界をまたぐ両タイルの画素と、回転したレイヤーに先端の角度が従うことも確認した。既存の筆圧、タイル境界、Undo／Redo、消しゴムの試験も成功した。
 
 **完了条件：** 上の試験が通り、既存の丸いブラシの画素が変わらない。
 
@@ -233,7 +229,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ）。
-- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので9 に含める（段階1）。
+- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので 10 に含める（BR-1 の後）。
 - シェーダー：変更なし（`angle` は BR-1 の `extra` で渡る）。
 
 ### 作業手順
@@ -300,7 +296,7 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ。既定のカーブは今の出力と同じ）。
-- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので9 に含める（段階1）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので 10 に含める（BR-1 の後）。README と RELEASING を同じ PR で更新する。
 - 公開 API：`BrushOptions.pressureSize` / `pressureOpacity` を削除する破壊的変更（決定が要る点）。`packages/alto-sdk/api/alto-engine.api.md` を更新する。
 - シェーダー：変更なし。
 

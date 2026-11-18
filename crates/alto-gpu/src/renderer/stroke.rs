@@ -56,6 +56,11 @@ impl Renderer {
         };
         for d in dabs {
             let r = d.radius;
+            let (sin, cos) = if d.roundness < 1.0 {
+                d.angle.sin_cos()
+            } else {
+                (0.0, 1.0)
+            };
             bounds.x0 = bounds.x0.min((d.center[0] - r) as f64);
             bounds.y0 = bounds.y0.min((d.center[1] - r) as f64);
             bounds.x1 = bounds.x1.max((d.center[0] + r) as f64);
@@ -71,7 +76,7 @@ impl Renderer {
                         .or_default()
                         .push(GpuDab {
                             center_radius: [d.center[0], d.center[1], r, d.opacity],
-                            extra: [0.0; 4],
+                            extra: [cos, sin, d.roundness, 0.0],
                         });
                 }
             }

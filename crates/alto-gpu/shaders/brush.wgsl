@@ -11,7 +11,17 @@ struct Config { color: vec4f, params: vec4f, origin: vec4f, info: vec4u };
   let p=config.origin.xy+vec2f(id.xy)+0.5;let idx=id.y*256u+id.x;
   var v=coverage[idx];
   for(var i=0u;i<config.info.x;i++) {
-    let d=dabs[i];let dist=distance(p,d.center_radius.xy)/max(0.01,d.center_radius.z);
+    let d=dabs[i];
+    let radius=max(0.01,d.center_radius.z);
+    var dist: f32;
+    if d.extra.z>=1.0 {
+      dist=distance(p,d.center_radius.xy)/radius;
+    } else {
+      let q=p-d.center_radius.xy;
+      let u=q.x*d.extra.x+q.y*d.extra.y;
+      let minor=(-q.x*d.extra.y+q.y*d.extra.x)/max(d.extra.z,0.01);
+      dist=length(vec2f(u,minor))/radius;
+    }
     let shape=1.0-smoothstep(config.params.x,1.0,dist);
     v=1.0-(1.0-v)*(1.0-shape*d.center_radius.w);
   }

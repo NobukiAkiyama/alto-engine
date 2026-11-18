@@ -237,14 +237,14 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 - STO-5（プレビュー）は manifest の外のエントリなので上げない。STO-9 は `tables/` を足すが上げない。今の読み手は `document_format` の照合（`decode_entries_impl`）で 11 を先に拒否するので、`tables/` を黙って無視して開くことは無い。
 - 今の試験（`crates/alto-store/src/lib.rs` の、薄い manifest の組み合わせを拒否する試験）は format 4 を未知の値として使っている。VER-4 で未知の値を別の番号（例：99）に変える。
 
-### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 9）
+### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 10）
 
 段階ごとに1回上げる。回の中で後から入る PR は上げない（最初のリリースまで）。
 
 | 値 | 回 | 項目 |
 |---|---|---|
-| 9 | 段階1 | BR-4、BR-5（`beginBrush` の `dynamics`）、BR-6（`init` の `undoSteps`）、STO-3（`exportImage` の選択肢）、VER-4（`historyCommand` の stash）、PERF-5（`recoveryStages`（新規）） |
-| 10 | 段階2 | BR-1、BR-2、BR-3（`beginBrush`）、IMG-1（`layerBake`（新規））、TXT-8（`fontAxes`（新規））、STO-4、STO-5、STO-9、STO-10、VER-5（`trimmedPackage`（新規）） |
+| 9 | 段階1 | BR-6（`init` の `undoSteps`）、STO-3（`exportImage` の選択肢）、VER-4（`historyCommand` の stash）、PERF-5（`recoveryStages`（新規）） |
+| 10 | 段階2 | BR-1、BR-2、BR-3（`beginBrush`）、BR-4、BR-5（`beginBrush` の `dynamics`）、IMG-1（`layerBake`（新規））、TXT-8（`fontAxes`（新規））、STO-4、STO-5、STO-9、STO-10、VER-5（`trimmedPackage`（新規）） |
 | 11 | 段階3 | COL-1（`createDocument`）、COL-5（`import` の `profile`）、STO-1、GIT-2、STO-6（`cache` を足すときだけ）、RUN-1（`init` に版を渡すときだけ）、RUN-2（`unstable` に診断を足すときだけ） |
 | 12 | 段階4の v4 | RV4-1 の段8（`renderVersion: 4` の公開）、COL-2、COL-4、COL-3、COL-6、TXT-10（作成の引数に属性を足すとき） |
 | 13 | 段階4のほか | IMG-6（`imageWarp`（新規））、VER-6、STO-11、RUN-5（`exportBitmap`（新規））、COLLAB-1、IMG-5（採用時）、VEC-4（`vectorPreview` を足すとき）、FX-8（新しい要求が要るとき） |
@@ -305,10 +305,10 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 依存があるものだけを示す。
 
 1. QA-1 の残り（`folder`、`decode` の target、薄い `.alto` の seed）を先に入れる。以後の形式変更を読み込みファザーが検査する。QA-5 は実装済み。
-2. 段階1の項目：BR-4 → BR-5、BR-6、SEL-1 → SEL-2 → SEL-3、IMG-3（SEL-3 の前）、TXT-4、TXT-6、TXT-7（回 6。最初の PR が形式番号の基盤と焼き込みの `Result` 化を入れる）、VEC-2、STO-3、STO-8、PERF-5。VER-4 は manifest の形式の基盤として、VER-6、GIT-1 より前に入れる。
+2. 段階1の項目：BR-6（実装済み）、SEL-1 → SEL-2 → SEL-3、IMG-3（SEL-3 の前）、TXT-4、TXT-6、TXT-7（回 6。最初の PR が形式番号の基盤と焼き込みの `Result` 化を入れる）、VEC-2、STO-3、STO-8、PERF-5。VER-4 は manifest の形式の基盤として、VER-6、GIT-1 より前に入れる。
 3. FX-4 → FX-1。FX-4 が共通基盤（`smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow`、評価のメモ）を作り、`Context::stack` のぼかしの枝が選択つきで前段を2回評価する既存の問題も直す。（新規）
 4. FX-5 → FX-6（距離場を FX-5 で作る）。FX-5 → IMG-1（`effect_output_bounds`）。VEC-1 → FX-9（`Gradient` の持ち主は VEC-1）。FX-2、FX-3、FX-7 は FX-4 の後なら順不同。（新規）
-5. BR-1 → BR-2 → BR-3。
+5. BR-1 → BR-2 → BR-3。BR-4 は BR-1 の描画を使い、BR-5 と共通の設定を使うため、BR-1 の後に BR-4 と BR-5 を進める。
 6. TXT-5 → TXT-1 → TXT-2 → TXT-3（TXT-3a → TXT-3b）。ルビは行送りの計算を変えるため、段落属性の後に入れる。TXT-5 → VER-3（`remap_range`）。（新規）
 7. STO-10、STO-5、VER-1 → STO-1 → IMG-4。STO-1 は STO-5 の `ZipIndex`（新規）を使う。STO-9 は STO-1 の前提ではない（同じ `lazy.rs`、`gc.rs` を変えるので、先に入れると衝突が減る）。IMG-4 は PERF-1、PERF-3 の後に測り直してから採否を決める。
 8. PERF-5 → PERF-2 → PERF-1 → PERF-4。PERF-3 は PERF-5 の内訳で律速の項目を選ぶ。段階2の効果 → PERF-4 → RV4-1。RUN-2 → RUN-1。

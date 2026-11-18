@@ -100,6 +100,8 @@ export interface BrushOptions {
         size?: number;
         hardness?: number;
         spacing?: number;
+        angle?: number;
+        roundness?: number;
     };
 }
 

@@ -8,7 +8,15 @@ export interface BrushOptions {
   /** Paint the layer's pixels or its mask. */
   target?: "content" | "mask";
   /** Size in document pixels (default 24), hardness 0–1 (0.8), spacing as a fraction of size (0.15). */
-  tip?: { size?: number; hardness?: number; spacing?: number };
+  tip?: {
+    size?: number;
+    hardness?: number;
+    spacing?: number;
+    /** Rotation in degrees in layer coordinates (default 0). */
+    angle?: number;
+    /** Ratio of short to long radius, clamped to 0.01–1 (default 1). */
+    roundness?: number;
+  };
   color?: Color;
   opacity?: number;
   flow?: number;
@@ -57,6 +65,10 @@ export class ToolSession {
     tool: "brush" | "eraser",
     options: BrushOptions,
   ) {
+    const angle = options.tip?.angle ?? 0;
+    const roundness = options.tip?.roundness ?? 1;
+    if (!Number.isFinite(angle)) throw new AltoError("INVALID_ARGUMENT", "brush angle must be finite");
+    if (!Number.isFinite(roundness)) throw new AltoError("INVALID_ARGUMENT", "brush roundness must be finite");
     this.ready = host.request("beginBrush", {
       layer: options.layer,
       config: {
@@ -67,6 +79,8 @@ export class ToolSession {
         flow: options.flow ?? 1,
         pressure_size: options.pressureSize ?? true,
         pressure_opacity: options.pressureOpacity ?? false,
+        angle,
+        roundness,
       },
       color: options.color ?? [0, 0, 0, 1],
       erase: tool === "eraser",

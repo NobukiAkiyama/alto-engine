@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 9;
+export const PROTOCOL = 10;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -41,6 +41,8 @@ export interface BrushConfig {
   flow: number;
   pressure_size: boolean;
   pressure_opacity: boolean;
+  angle: number;
+  roundness: number;
 }
 export interface ImportedFontRecord {
   record: { id: string; hash: string; [field: string]: unknown };
