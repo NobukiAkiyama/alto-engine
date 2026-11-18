@@ -237,7 +237,7 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 - STO-5（プレビュー）は manifest の外のエントリなので上げない。STO-9 は `tables/` を足すが上げない。今の読み手は `document_format` の照合（`decode_entries_impl`）で 11 を先に拒否するので、`tables/` を黙って無視して開くことは無い。
 - 今の試験（`crates/alto-store/src/lib.rs` の、薄い manifest の組み合わせを拒否する試験）は format 4 を未知の値として使っている。VER-4 で未知の値を別の番号（例：99）に変える。
 
-### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 11）
+### `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、今は 12）
 
 破壊的な通信の変更では番号を上げる。同じ段階の項目は可能な限りまとめる。
 
@@ -245,10 +245,11 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 |---|---|---|
 | 9 | 段階1 | BR-6（`init` の `undoSteps`）、STO-3（`exportImage` の選択肢）、VER-4（`historyCommand` の stash）、PERF-5（`recoveryStages`（新規）） |
 | 10 | 段階2 | BR-1（`beginBrush` の角度と丸み） |
-| 11 | 段階2 | BR-4、BR-5（`beginBrush` の `dynamics`）、BR-2、BR-3（`beginBrush`）、IMG-1（`layerBake`（新規））、TXT-8（`fontAxes`（新規））、STO-4、STO-5、STO-9、STO-10、VER-5（`trimmedPackage`（新規）） |
-| 12 | 段階3 | COL-1（`createDocument`）、COL-5（`import` の `profile`）、STO-1、GIT-2、STO-6（`cache` を足すときだけ）、RUN-1（`init` に版を渡すときだけ）、RUN-2（`unstable` に診断を足すときだけ） |
-| 13 | 段階4の v4 | RV4-1 の段8（`renderVersion: 4` の公開）、COL-2、COL-4、COL-3、COL-6、TXT-10（作成の引数に属性を足すとき） |
-| 14 | 段階4のほか | IMG-6（`imageWarp`（新規））、VER-6、STO-11、RUN-5（`exportBitmap`（新規））、COLLAB-1、IMG-5（採用時）、VEC-4（`vectorPreview` を足すとき）、FX-8（新しい要求が要るとき） |
+| 11 | 段階2 | BR-4、BR-5（`beginBrush` の `dynamics`） |
+| 12 | 段階2 | BR-2（`beginBrush` の画像先端）、BR-3（`beginBrush` のテクスチャ）、IMG-1（`layerBake`（新規））、TXT-8（`fontAxes`（新規））、STO-4、STO-5、STO-9、STO-10、VER-5（`trimmedPackage`（新規）） |
+| 13 | 段階3 | COL-1（`createDocument`）、COL-5（`import` の `profile`）、STO-1、GIT-2、STO-6（`cache` を足すときだけ）、RUN-1（`init` に版を渡すときだけ）、RUN-2（`unstable` に診断を足すときだけ） |
+| 14 | 段階4の v4 | RV4-1 の段8（`renderVersion: 4` の公開）、COL-2、COL-4、COL-3、COL-6、TXT-10（作成の引数に属性を足すとき） |
+| 15 | 段階4のほか | IMG-6（`imageWarp`（新規））、VER-6、STO-11、RUN-5（`exportBitmap`（新規））、COLLAB-1、IMG-5（採用時）、VEC-4（`vectorPreview` を足すとき）、FX-8（新しい要求が要るとき） |
 
 上げない項目：IMG-3（段階1で IMG-1 より先に入り、結果に `missing` を足すだけ）、SEL-1〜3、TXT-1〜7、TXT-9、TXT-11、VEC-1〜3、FX-1〜7、FX-9、VER-1〜3、GIT-1、GIT-3（別パッケージ）、STO-2、STO-7、STO-8、STO-12、RUN-3、RUN-4、PERF-1〜4、PERF-6、PERF-7。13 の QA-5 で Worker の無言の終了を直す場合は、その時期の回に入れる。
 

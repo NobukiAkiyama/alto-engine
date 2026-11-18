@@ -1,6 +1,6 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
-import type { BrushConfig, BrushCurve, StreamMessage } from "./protocol.js";
+import { validBrushImageSize, type BrushConfig, type BrushCurve, type StreamMessage } from "./protocol.js";
 import type { Color, NodeId } from "./types.js";
 
 export interface BrushDynamics {
@@ -38,6 +38,13 @@ function wireDynamics(dynamics: BrushDynamics): BrushConfig["dynamics"] {
   };
 }
 
+/** Reusable R8 coverage image. White is full coverage, black is transparent. */
+export interface BrushImage {
+  width: number;
+  height: number;
+  pixels: Uint8Array;
+}
+
 export interface BrushOptions {
   layer: NodeId;
   /** Paint the layer's pixels or its mask. */
@@ -51,6 +58,8 @@ export interface BrushOptions {
     angle?: number;
     /** Ratio of short to long radius, clamped to 0.01–1 (default 1). */
     roundness?: number;
+    /** Coverage image stamped at each dab. Its long side follows the tip size. */
+    image?: BrushImage;
   };
   color?: Color;
   opacity?: number;
@@ -101,6 +110,16 @@ export class ToolSession {
     const roundness = options.tip?.roundness ?? 1;
     if (!Number.isFinite(angle)) throw new AltoError("INVALID_ARGUMENT", "brush angle must be finite");
     if (!Number.isFinite(roundness)) throw new AltoError("INVALID_ARGUMENT", "brush roundness must be finite");
+    let tipImage;
+    const image = options.tip?.image;
+    if (image !== undefined) {
+      if (!image || !validBrushImageSize(image.width, image.height) ||
+          !(image.pixels instanceof Uint8Array) || image.pixels.length !== image.width * image.height) {
+        throw new AltoError("INVALID_ARGUMENT", "brush tip");
+      }
+      // Transfer a snapshot of the view so callers can reuse their image on later strokes.
+      tipImage = { width: image.width, height: image.height, pixels: new Uint8Array(image.pixels).buffer };
+    }
     this.ready = host.request("beginBrush", {
       layer: options.layer,
       config: {
@@ -116,7 +135,8 @@ export class ToolSession {
       color: options.color ?? [0, 0, 0, 1],
       erase: tool === "eraser",
       mask: options.target === "mask",
-    });
+      tipImage,
+    }, tipImage ? [tipImage.pixels] : []);
     // A stroke that cannot start ends here, and reports once: the frame loop keeps
     // flushing until the session ends.
     this.ready.catch((e) => {

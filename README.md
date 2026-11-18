@@ -237,7 +237,7 @@ await doc.undo();
 | `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
-| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル11）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
+| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル12）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
 | `examples/browser-playground` | 編集UIとビルド済みWASM |
 | `tests/e2e` | 実ブラウザで実行する画素検証・性能測定 |
 | `tests/fonts` | テスト・デモ用フォント（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1） |
@@ -271,6 +271,8 @@ await doc.save(downloadTarget('work.alto'));
 ```
 
 ブラシの `dynamics` では、筆圧・速度（レイヤー上の移動速度）・ペンの傾きに応じて直径、ダブごとの不透明度、流量をカーブで設定できます。たとえば `dynamics: { opacity: { input: "pressure", points: [[0, 0], [1, 1]] } }` は筆圧をダブの不透明度に反映します。`size: null` は直径を固定し、`angleFromTilt: true` はペンの傾きの方向を先端の角度に加えます。
+
+画像を先端にするには、`const image = await engine.assets.importBrushTip(file)` で取り込み、ブラシ開始時に `tip: { image, size: 40, angle: 30 }` を渡します。画像の長辺がブラシの直径に対応し、明るい不透明部分ほど強く描画します。同じ画像を繰り返し使えます。文書には描いた画素が保存されます。
 
 Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。Promiseはメモリ上の文書に適用された時点で解決し、復旧用ジャーナルへの書き込みは描画と別に進みます。書き込みの完了は `await doc.durable()` で待てます（書き込みに失敗すると `STORAGE` で失敗します）。文書は `doc.getSnapshot()`（凍結済みの値）と `doc.subscribe(listener)` で読みます。ラスターレイヤーの `tiles` はタイル数と範囲（`{format, count, bounds}`）だけで、タイル一覧は `await doc.nodeTiles(id)` で取得します。保存されるスナップショットのハッシュは `await doc.snapshotHash()` で取得します。公開APIの一覧は [packages/alto-sdk/api](packages/alto-sdk/api) にあります。`@alto/engine/unstable` と `@alto/engine/testing` は検証用です。
 
@@ -314,7 +316,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル11）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル12）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 

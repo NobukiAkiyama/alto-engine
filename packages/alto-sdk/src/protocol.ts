@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 11;
+export const PROTOCOL = 12;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -39,6 +39,16 @@ export type BrushCurve = {
   points: [number, number][];
 };
 
+export function validBrushImageSize(width: number, height: number): boolean {
+  return Number.isInteger(width) && Number.isInteger(height) &&
+    width >= 16 && width <= 1024 && height >= 16 && height <= 1024;
+}
+
+export interface WireBrushImage {
+  width: number;
+  height: number;
+  pixels: ArrayBuffer;
+}
 export interface BrushConfig {
   size: number;
   hardness: number;
@@ -107,7 +117,7 @@ export interface Requests {
   transact: Q<{ intent: string; label?: string; ops: WireOp[]; baseRevision: number }, WireState>;
   undo: Q<None, WireState>;
   redo: Q<None, WireState>;
-  beginBrush: Q<{ layer: string; config: BrushConfig; color: number[]; erase: boolean; mask: boolean }, true>;
+  beginBrush: Q<{ layer: string; config: BrushConfig; color: number[]; erase: boolean; mask: boolean; tipImage?: WireBrushImage }, true>;
   endBrush: Q<None, WireState>;
   cancelBrush: Q<None, true>;
   select: Q<{ spec: unknown }, WireState>;
@@ -197,7 +207,7 @@ export interface Requests {
   validateFrame: Q<None, true>;
   /** A text node's render version 3 bake: blake3 and the ALTB bytes in hex, or nulls. */
   textBake: Q<{ node: string }, { hash: string | null; hex: string | null }>;
-  cpuReference: Q<{ config: BrushConfig; color: number[]; samples: number[] }, Uint8Array>;
+  cpuReference: Q<{ config: BrushConfig; color: number[]; samples: number[]; tipImage?: WireBrushImage }, Uint8Array>;
   stallDecodeWorkers: Q<None, number>;
   destroyGpu: Q<None, true>;
   testPanic: Q<None, true>;

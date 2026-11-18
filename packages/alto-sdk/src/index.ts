@@ -21,7 +21,7 @@ export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider, ExclusiveObje
 export { applyTextStyle, replaceText } from "./text-edit.js";
 export { ToolSession } from "./tools.js";
 export type { BrushCurve } from "./protocol.js";
-export type { BrushDynamics, BrushOptions, InputSample } from "./tools.js";
+export type { BrushDynamics, BrushImage, BrushOptions, InputSample } from "./tools.js";
 export { Transaction } from "./transaction.js";
 export type { InsertOptions } from "./transaction.js";
 export { ViewportControl } from "./viewport.js";

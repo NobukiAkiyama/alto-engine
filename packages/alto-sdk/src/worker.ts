@@ -1,4 +1,4 @@
-import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -737,6 +737,15 @@ function rememberSave(entry: { hash: string; revision: number }) {
   while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value!);
   return token;
 }
+function brushTipArgs(image: Args<"beginBrush">["tipImage"]): [number, number, Uint8Array] {
+  if (image === undefined) return [0, 0, new Uint8Array()];
+  if (!image || !validBrushImageSize(image.width, image.height) ||
+      !(image.pixels instanceof ArrayBuffer) || image.pixels.byteLength !== image.width * image.height) {
+    throw new Error("INVALID_ARGUMENT: brush tip");
+  }
+  return [image.width, image.height, new Uint8Array(image.pixels)];
+}
+
 async function execute(m: Queued): Promise<unknown> {
   // Check when executed: the request may have waited behind a document replacement.
   checkDocument(m.documentEpoch);
@@ -825,6 +834,7 @@ async function execute(m: Queued): Promise<unknown> {
         new Float32Array(m.color),
         m.erase,
         !!m.mask,
+        ...brushTipArgs(m.tipImage),
       );
       return true;
     case "input":
@@ -1107,6 +1117,7 @@ async function execute(m: Queued): Promise<unknown> {
         JSON.stringify(m.config),
         new Float32Array(m.color),
         new Float32Array(m.samples),
+        ...brushTipArgs(m.tipImage),
       );
     case "recoveryStore": {
       await writesIdle();

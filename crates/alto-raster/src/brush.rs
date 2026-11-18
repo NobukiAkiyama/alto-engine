@@ -301,6 +301,63 @@ impl StrokeSampler {
         out
     }
 }
+/// Coverage image in texel order, owned by one stroke.
+pub struct BrushImage {
+    width: u32,
+    height: u32,
+    pixels: Box<[u8]>,
+}
+
+impl BrushImage {
+    pub fn new(width: u32, height: u32, pixels: &[u8]) -> Result<Self, &'static str> {
+        if !(16..=1024).contains(&width)
+            || !(16..=1024).contains(&height)
+            || pixels.len() != (width * height) as usize
+        {
+            return Err("INVALID_ARGUMENT: brush tip");
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels: pixels.into(),
+        })
+    }
+
+    pub fn dimensions(&self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    fn sample(&self, u: f32, v: f32, radius: f32) -> f32 {
+        let scale = self.width.max(self.height) as f32 / (2.0 * radius);
+        let x = u * scale + self.width as f32 * 0.5 - 0.5;
+        let y = v * scale + self.height as f32 * 0.5 - 0.5;
+        if x <= -1.0 || y <= -1.0 || x >= self.width as f32 || y >= self.height as f32 {
+            return 0.0;
+        }
+        let texel = |x: i32, y: i32| {
+            if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                0.0
+            } else {
+                f32::from(self.pixels[(y as u32 * self.width + x as u32) as usize]) / 255.0
+            }
+        };
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+        let mix = |a, b, t| a + (b - a) * t;
+        mix(
+            mix(texel(x0, y0), texel(x0 + 1, y0), fx),
+            mix(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), fx),
+            fy,
+        )
+    }
+}
+
 pub fn cpu_paint(
     base: &[u8],
     origin: [f32; 2],
@@ -308,11 +365,12 @@ pub fn cpu_paint(
     config: BrushConfig,
     color: [f32; 4],
     erase: bool,
+    tip: Option<&BrushImage>,
 ) -> Vec<u8> {
     let mut out = base.to_vec();
     let rotations: Vec<_> = dabs
         .iter()
-        .map(|d| (d.roundness < 1.0).then(|| d.angle.sin_cos()))
+        .map(|d| (tip.is_some() || d.roundness < 1.0).then(|| d.angle.sin_cos()))
         .collect();
     for y in 0..256 {
         for x in 0..256 {
@@ -321,16 +379,23 @@ pub fn cpu_paint(
             for (d, rotation) in dabs.iter().zip(&rotations) {
                 let dx = p[0] - d.center[0];
                 let dy = p[1] - d.center[1];
-                let dist = if let Some((sin, cos)) = rotation {
-                    let u = dx * cos + dy * sin;
-                    let v = (-dx * sin + dy * cos) / d.roundness.max(0.01);
-                    (u.powi(2) + v.powi(2)).sqrt()
+                let [u, v] = if let Some((sin, cos)) = rotation {
+                    [
+                        dx * cos + dy * sin,
+                        (-dx * sin + dy * cos) / d.roundness.max(0.01),
+                    ]
                 } else {
-                    (dx.powi(2) + dy.powi(2)).sqrt()
-                } / d.radius.max(0.01);
-                let t =
-                    ((dist - config.hardness) / (1.0 - config.hardness).max(0.001)).clamp(0.0, 1.0);
-                let shape = 1.0 - t * t * (3.0 - 2.0 * t);
+                    [dx, dy]
+                };
+                let radius = d.radius.max(0.01);
+                let shape = if let Some(tip) = tip {
+                    tip.sample(u, v, radius)
+                } else {
+                    let dist = (u.powi(2) + v.powi(2)).sqrt() / radius;
+                    let t = ((dist - config.hardness) / (1.0 - config.hardness).max(0.001))
+                        .clamp(0.0, 1.0);
+                    1.0 - t * t * (3.0 - 2.0 * t)
+                };
                 coverage = 1.0 - (1.0 - coverage) * (1.0 - shape * d.opacity);
             }
             let alpha = coverage.min(config.opacity) * color[3];
@@ -373,6 +438,33 @@ mod tests {
             input,
             points: vec![[0.0, 0.0], [1.0, 1.0]],
         }
+    }
+
+    #[test]
+    fn brush_image_rejects_invalid_dimensions_and_lengths() {
+        for (width, height, length) in [
+            (8, 16, 128),
+            (2048, 16, 32768),
+            (32, 16, 511),
+            (u32::MAX, 32, 0),
+        ] {
+            assert_eq!(
+                BrushImage::new(width, height, &vec![0; length]).err(),
+                Some("INVALID_ARGUMENT: brush tip")
+            );
+        }
+    }
+
+    #[test]
+    fn tip_uses_the_long_side_for_scale_and_blends_to_transparent() {
+        let image = BrushImage::new(32, 16, &[255; 32 * 16]).unwrap();
+        assert_eq!(image.sample(0.0, 0.0, 32.0), 1.0);
+        assert_eq!(image.sample(31.0, 0.0, 32.0), 1.0);
+        assert_eq!(image.sample(32.0, 0.0, 32.0), 0.5);
+        assert_eq!(image.sample(33.0, 0.0, 32.0), 0.0);
+        assert_eq!(image.sample(0.0, -15.0, 32.0), 1.0);
+        assert_eq!(image.sample(0.0, -16.0, 32.0), 0.5);
+        assert_eq!(image.sample(0.0, -17.0, 32.0), 0.0);
     }
 
     #[test]
@@ -461,6 +553,7 @@ mod tests {
                 sampler.config().clone(),
                 [0.25, 0.5, 0.75, 1.0],
                 false,
+                None,
             );
             assert_eq!(alto_core::ContentHash::of(&pixels).to_string(), expected);
         }
@@ -601,7 +694,15 @@ mod tests {
             roundness: 1.0,
         };
         let base = vec![0; 256 * 256 * 4];
-        let painted = cpu_paint(&base, [0.0; 2], &[dab], config, [0.0, 0.0, 0.0, 1.0], false);
+        let painted = cpu_paint(
+            &base,
+            [0.0; 2],
+            &[dab],
+            config,
+            [0.0, 0.0, 0.0, 1.0],
+            false,
+            None,
+        );
         // BLAKE3 of the RGBA bytes painted by the same dab at 3dc0b48.
         assert_eq!(
             alto_core::ContentHash::of(&painted).to_string(),
@@ -625,7 +726,15 @@ mod tests {
             t_ms: 0.0,
         });
         let base = vec![0; 256 * 256 * 4];
-        let pixels = cpu_paint(&base, [0.0; 2], &dabs, config, [0.0, 0.0, 0.0, 1.0], false);
+        let pixels = cpu_paint(
+            &base,
+            [0.0; 2],
+            &dabs,
+            config,
+            [0.0, 0.0, 0.0, 1.0],
+            false,
+            None,
+        );
         assert_eq!(pixels[(128 * 256 + 128) * 4 + 3], 255);
         assert_eq!(pixels[(129 * 256 + 128) * 4 + 3], 0);
     }
