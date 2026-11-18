@@ -193,7 +193,7 @@ impl Engine {
         doc.revision = revision
             .checked_add(1)
             .ok_or_else(|| fail("RESOURCE_LIMIT", "revision overflow"))?;
-        self.documents.insert(h, alto_doc::Editor::new(doc));
+        self.install_editor(h, alto_doc::Editor::new(doc));
         self.maintain();
         Ok(())
     }

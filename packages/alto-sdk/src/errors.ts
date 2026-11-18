@@ -32,7 +32,7 @@ export type ConflictReason =
  * the code: `reason` for `CONFLICT` and `INVALID_ARGUMENT`, `node` for `NOT_FOUND`.
  */
 export interface ErrorDetails {
-  reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable";
+  reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable" | "undo-steps";
   node?: string;
   namespace?: string;
 }

@@ -28,6 +28,7 @@ interface Metadata {
   locations?: [number, number, number][];
   /** Format 3 and 4: the document was not saved to a file when checkpointed. */
   dirty?: boolean;
+  undoSteps?: number;
 }
 interface Parsed {
   generation: number;
@@ -54,6 +55,7 @@ export interface StorageMessage {
   stop?: "pack" | "journal";
   /** Checkpoint: the document differs from what was last created, opened or saved. */
   dirty?: boolean;
+  undoSteps?: number;
   /** Collect: the packs a `collectPlan` named. */
   packs?: string[];
 }
@@ -304,25 +306,26 @@ async function scan() {
   candidates.sort((a, b) => b.generation - a.generation);
   // Newest first, so an object a later checkpoint copied is read from its new pack. A
   // rescan keeps what this session wrote: those files are still there.
-  for (const { metadata: meta } of candidates) {
-    if (meta?.format === 3)
-      for (const path of meta.objects) {
-        keptLoose.add(path);
-        if (!stored.has(path)) stored.set(path, { loose: true });
-      }
-    if (meta?.format === 4) {
-      const packs = meta.packs!;
-      for (const name of packs) keptPacks.add(name);
-      meta.objects.forEach((path, i) => {
-        const [pack, offset, length] = meta.locations![i];
-        if (!stored.has(path)) stored.set(path, { pack: packs[pack], offset, length });
-      });
-    }
-  }
+  for (const { metadata } of candidates) rememberStoredObjects(metadata);
   released = false;
   if (candidates.length) {
     active = candidates[0];
     offset = active.validLength;
+  }
+}
+function rememberStoredObjects(meta: Metadata | null) {
+  if (meta?.format === 3) {
+    for (const path of meta.objects) {
+      keptLoose.add(path);
+      if (!stored.has(path)) stored.set(path, { loose: true });
+    }
+  } else if (meta?.format === 4) {
+    const packs = meta.packs!;
+    for (const name of packs) keptPacks.add(name);
+    meta.objects.forEach((path, i) => {
+      const [pack, offset, length] = meta.locations![i];
+      if (!stored.has(path)) stored.set(path, { pack: packs[pack], offset, length });
+    });
   }
 }
 /**
@@ -427,9 +430,11 @@ async function readPacks(names: string[]) {
   );
   return new Map(unique.map((name, i) => [name, bytes[i]]));
 }
+class ShortPackError extends Error {}
+
 function slicePack(packs: Map<string, Bytes>, { pack, offset, length }: Location) {
   const bytes = packs.get(pack)!;
-  if (offset + length > bytes.length) throw Error(`pack ${pack} is shorter than its objects`);
+  if (offset + length > bytes.length) throw new ShortPackError(`pack ${pack} is shorter than its objects`);
   return bytes.subarray(offset, offset + length);
 }
 /** Format 3 objects, one OPFS read each; overlapping them hides most of the latency. */
@@ -579,7 +584,7 @@ async function writePack(name: string, objects: Map<string, Bytes>) {
  * object it names is written as its own file instead (format 3), so tests can produce
  * a journal the previous SDK wrote.
  */
-async function checkpoint(framed: Bytes, loose = false, stop?: StorageMessage["stop"], dirty = false) {
+async function checkpoint(framed: Bytes, loose = false, stop?: StorageMessage["stop"], dirty = false, undoSteps?: number) {
   await init();
   await collectGarbage();
   const entries = unframe(framed);
@@ -600,6 +605,7 @@ async function checkpoint(framed: Bytes, loose = false, stop?: StorageMessage["s
     objects: meta.objects,
     opaque: meta.opaque,
     ...(dirty ? { dirty: true } : {}),
+    ...(undoSteps === undefined ? {} : { undoSteps }),
   };
   let moved: Map<string, Stored>;
   if (loose) {
@@ -723,12 +729,23 @@ export async function handle(data: StorageMessage): Promise<unknown> {
     if (released) await scan();
     const candidate = candidates.find((c) => c.generation === data.generation);
     if (!candidate) throw Error("Journal generation unavailable");
+    let base;
+    try {
+      base = await packageOf(candidate);
+    } catch (error) {
+      // A missing or truncated object can invalidate this generation. Other I/O
+      // errors may be temporary, so stop recovery before replacing any journal.
+      if (error instanceof ShortPackError || (error instanceof DOMException && error.name === "NotFoundError"))
+        return { damaged: String(error) };
+      throw error;
+    }
     value = {
-      base: await packageOf(candidate),
+      base,
       metadata: candidate.metadata && {
         format: candidate.metadata.format,
         opaque: candidate.metadata.opaque,
         dirty: candidate.metadata.dirty === true,
+        undoSteps: candidate.metadata.undoSteps,
       },
       records: candidate.records,
     };
@@ -747,11 +764,15 @@ export async function handle(data: StorageMessage): Promise<unknown> {
       }
       active.truncated = false;
     }
+    // Only the selected generation's object locations were verified on recovery.
+    const previouslyStored = [...stored.keys()];
+    stored.clear();
+    rememberStoredObjects(selected.metadata);
     release();
-    value = true;
+    value = previouslyStored.filter((path) => !stored.has(path));
   } else if (data.t === "checkpoint") {
     if (data.stop !== undefined && data.stop !== "pack" && data.stop !== "journal") throw Error("Invalid checkpoint stop");
-    await checkpoint(new Uint8Array(data.entries!), false, data.stop, data.dirty === true);
+    await checkpoint(new Uint8Array(data.entries!), false, data.stop, data.dirty === true, data.undoSteps);
     value = true;
   } else if (data.t === "collectPlan") {
     value = await collectPlan();
@@ -760,7 +781,7 @@ export async function handle(data: StorageMessage): Promise<unknown> {
       throw Error("Invalid collect");
     value = await collect(data.packs);
   } else if (data.t === "checkpointLoose") {
-    await checkpoint(new Uint8Array(data.entries!), true, undefined, data.dirty === true);
+    await checkpoint(new Uint8Array(data.entries!), true, undefined, data.dirty === true, data.undoSteps);
     value = true;
   } else if (data.t === "checkpointLegacy") {
     await checkpointLegacy(new Uint8Array(data.bytes!));

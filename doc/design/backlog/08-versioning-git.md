@@ -271,7 +271,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 - manifest：`stashes` を持つ manifest は `format` を上げる（4。「共通の設計」の案 B が既定）。stash が空なら今の形式のまま書く。
 - `format_version`（文書）：上げない。描画の版：触れない。
-- `PROTOCOL`：上げる（9。段階1の回）。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
+- `PROTOCOL`：9 に含める（段階1）。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
 - SDK の型：`VersionRefs.stashes`（`packages/alto-sdk/src/image-types.ts`）、`StashEntry`、`MergePlan.kind` に `"stash"`。API 報告を更新する。（新規）
 
 ### 作業手順

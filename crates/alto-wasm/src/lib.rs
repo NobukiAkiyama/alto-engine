@@ -161,7 +161,7 @@ pub struct Runtime {
     budget: u32,
     warnings: Vec<alto_engine::Warning>,
     /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
-    /// The store deletes objects only at startup, so this set only grows.
+    /// Recovery and pack collection can invalidate entries in this set.
     stored_objects: std::collections::BTreeSet<ContentHash>,
     /// The Worker decodes job inputs in its decode pool. Kept across GPU recovery.
     decode_workers: bool,
@@ -170,7 +170,11 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        8
+        9
+    }
+    #[wasm_bindgen(js_name=setMaxUndo)]
+    pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
+        self.engine.set_max_undo(steps as usize).map_err(error)
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
@@ -223,7 +227,7 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: canvas must be 1..65536 pixels"));
         }
         self.renderer.cancel_stroke();
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let meta = match render_version {
             None | Some(3) => DocumentMeta::srgb_u8(w, h),
             _ => return Err(error("INVALID_ARGUMENT: render version must be 3")),
@@ -1095,7 +1099,7 @@ impl Runtime {
     pub fn open_recovery_package(&mut self, bytes: &[u8], opaque: &str) -> Result<String, JsValue> {
         let opaque: std::collections::BTreeSet<ContentHash> =
             serde_json::from_str(opaque).map_err(error)?;
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine
             .open_recovery_package(bytes, &opaque)
             .map_err(error)?;
@@ -1103,7 +1107,7 @@ impl Runtime {
     }
     #[wasm_bindgen(js_name=openPackage)]
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine.open_package(bytes).map_err(error)?;
         self.install(engine, doc, warnings)
     }
@@ -1261,6 +1265,12 @@ impl Runtime {
     }
 }
 impl Runtime {
+    pub(crate) fn fresh_engine(&self) -> Result<Engine, JsValue> {
+        let mut engine = Engine::new();
+        engine.set_max_undo(self.engine.max_undo()).map_err(error)?;
+        Ok(engine)
+    }
+
     pub(crate) fn install(
         &mut self,
         engine: Engine,

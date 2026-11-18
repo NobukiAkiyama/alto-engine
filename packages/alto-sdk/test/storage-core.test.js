@@ -168,7 +168,7 @@ function checkpointOf(version, listed, carried = listed) {
   return frame(entries).buffer;
 }
 /** Pack files in a namespace, found by walking the fake OPFS. */
-function packNames(namespace) {
+function packDirectory(namespace) {
   const folder = "ns-" + Array.from(encoder.encode(namespace), (b) => b.toString(16).padStart(2, "0")).join("");
   const find = (dir) => {
     for (const [name, child] of dir.children ?? []) {
@@ -177,7 +177,10 @@ function packNames(namespace) {
       if (found) return found;
     }
   };
-  return [...(find(root)?.children.keys() ?? [])].sort();
+  return find(root);
+}
+function packNames(namespace) {
+  return [...(packDirectory(namespace)?.children.keys() ?? [])].sort();
 }
 
 test("packs neither journal names are collected mid-session, and their objects are written again", async () => {
@@ -236,7 +239,7 @@ test("a session that starts on two journals collects only what neither names", a
   const candidates = await next({ t: "loadCandidates" });
   assert.deepEqual(candidates.map((c) => c.generation), [3, 2]);
   assert.equal(await recoveredVersion(next, 3), 3);
-  await next({ t: "activate", generation: 3 });
+  assert.deepEqual(await next({ t: "activate", generation: 3 }), [object(3)]);
   // Before the session's first write nothing is collected mid-session; the startup
   // collection takes the dead pack with that write.
   assert.deepEqual((await next({ t: "collectPlan" })).packs, []);
@@ -245,7 +248,7 @@ test("a session that starts on two journals collects only what neither names", a
   const plan = await next({ t: "collectPlan" });
   // Journals 4 and 3 name packs 3 and 4 (or 4 alone after a merge); pack 2 is dead.
   assert.deepEqual(plan.packs, ["2.pack"]);
-  assert.deepEqual(plan.objects, [object(3)]);
+  assert.deepEqual(plan.objects, []);
   assert.equal((await next({ t: "collect", packs: plan.packs })).packs, 1);
   // Both journals still recover in a third session.
   const { handle: third } = await import(`../dist/storage-core.js?session=${++sessions}`);
@@ -254,4 +257,44 @@ test("a session that starts on two journals collects only what neither names", a
   assert.deepEqual(after.map((c) => c.generation), [4, 3]);
   assert.equal(await recoveredVersion(third, 4), 4);
   assert.equal(await recoveredVersion(third, 3), 3);
+});
+
+test("activating an older generation uses its pack even when a newer pack copied the same object", async () => {
+  const open = async () => {
+    const { handle } = await import(`../dist/storage-core.js?session=${++sessions}`);
+    await handle({ t: "configure", namespace: "fallback-pack" });
+    return handle;
+  };
+  let handle = await open();
+  await handle({ t: "checkpoint", entries: checkpointOf(1, [1]), undoSteps: 8 });
+  await handle({ t: "checkpoint", entries: checkpointOf(2, [1, 2], [2]), undoSteps: 8 });
+  assert.deepEqual(packNames("fallback-pack"), ["1.pack", "2.pack"]);
+
+  await handle({ t: "append", bytes: Uint8Array.of(7).buffer });
+  fs.failReads.add("2.pack");
+  try {
+    handle = await open();
+    const [latest] = await handle({ t: "loadCandidates" });
+    await assert.rejects(handle({ t: "loadCandidate", generation: latest.generation }), { name: "NotReadableError" });
+  } finally {
+    fs.failReads.delete("2.pack");
+  }
+  const [latest, prior] = await handle({ t: "loadCandidates" });
+  const latestContents = await handle({ t: "loadCandidate", generation: latest.generation });
+  assert.deepEqual(latestContents.records, [Uint8Array.of(7)], "transient read failure changed the latest journal");
+
+  const shortPack = packDirectory("fallback-pack").children.get("2.pack");
+  shortPack.data = shortPack.data.slice(0, -1);
+  assert.match((await handle({ t: "loadCandidate", generation: latest.generation })).damaged, /shorter than its objects/);
+  assert.equal(await recoveredVersion(handle, prior.generation), 1);
+
+  await packDirectory("fallback-pack").removeEntry("2.pack");
+  assert.match((await handle({ t: "loadCandidate", generation: latest.generation })).damaged, /NotFoundError/);
+  assert.equal(await recoveredVersion(handle, prior.generation), 1);
+  assert.deepEqual(await handle({ t: "activate", generation: prior.generation }), [object(2)]);
+  await handle({ t: "checkpoint", entries: checkpointOf(1, [1], []), undoSteps: 1 });
+  const [saved] = await handle({ t: "loadCandidates" });
+  assert.equal(await recoveredVersion(handle, saved.generation), 1);
+  const { metadata } = await handle({ t: "loadCandidate", generation: saved.generation });
+  assert.equal(metadata.undoSteps, 1);
 });

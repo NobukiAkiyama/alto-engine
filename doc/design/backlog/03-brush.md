@@ -55,7 +55,7 @@ SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?
 
 - `format_version`：触れない。ストロークは `Op::SetTiles` で保存され、ダブは保存されない。
 - render v3 の画素：触れない（表示の合成は変えない）。既存の丸いダブは従来と同じ式を通る。
-- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、現在 8）：`beginBrush` の `config` が増えるので上げる（10。00-ROADMAP の番号の表の段階2の回）。BR-4、BR-5 は段階1の回（9）で先に上げる。BR-1〜BR-3 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`、現在 9）：`beginBrush` の `config` が増えるので上げる（10。00-ROADMAP の番号の表の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-1〜BR-3 は段階2の回（10）で、同じ回の2本目以降は上げない。README と RELEASING を同じ PR で更新する。
 - シェーダー：`brush.wgsl` の既存モードの変更で、新しいモード番号は不要。
 
 ### 作業手順
@@ -233,7 +233,7 @@ R8 の先端画像を、ストロークの開始時に渡して使う（案 A）
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ）。
-- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので上げる（9。段階1の回。BR-5 と同じ回）。
+- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので9 に含める（段階1）。
 - シェーダー：変更なし（`angle` は BR-1 の `extra` で渡る）。
 
 ### 作業手順
@@ -300,7 +300,7 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 
 - `format_version`：触れない。
 - render v3：触れない（ダブ生成だけ。既定のカーブは今の出力と同じ）。
-- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので上げる（9。段階1の回。BR-4 と同じ回）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので9 に含める（段階1）。README と RELEASING を同じ PR で更新する。
 - 公開 API：`BrushOptions.pressureSize` / `pressureOpacity` を削除する破壊的変更（決定が要る点）。`packages/alto-sdk/api/alto-engine.api.md` を更新する。
 - シェーダー：変更なし。
 
@@ -352,15 +352,15 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 - `Runtime`（`crates/alto-wasm/src/lib.rs`）に `setMaxUndo(steps: u32)`（js_name、新規）。`Engine::new()` で作り直す箇所では、直前の上限を引き継ぐ。
 - 上限を上げても、`MAX_HISTORY_ONLY_OBJECTS` で `maintain` が古い Undo を捨てる。ただしこれは**ハッシュで数えたオブジェクト数**（ドキュメントが参照しないもの）の上限で、`Vec<Transaction>` 自体のバイト数は数えない。1000 ステップでは、Op の大きさに比例して線形に増える。このアイテムはバイトの上限を足さない。必要なら別途決める（決定が要る点）。
 
-**SDK / Worker。** `EngineOptions.undo?: { steps?: number }`。`init` の要求に `undo: number` を足し、Worker が `Runtime.create` のあとに `runtime.setMaxUndo(m.undo)` を呼ぶ。Worker の再起動（`restart`）でも同じ値を送る。再起動後のジャーナルの再生は `restore_history` が上限で切る。
+**SDK / Worker。** `EngineOptions.undo?: { steps?: number }`。`init` の要求に `undoSteps: number` を足し、Worker がプロトコルの照合後に `runtime.setMaxUndo` を呼ぶ。再起動でも同じ値を送る。復旧では保存時の上限（メタデータがない場合は 100）でジャーナルを再生してから、新しい上限を適用する。上限が変わった場合、旧世代に戻った場合、またはジャーナル再生が不一致で止まった場合は、次の編集を追記する前にチェックポイントを作る。保存ファイルの欠損や破損では旧世代を試す。一時的な読み取りエラーでは復旧を中断し、両世代を保存したまま再試行できるようにする。
 
 **エラー：** 範囲外は `INVALID_ARGUMENT`（`details.reason` は `"undo-steps"`）。
 
 ### 形式と通信
 
-- `format_version`：触れない（`max_undo` は保存しない）。
+- `format_version`：触れない（Undo 上限は OPFS の復旧チェックポイントに保存する）。
 - render v3：触れない。
-- `PROTOCOL`：`init` の要求が増えるので上げる（9。段階1の回。BR-4、BR-5 と同じ回）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：`init` の要求を追加し、段階1のプロトコルを 9 に更新する。README と RELEASING を同じ PR で更新する。
 - シェーダー：変更なし。
 
 ### 作業手順
@@ -370,11 +370,9 @@ Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input:
 - Modify `packages/alto-sdk/src/engine.ts`、`protocol.ts`、`worker.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`tests/e2e/browser-tests.js`。
 
 **試験：**
-- [ ] `editor.rs`：`undo_steps_limit_the_stack`、`lowering_the_limit_keeps_the_newest_steps`、`set_max_undo_to_one_keeps_only_the_last_step`。
-- [ ] `alto-engine`：`set_max_undo_applies_to_open_and_new_documents`、`the_limit_survives_a_rollback_and_a_recovery_reinstall`（`install_editor` の4か所）、`undo_steps_out_of_range_is_invalid`。
-- [ ] `browser-tests.js`：`undo steps beyond the configured depth are dropped`（`steps: 3` で5回編集し、3回目の Undo のあと4回目は何も起きない）。
-- [ ] `browser-tests.js`：`undo steps are kept across a Worker restart`。
-- [ ] `browser-tests.js`：`createEngine rejects undo.steps outside 1 to 1000`。
+- `editor.rs` の `configurable_undo_trims_oldest_and_applies_to_future_edits` で Undo と Redo 後の上限を確認する。
+- `undo_depth.rs` で既存・新規文書、範囲外の値、ロールバックと復旧・版の切り替え後の履歴件数を確認する。
+- `browser-tests.js` で範囲外の値、上限到達後の Undo、Worker 再起動、旧世代からの復旧、保存障害と再生の不一致からの再復旧を確認する。
 
 **完了条件：** 上の試験が通り、`undo` を指定しないときの挙動が変わらない（100）。
 

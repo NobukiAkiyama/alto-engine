@@ -97,6 +97,14 @@ impl Editor {
             log: vec![],
         }
     }
+    /// Change the history depth, discarding the oldest undo entries first.
+    pub fn set_max_undo(&mut self, steps: usize) {
+        self.max_undo = steps;
+        self.trim_undo();
+    }
+    pub fn max_undo(&self) -> usize {
+        self.max_undo
+    }
     /// Identifies the document's content; kept current by every edit, undo and redo.
     pub fn state_digest(&self) -> ContentHash {
         self.digest.value()
@@ -197,9 +205,7 @@ impl Editor {
         };
         self.log_tx(&tx, false);
         self.undo.push(tx);
-        if self.undo.len() > self.max_undo {
-            self.undo.remove(0);
-        }
+        self.trim_undo();
         self.redo.clear();
         self.digest.update(&self.doc, &changes);
         Ok(changes)
@@ -236,6 +242,7 @@ impl Editor {
         self.redo.pop();
         self.log_tx(&tx, false);
         self.undo.push(tx);
+        self.trim_undo();
         self.digest.update(&self.doc, &changes);
         Ok(Some(changes))
     }
@@ -288,10 +295,11 @@ impl Editor {
         self.redo = history.redo;
         self.seq = history.seq;
         self.log = history.log;
-        if self.undo.len() > self.max_undo {
-            let excess = self.undo.len() - self.max_undo;
-            self.undo.drain(..excess);
-        }
+        self.trim_undo();
+    }
+
+    fn trim_undo(&mut self) {
+        self.drop_oldest_undos(self.undo.len().saturating_sub(self.max_undo));
     }
     /// Forgets the most recent redo entry, for an undo that reverted a replayed edit.
     pub fn drop_newest_redo(&mut self) {
@@ -314,6 +322,40 @@ mod tests {
         doc.revision = 0;
         doc
     }
+    #[test]
+    fn configurable_undo_trims_oldest_and_applies_to_future_edits() {
+        let mut e = editor();
+        e.set_max_undo(3);
+        for width in 1..=5 {
+            e.transact(
+                "resize",
+                vec![Op::SetMeta {
+                    meta: DocumentMeta::srgb_u8(width, 10),
+                }],
+                e.doc.revision,
+            )
+            .unwrap();
+        }
+        assert_eq!(e.max_undo(), 3);
+        assert!(e.undo().unwrap().is_some());
+        e.set_max_undo(1);
+        assert!(e.undo().unwrap().is_some());
+        assert!(e.undo().unwrap().is_none());
+        assert!(e.redo().unwrap().is_some());
+        assert!(e.redo().unwrap().is_some());
+        assert_eq!(e.undo_len(), 1);
+        e.transact(
+            "resize",
+            vec![Op::SetMeta {
+                meta: DocumentMeta::srgb_u8(9, 10),
+            }],
+            e.doc.revision,
+        )
+        .unwrap();
+        assert!(e.undo().unwrap().is_some());
+        assert!(e.undo().unwrap().is_none());
+    }
+
     #[test]
     fn incremental_state_digest_matches_a_full_recompute_after_every_edit() {
         let mut e = editor();

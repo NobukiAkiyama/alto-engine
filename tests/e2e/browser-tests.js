@@ -1011,6 +1011,297 @@ export async function runTests(engine, benchmark, log) {
       const p = pixel(await unstable(engine).readTile(0, 0), 16, 16);
       assert(p[1] > 240 && p[3] === 255, "JPEG/PNG color " + p);
     });
+    await test("undo limit is validated and persists across document creation and restart", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      for (const steps of [0, 1001, 1.5, NaN]) {
+        let rejected = false;
+        try { await createEngine({ container: document.createElement("div"), undo: { steps } }); }
+        catch (error) { rejected = error.code === "INVALID_ARGUMENT" && error.details?.reason === "undo-steps"; }
+        assert(rejected, `invalid undo limit ${steps} accepted`);
+      }
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const other = await createEngine({ container: document.createElement("div"), undo: { steps: 2 }, storage: { namespace } });
+      try {
+        let d = await other.createDocument({ width: 64, height: 64 });
+        const edit = async () => { for (let i = 0; i < 4; i++) await d.transact("layer", tx => tx.addRaster()); };
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit not applied to new document");
+        await d.undo(); await d.undo();
+        assert(d.getSnapshot().history.undo === 0, "undo did not stop at the configured limit");
+        const exhausted = await d.snapshotHash();
+        await d.undo();
+        assert(await d.snapshotHash() === exhausted, "undo passed the configured limit");
+        await edit();
+        const beforeRestart = await d.snapshotHash();
+        await d.durable();
+        await testing(other).crash();
+        d = other.document;
+        assert(d.getSnapshot().history.undo === 2, "undo history changed during recovery");
+        assert(await d.snapshotHash() === beforeRestart, "document changed during recovery");
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost after restart");
+        const saved = await testing(other).saveBytes();
+        d = await other.open(new Blob([saved]));
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost when opening a package");
+        d = await other.createDocument({ width: 64, height: 64 });
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost when replacing document");
+      } finally {
+        await other.dispose();
+        await deleteRecovery(namespace);
+      }
+    });
+    await test("recovery replays every undo before applying a smaller undo limit", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+      let session;
+      try {
+        session = await start(8);
+        let d = await session.createDocument({ width: 64, height: 64 });
+        for (let i = 0; i < 5; i++) await d.transact("layer", tx => tx.addRaster());
+        await d.versions.commit("checkpoint with undo history");
+        await d.durable();
+        for (let i = 0; i < 3; i++) await d.undo();
+        const expected = await d.snapshotHash();
+        await d.durable();
+        const store = await testing(session).recoveryStore();
+        assert(store.records === 3, "expected three undo records after the checkpoint");
+        await session.dispose();
+
+        session = await start(1);
+        await testing(session).holdStorage(true);
+        d = await session.recovery.restore();
+        assert(await d.snapshotHash() === expected, "recovery stopped before the final recorded undo");
+        assert(d.getSnapshot().history.undo === 1, "recovery did not apply the configured undo limit");
+        assert(d.getSnapshot().history.redo === 3, "recovery lost redo history");
+        assert(await testing(session).storageHeld() === "checkpoint", "checkpoint was not queued first");
+        await d.redo();
+        const expectedAfterRedo = await d.snapshotHash();
+        assert(await testing(session).storageHeld() === "checkpoint",
+          "redo bypassed the held checkpoint");
+        await testing(session).holdStorage(false);
+        await d.durable();
+        const migrated = await testing(session).recoveryStore();
+        assert(migrated.latestGeneration > store.latestGeneration && migrated.records === 1,
+          "redo was not appended after checkpointing the new undo limit");
+        await testing(session).crash();
+        d = session.document;
+        assert(await d.snapshotHash() === expectedAfterRedo, "recovery lost an edit recorded under the new limit");
+        assert(d.getSnapshot().history.undo === 1 && d.getSnapshot().history.redo === 2,
+          "recovery with the new limit changed the undo or redo history");
+      } finally {
+        if (session?.status.state === "ready") await testing(session).holdStorage(false).catch(() => {});
+        await session?.dispose();
+        await deleteRecovery(namespace);
+      }
+    });
+    for (const steps of [1, 8]) {
+      await test(`recovery from an older pack checkpoints at undo limit ${steps}`, async () => {
+        const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+        const { namespaceFolder } = await import("../../packages/alto-sdk/dist/storage-core.js");
+        const namespace = `test-undo/${crypto.randomUUID()}`;
+        const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+        let session;
+        let unreadableWorkerURL;
+        let unreadableSetupURL;
+        try {
+          session = await start(8);
+          const d = await session.createDocument({ width: 64, height: 64 });
+          const add = async color => {
+            const asset = await image(session, color, 64, 64);
+            await d.transact("image", tx => tx.addRasterFromAsset(asset));
+            await d.versions.commit(color);
+            await d.durable();
+            return (await testing(session).recoveryStore()).latestGeneration;
+          };
+          const previous = await add("#ff0000");
+          const latest = await add("#0000ff");
+          // The previous checkpoint's journal also contains the committed edits.
+          const expected = await d.snapshotHash();
+          let latestOnly;
+          if (steps === 8) {
+            await d.transact("latest generation only", tx => tx.addRaster());
+            latestOnly = await d.snapshotHash();
+            await d.durable();
+          }
+          await session.dispose();
+
+          const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+          const directory = await root.getDirectoryHandle(namespaceFolder(namespace));
+          const packs = await directory.getDirectoryHandle("packs");
+          await packs.getFileHandle(`${previous}.pack`);
+          if (steps === 8) {
+            // Use the inline storage path in this test Worker to inject a transient OS read error.
+            const workerModule = new URL("../../packages/alto-sdk/dist/worker.js", import.meta.url);
+            unreadableSetupURL = URL.createObjectURL(new Blob([`
+              const RealWorker = self.Worker;
+              self.Worker = class extends RealWorker {
+                constructor(url, options) {
+                  if (String(url).endsWith("/storage-worker.js")) throw new Error("use inline test storage");
+                  super(url, options);
+                }
+              };
+              const read = FileSystemFileHandle.prototype.getFile;
+              FileSystemFileHandle.prototype.getFile = function () {
+                if (this.name === ${JSON.stringify(`${latest}.pack`)})
+                  throw new DOMException("temporary test read failure", "NotReadableError");
+                return read.call(this);
+              };
+            `], { type: "text/javascript" }));
+            unreadableWorkerURL = URL.createObjectURL(new Blob([`
+              import ${JSON.stringify(unreadableSetupURL)};
+              import ${JSON.stringify(workerModule.href)};
+            `], { type: "text/javascript" }));
+            session = await start(steps);
+            testing(session).setWorkerURL(unreadableWorkerURL);
+            let failure;
+            try { await testing(session).crash(); }
+            catch (error) { failure = error; }
+            assert(failure?.code === "STORAGE" && failure.message.includes("NotReadableError"),
+              "transient read failure did not stop recovery: " + failure);
+            testing(session).setWorkerURL(null);
+            await session.retry();
+            assert(await session.document.snapshotHash() === latestOnly, "retry lost the latest confirmed edit");
+            await session.dispose();
+          }
+          await packs.removeEntry(`${latest}.pack`);
+
+          session = await start(steps);
+          const restored = await session.recovery.restore();
+          assert(await restored.snapshotHash() === expected, "recovery lost edits from the older checkpoint and its journal");
+          assert(restored.getSnapshot().warnings.some(w => w.code === "RECOVERED_OLDER_GENERATION"),
+            "older generation warning missing");
+          await restored.durable();
+          assert((await testing(session).recoveryStore()).latestGeneration > latest,
+            "the recovered checkpoint could not be written");
+          await testing(session).crash();
+          assert(await session.document.snapshotHash() === expected, "the new checkpoint did not reopen");
+          assert(!session.document.getSnapshot().warnings.some(w => w.code === "RECOVERED_OLDER_GENERATION"),
+            "the new checkpoint still pointed to the missing pack");
+        } finally {
+          await session?.dispose();
+          if (unreadableWorkerURL) URL.revokeObjectURL(unreadableWorkerURL);
+          if (unreadableSetupURL) URL.revokeObjectURL(unreadableSetupURL);
+          await deleteRecovery(namespace);
+        }
+      });
+    }
+    await test("failed recovery checkpoint leaves the legacy journal recoverable", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+      let session;
+      let faultWorkerURL;
+      try {
+        session = await start(100);
+        let d = await session.createDocument({ width: 64, height: 64 });
+        await d.durable();
+        await testing(session).legacyCheckpoint();
+        for (let i = 0; i < 4; i++) await d.transact("layer", tx => tx.addRaster());
+        for (let i = 0; i < 3; i++) await d.undo();
+        const expected = await d.snapshotHash();
+        await d.durable();
+        await session.dispose();
+
+        session = await start(1);
+        await testing(session).injectStorageFault("beforeCheckpoint");
+        d = await session.recovery.restore();
+        assert(await d.snapshotHash() === expected, "legacy replay changed the document");
+        assert(d.getSnapshot().history.undo === 1 && d.getSnapshot().history.redo === 3,
+          "legacy replay did not retain the expected undo and redo history");
+        let failed = false;
+        try { await d.durable(); } catch (error) { failed = error.code === "STORAGE"; }
+        assert(failed && session.status.state === "storage-failed", "checkpoint failure was not reported");
+        // Re-arm a different fault in the replacement Worker, before its recovery request.
+        const workerModule = new URL("../../packages/alto-sdk/dist/worker.js", import.meta.url);
+        faultWorkerURL = URL.createObjectURL(new Blob([`
+          import ${JSON.stringify(workerModule.href)};
+          const receive = self.onmessage;
+          self.onmessage = event => {
+            if (event.data.t === "recover") {
+              receive({ data: { t: "injectStorageFault", id: -1, position: "beforeCheckpointParts" } });
+            }
+            receive(event);
+          };
+        `], { type: "text/javascript" }));
+        testing(session).setWorkerURL(faultWorkerURL);
+        const interrupted = await session.recovery.recoverAfterStorageFailure();
+        assert(interrupted.document === d && await d.snapshotHash() === expected,
+          "restart lost the recovered document when checkpoint generation failed");
+        assert(session.status.state === "storage-failed" && session.status.error.message.includes("before checkpoint generation"),
+          "restart hid the checkpoint generation failure");
+        testing(session).setWorkerURL(null);
+        const report = await session.recovery.recoverAfterStorageFailure();
+        d = report.document;
+        await d.durable();
+        assert(await d.snapshotHash() === expected, "retry lost edits from the original journal");
+      } finally {
+        await session?.dispose();
+        if (faultWorkerURL) URL.revokeObjectURL(faultWorkerURL);
+        await deleteRecovery(namespace);
+      }
+    });
+    await test("edits after a journal replay mismatch survive the next restart", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const { namespaceFolder } = await import("../../packages/alto-sdk/dist/storage-core.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = () => createEngine({ container: document.createElement("div"), storage: { namespace } });
+      let session;
+      try {
+        session = await start();
+        let d = await session.createDocument({ width: 64, height: 64 });
+        let first, second;
+        await d.transact("layers", tx => { first = tx.addRaster(); second = tx.addRaster(); });
+        await d.versions.commit("base");
+        await d.durable();
+        const rename = (layer, name) => d.transact("rename", tx => tx.setProps(layer, { name }));
+        await rename(first, "retained");
+        const prefix = await d.snapshotHash();
+        await rename(second, "removed from the journal");
+        await rename(first, "depends on the missing edit");
+        await d.durable();
+        const store = await testing(session).recoveryStore();
+        assert(store.records === 3, "expected three records after the checkpoint");
+        await session.dispose();
+
+        // Remove one intact record from the test namespace, leaving the remaining
+        // checksums valid so replay, rather than the journal reader, detects the gap.
+        const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+        const directory = await root.getDirectoryHandle(namespaceFolder(namespace));
+        let removed = false;
+        for (const name of ["journal-a.bin", "journal-b.bin"]) {
+          const handle = await directory.getFileHandle(name);
+          const bytes = await (await handle.getFile()).arrayBuffer();
+          const view = new DataView(bytes);
+          if (view.getUint32(8, true) !== store.latestGeneration) continue;
+          const next = at => at + 8 + view.getUint32(at, true);
+          const omitted = next(next(12));
+          const writer = await handle.createWritable();
+          await writer.write(bytes.slice(0, omitted));
+          await writer.write(bytes.slice(next(omitted)));
+          await writer.close();
+          removed = true;
+          break;
+        }
+        assert(removed, "could not find the active journal");
+
+        session = await start();
+        d = await session.recovery.restore();
+        assert(d.getSnapshot().warnings.some(w => w.code === "RECOVERY_DIVERGED"), "missing replay warning");
+        assert(await d.snapshotHash() === prefix, "recovery did not retain the valid prefix");
+        await rename(second, "saved after recovery");
+        const expected = await d.snapshotHash();
+        await d.durable();
+        await testing(session).crash();
+        d = session.document;
+        assert(await d.snapshotHash() === expected, "restart lost the edit saved after recovery");
+      } finally {
+        await session?.dispose();
+        await deleteRecovery(namespace);
+      }
+    });
     await test("second engine cannot overwrite the active recovery journal", async () => {
       const { createEngine } = await import("../../packages/alto-sdk/dist/index.js");
       const hash = (await doc.snapshotHash());

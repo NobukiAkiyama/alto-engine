@@ -574,6 +574,9 @@ export interface EngineOptions {
         namespace?: string;
         recovery?: boolean;
     };
+    undo?: {
+        steps?: number;
+    };
 }
 
 // @public (undocumented)
@@ -596,7 +599,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable" | "undo-steps";
 }
 
 // @public
