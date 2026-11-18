@@ -286,7 +286,7 @@ fn disk_extreme<const MAX: bool>(window: &[u8], side: usize, radius: usize) -> V
     output
 }
 
-fn box_average(window: &[u8], side: usize, radius: usize) -> Vec<u8> {
+pub(super) fn box_average(window: &[u8], side: usize, radius: usize) -> Vec<u8> {
     let width = side - 2 * radius;
     let count = 2 * radius + 1;
     let area = (count * count) as u32;

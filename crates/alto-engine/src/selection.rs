@@ -1,5 +1,7 @@
 //! Selection and mask commands operate on canonical R8 content, never on GPU caches.
 mod modify;
+mod path;
+pub use path::{PathCoverage, PathCoverageError};
 
 use super::*;
 use alto_core::{Affine2, NodeId, PixelFormat, TileKey};
@@ -453,6 +455,24 @@ fn lasso_coverage(row: &LassoRow, p: [f64; 2], feather: f64) -> f64 {
     })
     .clamp(0.0, 1.0)
 }
+fn selection_mode(spec: &Value) -> Result<&str, EngineError> {
+    let mode = spec["mode"].as_str().unwrap_or("replace");
+    if ["replace", "add", "subtract", "intersect"].contains(&mode) {
+        Ok(mode)
+    } else {
+        Err(invalid("Unknown selection combination"))
+    }
+}
+
+fn combine_selection(mode: &str, prior: f64, amount: f64) -> f64 {
+    match mode {
+        "add" => prior + amount - prior * amount,
+        "subtract" => prior * (1.0 - amount),
+        "intersect" => prior * amount,
+        _ => amount,
+    }
+}
+
 impl Engine {
     pub fn node_world(&self, h: DocHandle, id: NodeId) -> Result<[f64; 6], EngineError> {
         let doc = self.document(h)?;
@@ -487,10 +507,7 @@ impl Engine {
         if kind == "color" || kind == "contiguous" {
             return generated_selection(self, h, spec, kind);
         }
-        let mode = spec["mode"].as_str().unwrap_or("replace");
-        if !["replace", "add", "subtract", "intersect"].contains(&mode) {
-            return Err(invalid("Unknown selection combination"));
-        }
+        let mode = selection_mode(spec)?;
         let previous = doc.selection.clone();
         let old = previous
             .as_ref()
@@ -620,12 +637,7 @@ impl Engine {
                         let coverage = if kind == "invert" {
                             amount
                         } else {
-                            match mode {
-                                "add" => prior + amount - prior * amount,
-                                "subtract" => prior * (1.0 - amount),
-                                "intersect" => prior * amount,
-                                _ => amount,
-                            }
+                            combine_selection(mode, prior, amount)
                         };
                         pixels[(iy * 256 + ix) as usize] = (coverage * 255.0).round() as u8;
                     }

@@ -19,8 +19,10 @@ import type {
   ClipPath,
   CommitView,
   Effect,
+  FillRule,
   NodeId,
   PackageSize,
+  PathData,
   Rect,
   StylePatch,
   StyledPath,
@@ -70,6 +72,16 @@ export type SelectionSpec =
       /** Lasso points in document pixels. */
       points: [number, number][];
       feather?: number;
+    }
+  | {
+      kind: "path";
+      /** Filled Bézier path in document coordinates. Open subpaths close for filling. */
+      path: PathData;
+      /** Defaults to "non_zero". */
+      fill_rule?: FillRule;
+      /** Feather width in document pixels, from 0 to 64 (default 0). */
+      feather?: number;
+      mode?: SelectionMode;
     }
   | { kind: "all" | "invert"; mode?: SelectionMode }
   | { kind: "clear" }

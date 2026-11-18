@@ -172,98 +172,15 @@ export type SelectionSpec =
 
 ## SEL-3 パスからの選択
 
-### 現状
+`doc.selection.apply({ kind: "path", path, fill_rule?, feather?, mode? })` で、文書座標の Bézier パスの塗りを R8 の選択範囲に変換する。開いた部分パスも塗りに使うときは閉じる。塗り規則は `non_zero`（既定）または `even_odd`。選択の結合には既存の4モードを使う。空のパス、move のみ、文書外のパスは被覆が空になる。置換では R8 の空マスクを保持する。
 
-- 注入の形：`pub type VectorRasterizer<'a> = &'a dyn Fn(&[StyledPath], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>`（`crates/alto-engine/src/canvas.rs`）。`window` は `[x, y, w, h]`（世界座標の画素）、戻りは窓の各画素のプレマルチプライ Q14 の RGBA。`alto-engine` が GPU に依存しないための形。
-- 実体：`alto_gpu::raster_q8::vector_pixels_q14(paths, world, window)`（`crates/alto-gpu/src/raster_q8.rs`）。`crates/alto-wasm/src/image_versions.rs` の `layer_edit` が、これを `VectorRasterizer` として `prepare_layer_edit` に渡している。
-- 同じ実体の `Prepared`（`crates/alto-gpu/src/raster_q8.rs`）は、コマンドを一度だけ正規化して多くの窓へ描くための型で、`rasterize_crop_prepared` が窓ごとに使う。`vector_pixels_q14` は呼ぶたびに `map_path` と正規化をやり直す。
-- 使われ方：`vector_tiles`（`crates/alto-engine/src/canvas.rs`）が、タイルごとに `[tx*256, ty*256, 256, 256]` の窓で呼び、α を `((a * 255 + 8192) / 16384)` で8bit にする。エラー文字列は `UNSUPPORTED` にする。
-- パスの型：`alto_vector::PathData`、`PathCommand`（`move`／`line`／`quad`／`cubic`／`close`）、`FillRule`（`non_zero`／`even_odd`）、`StyledPath`（`crates/alto-vector/src/lib.rs`）。`PathData::validate` が 4096 命令、座標 ±1048576、部分パスの規則（`move` で始める）を検査する。
-- SDK の型：`PathData`、`FillRule`（`packages/alto-sdk/src/types.ts`）。
-- `selection_ops` は今、ラスタライザを受け取らない。呼び出し元：`crates/alto-wasm/src/lib.rs` の `select`、`crates/alto-engine/examples/create-masks-sample.rs`（3か所）、`selection.rs` の試験。
+`alto-wasm` の `select` は `PathCoverage` を注入する。レベル0のベクター塗りと同じ `raster_q8` の8bit被覆を使い、`Prepared` はパスごとに一度だけ作る。タイルを制御点の外接矩形とフェザーの半径で絞り、既存の選択との結合には疎なタイル集合を使う。フェザー（0〜64）は SEL-2 と同じ箱平均を半径 `round(feather / 2)`（正の幅では最小1）で使う。文書の外は平均前の被覆と出力の両方で0にする。
 
-### 11-04 からの変化
+パスの構造・命令数・座標は `PathData::validate` で検査する。4096タイルを超える場合は描画前に拒否する。別の作業量上限（2^27）は、候補タイルの合成、広げた窓の被覆と箱平均、曲線の分割、命令ごとの走査を見積もる。窓ごとの走査にも上限を置き、`even_odd` の交差点用バッファを抑える。上限超過や曲線の予算超過は `INVALID_ARGUMENT`、ラスタライザの座標範囲エラーは `UNSUPPORTED`。失敗時に選択は更新しない。
 
-- `m5/mod.rs` は `selection.rs` に改名された。
-- `VectorRasterizer` の定義と `image_versions.rs` の呼び出しは変化なし。
+実装は SEL-1 の SDK 型と SEL-2 の箱平均に依存する。パス用の注入は `select` に閉じているため、IMG-3 の `image_versions.rs` とは順序の制約がない。ファイル形式、プロトコル、描画の版は据え置く。
 
-### 設計
-
-```ts
-{ kind: "path"; path: PathData; fill_rule?: FillRule; feather?: number; mode?: SelectionMode }
-```
-
-- `path`：`PathData`（SDK の `types.ts`）。座標は文書座標。Rust は `serde_json::from_value::<alto_vector::PathData>` で読み、`validate()` を通す。失敗は `INVALID_ARGUMENT`（`"Path selection requires valid path data"`）。コマンドが空、または `move` だけで面積が無いパスは空の選択になる（エラーにしない）。
-- `fill_rule`：`"non_zero"`（既定）か `"even_odd"`。
-- `feather`：0〜64（既存の `feather` と同じ範囲と検査）。
-- `mode`：既存の4つ。既存の結合式（`add`、`subtract`、`intersect`）をそのまま使う。
-
-**ラスタライザの注入。** `selection_ops` に引数を足す。
-
-```rust
-pub fn selection_ops(
-    &mut self,
-    h: DocHandle,
-    spec: &Value,
-    rasterizer: PathCoverage<'_>,
-) -> Result<Vec<Op>, EngineError>
-```
-
-注入する型の注意：`VectorRasterizer` は `StyledPath` の列を受け、呼ぶたびに正規化をやり直すので、4096タイルで4096回の正規化になる。案（既定）：`Prepared` を使う窓のまとめ呼び出し用に、`canvas.rs` に注入の型 `PathCoverage<'a>`（新規：`&'a dyn Fn(&PathData, FillRule, &[[i64; 4]]) -> Result<Vec<Vec<u8>>, PathCoverageError>`、窓ごとの8bit被覆を返す）を足し、`alto-wasm` 側で `Prepared::new` を一度だけ呼んで `rasterize_crop_prepared` を窓ごとに使う。8bit への換算は `raster_q8` の被覆の単位を確かめて決める（実装時）。`PathCoverageError`（新規）は `TooComplex` と `OutOfRange` を持つ。代案：`VectorRasterizer` をそのまま使い、正規化の繰り返しを作業量の上限に含める。以下の `selection_ops` のシグネチャ、手順、閉包は、既定の案に合わせて読み替える。
-
-`alto-wasm` の `select` は `layer_edit` と同じ閉包（`alto_gpu::raster_q8::vector_pixels_q14` を呼び、`"the vector is outside the renderer's coordinate range"` に変換する）を渡す。閉包は `crates/alto-wasm/src/image_versions.rs` から関数に切り出して2か所で使う。他の `kind` は `rasterizer` を使わない。
-
-**アルゴリズム。**
-1. 範囲：パスの制御点の外接矩形を求める。`feather` があれば両側に `feather / 2` 広げ、文書の範囲 `[0, width) × [0, height)` に切り取る。`mode != "replace"` なら既存の選択のタイルの範囲も含める（既存の `selection_ops` と同じ）。`checked_bounds` で4096タイルを超えるなら `INVALID_ARGUMENT`（`"Selection/mask exceeds 4096 tiles"`）。
-2. タイルごと：パスの制御点の外接矩形と重ならないタイルは、ラスタライザを呼ばずに飛ばす。残りは `window = [tx*256, ty*256, 256, 256]` の被覆を `rasterizer` から得る（`world` は恒等）。これが `amount`（8bit を 0〜1 にして使う）。文書の外の画素は 0。代案（`VectorRasterizer` を使う場合）：`StyledPath { data, fill: Some([1.0, 1.0, 1.0, 1.0]), stroke: None, fill_rule }` を1つ渡し、α（Q14）を `(a * 255 + 8192) / 16384` で8bitにする。
-3. `feather == 0`：`amount` をそのまま既存の結合式へ渡す。長方形パスは整数座標で `rectangle` の `feather == 0` の結果と同じ値になる（画素の中心の内外判定と、端の画素の被覆が一致する）。
-4. `feather > 0`：パスの被覆（手順2の結果）を、SEL-2 の `smooth` の箱平均（半径 `round(feather / 2)`、最小 1）で柔らかくしてから結合する。直線の縁では幅 `2r + 1` の線形の傾きになり、`rectangle` の `feather` の傾き（幅 `feather`）に近いが、画素は一致しない。一致は約束しない。SEL-2 より前には入れず、前に出す場合は `feather > 0` を `INVALID_ARGUMENT`（`"Path selection feather is not available"`）にする。
-5. 結合式の結果を R8 のタイルにして `put_tile` する。全画素 0 のタイルは作らない。結果にタイルが無いときは `Some(空の TileMap)`（既存の長方形などと同じ。`None` にしない）。
-
-**上限とエラー。** パスは `PathData::validate` の上限（4096 命令、座標 ±1048576）、タイルは4096。作業量は、候補タイル × 65536 画素の被覆の計算に、タイルごとの曲線の分割（命令数に比例）を足したもの。`MAX_PATH_SELECTION_WORK: u64 = 1 << 31`（新規。既定値で、測定で調整する）を置き、`候補タイル数 × (65536 + 命令数 × 64)` がそれを超えたら、計算の前に `INVALID_ARGUMENT`（`"Path selection is too large; reduce the path or the area"`）で拒否する（`64` も既定値）。最大の4096タイルでも被覆の画素数は約2.7億で、SEL-2 の上限より小さいが、曲線の分割が加わるのでこの上限が要る。ラスタライザの失敗：`OutOfRange`（新規）（座標が範囲外）は `UNSUPPORTED`、`TooComplex`（新規）（曲線の予算超過。`raster_q8` は `CurveRange` として扱う）は `INVALID_ARGUMENT`（`"Path is too complex"`）にする。`vector_pixels_q14` は曲線の予算を超えたパスを黙って飛ばす（空になる）ので、`VectorRasterizer` を使う代案では、複雑すぎるパスは空の選択になる。計算は検証してから行い、エラーのとき文書は変わらない。
-
-**ベクターの画素との一致。** 同じ `raster_q8` の塗りの被覆を通すので、単一のパスの塗りだけは、そのパスをベクターレイヤーに描いたときの塗りの被覆と同じ値になる。複数のパスの合成、線（ストローク）、曲線の予算を超えて描画で飛ばされるパスは、選択には反映されない。レンダラー側の描画は変えない。描画の3実装には関係しない（選択は CPU の R8）。
-
-### 形式と通信
-
-なし。選択は R8 のまま、`spec` の `kind` が増えるだけ。`format_version`、`PROTOCOL`、描画の版は上げない。`selection_ops` の Rust のシグネチャが変わるが、公開の API ではない。SDK の公開型が変わるので API 報告を更新する。
-
-### 作業手順
-
-**Files:**
-- Modify `crates/alto-engine/src/selection.rs`（`kind == "path"` の分岐、`selection_ops` の引数、パスの被覆の計算）
-- Modify `crates/alto-engine/src/canvas.rs`（`PathCoverage` の型を足す場合）
-- Modify `crates/alto-wasm/src/lib.rs`（`select` が閉包を渡す）
-- Modify `crates/alto-wasm/src/image_versions.rs`（閉包を関数に切り出す）
-- Modify `crates/alto-engine/examples/create-masks-sample.rs`（`selection_ops` の呼び出し3か所）
-- Modify `packages/alto-sdk/src/document.ts`（`SelectionSpec` に枝）、`packages/alto-sdk/api/alto-engine.api.md`
-- Modify `tests/e2e/m5-tests.js`
-
-**Interfaces:** Consumes `VectorRasterizer`（`crates/alto-engine/src/canvas.rs`。代案の場合）、`alto_gpu::raster_q8::Prepared`、`alto_vector::PathData::validate`。Produces `selection_ops` の新しいシグネチャ、`PathCoverage`（新規）、`PathCoverageError`（新規）、`MAX_PATH_SELECTION_WORK`（新規）。
-
-- [ ] 試験用のラスタライザ：`selection.rs` の `mod tests` は `alto-gpu` に依存できない（`alto-engine` が GPU に依存しないため）。単位が整数の長方形と、半分だけ被覆する縁を返す小さな固定の閉包（`StyledPath` の長方形だけを扱う）を試験の中に書く。実際の `raster_q8` との一致はブラウザ試験で確かめる。
-- [ ] Rust 試験（`selection.rs`）：
-  - `path_selection_matches_rectangle_selection`：整数座標の長方形パスの `path` 選択が、同じ長方形の `rectangle` 選択と同じタイルハッシュ。
-  - `even_odd_hole_is_not_selected`：外側と内側の長方形のパスで、`even_odd` は内側が 0、`non_zero`（同じ向き）は内側も 255。
-  - `path_selection_respects_add_and_subtract`：`add`、`subtract`、`intersect` が既存の長方形との結合と同じ結果。
-  - `path_selection_is_clipped_to_the_document`：文書の外へはみ出すパスがタイルを文書の外に作らない。
-  - `path_work_limit_is_refused_before_any_work`：4096命令の複雑なパスを大きな範囲に広げると、ラスタライザを呼ぶ前に拒否される（呼び出し回数の数える閉包で確かめる）。
-  - `huge_path_is_refused_by_the_tile_limit`：座標が大きく、4096タイルを超えるパスが `INVALID_ARGUMENT` で拒否され、文書とタイルストアが変わらない。
-  - `invalid_path_is_refused_atomically`：4097 命令、座標が ±1048576 の外、`move` で始まらないパスが `INVALID_ARGUMENT`。
-  - `empty_path_gives_an_empty_selection`：コマンドが空のパスで `Some` の空の選択になり、`EMPTY_SELECTION` で塗りが拒否される。
-  - `path_feather_softens_the_edge`（SEL-2 の後）：`feather > 0` で縁の値が 0 と 255 の間になり、内側の深い所は 255。
-  - `path_selection_is_one_undo_step`：1回の Undo で元に戻る。
-  - `path_selection_skips_tiles_outside_the_path_bounds`：外接矩形の外のタイルでラスタライザが呼ばれない。
-  - 既存の `selection_ops` の試験を新しいシグネチャ（エラーを返す閉包を渡す）に直す。
-- [ ] ブラウザ試験 `a path selection matches the vector layer's coverage`（`tests/e2e/m5-tests.js`）：曲線を含む単一のパスを `doc.selection.apply({ kind: "path", path })` で選び、同じパスを塗りだけ（線なし）のベクターレイヤーに描いたときの α（`at(engine, x, y)`）と、選択の値が 8bit の丸めの範囲で一致する。`fill_rule: "even_odd"` の穴が選ばれない。
-- [ ] ブラウザ試験 `a path selection is refused when it is too large`：巨大なパスが `INVALID_ARGUMENT`、選択が変わらない。
-- [ ] 完了条件：`path` の選択が動き、上の試験が通る。既存のベクター・選択・描画のハッシュ（`tests/parity/` の既存行）が変わらない（共通規則1）。
-- [ ] 検証：`cargo test -p alto-engine selection`、`cargo build -p alto-wasm`、`sh scripts/check.sh native`、`pnpm --dir packages/alto-sdk build`、`pnpm --dir packages/alto-sdk api:check`、`node scripts/verify-browser.mjs --functional`。PR を出して opencode でレビューする。
-
-### 依存
-
-- 先に要る項目：SEL-1（型）。`feather > 0` の実装は SEL-2。IMG-3（05）は `crates/alto-wasm/src/image_versions.rs` の同じ閉包（`Rasterizers`（新規））を変えるので、IMG-3 を先に入れ、本項目はその後に引数を足す（00-ROADMAP の重なりの表）。
-- 後に続く項目：なし。VEC-1（グラデーション）、VEC-4（vello）はベクターの描画を変えるが、選択は `raster_q8` の被覆（塗りの α）だけを使うので、塗りの色やグラデーションは影響しない。`raster_q8` の被覆の計算が変わる項目（VEC-2 の破線は線だけ）が現れたら、この選択の試験を再確認する。
+Rust の回帰試験は結合・Undo、フェザーとクリッピング、疎なタイル、空パス、描画前の上限検査を確認する。ブラウザ試験では、曲線と穴のあるパスを2タイルに描き、ベクターレイヤーと選択マスクの全画素のアルファを許容差1で比較する。
 
 ## SEL-4 被写体選択
 

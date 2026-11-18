@@ -185,6 +185,64 @@ export async function runM5Tests(engine, log) {
       assert(await doc.snapshotHash() === before && doc.getSnapshot().selection !== null,
         "a rejected color selection changed the document");
     });
+    await test("a path selection matches the vector layer's coverage", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      const path = await engine.vectors.parseSvg(
+        "M100 40 Q230 -20 300 40 C345 70 400 145 358 205 H110 Z " +
+        "M235 100 H275 V160 H235 Z",
+      );
+      let vector;
+      await doc.transact("curve and hole", tx => {
+        vector = tx.addVector([{ data: path, fill: [1, 1, 1, 1], stroke: null, fill_rule: "even_odd" }]);
+      });
+      const alpha = async () => Promise.all([0, 1].map(tx => unstable(engine).readTile(tx, 0)));
+      const rendered = await alpha();
+      assert(pixel(rendered[0], 250, 125)[3] === 0, "vector hole");
+      assert(rendered.every(tile => tile.some((value, i) => i % 4 === 3 && value > 0 && value < 255)),
+        "both tiles should contain antialiased edges");
+      const white = await image(engine, 512, 256, ctx => {
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, 512, 256);
+      });
+      await doc.transact("show mask on white", tx => {
+        tx.setProps(vector, { visible: false });
+        layer = tx.addRasterFromAsset(white);
+      });
+      await doc.selection.apply({ kind: "path", path, fill_rule: "even_odd" });
+      await doc.masks.fromSelection(layer);
+      await doc.selection.clear();
+      const masked = await alpha();
+      for (let tx = 0; tx < masked.length; tx++) {
+        for (let i = 3; i < masked[tx].length; i += 4) {
+          assert(Math.abs(masked[tx][i] - rendered[tx][i]) <= 1,
+            `selection differs from vector coverage on tile ${tx}, pixel ${(i - 3) / 4}`);
+        }
+      }
+      await doc.selection.apply({ kind: "path", path });
+      await doc.masks.fromSelection(layer);
+      await doc.selection.clear();
+      assert((await at(engine, 250, 125))[3] === 255, "non-zero selects the same-winding interior");
+    });
+    await test("a path selection is refused when it is too large", async () => {
+      doc = await engine.createDocument({ width: 32000, height: 32000 });
+      const path = await engine.vectors.parseSvg("M0 0 H32000 V32000 H0 Z");
+      await doc.selection.apply({ kind: "rectangle", width: 10, height: 10 });
+      const before = await doc.snapshotHash();
+      await doc.selection.apply({ kind: "path", path }).then(
+        () => { throw Error("path exceeded its tile limit"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /4096 tiles/.test(error.message), String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "the rejected path changed the selection");
+      const outOfBudget = await engine.vectors.parseSvg("M0 0 C900000 0 -900000 220 20 20 Z");
+      await doc.selection.apply({ kind: "path", path: outOfBudget }).then(
+        () => { throw Error("path exceeded the rasterizer's curve budget"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /Path is too complex/.test(error.message), String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "a rasterizer error changed the selection");
+      await doc.selection.apply({ kind: "path", path: { commands: [] } });
+      assert(doc.getSnapshot().selection?.format === "r8" && await doc.selection.outline() === "",
+        "an empty path must produce an empty selection");
+    });
     await test("selection modification applies all four operations through the SDK", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await doc.selection.apply({ kind: "modify", operation: "grow", radius: 1 }).then(

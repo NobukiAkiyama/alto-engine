@@ -955,7 +955,10 @@ impl Runtime {
             return Err(error("CONFLICT: finish tool first"));
         }
         let v = serde_json::from_str(spec).map_err(error)?;
-        let ops = self.engine.selection_ops(self.doc, &v).map_err(error)?;
+        let ops = self
+            .engine
+            .selection_ops_with_path(self.doc, &v, &selection::rasterize_path)
+            .map_err(error)?;
         self.command("selection.set", ops)
     }
     #[wasm_bindgen(js_name=selectionOutline)]
@@ -1437,6 +1440,7 @@ impl Runtime {
 }
 
 mod image_versions;
+mod selection;
 mod text;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;
