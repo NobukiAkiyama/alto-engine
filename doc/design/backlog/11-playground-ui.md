@@ -14,7 +14,7 @@
 
 - `index.html` の合成モードの選択肢は Normal、Multiply、Screen（393〜395行）。
 - `image-versions-ui.js`：スタンプ（`image-stamp`）と指先（`image-smudge`）のボタンはある。ただしストロークは始点・終点の数値入力による直線1本で、ドラッグの入力はない。
-- レベル補正、トーンカーブ、色相・彩度の効果の編集画面がない。色調整には彩度のスライダー（`index.html` の `adjust-saturation`、`selection-ui.js` で接続）だけがある。
+- レベル補正、トーンカーブ、色相・彩度の効果の編集画面がない。色調整には明るさ・コントラスト・彩度の入力欄がある（`index.html` の `adjust-brightness`、`adjust-contrast`、`adjust-saturation`、`selection-ui.js` で接続）。
 
 ## UI-1 スタンプと指先のドラッグ
 
@@ -39,11 +39,11 @@
 
 ## UI-4 エディタ UI 部品
 
-**設計。** 埋め込みの設計では対象外。作るなら別パッケージ `@alto/ui` で、レイヤーパネル、ツールバー、カラーピッカーを Web Components として提供する。`doc.subscribe`、`getSnapshot` の上に作る。D1 の判断待ち。製品を作る側の要件が決まるまでは着手しない。
+**設計。** 埋め込みの設計では対象外。作るなら別パッケージ `@alto/ui` で、レイヤーパネル、ツールバー、カラーピッカーを Web Components として提供する。`doc.subscribe`、`getSnapshot` の上に作る。D1 で UI は除外と決定済み。範囲が変わり、製品を作る側の要件が決まるまでは着手しない。
 
 ## UI-5 React、Vue の包み
 
-**設計。** `examples/react-embed/src/main.tsx` が React の useSyncExternalStore に載ることを示している。`@alto/react`（新規）は `useAltoEngine`、`useDocument`、`useSnapshot(selector)`（いずれも新規）の薄い層で、100 行程度に収まる。Vue も同じ形。公開するとメンテナンスの対象が増えるので、D1 の判断待ち。
+**設計。** `examples/react-embed/src/main.tsx` が React の useSyncExternalStore に載ることを示している。`@alto/react`（新規）は `useAltoEngine`、`useDocument`、`useSnapshot(selector)`（いずれも新規）の薄い層で、100 行程度に収まる。Vue も同じ形。公開するとメンテナンスの対象が増える。D1 で UI は除外と決定済み。
 
 ## 実装タスク
 
