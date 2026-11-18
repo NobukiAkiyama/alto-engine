@@ -11,7 +11,7 @@ export type {
   RecoveryReport,
 } from "./engine.js";
 export { DocumentHandle } from "./document.js";
-export type { ExportImageOptions, SelectionSpec } from "./document.js";
+export type { ExportImageOptions, SelectionMode, SelectionSpec } from "./document.js";
 export { AltoError } from "./errors.js";
 export type { ConflictReason, ErrorCode, ErrorDetails } from "./errors.js";
 export type { BuiltInIntent, Intent, IntentId } from "./intents.js";
