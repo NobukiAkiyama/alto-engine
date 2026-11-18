@@ -156,6 +156,8 @@ jobs:
           # Optimized test builds keep debug assertions and overflow checks.
           CARGO_PROFILE_TEST_OPT_LEVEL: "2"
         run: sh scripts/check.sh native
+      - name: Compile fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
       - name: Record Metal semi-transparent parity
         if: always()
         run: |

@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [package, recovery, snapshot, commit, svg, font, path, journal]
+        target: [package, recovery, snapshot, commit, svg, font, path, journal, folder, decode]
     steps:
       - uses: actions/checkout@v7
       # cargo-fuzz needs nightly; the workspace stays on the pinned toolchain.

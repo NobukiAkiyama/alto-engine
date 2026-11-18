@@ -8,6 +8,35 @@ use std::sync::Arc;
 
 static SAMPLE: &[u8] = include_bytes!("../../../verification/sample-m6.alto");
 
+#[test]
+fn new_fuzz_seeds_reach_their_success_paths() {
+    let entries =
+        alto_store::read_entries(include_bytes!("../../../fuzz/seeds/folder/sample.alto")).unwrap();
+    assert!(Engine::folder_plan(entries.clone()).is_ok());
+    assert!(Engine::new().open_entries(entries).is_ok());
+    // The thin seed reaches the external-history branch of open_package_entries:
+    // one version-only object stays outside and the document opens without it.
+    // (folder's decode_folder rejects this input as UNSUPPORTED.)
+    let mut thin = Engine::new();
+    let (opened, warnings) = thin
+        .open_package(include_bytes!("../../../tests/fixtures/thin-versions.alto"))
+        .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(thin.history_is_external(opened));
+    assert_eq!(thin.external_objects(opened).unwrap().len(), 1);
+    for (seed, expected) in [
+        (&include_bytes!("../../../fuzz/seeds/decode/r8")[..], 65536),
+        (
+            &include_bytes!("../../../fuzz/seeds/decode/rgba8")[..],
+            262144,
+        ),
+    ] {
+        let result = alto_decode::decode_batch(seed);
+        assert_eq!(result[36], 0);
+        assert_eq!(result.len(), 41 + expected);
+    }
+}
+
 fn run(target: &str, data: &[u8]) {
     match target {
         "package" => {
@@ -52,6 +81,24 @@ fn run(target: &str, data: &[u8]) {
             let mut engine = Engine::new();
             let (h, _) = engine.open_package(SAMPLE).unwrap();
             let _ = engine.replay_record(h, data);
+        }
+        "folder" => {
+            let Ok(entries) = alto_store::read_entries(data) else {
+                return;
+            };
+            let known = entries
+                .keys()
+                .filter_map(|name| {
+                    let (_, hash) = name.strip_prefix("objects/")?.split_once('/')?;
+                    hash.parse::<alto_core::ContentHash>().ok()
+                })
+                .collect();
+            let _ = Engine::folder_plan(entries.clone());
+            let _ = Engine::new().open_entries(entries.clone());
+            let _ = Engine::new().open_entries_on_demand(entries, known);
+        }
+        "decode" => {
+            let _ = alto_decode::decode_batch(data);
         }
         other => panic!("tests/fixtures/fuzz/{other}: no such fuzz target"),
     }

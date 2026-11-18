@@ -19,6 +19,12 @@ for t in $targets; do
   mkdir -p "corpus/$t"
   case $t in
     package | recovery) cp ../tests/fixtures/*.alto ../verification/*.alto "corpus/$t/" || exit 1 ;;
+    # folder の corpus にコピーするのは薄い .alto の 1 件だけ（seeds/folder と
+    # 併用）。decode_folder は外部履歴を持つ入力を UNSUPPORTED として拒否する
+    # ため、この seed は folder の拒否経路を試す。大きな .alto を混ぜないのは
+    # 入力上限の増加と試験速度のため。正常な folder 経路は
+    # seeds/folder/sample.alto（17,831 バイト）で試す。
+    folder) cp ../tests/fixtures/thin-versions.alto "corpus/$t/" || exit 1 ;;
     font) cp ../tests/fonts/*.otf ../tests/fonts/*.ttf "corpus/$t/" || exit 1 ;;
   esac
   echo "== $t"

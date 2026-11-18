@@ -1373,3 +1373,95 @@ F-2 の4時間試験は、版の持つタイルで `.alto` が 512 MiB に届い
 レビュー：作業ごとのレビューと、ブランチ全体のレビュー（Important 3件、Minor 2件を直した）。その後、opencode でもレビューし、コードを直す指摘はなかった。
 
 生ログ：`thin-soak-240/`（`console.txt`、`chrome-stderr.log`、`soak-report.json`、`browser-diagnostics.json`、`build.log`）、`thin-soak-240-stopped-pre-fix/`（レビューの修正の前に止めた回）、`thin-soak-5/`、`thin-save-bench/`（`run1.txt`、`run2.txt`、`summary.txt`）。
+
+## 2026-11-17：QA-1 の追加ファジング
+
+`folder` と `decode` の target を追加し、ローカルの macOS で各60秒実行した。nightly は `rustc 1.102.0-nightly (f5cedb83a 2026-11-07)`、cargo-fuzz は 0.13.2。薄い seed を追加した後の再実行（`verification/out/qa1-fuzz/run-60s-current.log`）では、`folder` は 221,917 入力・peak RSS 1,221 MiB、`decode` は 3,806,294 入力・peak RSS 409 MiB、どちらもクラッシュなし。
+
+最初の `decode` 実行では、R8 の LZ4 サイズ接頭辞を `0xffffffff` とした入力で約4 GiB の確保を試み、libFuzzer がメモリ不足として停止した。展開前に R8 または RGBA8 の固定サイズを確認するよう修正し（`alto_core::TILE` と `PixelFormat::bytes_per_pixel` に合わせた）、入力を `tests/fixtures/fuzz/decode/oversized-lz4` に保存した。この最初の停止の生ログは残していない（`run.log` は修正後の実行）。停止の原因は、回帰入力の先頭4バイト（`0xffffffff`）と単体試験 `oversized_lz4_prefix_is_reported_as_damage` で確かめられる。デコードの単体試験、回帰試験、WASM ターゲットの `cargo check` は成功。
+
+あわせて `decode_batch` の位置計算を直した。`p + 38 + len` は wasm32 の 32 ビット `usize` で `len` が `u32::MAX` に近いとあふれ、release では値が回り込んで `p` が先頭に戻り、`count` 回まで出力を増やし続けうる。64 ビットのホストで動く fuzz では見つからない。先に `framed.get(p..)` でヘッダーを確認し、残りのスライスで本体の長さを確かめてから `p` を進める。範囲内と確認できないバッチは拒否する。単体試験 `length_past_the_frame_stops_the_batch`（長さ `u32::MAX`）と `empty_and_frame_ending_items_keep_the_batch_aligned`（長さ 0 と、本体がフレームの末尾ちょうどで終わる場合）を追加した。
+
+### 薄い `.alto` の seed（QA-1b）
+
+`tests/fixtures/thin-versions.alto`（manifest format 3、version-only object 1件）を `Engine::save_thin_package` で生成した。生成器は `crates/alto-engine/examples/create-thin-versions-sample.rs`。`run-all.sh` は `package` と `recovery` の seed に入れる（外部履歴の分岐は `open_package_entries` 経路で到達する）。`folder` の seed にも入れるが、folder の `decode_folder` は外部履歴を持つ入力を `UNSUPPORTED` として拒否するため、folder target では拒否経路の試験になる。`fuzz_regressions.rs` の seed 試験で、package 経路で `history_is_external` が真、`external_objects` が1件になることを確かめた。
+
+`package` を60秒実行（74,747 入力、クラッシュなし、`verification/out/qa1-fuzz/package-60s.log`）。`cargo fuzz coverage package` で `open_package_entries` の外部履歴分岐（`external.take()` の `Some` 側）が 8 回実行されたことを確認した。確認は次のコマンドで、`fuzz/coverage/package/coverage.profdata`（412 入力）から `versions.rs` の行ごとの実行回数を出した。597 行（`external.take()`）が 39 回、`None` 側の 598 行が 31 回、`Some` 側の 600 行が 8 回。抜粋は `verification/out/qa1-fuzz/package-coverage-external.txt`。
+
+```
+llvm-cov show target/aarch64-apple-darwin/coverage/aarch64-apple-darwin/release/package \
+  -instr-profile=fuzz/coverage/package/coverage.profdata \
+  "$PWD/crates/alto-engine/src/versions.rs"
+```
+
+`llvm-cov` は nightly の `llvm-tools` のもの。ソースは絶対パスで渡す（相対パスでは何も出ない）。
+
+### 週次の10分試験（2026-11-17）
+
+`TARGETS="folder decode" sh fuzz/run-all.sh 600`（各 target 10分、1入力10秒、2 GiB RSS）。最終版の `run-all.sh`（folder の corpus に `thin-versions.alto` をコピー）と、`decode_batch` のあふれ修正の後のコードで計測した。開始時の corpus は `folder` が 8,895 件（最大 17,831 バイト）、`decode` が 601 件。
+
+| target | 入力数 | peak RSS | クラッシュ |
+|---|---:|---:|---|
+| `folder` | 2,092,298 | 1,432 MiB | なし |
+| `decode` | 38,605,517 | 426 MiB | なし |
+
+exit 0。クラッシュ入力は発生せず、`fuzz/artifacts/` には何も残らなかった。ログは `verification/out/qa1-fuzz/tenmin-final.log`。`folder` の実行中に同じマシンで下記の ASan 再生を走らせたため、`folder` の入力数は少なめに出ている。修正前の版での 10 分試験（`folder` 3,171,563 入力・1,372 MiB、`decode` 35,945,301 入力・378 MiB）は `tenmin.log` に残している。
+
+### ブラウザ試験（2026-11-17）
+
+`sh scripts/build-m0.sh`（WASM 6.2 MiB）と `pnpm --dir packages/alto-sdk build` の後に `node scripts/verify-browser.mjs --functional` を回した。`decode_batch` のあふれ修正の後に再実行した結果で、Chrome 157.0.8103.79（headless、WebGPU アダプタ `apple / metal-3`）。ログは `verification/out/qa1-fuzz/browser-functional2.log`。修正前の実行（Chrome 157.0.8103.39、`browser-functional.log`）も件数・失敗数は同じだった。
+
+| suite | 件数 | 失敗 |
+|---|---:|---:|
+| image-versions | 24 | 0 |
+| functional | 38 | 0 |
+| m5 | 9 | 0 |
+| m6 | 10 | 0 |
+| m7 | 8 | 0 |
+| m8 | 6 | 0 |
+| embed | 40 | 0 |
+| parity | 164 | 0 |
+| crash | 56 | 0 |
+
+予期しない GPU プロセスのクラッシュは 0 件。decode Worker の変更（LZ4 サイズ接頭辞の事前検査）の後も、ブラウザ経路で回帰はなかった。
+
+### メモリ不足の入力について
+
+`folder` target の 60 秒実行（10 分試験より前、`run.log` の頃）で、RSS が 2 GiB を超えて入力が `fuzz/artifacts/folder/oom-e50e617386d9d30ce161d5652375aeeb43a73e0e` に保存された。この入力は回帰入力 `tests/fixtures/fuzz/folder/oversized-header`（106,317 バイト）に移したので、`fuzz/artifacts/` には残っていない。
+
+同じ入力を ASan 付きの `folder` バイナリで単体再生すると、peak RSS は 92 MiB（`verification/out/qa1-fuzz/single-replay2.log`）。コーパスの 9,076 入力にこの入力を加えた 9,077 入力を、同じ ASan バイナリで1プロセスで順に再生した（`-runs=0 -rss_limit_mb=0`）。
+
+| 検疫（quarantine） | 最大 RSS | ログ |
+|---|---:|---|
+| 既定 | 734 MiB | `corpus-replay-asan-default.log` |
+| 16 MiB（`ASAN_OPTIONS=quarantine_size_mb=16`） | 192 MiB | `corpus-replay-asan-q16.log` |
+
+60 秒の fuzz 実行でも、検疫を 16 MiB にすると peak RSS は 356 MiB だった（`folder-60s-quarantine16.log`。既定では 1,221 MiB）。同じ入力列で検疫の大きさだけを変えると RSS が約4分の1になるので、増えた分は解放済みのメモリを ASan が検疫として抱えている分と見るのが有力である。macOS の ASan ではリーク検出（LeakSanitizer）が使えないため、Alto のコードにリークが無いことまでは示していない。以前の `corpus-scan.log`（最大 8.4 MiB）は ASan を使わない計測で、問題の入力も含んでいなかったので、この比較の根拠には使わない。
+
+10 分試験の peak RSS は検疫が既定のままで 2 GiB の判定線の内側に収まった（上表）。ただしローカルで1回測っただけで、週次 CI（Ubuntu）でも常に収まることは示していない。
+
+### 検証コマンド
+
+- `sh scripts/check.sh native`：成功（Rust テスト 372 件成功、失敗 0。`native4.log`）
+- `cargo test -p alto-engine --test fuzz_regressions`：2 件成功
+- `cargo test -p alto-decode`：4 件成功
+- `cargo check -p alto-decode --target wasm32-unknown-unknown`：成功
+- `TARGETS="folder decode" sh fuzz/run-all.sh 60`：成功（exit 0、artifact なし）
+- `TARGETS="folder decode" sh fuzz/run-all.sh 600`：成功（exit 0、artifact なし。`tenmin-final.log`）
+- `node scripts/verify-browser.mjs --functional`：成功（上表）
+
+### 2026-11-18：ジャーナルの変異試験（QA-1c）
+
+`packages/alto-sdk/test/journal-mutation.test.js` に、チェックポイントと3記録を持つ format 1 ジャーナルの固定入力を追加した。全バイト位置での切り詰め、各レコードの全ビット反転、異常な長さ、CRC が正しい不正タグで、初めて破損した記録より前の内容と件数が復元されることを確認する。後ろに完全な記録があっても復元しない現在の契約を含む。format 2〜4 のメタデータ自体の変異はこの試験の対象外。
+
+`pnpm --dir packages/alto-sdk build` と `node --test packages/alto-sdk/test/*.test.js` は成功（57件、失敗0）。ログは `verification/out/qa1-fuzz/journal-mutation-tests.log`。F-9 後の `unwrap` / `expect` の中間確認は [UNWRAP-AUDIT.md](UNWRAP-AUDIT.md) に追記した。全機能実装後の QA-1d は未実施。
+
+### 2026-11-18：decode レビュー指摘への対応
+
+切り詰められた要求を受けたときは部分的な結果を返さず、decode Worker から失敗を通知してプールを停止し、未処理タイルを既存の inline 復号に戻す。入力が整ったバッチの不正な圧縮タイルは従来どおり破損として扱う。fuzz target に出力の件数・長さの整合性検査を追加した。
+
+ブラウザ functional 試験では、実際の wasm32 の decode と Worker に、長さ `0xffffffff` と切り詰めたバッチを渡して拒否を確認した。Chrome 157.0.8103.79 / Apple Metal、39件成功（`verification/out/decode-review/browser.log`）。Worker の不正要求の通知と、既存の停止・inline 復号の試験を確認したが、エンジン側から不正要求を注入する一連の試験ではない。decode の60秒 fuzz は 2,509,081 入力、クラッシュなし、peak RSS 391 MiB（`verification/out/decode-review/fuzz.log`）。
+
+PR 時の native CI に `cargo check --manifest-path fuzz/Cargo.toml --bins --locked` を追加し、全 fuzz target のコンパイルを検査する。新しい週次 matrix の CI 実行は未確認。
+
+ローカルでは同じ fuzz target のコンパイル、`sh scripts/check.sh native`、SDK の Node 試験57件が成功した（`verification/out/decode-review/native.log`、`sdk-tests.log`）。CI での実行結果はまだない。

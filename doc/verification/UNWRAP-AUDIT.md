@@ -1,5 +1,24 @@
 # ファジングと unwrap / expect の監査（QA-1、2026-11-08）
 
+## 2026-11-18 中間確認（F-9 後）
+
+上記「数え方」を基点 `fe87225` と現行作業ツリーに同じように適用した。行単位で `.unwrap()` / `.expect(` を数え、テスト用ディレクトリ・ファイル、各ファイルの最初の `#[cfg(test)]` 以降、`cpu_composite/` と `vector_probe.rs` を除外した。基点は文書どおり 71 箇所、現行は **75 箇所**。
+
+| crate | 基点 | 現行 |
+|---|---:|---:|
+| alto-core | 5 | 5 |
+| alto-decode | 2 | 2 |
+| alto-doc | 4 | 4 |
+| alto-engine | 31 | 32 |
+| alto-gpu | 25 | 27 |
+| alto-store | 1 | 2 |
+| alto-text | 2 | 2 |
+| alto-vector | 1 | 1 |
+
+増えた箇所を確認した。`versions/journal.rs` の `rsplit('/').next()` は空文字列でも要素が1つある。`raster_q8.rs` の `Packed::iter` は `Packed::new` がタグに応じた点を一緒に格納し、`crop_within` の `rposition` は直前に同じ行の非ゼロ値を検出している。`alto-store` の `external_objects_bytes` は固定形式のハッシュ集合を JSON にする。今回の差分確認では、外部入力だけでこれらが失敗する例は見つからなかった。
+
+これは F-9 と現在の未コミット変更までの中間確認であり、01〜12 の未実装項目を入れた後の再監査ではない。QA-1d は残す。行ベースの集計は条件付きコンパイルの構文解析ではなく、将来のファイル構成変更時は除外範囲を再確認する。
+
 設計：[13-verification.md](../design/backlog/13-verification.md) の QA-1。基点は main `fe87225`。
 
 ## 数え方

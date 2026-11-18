@@ -127,6 +127,35 @@ export async function runTests(engine, benchmark, log) {
       await benches(engine, log, results);
       return;
     }
+    await test("wasm decode rejects truncated batches and 32-bit length overflow", async () => {
+      const { default: init, decodeBatch } = await import("../../packages/alto-sdk/dist/pkg/alto_decode.js");
+      await init();
+      const overflow = new Uint8Array(4 + 38 + 38);
+      const view = new DataView(overflow.buffer);
+      view.setUint32(0, 2, true);
+      view.setUint32(38, 0xffffffff, true);
+      assert(decodeBatch(overflow).length === 0, "overflowed batch was not rejected");
+      const truncated = new Uint8Array(4 + 38);
+      new DataView(truncated.buffer).setUint32(0, 2, true);
+      assert(decodeBatch(truncated).length === 0, "truncated batch was not rejected");
+      const empty = decodeBatch(new Uint8Array(4));
+      assert(empty.length === 4 && new DataView(empty.buffer, empty.byteOffset, 4).getUint32(0, true) === 0,
+        "empty valid batch was rejected");
+      const worker = new Worker(new URL("../../packages/alto-sdk/dist/decode-worker.js", import.meta.url), { type: "module" });
+      try {
+        const reply = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(Error("decode worker timeout")), 15000);
+          worker.onerror = (event) => { clearTimeout(timer); reject(Error(event.message)); };
+          worker.onmessage = ({ data }) => {
+            if (data.ready) worker.postMessage({ id: 7, batch: overflow.buffer });
+            else { clearTimeout(timer); resolve(data); }
+          };
+        });
+        assert(reply.id === 7 && reply.error === "invalid decode request frame", "worker did not report malformed batch");
+      } finally {
+        worker.terminate();
+      }
+    });
     let doc, lower, upper, assetRed, assetBlue;
     await test("queue-ordered reuse and destroy preserve earlier copies without a CPU fence", async () => {
       const adapter=await navigator.gpu.requestAdapter(), device=await adapter.requestDevice();
