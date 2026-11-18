@@ -140,7 +140,7 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 **共通基盤（FX-4 で作る）。**
 
 1. `smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow` を作り、`stack` のぼかしの枝を一般化する。既存の `GaussianBlur` の挙動は変えない。（新規）
-2. 評価の重複を避ける。`Context` に `(効果の接頭辞の長さ, ROI)` をキーにした評価結果のメモ（新規、同じ `Context` の間だけ）を持たせ、`stack` が同じ接頭辞を同じ ROI で2回評価しないようにする。選択つきぼかしが連なっても評価は線形になる。メモはレース無しで同じ `Target` の `lease` を共有するだけである（`Context::alloc` の貸し出しを数える）。
+2. 評価の重複を避ける。各 `stack` のルート呼び出しに専用の評価結果のメモ（新規）を持たせ、再帰の間だけ `(効果の接頭辞の長さ, ROI)` をキーに共有する。別のノードや調整レイヤー、子孫の `stack` 呼び出しには共有しない。同じ `Context` は複数の入力や変換を扱うので、メモを `Context` 全体で共有すると別の入力と衝突する。粗い平面と元画像では ROI が異なるため、このメモだけで評価回数が線形になるとは限らない。異なる半径・倍率と選択範囲を組み合わせて評価回数と GPU 予算を測り、必要なら ROI をまとめる評価計画を追加する。メモは同じ `Target` の `lease` を共有し、既存の GPU 予算に計上する。予算が逼迫したら使用中でないメモの lease を解放し必要時に再計算する。再計算の増加も測る。必要な作業が予算に収まらない場合は既存の `RenderError::Budget`（`INVALID_ARGUMENT`）を返し、編集済み文書は維持する。
 3. 調整レイヤーの判定（`graph.rs`）を述語へ置き換える。
 
 ### 形式と通信
@@ -159,7 +159,9 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 **Interfaces:** Produces `Effect::HighPass { radius, selection, extra }`、`REffectKind::HighPass { radius, radius_q8 }`、`smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow`、評価のメモ、ハイパスの結合モード。
 
 - [ ] 形式の試験：`document_format` を上げた manifest を保存・再オープンでき、旧番号は `package format` で拒否される。
-- [ ] 基盤の試験（先に赤）：`selected_blur_stack_evaluates_each_prefix_once`（選択つきぼかし 8 個で、`stack` の評価回数が個数に比例する。修正前は 2^8）。既存のぼかしの parity（`blur-v3-*`）が1バイトも変わらないこと。
+- [ ] 基盤の試験（先に赤）：`selected_blur_stack_evaluates_each_prefix_once`（十分な予算でメモを保持できる間、同一の接頭辞・ROI を重複評価しない）。選択つきぼかしを異なる半径・倍率で最大 32 個重ねた場合も評価回数と GPU 予算を記録し、指数的な増加を防ぐこと。予算逼迫による解放・再計算も画素一致を検証する。既存のぼかしの parity（`blur-v3-*`）が1バイトも変わらないこと。
+- [ ] 試験：同じ ROI・効果数を持つ異なるレイヤーと調整レイヤーを重ね、メモ有効時も無効時と全画素が一致する。ネストしたグループと異なる変換も含める。
+- [ ] 試験：メモが領域を保持する場合も、従来成功した文書が同じ GPU 予算で描画できることと、予算超過時に既存のエラーを返し文書を保つことを確認する。
 - [ ] 試験（`effect.rs`）`validate_rejects_high_pass_radius_below_half`、`high_pass_defaults_parse_and_roundtrip`、`known_effect_defaults_parse_but_unknown_fields_are_rejected` の形に新しい形を足す。
 - [ ] 試験（`effect_reference.rs`）`high_pass_of_flat_color_is_mid_gray`（RGB が 8192、アルファ維持）、`high_pass_keeps_alpha_and_transparent_pixels`、`high_pass_of_straight_ramp_has_known_values`（手計算した値）。
 - [ ] 試験（`stages.rs`）`high_pass_input_roi_matches_blur`（同じ半径で `input_roi_v3` が同じ）。
