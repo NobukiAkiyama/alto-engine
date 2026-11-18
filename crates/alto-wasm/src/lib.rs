@@ -170,7 +170,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        9
+        10
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -656,19 +656,8 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: brush state/color"));
         }
         let id: NodeId = serde_json::from_str(&format!("\"{layer}\"")).map_err(error)?;
-        let mut cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
-        if ![cfg.size, cfg.hardness, cfg.spacing, cfg.opacity, cfg.flow]
-            .iter()
-            .all(|v| v.is_finite())
-            || cfg.size <= 0.0
-            || cfg.size > 2048.0
-        {
-            return Err(error("INVALID_ARGUMENT: brush size"));
-        }
-        cfg.hardness = cfg.hardness.clamp(0.0, 0.999);
-        cfg.spacing = cfg.spacing.clamp(0.01, 1.0);
-        cfg.flow = cfg.flow.clamp(0.0, 1.0);
-        cfg.opacity = cfg.opacity.clamp(0.0, 1.0);
+        let cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
+        let cfg = cfg.normalized().map_err(error)?;
         let doc = self.engine.document(self.doc).map_err(error)?;
         if (!mask && !matches!(doc.node(id).map_err(error)?.kind, NodeKind::Raster { .. }))
             || (mask && doc.node(id).map_err(error)?.props.mask.is_none())
@@ -1397,6 +1386,7 @@ impl Runtime {
         if color.len() != 4 || !samples.len().is_multiple_of(6) {
             return Err(error("INVALID_ARGUMENT: reference input"));
         }
+        let cfg = cfg.normalized().map_err(error)?;
         let mut s = StrokeSampler::new(cfg);
         let mut dabs = vec![];
         for p in samples.as_chunks::<6>().0 {

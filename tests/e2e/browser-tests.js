@@ -533,6 +533,64 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       assert(frame.gpu.overviewReady===1,"overview was evicted");
       assert(same(before,await unstable(engine).readTileLevel(2,0,0)),"overview pixels changed");
     });
+    await test("elliptical brush rotates with its angle and a round brush stays unchanged", async () => {
+      const draw = async (angle, roundness) => {
+        doc = await engine.createDocument({ width: 256, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const color = [0, 0, 0, 1];
+        const s = doc.tools.begin("brush", { layer, tip: { size: 64, angle, roundness }, color });
+        s.input({ x: 128.5, y: 128.5, pressure: 1 });
+        await s.end();
+        const painted = await unstable(engine).readTile(0, 0);
+        const reference = new Uint8Array(await testing(engine).request("cpuReference", {
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, pressure_size: true, pressure_opacity: false, angle, roundness },
+          color,
+          samples: [128.5, 128.5, 1, 0, 0, 0],
+        }));
+        assert(painted.every((v, i) => Math.abs(v - reference[i]) <= 2), "CPU/GPU brush shape mismatch");
+        return painted;
+      };
+      const horizontal = await draw(0, 0.4);
+      const vertical = await draw(90, 0.4);
+      for (const offset of [16, 20, 24]) {
+        assert(pixel(horizontal, 128 + offset, 128)[3] > 200 && pixel(horizontal, 128, 128 + offset)[3] === 0,
+          "zero degrees should extend along the horizontal axis");
+        assert(pixel(vertical, 128, 128 + offset)[3] > 200 && pixel(vertical, 128 + offset, 128)[3] === 0,
+          "ninety degrees should extend along the vertical axis");
+      }
+      assert(same(await draw(0, 1), await draw(45, 1)), "a circular brush changed when rotated");
+    });
+    await test("elliptical brush crosses a tile boundary and follows the layer's rotation", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const dab = async (x, y, angle) => {
+        const s = doc.tools.begin("brush", { layer, tip: { size: 64, angle, roundness: 0.4 }, color: [0, 0, 0, 1] });
+        s.input({ x, y, pressure: 1 });
+        await s.end();
+      };
+      await dab(250.5, 128.5, 90);
+      for (const tileX of [0, 1]) {
+        const gpu = await unstable(engine).readTile(tileX, 0);
+        const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, pressure_size: true, pressure_opacity: false, angle: 90, roundness: 0.4 },
+          color: [0, 0, 0, 1],
+          samples: [250.5 - tileX * 256, 128.5, 1, 0, 0, 0],
+        }));
+        assert(pixel(gpu, tileX === 0 ? 255 : 0, 128)[3] > 200, `brush missed tile ${tileX}`);
+        assert(gpu.every((v, i) => Math.abs(v - cpu[i]) <= 2), `CPU/GPU brush mismatch in tile ${tileX}`);
+      }
+      await doc.undo();
+      await doc.transact("rotate layer", tx => tx.setTransform(layer, {
+        x: 256, y: 0, scaleX: 1, scaleY: 1, rotation: Math.PI / 2,
+      }));
+      // Layer center (64.5, 64.5) maps to document center (191.5, 64.5).
+      await dab(191.5, 64.5, 0);
+      const rotated = await unstable(engine).readTile(0, 0);
+      assert(pixel(rotated, 191, 84)[3] > 200 && pixel(rotated, 211, 64)[3] === 0,
+        "the brush's local horizontal axis did not rotate with the layer");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });

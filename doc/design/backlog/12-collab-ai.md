@@ -49,7 +49,7 @@ doc.exportRegionPixels({ region, source: "layer" | "composite", node? }): Promis
 - ジャーナル：`Engine::journal_record(h, kind, intent, ops)` が `transaction.json`（`kind`、`intent`、`ops`、`after`）と、ops が参照するオブジェクトを 1 つの記録にする。`Engine::replay_record` が再生し、`after` と合わなければ戻して `Replayed::Diverged`。`JournalKind` は `Transact`、`Undo`、`Redo`。
 - `crates/alto-wasm/src/lib.rs`：利用者の編集は `Runtime::transact`、`undo`、`redo`、`end_brush`（ストロークの確定。`SetTiles`、マスクでは `SetMask` を作る）、`command`（選択、マスク、効果）で `Engine::transact` を通り、`journal.push` で記録する。画像編集は `crates/alto-wasm/src/image_versions.rs`、版の操作は `crates/alto-wasm/src/versions.rs`。ストローク中は他の編集を `CONFLICT: finish active tool first` で拒む。
 - `crates/alto-engine/src/text.rs`：`bake_text_ops` は、`bake` を持たない `SetText` を焼き込む。**持つ Op はそのまま**（「焼き込みは他者の Op から再計算しない」）。
-- SDK：`DocumentHandle.transact`（`packages/alto-sdk/src/document.ts`）は `baseRevision` を付けて `transact` を要求する。`edit()` は先に進行中のストロークを終わらせる。要求の型は `packages/alto-sdk/src/protocol.ts`（`PROTOCOL = 9`）。エラーは `packages/alto-sdk/src/errors.ts` の `ErrorCode` と `ConflictReason`。SDK に WebSocket などの通信は無い（README の「外部サーバーへ送信する処理はありません」）。
+- SDK：`DocumentHandle.transact`（`packages/alto-sdk/src/document.ts`）は `baseRevision` を付けて `transact` を要求する。`edit()` は先に進行中のストロークを終わらせる。要求の型は `packages/alto-sdk/src/protocol.ts`（`PROTOCOL = 10`）。エラーは `packages/alto-sdk/src/errors.ts` の `ErrorCode` と `ConflictReason`。SDK に WebSocket などの通信は無い（README の「外部サーバーへ送信する処理はありません」）。
 - 版を `.alto` の外に持つ（F-9、[設計](../2026-11-16-versions-outside-alto.md)）：`save(target, { history: "omit" })` は作業文書だけの `.alto`。`save(target, { history: { folder } })` は薄い `.alto`。`engine.open(source, { history })` で置き場をつなぐ。
 - 無いもの：リモートの Op を適用する入口、Op の作者（actor）、順序の番号、組み込み側へ編集を渡す取り付け口、通信のパッケージ。
 
