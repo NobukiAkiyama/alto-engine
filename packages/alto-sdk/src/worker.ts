@@ -257,6 +257,10 @@ function startDecoders() {
         const sent = decoder.pending.get(data.id);
         // An answer to a batch this pool no longer waits for is dropped.
         if (!sent || !decoders.includes(decoder)) return;
+        if (data.error) {
+          stopDecoders(String(data.error));
+          return;
+        }
         clearTimeout(sent.timer);
         decoder.pending.delete(data.id);
         decodedResults.push(data.out);

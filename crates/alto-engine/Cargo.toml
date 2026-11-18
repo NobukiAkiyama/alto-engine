@@ -25,3 +25,4 @@ unstable-render-v3 = []
 
 [dev-dependencies]
 alto-raster = { path = "../alto-raster", features = ["test-hooks"] }
+alto-decode = { path = "../alto-decode" }

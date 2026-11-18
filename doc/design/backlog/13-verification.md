@@ -90,14 +90,14 @@
 
 残り：
 
-- [ ] **Task QA-1a: `folder` と `decode` の target。**
+- [ ] **Task QA-1a: `folder` と `decode` の target。** `fuzz/`、`fuzz.yml`、`run-all.sh`（folder の seed 配置を含む）、`fuzz_regressions.rs` の `run` の分岐をそろえた。ローカルで各60秒と各10分の試験でクラッシュ0（ENGINE-HARDENING-RESULTS.md）。完了条件にある新しい matrix での週次 CI 実行は未確認。
   Create `fuzz/fuzz_targets/folder.rs`（新規）、`fuzz/fuzz_targets/decode.rs`（新規）、`fuzz/seeds/folder/`（新規）、`fuzz/seeds/decode/`（新規）。Modify `fuzz/Cargo.toml`（`alto-decode`、`alto-store` の依存と `[[bin]]`）、`.github/workflows/fuzz.yml`（`matrix.target`）、`fuzz/run-all.sh`、`crates/alto-engine/tests/fuzz_regressions.rs`（`run` に分岐）。
   `cargo fuzz list` に `folder` と `decode` が出ること、`TARGETS="folder decode" sh fuzz/run-all.sh 60` が終わり、各 seed がコーパスに入ったこと（`run-all.sh` は一覧にある target だけを動かすので、`[[bin]]` を忘れると黙って省かれる）。見つけた欠陥は再現入力を `tests/fixtures/fuzz/<target>/` に置いて直す（`fuzz_regressions_do_not_panic` がその target を再生する）。
-- [ ] **Task QA-1b: 薄い `.alto` の seed。**
-  Create `tests/fixtures/` の薄い `.alto`（新規。版を外に持つ保存で作る）。`run-all.sh` の seed 配置を直す。`package` を60秒動かし、`open_package_entries` の外部履歴の分岐にカバレッジが入ること（`cargo fuzz coverage`）を確かめる。
-- [ ] **Task QA-1c: ジャーナル読み取りの変異試験。**
+- [x] **Task QA-1b: 薄い `.alto` の seed。** `tests/fixtures/thin-versions.alto`（manifest format 3、version-only object 1件）を生成器 `create-thin-versions-sample.rs` で作った。`run-all.sh` は `package` と `recovery` の seed に入れる（外部履歴の分岐は `open_package_entries` 経路で到達する）。`folder` の seed にも入れるが、folder の `decode_folder` は外部履歴を持つ入力を `UNSUPPORTED` として拒否するため、folder target では拒否経路の試験になる。
+  回帰試験（`fuzz_regressions.rs`）で package 経路の外部履歴分岐に届くことを確認。`package` を60秒実行し（74,747 入力、クラッシュなし）、`cargo fuzz coverage package` で `open_package_entries` の外部履歴分岐（`external.take()` の Some 側、行 607）が 8 回実行されたことを確認した。
+- [x] **Task QA-1c: ジャーナル読み取りの変異試験。** `packages/alto-sdk/test/journal-mutation.test.js` で先頭・全位置の切り詰め、各レコードの全ビット反転、長さの異常値、CRC が正しい不正タグを検証。破損より前の記録の内容と数を確認する。
   Create `packages/alto-sdk/test/` の試験（新規）。`pnpm --dir packages/alto-sdk build` の後に `node --test packages/alto-sdk/test/*.test.js`。
-- [ ] **Task QA-1d: 再監査。** 全項目の実装後に UNWRAP-AUDIT.md へ追記。
+- [ ] **Task QA-1d: 再監査。** F-9 後の中間確認は UNWRAP-AUDIT.md に追記済み。01〜12 の全項目の実装後に再監査する。
 
 完了条件：2 target と seed が週次ジョブで動き、1回の週次実行（各10分）でクラッシュ0、または見つかった欠陥がすべて直って回帰入力に入っている。検証コマンド：`sh fuzz/run-all.sh 60`、`cargo test -p alto-engine --test fuzz_regressions`。
 

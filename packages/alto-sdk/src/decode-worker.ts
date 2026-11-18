@@ -14,5 +14,9 @@ self.onmessage = async ({ data }) => {
   if (data.stall) stalled = true;
   if (stalled) return;
   const out = decodeBatch(new Uint8Array(data.batch));
+  if (!out.length) {
+    postMessage({ id: data.id, error: "invalid decode request frame", memory: memory!.buffer.byteLength });
+    return;
+  }
   postMessage({ id: data.id, out: out.buffer, memory: memory!.buffer.byteLength }, [out.buffer]);
 };
