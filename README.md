@@ -1,4 +1,4 @@
-# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 10）
+# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 12）
 
 未リリースの開発版です。旧ファイル・旧通信との互換性はありません。
 
@@ -12,7 +12,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-この開発版は Protocol 10 / format 5 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
+この開発版は Protocol 12 / format 5 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
 
 ```sh
 sh scripts/build.sh                     # WASM パッケージと SDK をビルド
@@ -143,7 +143,7 @@ await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **9** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **12** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
 
 Undo の保持件数は `createEngine({ container, undo: { steps: 100 } })` で 1〜1000 に設定できます（既定値 100）。Worker が再起動しても設定は維持されます。
 
