@@ -1,7 +1,42 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
-import type { StreamMessage } from "./protocol.js";
+import type { BrushConfig, BrushCurve, StreamMessage } from "./protocol.js";
 import type { Color, NodeId } from "./types.js";
+
+export interface BrushDynamics {
+  /** Defaults to pressure with a 5% floor. Pass null for a constant size. */
+  size?: BrushCurve | null;
+  /** Multiplies dab opacity. Defaults to a constant factor of 1. */
+  opacity?: BrushCurve | null;
+  /** Multiplies dab flow. Defaults to a constant factor of 1. */
+  flow?: BrushCurve | null;
+  /** Adds pen tilt direction to the tip angle. The direction is not adjusted for layer rotation. */
+  angleFromTilt?: boolean;
+}
+
+function wireCurve(curve: BrushCurve): BrushCurve {
+  const { input, points } = curve;
+  if (!["pressure", "speed", "tilt"].includes(input) ||
+      !Array.isArray(points) || points.length < 2 || points.length > 8 ||
+      Array.from(points).some((point, i) => !Array.isArray(point) || point.length !== 2 ||
+        ![point[0], point[1]].every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
+        // The renderer stores curve coordinates as f32.
+        (i > 0 && Math.fround(points[i - 1][0]) >= Math.fround(point[0]))) ||
+      points[0][0] !== 0 || points[points.length - 1][0] !== 1) {
+    throw new AltoError("INVALID_ARGUMENT", "brush curve");
+  }
+  return { input, points: points.map(([x, y]) => [Math.fround(x), Math.fround(y)]) };
+}
+
+function wireDynamics(dynamics: BrushDynamics): BrushConfig["dynamics"] {
+  const { size, opacity, flow, angleFromTilt } = dynamics;
+  return {
+    size: size === null ? { input: "pressure", points: [[0, 1], [1, 1]] } : size && wireCurve(size),
+    opacity: opacity == null ? undefined : wireCurve(opacity),
+    flow: flow == null ? undefined : wireCurve(flow),
+    angle_from_tilt: angleFromTilt,
+  };
+}
 
 export interface BrushOptions {
   layer: NodeId;
@@ -20,10 +55,7 @@ export interface BrushOptions {
   color?: Color;
   opacity?: number;
   flow?: number;
-  /** Pen pressure scales the size (default true). */
-  pressureSize?: boolean;
-  /** Pen pressure scales the opacity (default false). */
-  pressureOpacity?: boolean;
+  dynamics?: BrushDynamics;
 }
 
 /** One input sample in document coordinates. */
@@ -77,8 +109,7 @@ export class ToolSession {
         spacing: options.tip?.spacing ?? 0.15,
         opacity: options.opacity ?? 1,
         flow: options.flow ?? 1,
-        pressure_size: options.pressureSize ?? true,
-        pressure_opacity: options.pressureOpacity ?? false,
+        dynamics: options.dynamics && wireDynamics(options.dynamics),
         angle,
         roundness,
       },
@@ -141,6 +172,7 @@ export class ToolSession {
     this.ending = true;
     try {
       await this.flush();
+      if (this.aborted) throw this.aborted;
       const state = await this.host.request("endBrush");
       this.host.ended(this, state);
     } catch (error) {

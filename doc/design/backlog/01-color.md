@@ -35,7 +35,7 @@
 - 文書の形式番号 5 は複数の箇所に固定で書かれている。`DocumentMeta::srgb_u8` と `validate`（`crates/alto-doc/src/lib.rs`）、`.alto` の manifest の書き出し（`crates/alto-store/src/lib.rs` の `document_format: 5`）と読み込み（`document_format` が 5 以外なら `UNSUPPORTED: package format`）、`crates/alto-engine/src/versions/gc.rs`（manifest の `document_format != 5` を拒否）、`crates/alto-engine/src/versions/merge.rs`（対象の `format_version != 5` を拒否）。
 - `Op::SetMeta` はキャンバスの拡縮（`crates/alto-engine/src/canvas.rs`）と `restore_ops`（`crates/alto-doc/src/version.rs`）が使い、`Document::apply` で `validate` を通る。`color`、`depth`、`render_version` を変える要求は今は無いが、`SetMeta` はそれを拒否しない。
 - `crates/alto-doc/src/version.rs` の `diff` は `color`、`depth`、`render_version` の差を `MetaChanged` にする。`crates/alto-engine/src/versions/merge.rs` は文書の `root` が違えば `UNRELATED_HISTORY`。
-- 作成：`crates/alto-wasm/src/lib.rs` の `Runtime::create_document(w, h, render_version)` は `None | Some(3)` だけを受け、`DocumentMeta::srgb_u8` を使う。辺は 1〜65536（`INVALID_ARGUMENT`）。SDK は `createDocument({ width, height, renderVersion?: 3 })`（`packages/alto-sdk/src/engine.ts`、`protocol.ts`）。`PROTOCOL` は 10。SDK の `DocumentMeta.color` と `depth` は `string`（`packages/alto-sdk/src/types.ts`）。
+- 作成：`crates/alto-wasm/src/lib.rs` の `Runtime::create_document(w, h, render_version)` は `None | Some(3)` だけを受け、`DocumentMeta::srgb_u8` を使う。辺は 1〜65536（`INVALID_ARGUMENT`）。SDK は `createDocument({ width, height, renderVersion?: 3 })`（`packages/alto-sdk/src/engine.ts`、`protocol.ts`）。`PROTOCOL` は 11。SDK の `DocumentMeta.color` と `depth` は `string`（`packages/alto-sdk/src/types.ts`）。
 - 画素の正本：RGBA8 は直線（非乗算）アルファ、R8 はマスクと選択。タイル 256×256。ハッシュは `ContentHash::of_tagged(tag, pixels)` で、tag は 4（RGBA8）か 1（R8）（`crates/alto-raster/src/lib.rs` の `TileData::hash`）。パッケージのオブジェクトは `ALTOOBJ1` + tag + LZ4 で、`crates/alto-store/src/lib.rs` の `object_header` は tag 0、1、4 だけを受ける。大きさが固定なのは tag 4（262144）と tag 1（65536）で、tag 0（一般のバイト列）は 268,435,456 バイトまで任意。復号 Worker（`crates/alto-decode/src/lib.rs` の `decode_batch`）は形式のバイトが 1 なら R8、それ以外を RGBA8 とみなす。
 - 描画（render v3）：内容のアトラスは `Rgba8Unorm`、表示タイルは `Rgba8Uint`（乗算済み）。
   - 平易な文書は `integer_composite_shader`（`crates/alto-gpu/src/lib.rs`。`composite-v3-layout.wgsl`、`q14.wgsl` の一部、`composite-v3-fetch.wgsl`、`blend-q14.wgsl`、`composite-q14.wgsl`）。
@@ -157,7 +157,7 @@ export interface DisplayColor {
 ### 形式と通信
 
 - `format_version`：上げない（既定）。`color: "display_p3"` は形式 5 の型に既にある値で、今の読み手は `INVALID_ARGUMENT` で拒否するので誤って読まない。リリース済みの形式も無い。「意味を増やす変更」とみなすなら、RV4-1 の回 13 にまとめる（00-ROADMAP の番号の表は、上げない既定で書いた）。
-- `PROTOCOL`：上げる（`createDocument` の引数。11。段階3の回で、COL-5 と同じ番号）。README と RELEASING を同じ PR で更新する。
+- `PROTOCOL`：上げる（`createDocument` の引数。12。段階3の回で、COL-5 と同じ番号）。README と RELEASING を同じ PR で更新する。
 - render v3 の画素：変えない。`tests/parity/*.txt` は不変。
 - シェーダーのモード番号：不要（`present-p3-srgb.wgsl` は提示の段で、効果のモードではない）。
 - manifest：触れない。
@@ -278,7 +278,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げない。文書の型は変わらず、変換後の画素が入るだけ。
-- `PROTOCOL`：上げる（`import` の応答に `profile`。11。COL-1 と同じ段階3の回）。
+- `PROTOCOL`：上げる（`import` の応答に `profile`。12。COL-1 と同じ段階3の回）。
 - render v3 の画素：触れない。
 - 依存：`alto-color` は新しいワークスペースのメンバー。PNG の展開器の扱いは 07 と揃える。
 
@@ -420,7 +420,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げる（`render_version` 4 を読めるようにする。13）。「共通の設計：形式番号を上げる経路」の基盤は回 6 の PR が先に入れるので、この PR は `SUPPORTED_FORMATS` に 13 を足すだけ。06-text の TXT-10（`DocumentMeta.text_rendering`（新規））、COL-2、COL-4（`blend_space`）と同じ回 13。COL-1 を「意味を増やす変更」とみなす場合も 13。
-- `PROTOCOL`：上げる（`createDocument` の `renderVersion: 4`。12。段8でだけ上げ、COL-2 以降の v4 の項目と同じ回）。
+- `PROTOCOL`：上げる（`createDocument` の `renderVersion: 4`。13。段8でだけ上げ、COL-2 以降の v4 の項目と同じ回）。
 - render v3 の画素：変えない。`v3_shader_sources_are_pinned` と既存の parity が通ること。
 - シェーダーのモード番号：新しい番号は要らない。v4 は v3 と同じ番号の空間を使い、各番号の Q30 版を持つ。02 が v3 に足すモード（34〜43。07 はモードを使わない）は、v4 にも同じ番号で Q30 版を足す。
 - manifest：`document_format` を文書の `format_version` から書く（共通の設計）。manifest の `format` は変えない。
@@ -522,7 +522,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げる（`PixelFormat::Rgba16`（新規）、tag 8 のオブジェクト。13。RV4-1 と同じ回）。
-- `PROTOCOL`：上げる（`createDocument` の `depth`、`exportImage` の `depth`、`readTiles` の大きさ。12。RV4-1 段8と同じ回）。
+- `PROTOCOL`：上げる（`createDocument` の `depth`、`exportImage` の `depth`、`readTiles` の大きさ。13。RV4-1 段8と同じ回）。
 - render：v4 のみ。v3 の画素は変えない。
 - manifest：`document_format` は共通の設計の経路で新しい番号を書く。オブジェクトの tag は manifest の外。
 
@@ -596,7 +596,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げる（`blend_space`（新規）。13。RV4-1、TXT-10 と同じ回）。
-- `PROTOCOL`：上げる（`createDocument` の `blendSpace`（新規）。12）。
+- `PROTOCOL`：上げる（`createDocument` の `blendSpace`（新規）。13）。
 - render：v4 のみ。v4 の `Gamma` の文書の画素は変えない。
 - シェーダーのモード番号：要らない（取得と解決の段の分岐で、モードではない）。
 
@@ -653,7 +653,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げる（`depth: f16` の意味を定める。14）。COL-2 と TXT-10 の後に入るので、回 13 とは分ける。
-- `PROTOCOL`：上げる（`createDocument` の `depth: "f16"`、EXR の読み込みと書き出し。12。v4 の項目と同じ回）。
+- `PROTOCOL`：上げる（`createDocument` の `depth: "f16"`、EXR の読み込みと書き出し。13。v4 の項目と同じ回）。
 - render：v4 のみ。
 
 ### 作業手順
@@ -729,7 +729,7 @@ pub fn embedded_profile(encoded: &[u8], mime: &str) -> Embedded;    // 下記
 ### 形式と通信
 
 - `format_version`：上げる（`LayerProps.spot`。15）。プロファイルは文書に保存しないので、ソフトプルーフと書き出しは形式に触れない。
-- `PROTOCOL`：上げる（`setProof`（新規）、`exportImage` の `colorSpace`、CMYK の読み込み。12。v4 の項目と同じ回）。
+- `PROTOCOL`：上げる（`setProof`（新規）、`exportImage` の `colorSpace`、CMYK の読み込み。13。v4 の項目と同じ回）。
 - render：v3 と v4 のどちらの文書でも使える（特色の表示は既存の着色の段）。既存の parity の行は変えない。特色を持つ文書の行は新しく足す。
 
 ### 作業手順

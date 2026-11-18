@@ -83,18 +83,32 @@ export interface BranchView {
     protected: boolean;
 }
 
+// @public
+export type BrushCurve = {
+    input: "pressure" | "speed" | "tilt";
+    points: [number, number][];
+};
+
+// @public (undocumented)
+export interface BrushDynamics {
+    angleFromTilt?: boolean;
+    flow?: BrushCurve | null;
+    opacity?: BrushCurve | null;
+    size?: BrushCurve | null;
+}
+
 // @public (undocumented)
 export interface BrushOptions {
     // (undocumented)
     color?: Color;
+    // (undocumented)
+    dynamics?: BrushDynamics;
     // (undocumented)
     flow?: number;
     // (undocumented)
     layer: NodeId;
     // (undocumented)
     opacity?: number;
-    pressureOpacity?: boolean;
-    pressureSize?: boolean;
     target?: "content" | "mask";
     tip?: {
         size?: number;

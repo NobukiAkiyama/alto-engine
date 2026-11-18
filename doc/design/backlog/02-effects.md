@@ -544,7 +544,7 @@ pub struct DisplacementMap { pub bounds: ImageBounds, pub tiles: TileMap }   // 
 ### 形式と通信
 
 - `format_version`：**上げる**（16。段階4なので FX-4 の回 8 とは分ける。00-ROADMAP の番号の表）。`DisplacementMap` が RGBA8 のタイルのハッシュを持つので、保存・版・GC の経路が「効果が持つタイル」を知っている必要がある。GIT-1（08、段階3）が先に入り、`node_hashes` と `effect_hashes` を `Document::object_hashes`（新規、alto-doc）へ移す。本項目はその関数と `crates/alto-engine/src/lib.rs` の全ハッシュの列挙（`Op::SetProps` の経路）を新しい型へ広げる。GIT-1 より先に入る場合は `effect_hashes` を広げ、GIT-1 が移す。（新規）
-- `PROTOCOL`：マップを SDK から渡す経路のために、`setEffects` の `effects: unknown[]` のままでよいか、RGBA を取り込む既存の `importRgba` の結果（`tiles`）を `Effect` の `map` として渡せるかを確かめる。渡せるなら上げない。新しい要求が要るなら上げる（13。段階4の回）。
+- `PROTOCOL`：マップを SDK から渡す経路のために、`setEffects` の `effects: unknown[]` のままでよいか、RGBA を取り込む既存の `importRgba` の結果（`tiles`）を `Effect` の `map` として渡せるかを確かめる。渡せるなら上げない。新しい要求が要るなら上げる（14。段階4の回）。
 - 描画の版：v3 のまま。
 - シェーダーのモード番号：置き換え 1 つ（43）。
 
