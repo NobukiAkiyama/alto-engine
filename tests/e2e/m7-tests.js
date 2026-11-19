@@ -80,6 +80,22 @@ export async function runM7Tests(engine, log) {
       assert(h && h[0] < 345 && h[1] > 100, "horizontal 。 control: " + h);
       metrics.punctuation = { kuten, touten, open, bar, horizontalKuten: h };
     });
+    await test("hanging punctuation extends bounds and toggles in one text edit", async () => {
+      await setup();
+      await addText(vertical("あい。う", [jp.id], {
+        writing_mode: "horizontal_tb",
+        frame: { kind: "area", width: 250, height: 400 },
+      }));
+      const off = await doc.text.info(id);
+      await doc.text.setHanging(id, true);
+      const on = await doc.text.info(id);
+      assert(off.lines[0].end === 1 && on.lines[0].end === 3 && on.lines[1].start === 3, "hanging line break");
+      assert(off.bounds[2] === 250 && on.bounds[2] === 300, "hanging bounds");
+      assert(doc.getSnapshot().meta.format_version === 6, "hanging requires format 6");
+      await doc.text.setHanging(id, false);
+      assert((await doc.text.info(id)).lines[0].end === off.lines[0].end, "disabled hanging");
+      assert(doc.getSnapshot().meta.format_version === 5, "disabling hanging returns to format 5");
+    });
     await test("tate-chu-yoko: automatic digits, explicit ranges compressed to one em, three digits rotate", async () => {
       await setup(768, 768);
       await addText(vertical("第12回", [latin.id, jp.id]), 300, 40);

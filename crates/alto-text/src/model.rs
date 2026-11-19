@@ -155,6 +155,9 @@ pub struct TextContent {
     pub writing_mode: WritingMode,
     #[serde(default)]
     pub align: TextAlign,
+    /// Allow one overflowing Japanese punctuation cluster at the end of an area line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hanging: bool,
     /// Explicit tate-chu-yoko (horizontal-in-vertical) ranges.
     #[serde(default)]
     pub tcy: Vec<TextRange>,
@@ -171,6 +174,7 @@ impl Default for TextContent {
             frame: TextFrame::Point,
             writing_mode: WritingMode::HorizontalTb,
             align: TextAlign::Start,
+            hanging: false,
             tcy: vec![],
             auto_tcy: auto_tcy(),
         }
@@ -517,4 +521,20 @@ mod tests {
         c.replace_range(2, 6, "").unwrap();
         assert!(c.spans.is_empty());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn new_text_fields_serialize_as_before() {
+    let legacy = r#"{"text":"あ。","style":{"fonts":[],"size":40.0,"color":[0.0,0.0,0.0,1.0],"line_height":1.2,"letter_spacing":0.0,"scale":1.0,"features":[],"language":null},"spans":[],"frame":{"kind":"point"},"writing_mode":"horizontal_tb","align":"start","tcy":[],"auto_tcy":2}"#;
+    let mut content: TextContent = serde_json::from_str(legacy).unwrap();
+    assert!(!content.hanging);
+    assert_eq!(serde_json::to_string(&content).unwrap(), legacy);
+    content.hanging = true;
+    let encoded = serde_json::to_value(&content).unwrap();
+    assert_eq!(encoded["hanging"], true);
+    assert_eq!(
+        serde_json::from_value::<TextContent>(encoded).unwrap(),
+        content
+    );
 }

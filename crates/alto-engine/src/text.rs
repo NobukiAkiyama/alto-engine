@@ -494,6 +494,8 @@ impl Engine {
     }
 
     pub(crate) fn text_entry(&self, doc: &Document, content: &TextContent) -> Arc<TextEntry> {
+        // Hash the full editable content so wrapping options such as hanging punctuation
+        // invalidate layout and selection geometry together.
         let mut key = serde_json::to_vec(content).unwrap_or_default();
         for id in content.font_ids() {
             if let Some(a) = doc.assets.get(&id) {

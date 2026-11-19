@@ -301,6 +301,13 @@ export class DocumentHandle {
       this.transact(intent, (tx) => tx.setText(id, replaceText(this.textOf(id), start, end, insert))),
     style: (id: NodeId, start: number, end: number, patch: StylePatch) =>
       this.transact("text.style", (tx) => tx.setText(id, applyTextStyle(this.textOf(id), start, end, patch))),
+    /** Enables or disables hanging punctuation in one undoable edit. */
+    setHanging: (id: NodeId, on: boolean) =>
+      this.transact("text.edit", (tx) => {
+        const content = this.textOf(id);
+        content.hanging = on;
+        tx.setText(id, content);
+      }),
     setTateChuYoko: (id: NodeId, start: number, end: number, on = true) =>
       this.transact("text.tate-chu-yoko", (tx) => {
         const c = this.textOf(id);

@@ -175,6 +175,8 @@ fn merge_value(
 fn value(doc: &Document) -> Result<Value, EngineError> {
     let mut v = serde_json::to_value(doc).map_err(|e| invalid(e.to_string()))?;
     v["revision"] = Value::from(0);
+    // The format is derived from the merged content, so it cannot conflict.
+    v["meta"]["format_version"] = Value::from(alto_doc::BASE_FORMAT);
     Ok(v)
 }
 fn result_doc(v: Value) -> Result<Document, EngineError> {
@@ -254,6 +256,12 @@ impl Engine {
         };
         let o = self.resolve(h, VersionRef::Commit(ours))?;
         let t = self.resolve(h, VersionRef::Commit(theirs))?;
+        if ![o.meta.format_version, t.meta.format_version]
+            .iter()
+            .all(|format| alto_doc::SUPPORTED_FORMATS.contains(format))
+        {
+            return Err(fail("UNSUPPORTED", "document format"));
+        }
         if o.root != t.root {
             return Err(fail("UNRELATED_HISTORY", "different document identity"));
         }
@@ -369,12 +377,9 @@ impl Engine {
                 base: None,
             });
         }
-        let target = result_doc(result)?;
-        if target.root != self.document(h)?.root || target.meta.format_version != 5 {
-            return Err(fail(
-                "INVALID_MERGE_RESULT",
-                "document identity or format changed",
-            ));
+        let mut target = result_doc(result)?;
+        if target.root != self.document(h)?.root {
+            return Err(fail("INVALID_MERGE_RESULT", "document identity changed"));
         }
         for hash in doc_hashes(&target) {
             if !self.tiles.reachable(&hash) && !self.blobs.contains_key(&hash) {
@@ -384,6 +389,7 @@ impl Engine {
         for node in target.nodes.values() {
             self.validate_node_content(node)?;
         }
+        target.meta.format_version = target.required_format();
         let snapshot = target.snapshot_bytes()?;
         let commit = if plan.view.kind == "three_way" {
             let c = Commit {

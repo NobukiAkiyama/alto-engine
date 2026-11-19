@@ -143,6 +143,8 @@ pub enum ContentDetail {
         writing_mode: Option<alto_text::WritingMode>,
         frame: bool,
         tate_chu_yoko: bool,
+        #[serde(default)]
+        hanging: bool,
     },
     Adjustment,
     Unsupported,
@@ -367,6 +369,7 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
                 writing_mode: (x.writing_mode != y.writing_mode).then_some(y.writing_mode),
                 frame: x.frame != y.frame || x.align != y.align,
                 tate_chu_yoko: x.tcy != y.tcy || x.auto_tcy != y.auto_tcy,
+                hanging: x.hanging != y.hanging,
             }
         }
         (NodeKind::Adjustment { adjustment: x }, NodeKind::Adjustment { adjustment: y })
@@ -1020,6 +1023,7 @@ mod tests {
             let n = m.nodes.get_mut(&it).unwrap();
             if let NodeKind::Text { content, .. } = &mut n.kind {
                 content.text = "吾輩は犬である".into();
+                content.hanging = true;
                 content.writing_mode = alto_text::WritingMode::VerticalRl;
             }
             m
@@ -1031,6 +1035,7 @@ mod tests {
                 DiffItem::ContentChanged {
                     detail: ContentDetail::Text {
                         text: Some([from, to]),
+                        hanging: true,
                         writing_mode: Some(WritingMode::VerticalRl),
                         style: false,
                         ..
