@@ -1279,6 +1279,12 @@ export type SelectionSpec = {
     points: [number, number][];
     feather?: number;
 } | {
+    kind: "path";
+    path: PathData;
+    fill_rule?: FillRule;
+    feather?: number;
+    mode?: SelectionMode_2;
+} | {
     kind: "all" | "invert";
     mode?: SelectionMode_2;
 } | {

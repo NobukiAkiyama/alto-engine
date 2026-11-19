@@ -288,7 +288,6 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 | `tile_renderer/stages.rs`、`graph.rs` | FX-1〜6、FX-9、FX-8（02）、RV4-1（01）、PERF-4（10） | 段階2の効果 → PERF-4（実装するなら）→ RV4-1、FX-8。PERF-4 が再帰を明示タスクに直し、後の項目はその形で段を足す |
 | `brush.wgsl`、`GpuDab.extra`、binding 6/7 | BR-1〜BR-3（03）、COL-2（01） | BR-1〜BR-3（段階2）→ COL-2。COL-2 が 16bit 版を足す |
 | `SelectionSpec`（`document.ts`） | SEL-1 → SEL-2 → SEL-3（04） | この順 |
-| `crates/alto-wasm/src/image_versions.rs` の編集の閉包 | IMG-3（05、`Rasterizers`（新規））、SEL-3（04） | IMG-3 → SEL-3 |
 | `crates/alto-gpu/src/renderer/upload.rs`、`TileStore` | STO-10、STO-1（09） | STO-10（段階2）→ STO-1 |
 | `ObjectTarget`（`crates/alto-engine/src/versions/lazy.rs`） | VER-1（08）、STO-1（09） | VER-1（段階2）→ STO-1 |
 | `crates/alto-engine/src/versions/gc.rs` の format の検査 | 回 6 の PR（`document_format`）、VER-4（`format`）、VER-5、STO-1、STO-9 | 同じ行を別の条件で変える。どちらが先でもよい。後の PR が並べて書く |
@@ -308,7 +307,7 @@ VER-4 は段階1のままだが、独立項目ではない。manifest の `forma
 依存があるものだけを示す。
 
 1. QA-1 の残り（`folder`、`decode` の target、薄い `.alto` の seed）を先に入れる。以後の形式変更を読み込みファザーが検査する。QA-5 は実装済み。
-2. 段階1の項目：BR-6（実装済み）、SEL-1 → SEL-2 → SEL-3、IMG-3（SEL-3 の前）、TXT-4、TXT-6、TXT-7（回 6。最初の PR が形式番号の基盤と焼き込みの `Result` 化を入れる）、VEC-2、STO-3、STO-8、PERF-5。VER-4 は manifest の形式の基盤として、VER-6、GIT-1 より前に入れる。
+2. 段階1の項目：BR-6（実装済み）、SEL-1 → SEL-2 → SEL-3、IMG-3、TXT-4、TXT-6、TXT-7（回 6。最初の PR が形式番号の基盤と焼き込みの `Result` 化を入れる）、VEC-2、STO-3、STO-8、PERF-5。VER-4 は manifest の形式の基盤として、VER-6、GIT-1 より前に入れる。
 3. FX-4 → FX-1。FX-4 が共通基盤（`smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow`、評価のメモ）を作り、`Context::stack` のぼかしの枝が選択つきで前段を2回評価する既存の問題も直す。（新規）
 4. FX-5 → FX-6（距離場を FX-5 で作る）。FX-5 → IMG-1（`effect_output_bounds`）。VEC-1 → FX-9（`Gradient` の持ち主は VEC-1）。FX-2、FX-3、FX-7 は FX-4 の後なら順不同。（新規）
 5. BR-1 → BR-2 → BR-3。BR-4 は BR-1 の描画を使い、BR-5 と共通の設定を使うため、BR-1 の後に BR-4 と BR-5 を進める。
