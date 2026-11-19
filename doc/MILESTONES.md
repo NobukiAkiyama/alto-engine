@@ -1,6 +1,6 @@
-# 実装状況 — render v3 / format 5（未リリース）
+# 実装状況 — render v3 / format 6（未リリース）
 
-2026-11-03。M0〜M8の基盤に、ブランチ・二親マージ・参照ベースのGCと、レイヤー単位の確定画像編集を追加しました。文書format 5 / manifest 2 / commit 2 / 当時の wire protocol は 8 です。現行の wire protocol は 10 です。旧ファイル・旧通信の互換や移行は対象外です。実装と検証の範囲は[追加実装の記録](verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照してください。
+2026-11-03。M0〜M8の基盤に、ブランチ・二親マージ・参照ベースのGCと、レイヤー単位の確定画像編集を追加しました。文書format 6 / manifest 2 / commit 2 / 当時の wire protocol は 8 です。現行の wire protocol は 13 です。旧ファイル・旧通信の互換や移行は対象外です。実装と検証の範囲は[追加実装の記録](verification/VERSIONING-IMAGE-EDITING-2026-11-03.md)を参照してください。
 
 | 段階 | 実装 |
 |---|---|
@@ -31,7 +31,7 @@
 - **コミット**：`Commit { parents, snapshot, message, intents, created_at, author }` を整形済みJSONの正規形で保存し、そのBLAKE3をIDにします。Intentは前回コミット以降のTransactionを「意図×対象ノード」で集計し、Undoで打ち消した編集は除きます。変更の無いコミットは拒否します。
 - **意味的差分**：NodeIdで木を照合し、追加・削除（部分木の頂点のみ）・移動（親の変更、または兄弟の最長共通部分列から外れたもの）・属性（フィールド名）・画素（タイルハッシュの比較のみ。レイヤー座標と文書座標の範囲）・内容（ベクター命令数、テキストの抜粋・縦横・書式・縦中横）・アセット・選択範囲を返します。画素は読みません。
 - **復元**：任意の版を、現在の文書からその版への可逆Op列（1回のUndoで戻せるTransaction）として適用します。履歴は書き換えません。
-- **保存**：スナップショットJSONを整形・木の順序の正規形に変え、gitの行差分に向く形にしました。`.alto` とフォルダ形式は同じエントリ（manifest / snapshots / commits / objects）を共有し、manifestに `head` を追加しました。版が参照するタイル・アセットはGCの根として保持し、保存にも含めます。コミットはジャーナルの対象外のため、コミット直後にチェックポイントを取ります（当時の記録。現在の履歴状態遷移はジャーナルにも記録し、受け付ける形式はformat 5 / manifest 2 / commit 2 / render v3のみです）。
+- **保存**：スナップショットJSONを整形・木の順序の正規形に変え、gitの行差分に向く形にしました。`.alto` とフォルダ形式は同じエントリ（manifest / snapshots / commits / objects）を共有し、manifestに `head` を追加しました。版が参照するタイル・アセットはGCの根として保持し、保存にも含めます。コミットはジャーナルの対象外のため、コミット直後にチェックポイントを取ります（当時の記録。現在の履歴状態遷移はジャーナルにも記録し、受け付ける形式はformat 5と6 / manifest 2 / commit 2 / render v3のみです）。
 - **フォルダ形式**：`objects/`・`snapshots/`・`commits/` は存在しなければ書き、既存は書き換えません。`document.json`（現在のスナップショットの読みやすい写し）と `.gitattributes` を書き、最後に `manifest.json` を置き換えて読み返します。保存の基準にしたmanifestのSHA-256が現在値と違えば、何も書かずにCONFLICTを返します。SDKは `ObjectStorageProvider` として File System Access のフォルダ、OPFS、メモリを同梱します。読み込みはmanifest・スナップショット・コミットから到達するオブジェクトだけを読みます。
 - **Git Adapter（`alto-git`）**：エンジンにリンクしない別crateのCLI（設計書の候補のgitoxideではなく、gitコマンドのplumbingを使用）。`sync` は未反映のAltoコミットを古い順に `git fast-import` で1対1のgitコミットへ写します。ツリーはその版の時点のフォルダ、メッセージはIntent要約とレイヤー単位の変更、トレーラ `Alto-Commit` で対応を記録します。オブジェクトは追加だけなので、後のコミットは新しいblobだけを含みます。`diff` / `log` は `.alto`・フォルダ・`<rev>:<folder>` を比較し、`install` で `document.json` のtextconvを登録すると通常の `git diff` もレイヤー見出し付きで読めます。`export` / `pack` で単一ファイルとフォルダを相互変換します。
 

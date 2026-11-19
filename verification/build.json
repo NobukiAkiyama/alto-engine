@@ -2,7 +2,7 @@
   "date": "2026-10-26",
   "version": "0.4.0",
   "milestone": "M8 + embedding API",
-  "protocolVersion": 4,
+  "protocolVersion": 13,
   "buildHost": "aarch64-apple-darwin",
   "wasmBytes": 6395243,
   "gzipBytes": 1604681,
@@ -25,7 +25,7 @@
   "browserM4RegressionTests": 11,
   "browserBenchmarks": 13,
   "comparisonWasmNote": "Rebuilt on 2026-10-26. Optional Legacy/Pooled/Disjoint/Dense/Batched RGBA16F verification, including MRT8 lifetimes. Vello is not linked into the production package.",
-  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Protocol remains 4.",
+  "imageEditingNote": "Crop, stamp, levels, curves, hue, invert, and the other image-editing operations are a Rust API. They are not WASM commands. Image editing does not change the wire protocol; `protocolVersion` records the current value.",
   "vectorOptimizationNote": "Disjoint batching plus ordered MRT8 coverage for dense vector calls, under the existing GPU budget. See DENSE-VECTOR-RESULTS-2026-10-26.md. Canvas loss remains an independent investigation.",
   "browserEmbeddingTests": 31,
   "gpuMemoryNote": "Budget-sized atlas/display arrays, managed byte categories and retirement ledger, viewport eviction with background overview, and lease-based 64px M5 bucket reuse. See GPU-MEMORY-RESULTS-2026-10-26.md. Values exclude driver VRAM and readback buffers; initial overview completion is asynchronous."
