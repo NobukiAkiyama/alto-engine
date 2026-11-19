@@ -22,7 +22,7 @@ export interface GradientOptions {
 export interface ImageEditResult { node: NodeId; bounds: ImageBounds; changed_tiles: number; no_op: boolean }
 /** Result of a whole-document edit. Layer pixels are not rewritten. */
 export interface CanvasEditResult { width: number; height: number; no_op: boolean }
-export interface LayerEditResult { node: NodeId; bounds: ImageBounds; no_op: boolean }
+export interface LayerEditResult { node: NodeId; bounds: ImageBounds; no_op: boolean; missing: number }
 /** Stored pixels per channel, before opacity, masks and effects. Each channel has 256 bins. */
 export interface ImageHistogram { r: number[]; g: number[]; b: number[]; a: number[]; pixels: number }
 /** A polyline in node-local pixels, drawn with a round tip. */

@@ -118,6 +118,50 @@ export async function runImageVersionTests(engine, log) {
         const flat = await Promise.all(samples.map((p) => d.image.pickComposite(p))); for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - flat[i].bytes[c]) <= 1), `group picture changed at ${p}`); }
       const saved = blobTarget(), done = await d.snapshotHash(); await d.save(saved); d = await engine.open(saved.blob); assert(await d.snapshotHash() === done, "bake reopen");
     });
+    const addBakedText = async (value = "A", spans = []) => {
+      d = await engine.createDocument({ width: 320, height: 64 });
+      assert(d.getSnapshot().meta.render_version === 3, "expected the v3 renderer");
+      const font = await engine.assets.importFont(await (await fetch("../../tests/fonts/AltoTestLatin.ttf")).blob());
+      let text;
+      await d.transact("text", (tx) => {
+        text = tx.addText({ text: value, spans, style: { fonts: [tx.addFont(font)], size: 32, color: [1, 0, 0, 1] } });
+        tx.setTransform(text, [1, 0, 0, 1, 247, 8]);
+      });
+      return text;
+    };
+    await test("text_rasterize_matches_the_canvas_pixels", async () => {
+      const text = await addBakedText("A😀", [{ start: 1, end: 3, style: { fonts: [] } }]);
+      const samples = Array.from({ length: 32 * 20 }, (_, i) => [246 + 2 * (i % 32), 7 + 2 * Math.floor(i / 32)]);
+      const pixels = async () => {
+        const colors = [];
+        for (const point of samples) colors.push((await d.image.pickComposite(point)).bytes);
+        return colors;
+      };
+      const before = await pixels();
+      assert(before.some((p) => p[3] === 255) && before.some((p) => p[3] > 0 && p[3] < 255), "expected opaque and antialiased text");
+      assert(before.some((p, i) => samples[i][0] >= 272 && p[3] === 255), "expected the placeholder box");
+      const result = await d.image.rasterize(text);
+      assert(result.missing === 1 && d.getSnapshot().nodes.get(text).type === "raster", "text rasterize result");
+      const after = await pixels();
+      for (const [i, p] of before.entries()) {
+        assert(p.every((v, c) => Math.abs(v - after[i][c]) <= (p[3] === 255 ? 0 : 1)),
+          `text changed at ${samples[i]}: ${p} vs ${after[i]}`);
+      }
+    });
+    await test("rasterize_is_one_undo_and_survives_save", async () => {
+      const text = await addBakedText();
+      const before = await d.snapshotHash();
+      assert((await d.image.rasterize(text)).missing === 0, "expected an explicit zero missing count");
+      const after = await d.snapshotHash();
+      await d.undo();
+      assert(await d.snapshotHash() === before && d.getSnapshot().nodes.get(text).type === "text", "text rasterize Undo");
+      await d.redo();
+      assert(await d.snapshotHash() === after, "text rasterize Redo");
+      const saved = blobTarget();
+      await d.save(saved);
+      d = await engine.open(saved.blob);
+      assert(await d.snapshotHash() === after && d.getSnapshot().nodes.get(text).type === "raster", "text rasterize reopen");
+    });
     await test("branches / dirty refusal / conflict resolution / two-parent roundtrip", async () => {
       d = await engine.createDocument({ width: 8, height: 8 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster(); });
       const base = await d.versions.commit("base"); await d.versions.createBranch("案A", { checkout: true });
