@@ -80,6 +80,102 @@ fn line_texts(c: &TextContent, l: &TextLayout) -> Vec<String> {
         .collect()
 }
 
+fn underlined(mut c: TextContent) -> TextContent {
+    c.style.underline = Underline {
+        kind: UnderlineKind::Solid,
+        ..Default::default()
+    };
+    c
+}
+
+#[test]
+fn underline_uses_the_font_metrics() {
+    let f = fixture();
+    let c = underlined(content("AB", vec![f.latin], false));
+    let l = layout(&c, &f.set);
+    let face = ttf_parser::Face::parse(LATIN, 0).unwrap();
+    let m = face.underline_metrics().unwrap();
+    assert_eq!(l.rules.len(), 1);
+    assert!(l.bounds[3] >= l.rules[0].rect[3]);
+    assert!(
+        (l.rules[0].rect[1] - l.lines[0].baseline
+            + m.position as f64 / face.units_per_em() as f64 * 100.0
+            + m.thickness as f64 / face.units_per_em() as f64 * 50.0)
+            .abs()
+            < 1e-6
+    );
+    assert!(
+        (l.rules[0].rect[3]
+            - l.rules[0].rect[1]
+            - m.thickness as f64 / face.units_per_em() as f64 * 100.0)
+            .abs()
+            < 1e-6
+    );
+}
+
+#[test]
+fn underline_falls_back_without_a_post_table() {
+    let mut f = fixture();
+    f.set.fonts.get_mut(&f.latin).unwrap().underline = None;
+    let l = layout(&underlined(content("A", vec![f.latin], false)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!((l.rules[0].rect[3] - l.rules[0].rect[1] - 5.0).abs() < 1e-6);
+}
+
+#[test]
+fn vertical_underline_is_on_the_right() {
+    let f = fixture();
+    let l = layout(&underlined(content("一", vec![f.jp], true)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!(l.rules[0].rect[0] > l.lines[0].baseline + 50.0);
+}
+
+#[test]
+fn underline_splits_at_a_size_change() {
+    let f = fixture();
+    let mut c = underlined(content("AB", vec![f.latin], false));
+    c.spans.push(TextSpan {
+        start: 1,
+        end: 2,
+        style: StylePatch {
+            size: Some(50.0),
+            ..Default::default()
+        },
+    });
+    assert_eq!(layout(&c, &f.set).rules.len(), 2);
+}
+
+#[test]
+fn underline_splits_when_font_metrics_change() {
+    let f = fixture();
+    let c = underlined(content("A吾", vec![f.latin, f.jp], false));
+    assert_eq!(layout(&c, &f.set).rules.len(), 2);
+}
+
+#[test]
+fn underline_skips_trailing_spaces() {
+    let f = fixture();
+    let l = layout(&underlined(content("A  ", vec![f.latin], false)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!((l.rules[0].rect[2] - l.clusters[0].inline[1]).abs() < 1e-5);
+    assert!(l.rules[0].rect[2] < l.clusters.last().unwrap().inline[1]);
+}
+
+#[test]
+fn justified_underline_spans_inter_cluster_expansion() {
+    let mut c = underlined(content("あいうえ", vec![], false));
+    c.frame = TextFrame::Area {
+        width: 250.0,
+        height: 500.0,
+    };
+    c.align = TextAlign::Justify;
+    let l = layout(&c, &FontSet::default());
+    assert_eq!(l.lines.len(), 2);
+    assert_eq!(l.rules.len(), 2);
+    assert!((l.rules[0].rect[0] - l.lines[0].inline[0]).abs() < 1e-6);
+    assert!((l.rules[0].rect[2] - l.lines[0].inline[1]).abs() < 1e-6);
+}
+
 #[test]
 fn font_inspection_reports_names_and_vertical_support() {
     let jp = inspect(JP, 0).unwrap();

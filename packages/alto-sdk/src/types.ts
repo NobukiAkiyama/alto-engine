@@ -82,6 +82,17 @@ export interface FontFeature {
   tag: string;
   value: number;
 }
+export type UnderlineKind = "none" | "solid";
+export interface Underline {
+  /** Underline rendering. `none` clears an inherited underline. */
+  kind: UnderlineKind;
+  /** Underline colour; defaults to the text colour. */
+  color?: Color;
+  /** Offset in em, positive down. Defaults to the selected font metric. */
+  position?: number;
+  /** Thickness in em. Defaults to the selected font metric. */
+  thickness?: number;
+}
 export interface TextStyle {
   /** Fallback order: the first font that has every character of a grapheme is used. */
   fonts: string[];
@@ -95,6 +106,7 @@ export interface TextStyle {
   scale?: number;
   features?: FontFeature[];
   language?: string | null;
+  underline?: Underline;
 }
 export type StylePatch = Partial<Omit<TextStyle, "line_height">>;
 /** Offsets are UTF-16 code units, the same as JavaScript string indices. */

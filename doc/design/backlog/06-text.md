@@ -390,8 +390,8 @@ pub struct Underline {
 
 - 検証：`position` は −1〜1、`thickness` は 0.005〜0.5、色は 0〜1。`patched` と `validate` が扱う。
 - 値の決め方：`position` と `thickness` が `None` なら、そのクラスターのフォントの Face::underline_metrics（ttf-parser）を size / upem 倍する（position は post の underlinePosition。上向き正なので符号を反転して下向き正にする）。`post` が無いフォントは `UNDERLINE_POSITION_EM`（新規）= 0.12 と `UNDERLINE_THICKNESS_EM`（新規）= 0.05。
-- 配置（`layout`）：行ごとに、同じ `Underline` と同じ `size` が連続するクラスターを1本の線にまとめる（行末の空白を除く）。`TextLayout.rules: Vec<PlacedRule>`（新規）（`rect: [f64; 4]` ノード座標、`color`）に入れる。横組み：線の中心は `baseline + position`、長さはクラスターの `inline` の端から端まで。縦組みは右側の傍線で、`x = baseline + size / 2 + VERTICAL_RULE_GAP_EM（新規）（0.1 em） × size`、`y` は同じく `inline` の範囲。ルビが同じ側にあるとき（縦組み）、ルビの内端を傍線の外縁まで寄せる。
-- 焼き込み：矩形は輪郭 1 個（1000 単位の箱。`Move`、`Line` ×3、`Close`。`font` は `PLACEHOLDER_FONT`、`glyph` は 0）を共有し、各線を `m = [w / 1000, 0, 0, -h / 1000]`（Q24）、`t` = 左上、色 Q14 の `BakeGlyph` として足す。`bake_text` の輪郭の重複除去の鍵は `(Option<AssetId>, u16)` で、箱の `(None, 0)` と衝突するので、TXT-2 の「合成の輪郭」の予約値 SYNTH_RULE を使う。線の描画はアトラスか直接ラスタ化かを字形と同じ判定で選ぶ。描画の3実装は変わらない。
+- 配置（`layout`）：行ごとに、同じ `Underline`、同じ `size`、同じ解決済み位置と太さが連続するクラスターを1本の線にまとめる（行末の空白を除く。フォント既定メトリクスが異なる境目では分ける）。`TextLayout.rules: Vec<PlacedRule>`（新規）（`rect: [f64; 4]` ノード座標、`color`）に入れる。横組み：線の中心は `baseline + position`、長さはクラスターの `inline` の端から端まで。縦組みは右側の傍線で、`x = baseline + size / 2 + VERTICAL_RULE_GAP_EM（新規）（0.1 em） × size`、`y` は同じく `inline` の範囲。ルビが同じ側にあるとき（縦組み）、ルビの内端を傍線の外縁まで寄せる。
+- 焼き込み：矩形は輪郭 1 個（1000 単位の箱。`Move`、`Line` ×3、`Close`。`font` は `PLACEHOLDER_FONT`、`glyph` は予約値 `SYNTH_RULE`（0xFF02））を共有し、各線を `m = [w / 1000, 0, 0, -h / 1000]`（Q24）、`t` = 左上、色 Q14 の `BakeGlyph` として足す。`bake_text` の輪郭の重複除去の鍵は `(Option<AssetId>, u16)` で、箱の `(None, 0)` と衝突するので、TXT-2 の「合成の輪郭」の予約値を使う。線の描画はアトラスか直接ラスタ化かを字形と同じ判定で選ぶ。描画の3実装は変わらない。
 - 下線を持たない文書の `rules` は空で、焼き込みは変わらない。
 - SDK：`StylePatch.underline`（`types.ts` に `Underline` を足す）。`doc.text.style(id, start, end, { underline })` を使う。新しい関数は足さない。
 
@@ -407,9 +407,9 @@ pub struct Underline {
 
 **Interfaces:** Produces `Underline`、`PlacedRule`、`TextLayout.rules`。
 
-- [ ] 試験 `underline_uses_the_font_metrics`（`post` の値と一致）、`underline_falls_back_without_a_post_table`、`vertical_underline_is_on_the_right`、`underline_splits_at_a_size_change`、`underline_skips_trailing_spaces`、`rule_bakes_one_shared_outline`。
-- [ ] 試験 `no_underline_bakes_the_same_bytes`（追加前の3つの parity テキスト）。
-- [ ] 形式の番号を上げる回では、`crates/alto-store/src/lib.rs` の `document_format` の書き出しと受け入れ、`DocumentMeta` の `format_version` を同じ PR で更新する（共通の設計）。
+- [x] 試験 `underline_uses_the_font_metrics`（`post` の値と一致）、`underline_falls_back_without_a_post_table`、`vertical_underline_is_on_the_right`、`underline_splits_at_a_size_change`、`underline_splits_when_font_metrics_change`、`underline_skips_trailing_spaces`、`justified_underline_spans_inter_cluster_expansion`、`underline_requires_format_6`、`rule_bakes_one_shared_outline`。
+- [x] 試験 `no_underline_bakes_the_same_bytes`（追加前の4つの parity テキスト）。
+- [x] 形式の番号を上げる回では、`crates/alto-store/src/lib.rs` の `document_format` の書き出しと受け入れ、`DocumentMeta` の `format_version` を同じ PR で更新する（共通の設計）。`FORMAT_VERSION`、`SUPPORTED_FORMATS` と manifest の処理は既に形式6を扱い、この差分では下線使用時に `required_format()` が6を返すようにした。
 - [ ] 完了条件・検証：TXT-4 と同じ。PR。
 
 ### 依存

@@ -1446,6 +1446,8 @@ export interface TextStyle {
     scale?: number;
     // (undocumented)
     size: number;
+    // (undocumented)
+    underline?: Underline;
 }
 
 // @public
@@ -1508,6 +1510,17 @@ export class Transaction {
     // (undocumented)
     setVectorMask(id: NodeId, mask: VectorMask | null): void;
 }
+
+// @public (undocumented)
+export interface Underline {
+    color?: Color;
+    kind: UnderlineKind;
+    position?: number;
+    thickness?: number;
+}
+
+// @public (undocumented)
+export type UnderlineKind = "none" | "solid";
 
 // @public
 export interface UnsupportedNode extends NodeBase {
