@@ -569,11 +569,15 @@ impl Document {
     }
     /// The oldest format that supports all semantics used by this document.
     pub fn required_format(&self) -> u32 {
-        if self
-            .nodes
-            .values()
-            .any(|node| matches!(&node.kind, NodeKind::Text { content, .. } if content.hanging))
-        {
+        if self.nodes.values().any(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Text { content, .. }
+                    if content.hanging
+                        || !content.style.underline.is_none()
+                        || content.spans.iter().any(|span| span.style.underline.is_some())
+            )
+        }) {
             FORMAT_VERSION
         } else {
             BASE_FORMAT
@@ -814,5 +818,43 @@ mod compatibility_tests {
         assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION_EXACT);
         assert_eq!(loaded.meta.format_version, 5);
         assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn underline_requires_format_6() {
+        let mut doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let mut content = TextContent {
+            text: "underlined".into(),
+            ..Default::default()
+        };
+        content.style.underline.kind = alto_text::UnderlineKind::Solid;
+        let node = Node::text("Text", content);
+        let id = node.id;
+        doc.nodes.insert(id, node);
+        if let NodeKind::Group { children, .. } = &mut doc.nodes.get_mut(&doc.root).unwrap().kind {
+            children.push(id);
+        }
+        assert_eq!(doc.required_format(), FORMAT_VERSION);
+        let snapshot_format = |doc: &Document| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&doc.snapshot_bytes().unwrap()).unwrap();
+            value["meta"]["format_version"].as_u64().unwrap() as u32
+        };
+        assert_eq!(snapshot_format(&doc), FORMAT_VERSION);
+
+        let NodeKind::Text { content, .. } = &mut doc.nodes.get_mut(&id).unwrap().kind else {
+            unreachable!();
+        };
+        content.style.underline.kind = alto_text::UnderlineKind::None;
+        content.spans.push(alto_text::TextSpan {
+            start: 0,
+            end: 1,
+            style: alto_text::StylePatch {
+                underline: Some(alto_text::Underline::default()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(doc.required_format(), FORMAT_VERSION);
+        assert_eq!(snapshot_format(&doc), FORMAT_VERSION);
     }
 }

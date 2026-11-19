@@ -5,7 +5,7 @@ use crate::text::BAKER_VERSION;
 use alto_core::text_bake::{BakeCommand, PLACEHOLDER_FONT, TextBake};
 use alto_core::{AssetId, NodeId};
 use alto_doc::Node;
-use alto_text::{TextContent, TextFrame, TextStyle, WritingMode};
+use alto_text::{TextContent, TextFrame, TextStyle, Underline, UnderlineKind, WritingMode};
 
 const JP: &[u8] = include_bytes!("../../../tests/fonts/AltoTestJP.otf");
 const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
@@ -78,6 +78,39 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
                     height: 200.0,
                 },
                 hanging: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline",
+            TextContent {
+                text: "Underline".into(),
+                style: TextStyle {
+                    fonts: vec![latin],
+                    size: 37.5,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline-vertical",
+            TextContent {
+                text: "縦書き".into(),
+                style: TextStyle {
+                    fonts: vec![jp],
+                    size: 40.0,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                writing_mode: WritingMode::VerticalRl,
                 ..Default::default()
             },
         ),
@@ -235,6 +268,39 @@ fn text_bake_roundtrip_and_validation() {
     let mut index = bake.clone();
     index.glyphs[0].outline = bake.outlines.len() as u32;
     assert!(TextBake::decode(&index.encode()).is_err(), "outline index");
+}
+
+#[test]
+fn rule_bakes_one_shared_outline() {
+    let (mut e, d, latin, _) = document();
+    let content = TextContent {
+        text: "ABCD".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            underline: Underline {
+                kind: UnderlineKind::Solid,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let id = insert(&mut e, d, content);
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    let rules: Vec<_> = bake
+        .outlines
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.glyph == 0xFF02)
+        .collect();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        bake.glyphs
+            .iter()
+            .filter(|g| g.outline == rules[0].0 as u32)
+            .count(),
+        1
+    );
 }
 
 #[test]

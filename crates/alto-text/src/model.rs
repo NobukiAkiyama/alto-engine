@@ -60,6 +60,43 @@ fn black() -> Color {
     [0.0, 0.0, 0.0, 1.0]
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderlineKind {
+    #[default]
+    None,
+    Solid,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Underline {
+    #[serde(default)]
+    pub kind: UnderlineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    /// Offset in em, positive down. `None` uses the font's metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<f32>,
+    /// Thickness in em. `None` uses the font's metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f32>,
+}
+impl Underline {
+    pub fn is_none(&self) -> bool {
+        self.kind == UnderlineKind::None
+    }
+    fn validate(&self) -> bool {
+        self.color.as_ref().is_none_or(color_ok)
+            && self
+                .position
+                .is_none_or(|v| v.is_finite() && (-1.0..=1.0).contains(&v))
+            && self
+                .thickness
+                .is_none_or(|v| v.is_finite() && (0.005..=0.5).contains(&v))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextStyle {
@@ -84,6 +121,8 @@ pub struct TextStyle {
     /// BCP 47 language tag. "ja" selects Japanese locl forms.
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Underline::is_none")]
+    pub underline: Underline,
 }
 impl Default for TextStyle {
     fn default() -> Self {
@@ -96,6 +135,7 @@ impl Default for TextStyle {
             scale: 1.0,
             features: vec![],
             language: Some("ja".into()),
+            underline: Underline::default(),
         }
     }
 }
@@ -118,6 +158,8 @@ pub struct StylePatch {
     pub features: Option<Vec<FontFeature>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<Underline>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -246,6 +288,7 @@ impl TextStyle {
             || !(0.5..=10.0).contains(&self.line_height)
             || !spacing_ok(self.letter_spacing)
             || !scale_ok(self.scale)
+            || !self.underline.validate()
         {
             return Err(invalid("style values out of range"));
         }
@@ -274,6 +317,9 @@ impl TextStyle {
         if let Some(v) = &p.language {
             s.language = Some(v.clone());
         }
+        if let Some(v) = &p.underline {
+            s.underline = v.clone();
+        }
         s
     }
 }
@@ -290,6 +336,7 @@ impl StylePatch {
             || self.color.as_ref().is_some_and(|c| !color_ok(c))
             || self.letter_spacing.is_some_and(|v| !spacing_ok(v))
             || self.scale.is_some_and(|v| !scale_ok(v))
+            || self.underline.as_ref().is_some_and(|v| !v.validate())
         {
             return Err(invalid("span style values out of range"));
         }

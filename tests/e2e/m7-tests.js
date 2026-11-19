@@ -174,6 +174,17 @@ export async function runM7Tests(engine, log) {
       try { await doc.text.set(id, { ...doc.getSnapshot().nodes.get(id).content, spans: [{ start: 3, end: 1, style: {} }] }); } catch { failed = true; }
       assert(failed, "invalid span accepted");
     });
+    await test("underline style bakes and renders a rule below horizontal text", async () => {
+      await setup();
+      await addText({ text: "AB", style: { fonts: [latin.id], size: 100, line_height: 1.5 }, writing_mode: "horizontal_tb" }, 50, 50);
+      const before = await ink(engine, 40, 40, 300, 250);
+      await doc.text.style(id, 0, 2, { underline: { kind: "solid" } });
+      await frame(engine);
+      const after = await ink(engine, 40, 40, 300, 250);
+      const span = doc.getSnapshot().nodes.get(id).content.spans[0];
+      assert(span.style.underline.kind === "solid", "underline style not retained");
+      assert(after.box && before.box && after.box[3] > before.box[3], `underline did not extend ink below text: ${before.box} -> ${after.box}`);
+    });
     await test("zoomed text keeps exact outlines (levels -4 .. 2)", async () => {
       await setup();
       await addText(vertical("永", [jp.id]), 200, 50);

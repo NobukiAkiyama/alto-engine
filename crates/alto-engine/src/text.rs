@@ -90,6 +90,7 @@ fn apply(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
 /// `tests/parity/text-bake.txt` and say why when the same input bakes to other
 /// bytes (a dependency version, a rounding change).
 pub const BAKER_VERSION: u16 = 1;
+const SYNTH_RULE: u16 = 0xFF02;
 /// The vector schema's per-path command limit (`placed` in `alto-text`).
 const BAKE_CHUNK: usize = 4000;
 /// Transformed control-point bounds beyond this are skipped (`placed`).
@@ -271,6 +272,48 @@ impl Engine {
                 t: [q(g.transform[4], 30) as i64, q(g.transform[5], 30) as i64],
                 color: g.color.map(text_color_q14),
             });
+        }
+        if !layout.rules.is_empty() {
+            use alto_core::text_bake::BakeCommand as B;
+            let outline = bake.outlines.len() as u32;
+            bake.outlines.push(BakeOutline {
+                font: alto_core::text_bake::PLACEHOLDER_FONT,
+                glyph: SYNTH_RULE,
+                upem: 1000,
+                commands: vec![
+                    B::Move([0, 0]),
+                    B::Line([64_000, 0]),
+                    B::Line([64_000, 64_000]),
+                    B::Line([0, 64_000]),
+                    B::Close,
+                ],
+            });
+            for rule in &layout.rules {
+                let [x0, y0, x1, y1] = rule.rect;
+                if !rule.rect.iter().all(|v| v.is_finite())
+                    || x1 <= x0
+                    || y1 <= y0
+                    || [x0, y0, x1, y1].iter().any(|v| v.abs() > BAKE_LIMIT)
+                {
+                    continue;
+                }
+                let q = |v: f64, bits: i32| (v * 2f64.powi(bits)).round();
+                let m = [
+                    q((x1 - x0) / 1000.0, 24),
+                    0.0,
+                    0.0,
+                    q(-(y1 - y0) / 1000.0, 24),
+                ];
+                if m.iter().any(|v| v.abs() > f64::from(i32::MAX)) {
+                    continue;
+                }
+                bake.glyphs.push(BakeGlyph {
+                    outline,
+                    m: m.map(|v| v as i32),
+                    t: [q(x0, 30) as i64, q(y1, 30) as i64],
+                    color: rule.color.map(text_color_q14),
+                });
+            }
         }
         bake
     }

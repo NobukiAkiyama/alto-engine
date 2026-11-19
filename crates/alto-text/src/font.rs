@@ -145,6 +145,8 @@ pub struct FontData {
     pub ascent: f64,
     pub descent: f64,
     pub has_vert: bool,
+    /// OpenType post underline metrics in font units (position is y-up).
+    pub underline: Option<(f64, f64)>,
 }
 impl FontData {
     pub fn new(id: AssetId, bytes: Arc<Vec<u8>>, face_index: u32) -> Result<Self, FontError> {
@@ -163,6 +165,9 @@ impl FontData {
             (upem * 0.88, upem * 0.12)
         };
         let has_vert = has_feature(&face, &[b"vert", b"vrt2"]);
+        let underline = face
+            .underline_metrics()
+            .map(|m| (m.position as f64, m.thickness as f64));
         Ok(Self {
             id,
             bytes,
@@ -171,6 +176,7 @@ impl FontData {
             ascent,
             descent,
             has_vert,
+            underline,
         })
     }
 }

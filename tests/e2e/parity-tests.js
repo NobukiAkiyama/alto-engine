@@ -893,6 +893,15 @@ export async function runParityTests(engine, log) {
           "text-v3-vertical": (l, j) => ({ text: "吾輩は猫である。\n第12回", style: style([l, j], 40), writing_mode: "vertical_rl", frame: { kind: "area", width: 300, height: 400 } }),
           "text-v3-placeholder": () => ({ text: "A B", style: style([], 24) }),
           "text-v3-hanging": (l, j) => ({ text: "あい。う", style: style([j], 40), frame: { kind: "area", width: 100, height: 200 }, hanging: true }),
+          "text-v3-underline": (l) => ({
+            text: "Underline",
+            style: { ...style([l], 37.5), underline: { kind: "solid" } },
+          }),
+          "text-v3-underline-vertical": (l, j) => ({
+            text: "縦書き",
+            style: { ...style([j], 40), underline: { kind: "solid" } },
+            writing_mode: "vertical_rl",
+          }),
         };
         assert(want.size === Object.keys(texts).length, `fixture has ${want.size} rows`);
         const failures = [];
