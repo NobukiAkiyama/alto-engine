@@ -68,6 +68,19 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
                 ..Default::default()
             },
         ),
+        (
+            "text-v3-hanging",
+            TextContent {
+                text: "あい。う".into(),
+                style: style(vec![jp], 40.0),
+                frame: TextFrame::Area {
+                    width: 100.0,
+                    height: 200.0,
+                },
+                hanging: true,
+                ..Default::default()
+            },
+        ),
     ]
 }
 
@@ -422,4 +435,75 @@ fn render_scenes_carry_the_bake() {
     };
     assert_eq!(bake.hash, hash);
     assert_eq!(*bake.bytes, e.blobs[&hash]);
+}
+
+#[test]
+fn new_format_document_saves_and_reopens() {
+    let (mut e, d, _, jp) = document();
+    let id = insert(
+        &mut e,
+        d,
+        TextContent {
+            text: "あい。う".into(),
+            style: TextStyle {
+                fonts: vec![jp],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    e.commit(d, "before hanging", 1, None, false).unwrap();
+    let mut content = match &e.document(d).unwrap().node(id).unwrap().kind {
+        NodeKind::Text { content, .. } => content.clone(),
+        _ => unreachable!(),
+    };
+    content.hanging = true;
+    content.frame = TextFrame::Area {
+        width: 80.0,
+        height: 200.0,
+    };
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "text.edit",
+        vec![Op::SetText {
+            id,
+            content,
+            bake: None,
+        }],
+        rev,
+    )
+    .unwrap();
+    e.commit(d, "hanging", 2, None, false).unwrap();
+    let old_objects = e.version_only_objects(d).unwrap();
+    assert!(!old_objects.is_empty());
+    let check_manifest = |entries: &std::collections::BTreeMap<String, Vec<u8>>, format| {
+        let m: alto_store::Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!(m.format, format);
+        assert_eq!(m.document_format, 6);
+    };
+    let mut fresh = Engine::new();
+    let bytes = e.save_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&bytes).unwrap(), 2);
+    let package = fresh.open_package(&bytes).unwrap();
+    let folder = e.folder_entries(d).unwrap();
+    check_manifest(&folder, 2);
+    let plan = e.prepare_gc(d, &folder, false).unwrap();
+    check_manifest(&plan.entries, 2);
+    let folder = fresh.open_entries(folder).unwrap();
+    let thin = e.save_thin_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&thin).unwrap(), 3);
+    let mut thin_engine = Engine::new();
+    let thin = thin_engine.open_package(&thin).unwrap();
+    assert_eq!(thin_engine.external_objects(thin.0).unwrap(), old_objects);
+    for (reopened, (h, warnings)) in [(&fresh, package), (&fresh, folder), (&thin_engine, thin)] {
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reopened.document(h).unwrap().meta.format_version, 6);
+        assert_eq!(reopened.text_info(h, id).unwrap().lines[0].end, 3);
+        assert_eq!(
+            reopened.text_bake(h, id).unwrap(),
+            e.text_bake(d, id).unwrap()
+        );
+        assert!(!reopened.version_status(h).unwrap().changed);
+    }
 }

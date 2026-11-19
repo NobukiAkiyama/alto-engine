@@ -162,6 +162,12 @@ impl Editor {
             self.doc.revision = revision;
             return Err(revert_err.unwrap_or(e));
         }
+        // Keep live metadata and its digest consistent with the saved snapshot.
+        let format = self.doc.required_format();
+        if self.doc.meta.format_version != format {
+            self.doc.meta.format_version = format;
+            changes.meta_changed = true;
+        }
         Ok((applied, changes))
     }
     /// Rolls back completed ops. Lock checks are off: the inverse of an op this

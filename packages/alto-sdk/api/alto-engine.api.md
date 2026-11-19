@@ -196,6 +196,7 @@ export type ContentDetail = {
     writing_mode: WritingMode | null;
     frame: boolean;
     tate_chu_yoko: boolean;
+    hanging: boolean;
 } | {
     kind: "adjustment";
 } | {
@@ -386,6 +387,7 @@ export class DocumentHandle {
         set: (id: NodeId, content: TextContent) => Promise<void>;
         replace: (id: NodeId, start: number, end: number, insert: string, intent?: Intent) => Promise<void>;
         style: (id: NodeId, start: number, end: number, patch: StylePatch) => Promise<void>;
+        setHanging: (id: NodeId, on: boolean) => Promise<void>;
         setTateChuYoko: (id: NodeId, start: number, end: number, on?: boolean) => Promise<void>;
         info: (id: NodeId) => Promise<TextInfo>;
         hitTest: (id: NodeId, x: number, y: number) => Promise<number>;
@@ -1364,6 +1366,7 @@ export interface TextContent {
         width: number;
         height: number;
     };
+    hanging?: boolean;
     // (undocumented)
     spans?: TextSpan[];
     // (undocumented)

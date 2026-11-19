@@ -259,6 +259,7 @@ fn describe(detail: &ContentDetail) -> String {
             writing_mode,
             frame,
             tate_chu_yoko,
+            hanging,
         } => {
             let mut parts = vec![];
             if let Some([from, to]) = text {
@@ -277,6 +278,9 @@ fn describe(detail: &ContentDetail) -> String {
             }
             if *tate_chu_yoko {
                 parts.push("縦中横".into());
+            }
+            if *hanging {
+                parts.push("ぶら下げ".into());
             }
             parts.join("、")
         }

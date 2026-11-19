@@ -567,6 +567,19 @@ impl Document {
         };
         Ok((inverse, change))
     }
+    /// The oldest format that supports all semantics used by this document.
+    pub fn required_format(&self) -> u32 {
+        if self
+            .nodes
+            .values()
+            .any(|node| matches!(&node.kind, NodeKind::Text { content, .. } if content.hanging))
+        {
+            FORMAT_VERSION
+        } else {
+            BASE_FORMAT
+        }
+    }
+
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, DocError> {
         let mut ordered = Vec::new();
         fn walk(doc: &Document, id: NodeId, out: &mut Vec<Node>) -> Result<(), DocError> {
@@ -581,7 +594,10 @@ impl Document {
         }
         walk(self, self.root, &mut ordered)?;
         let snapshot = Snapshot {
-            meta: self.meta.clone(),
+            meta: DocumentMeta {
+                format_version: self.required_format(),
+                ..self.meta.clone()
+            },
             root: self.root,
             nodes: ordered,
             assets: self.assets.values().cloned().collect(),
@@ -754,7 +770,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn only_render_version_three_and_format_five_load() {
+    fn unsupported_render_and_document_versions_are_rejected() {
         let bytes = Document::new(DocumentMeta::srgb_u8(8, 8))
             .unwrap()
             .snapshot_bytes()
@@ -788,7 +804,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn render_version_three_saves_format_five_and_reloads() {
+    fn format_5_documents_still_save_as_5() {
         let doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
         let bytes = doc.snapshot_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

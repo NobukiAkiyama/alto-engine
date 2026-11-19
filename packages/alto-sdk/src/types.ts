@@ -114,6 +114,8 @@ export interface TextContent {
   frame?: { kind: "point" } | { kind: "area"; width: number; height: number };
   writing_mode?: WritingMode;
   align?: "start" | "center" | "end" | "justify";
+  /** Allow one overflowing Japanese punctuation character per area text line. Defaults to false. */
+  hanging?: boolean;
   /** Explicit tate-chu-yoko ranges (vertical text). */
   tcy?: TextRange[];
   /** Isolated runs of up to this many ASCII digits become tate-chu-yoko (0–4, default 2). */
@@ -340,6 +342,7 @@ export type ContentDetail =
       writing_mode: WritingMode | null;
       frame: boolean;
       tate_chu_yoko: boolean;
+      hanging: boolean;
     }
   | { kind: "adjustment" }
   | { kind: "unsupported" }

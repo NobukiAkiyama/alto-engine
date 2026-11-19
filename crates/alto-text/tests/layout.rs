@@ -489,3 +489,103 @@ fn glyph_paths_cover_cff_and_truetype_outlines() {
     let paths = glyph_paths(&layout(&c, &f.set), &f.set, &cache);
     assert!(paths.len() > 1 && paths.iter().all(|p| p.data.commands.len() <= 4000));
 }
+
+fn hanging_content(text: &str, vertical: bool, inline: f64) -> TextContent {
+    let mut c = content(text, vec![], vertical);
+    let (width, height) = if vertical {
+        (500.0, inline)
+    } else {
+        (inline, 500.0)
+    };
+    c.frame = TextFrame::Area { width, height };
+    c.hanging = true;
+    c
+}
+
+#[test]
+fn hanging_keeps_the_period_on_the_line() {
+    for punctuation in ['、', '。', '，', '．'] {
+        // The following space fits, so the punctuation must explicitly end the line.
+        let mut c = hanging_content(&format!("あい{punctuation} う"), false, 250.0);
+        for (align, start) in [
+            (TextAlign::Start, 0.0),
+            (TextAlign::Center, 25.0),
+            (TextAlign::End, 50.0),
+        ] {
+            c.align = align;
+            let l = layout(&c, &FontSet::default());
+            assert_eq!((l.lines[0].end, l.lines[1].start), (3, 3));
+            assert_eq!(l.lines[0].inline, [start, start + 300.0]);
+            assert_eq!(l.bounds[2], start + 300.0);
+        }
+    }
+}
+
+#[test]
+fn hanging_does_not_count_in_justify() {
+    let mut c = hanging_content("あい。う", false, 250.0);
+    c.align = TextAlign::Justify;
+    let l = layout(&c, &FontSet::default());
+    assert_eq!(l.clusters[1].inline, [150.0, 250.0]);
+    assert_eq!(l.clusters[2].inline, [250.0, 350.0]);
+    assert_eq!(l.lines[0].inline, [0.0, 350.0]);
+}
+
+#[test]
+fn hanging_stops_at_one_character() {
+    let mut c = hanging_content("あい。、う", false, 300.0);
+    let fonts = FontSet::default();
+    let on = layout(&c, &fonts);
+    c.hanging = false;
+    let off = layout(&c, &fonts);
+    assert_eq!(on.lines[0].end, 1);
+    assert_eq!(on.lines[0].end, off.lines[0].end);
+}
+
+#[test]
+fn hanging_does_not_start_a_line_with_a_forbidden_character() {
+    let fonts = FontSet::default();
+    for text in ["あい。」", "あい。、"] {
+        let mut c = hanging_content(text, false, 250.0);
+        let on = layout(&c, &fonts);
+        c.hanging = false;
+        let off = layout(&c, &fonts);
+        assert!(
+            on.lines
+                .iter()
+                .map(|line| (line.start, line.end))
+                .eq(off.lines.iter().map(|line| (line.start, line.end))),
+            "hanging changed the line breaks for {text}"
+        );
+        assert_eq!(on.lines[0].end, 1);
+    }
+}
+
+#[test]
+fn vertical_hanging_uses_the_height() {
+    let f = fixture();
+    let mut c = hanging_content("あい。う", true, 250.0);
+    c.style.fonts = vec![f.jp];
+    let l = layout(&c, &f.set);
+    assert_eq!((l.lines[0].end, l.lines[1].start), (3, 3));
+    assert_eq!(l.lines[0].inline, [0.0, 300.0]);
+    assert_eq!(l.bounds[3], 300.0);
+}
+
+#[test]
+fn hanging_off_is_unchanged() {
+    let mut c = hanging_content("あい。う", false, 250.0);
+    c.hanging = false;
+    let fonts = FontSet::default();
+    let l = layout(&c, &fonts);
+    assert_eq!(l.lines[0].end, 1);
+    assert_eq!(l.lines[0].inline, [0.0, 100.0]);
+
+    c.frame = TextFrame::Point;
+    let off = layout(&c, &fonts);
+    c.hanging = true;
+    let on = layout(&c, &fonts);
+    assert_eq!(on.lines[0].inline, off.lines[0].inline);
+    assert_eq!(on.bounds, off.bounds);
+    assert_eq!(on.glyphs.len(), off.glyphs.len());
+}

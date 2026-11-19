@@ -1,6 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod archive;
 use alto_core::ContentHash;
+use alto_doc::{BASE_FORMAT, SUPPORTED_FORMATS};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -189,6 +190,7 @@ pub fn package_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>
         manifest_bytes_with_refs(
             hash,
             parts.head,
+            snapshot_document_format(&parts.snapshot)?,
             parts.refs.clone(),
             parts.external.as_ref(),
         ),
@@ -201,13 +203,39 @@ pub fn package_entries(parts: &PackageParts) -> Result<BTreeMap<String, Vec<u8>>
     }
     Ok(entries)
 }
+/// Read the format from the exact snapshot the manifest points to.
+pub fn snapshot_document_format(snapshot: &[u8]) -> Result<u32> {
+    #[derive(Deserialize)]
+    struct Header {
+        meta: Option<Meta>,
+    }
+    #[derive(Deserialize)]
+    struct Meta {
+        format_version: u32,
+    }
+    let header: Header = serde_json::from_slice(snapshot)
+        .map_err(|e| StoreError::Corrupt(format!("snapshot: {e}")))?;
+    Ok(header.meta.map_or(BASE_FORMAT, |meta| meta.format_version))
+}
+
 /// Canonical manifest bytes for a snapshot and head commit.
-pub fn manifest_bytes(snapshot: ContentHash, head: Option<ContentHash>) -> Vec<u8> {
-    manifest_bytes_with_refs(snapshot, head, VersionRefs::default(), None)
+pub fn manifest_bytes(
+    snapshot: ContentHash,
+    head: Option<ContentHash>,
+    document_format: u32,
+) -> Vec<u8> {
+    manifest_bytes_with_refs(
+        snapshot,
+        head,
+        document_format,
+        VersionRefs::default(),
+        None,
+    )
 }
 pub fn manifest_bytes_with_refs(
     snapshot: ContentHash,
     head: Option<ContentHash>,
+    document_format: u32,
     refs: VersionRefs,
     external: Option<&ExternalObjects>,
 ) -> Vec<u8> {
@@ -218,7 +246,7 @@ pub fn manifest_bytes_with_refs(
             objects: e.objects.len() as u64,
             digest: ContentHash::of(&external_objects_bytes(&e.objects)),
         }),
-        document_format: 5,
+        document_format,
         refs,
         snapshot,
         creator: CREATOR.into(),
@@ -341,6 +369,7 @@ fn package_sources<'a>(
         Source::Owned(manifest_bytes_with_refs(
             hash,
             parts.head,
+            snapshot_document_format(&parts.snapshot)?,
             parts.refs.clone(),
             parts.external.as_ref(),
         )),
@@ -514,7 +543,11 @@ fn decode_entries_impl(
                 value.get("external_history").is_some_and(|v| !v.is_null())
             ),
             (Some(2), false) | (Some(3), true)
-        ) || value.get("document_format").and_then(|v| v.as_u64()) != Some(5))
+        ) || !value
+            .get("document_format")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .is_some_and(|v| SUPPORTED_FORMATS.contains(&v)))
     {
         return Err(StoreError::Unsupported("package format".into()));
     }
@@ -1230,6 +1263,30 @@ mod tests {
         assert!(decode_recovery_entries(entries, &missing).is_err());
     }
     #[test]
+    fn format_5_documents_still_save_as_5() {
+        let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let snapshot = doc.snapshot_bytes().unwrap();
+        let package = encode_package(&snapshot, BTreeMap::new()).unwrap();
+        let entries = read_entries(&package).unwrap();
+        let manifest: Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!((manifest.format, manifest.document_format), (2, 5));
+        assert_eq!(decode_entries(entries).unwrap().snapshot, snapshot);
+    }
+
+    #[test]
+    fn unknown_document_format_is_unsupported() {
+        let parts = PackageParts {
+            snapshot: br#"{"meta":{"format_version":99}}"#.to_vec(),
+            ..Default::default()
+        };
+        let bytes = encode_parts(&parts).unwrap();
+        assert!(matches!(
+            decode_package(&bytes),
+            Err(StoreError::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn corrupt_object_is_rejected_without_implicit_repair() {
         let mut e = BTreeMap::new();
         let snapshot = b"{}";
@@ -1240,7 +1297,7 @@ mod tests {
             format!("objects/{}/{bad}", &bad.hex()[..2]),
             b"damaged".to_vec(),
         );
-        e.insert("manifest.json".into(), manifest_bytes(h, None));
+        e.insert("manifest.json".into(), manifest_bytes(h, None, BASE_FORMAT));
         assert!(decode_package(&write_entries(&e).unwrap()).is_err());
     }
     #[test]

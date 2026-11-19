@@ -490,6 +490,72 @@ mod tests {
         );
     }
     #[test]
+    fn merge_of_format_5_and_6_writes_6() {
+        let (mut e, h, id, _) = setup();
+        e.create_branch(h, "hanging", None, true).unwrap();
+        let node = Node::text(
+            "punctuation",
+            alto_text::TextContent {
+                text: "あい。".into(),
+                hanging: true,
+                ..Default::default()
+            },
+        );
+        let text = node.id;
+        let doc = e.document(h).unwrap();
+        e.transact(
+            h,
+            "layer.add",
+            vec![Op::InsertNode {
+                node,
+                parent: doc.root,
+                index: 0,
+            }],
+            doc.revision,
+        )
+        .unwrap();
+        let theirs = e.commit(h, "format 6", 2, None, false).unwrap().hash;
+        assert_eq!(e.document(h).unwrap().meta.format_version, 6);
+
+        e.checkout(h, "main").unwrap();
+        change(
+            &mut e,
+            h,
+            id,
+            PropPatch {
+                opacity: Some(0.5),
+                ..Default::default()
+            },
+        );
+        let ours = e.commit(h, "format 5", 3, None, false).unwrap().hash;
+        assert_eq!(e.document(h).unwrap().meta.format_version, 5);
+
+        let plan = e.prepare_merge(h, "hanging").unwrap();
+        assert!(plan.conflicts.is_empty());
+        let result = e
+            .finish_merge(h, &plan.token, vec![], "merge", 4, None)
+            .unwrap();
+        assert_eq!(
+            e.commit_view(h, result.head).unwrap().parents,
+            vec![ours, theirs]
+        );
+        assert!(!e.version_status(h).unwrap().changed);
+        let bytes = e.save_package(h).unwrap();
+        let entries = alto_store::read_entries(&bytes).unwrap();
+        let manifest: alto_store::Manifest =
+            serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!(manifest.document_format, 6);
+        let (reopened, warnings) = e.open_package(&bytes).unwrap();
+        assert!(warnings.is_empty());
+        let doc = e.document(reopened).unwrap();
+        assert_eq!(doc.meta.format_version, 6);
+        assert_eq!(doc.node(id).unwrap().props.opacity, 0.5);
+        assert!(
+            matches!(&doc.node(text).unwrap().kind, alto_doc::NodeKind::Text { content, .. } if content.hanging)
+        );
+    }
+
+    #[test]
     fn merge_conflict_is_read_only_until_all_resolved() {
         let (mut e, h, id, _) = setup();
         e.create_branch(h, "feature", None, true).unwrap();

@@ -244,30 +244,45 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 .first()
                 .is_some_and(|p| p.level.is_rtl());
         // Greedy line breaking at UAX #14 opportunities.
-        let mut lines: Vec<std::ops::Range<usize>> = vec![];
+        let mut lines = vec![];
         let mut start = 0;
         while start < clusters.len() {
             let mut width = 0.0;
             let mut end = clusters.len();
             let mut last_break = None;
+            let mut hanging = false;
             for (i, c) in clusters.iter().enumerate().skip(start) {
                 if i > start && c.allow_break {
                     last_break = Some(i);
                 }
                 if i > start && !c.space && width + c.advance > avail + 1e-9 {
-                    end = last_break.unwrap_or(i);
+                    if content.hanging
+                        && width <= avail + 1e-9
+                        && can_hang(&para[c.start..c.end])
+                        // Use the normal kinsoku break for an overflowing second mark.
+                        && !can_hang(&para[clusters[i - 1].start..clusters[i - 1].end])
+                        && !clusters
+                            .get(i + 1)
+                            .and_then(|next| para[next.start..next.end].chars().next())
+                            .is_some_and(no_line_start)
+                    {
+                        hanging = true;
+                        end = i + 1;
+                    } else {
+                        end = last_break.unwrap_or(i);
+                    }
                     break;
                 }
                 width += c.advance;
             }
-            lines.push(start..end);
+            lines.push((start..end, hanging));
             start = end;
         }
         if lines.is_empty() {
-            lines.push(0..0);
+            lines.push((0..0, false));
         }
         let last_line = lines.len() - 1;
-        for (li, range) in lines.into_iter().enumerate() {
+        for (li, (range, hanging)) in lines.into_iter().enumerate() {
             let line_clusters = &clusters[range.clone()];
             let base_style = &it.styles[line_clusters
                 .first()
@@ -335,7 +350,13 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                     level -= 1;
                 }
             }
-            let measured: f64 = line_clusters[..line_clusters.len() - trailing]
+            let measured_end = if hanging {
+                let aligned = &line_clusters[..line_clusters.len() - 1];
+                aligned.len() - aligned.iter().rev().take_while(|c| c.space).count()
+            } else {
+                line_clusters.len() - trailing
+            };
+            let measured: f64 = line_clusters[..measured_end]
                 .iter()
                 .map(|c| c.advance)
                 .sum();
@@ -357,7 +378,8 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 TextAlign::Center => (room - measured) / 2.0,
                 TextAlign::End => room - measured,
             };
-            let gaps = line_clusters.len().saturating_sub(trailing + 1);
+            let gaps = measured_end.saturating_sub(1);
+            let mut remaining = measured_end;
             let extra = if align == TextAlign::Justify && gaps > 0 && room > measured {
                 (room - measured) / gaps as f64
             } else {
@@ -379,8 +401,16 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 });
                 place(&mut out, &it, c, pen, baseline, id, fonts);
                 pen += c.advance;
-                if k + 1 < order.len() && ci < line_clusters.len() - trailing {
-                    pen += extra;
+                if ci < measured_end {
+                    remaining -= 1;
+                    let has_gap = if hanging {
+                        remaining > 0
+                    } else {
+                        k + 1 < order.len()
+                    };
+                    if has_gap {
+                        pen += extra;
+                    }
                 }
             }
             let (ls, le) = if line_clusters.is_empty() {
@@ -770,6 +800,10 @@ fn place(
             size,
         });
     }
+}
+
+fn can_hang(cluster: &str) -> bool {
+    matches!(cluster, "、" | "。" | "，" | "．")
 }
 
 /// 行頭禁則: characters that must not start a line.
