@@ -135,6 +135,8 @@ pub enum ContentDetail {
     Vector {
         paths: [usize; 2],
         commands: [usize; 2],
+        #[serde(default)]
+        style: bool,
     },
     /// `text` holds excerpts (24 characters at most), before and after, when the text changed.
     Text {
@@ -360,6 +362,11 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
             ContentDetail::Vector {
                 paths: [x.len(), y.len()],
                 commands: [cmds(x), cmds(y)],
+                style: x.iter().zip(y).any(|(before, after)| {
+                    before.fill != after.fill
+                        || before.stroke != after.stroke
+                        || before.fill_rule != after.fill_rule
+                }),
             }
         }
         (NodeKind::Text { content: x, .. }, NodeKind::Text { content: y, .. }) if x != y => {

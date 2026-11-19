@@ -189,6 +189,7 @@ export type ContentDetail = {
     kind: "vector";
     paths: [number, number];
     commands: [number, number];
+    style: boolean;
 } | {
     kind: "text";
     text: [string, string] | null;
@@ -1559,6 +1560,10 @@ export interface VectorStroke {
     cap?: "butt" | "round" | "square";
     // (undocumented)
     color: Color;
+    dash?: {
+        pattern: number[];
+        offset?: number;
+    };
     // (undocumented)
     join?: "miter" | "round" | "bevel";
     // (undocumented)

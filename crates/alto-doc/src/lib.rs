@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use version::{Commit, DiffItem, IntentSummary, diff, restore_ops};
 
 /// Latest document format this reader supports.
-pub const FORMAT_VERSION: u32 = 6;
-pub const SUPPORTED_FORMATS: [u32; 2] = [BASE_FORMAT, FORMAT_VERSION];
+pub const FORMAT_VERSION: u32 = 7;
+pub const SUPPORTED_FORMATS: [u32; 3] = [BASE_FORMAT, TEXT_FORMAT, FORMAT_VERSION];
 pub const BASE_FORMAT: u32 = 5;
+const TEXT_FORMAT: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -249,10 +249,17 @@ pub fn diff_text(a: &Document, b: &Document) -> String {
 fn describe(detail: &ContentDetail) -> String {
     match detail {
         ContentDetail::Geometry => "image bounds".into(),
-        ContentDetail::Vector { paths, commands } => format!(
-            "パス {}本/{}命令 → {}本/{}命令",
-            paths[0], commands[0], paths[1], commands[1]
-        ),
+        ContentDetail::Vector {
+            paths,
+            commands,
+            style,
+        } => {
+            let suffix = if *style { " · 書式" } else { "" };
+            format!(
+                "パス {}本/{}命令 → {}本/{}命令{suffix}",
+                paths[0], commands[0], paths[1], commands[1]
+            )
+        }
         ContentDetail::Text {
             text,
             style,

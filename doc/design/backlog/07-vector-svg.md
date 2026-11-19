@@ -146,7 +146,7 @@ export type VectorPaint = Color | VectorGradient;
 
 ## VEC-2 破線
 
-### 現状
+### 実装前
 
 - `Stroke` に破線は無い。線の輪郭は `crates/alto-gpu/src/stroke_q8.rs` の `outline` が作る：サブパスごとに `subpaths` で分け、`raster_q8::flatten_stroke` で整数の折れ線にし、線分ごとに本体、端に線端（butt、round、square）、内側の頂点に結合（miter、round、bevel）を足す。閉じたサブパス（`Close` を持つ）は最後の線分から最初への結合まで作り、線端を作らない。
 - `outline` はローカル座標（ノード座標を `local_bits(world, level)` で Q8〜Q32 の整数にしたもの）で計算し、多角形ごとに `map_point` でレベル画素の Q8 へ写す。幅、miter limit、破線の長さもこのローカルの整数にする。
@@ -172,12 +172,12 @@ pub struct Dash { pub pattern: Vec<f32>, #[serde(default)] pub offset: f32 }
 
 - 長さの単位はノード座標（線幅と同じ）。`dash` が無い文書の直列化は変わらない。
 - 検証（`Dash::validate`（新規））：`pattern` は 1〜16 要素（`MAX_DASH_ELEMENTS`（新規））、各要素は有限で 0..=1048576、周期（奇数個は2回繰り返して合計）> 0 かつ ≥ 1/64、`offset` は有限で ±1048576 以内（負でもよい）。全要素が0のパターンは拒否する（SVG の importer は「合計0は `none`」として `None` にする）。
-- 破線の数の上限（`StyledPath::validate` で編集時に拒否）：パスの制御点を結ぶ折れ線の長さ（弧長の上界）を f64 の四則と sqrt（IEEE で決まる）で求め、`ceil(長さ / 周期) * 周期内の「オン」要素数 > 4096`（`MAX_DASHES_PER_PATH`（新規））なら `INVALID_ARGUMENT: dash count`。`validate_paths` はレイヤー合計の上界も 16384（`MAX_DASHES_PER_LAYER`（新規））で拒否する。上界は保守的なので、本当の数が上限以下でも拒否されることがある。
-- 実行時の安全網：整数の折れ線の上で実際に数えた破線が 4096 を超えたら `RasterError::CurveRange`（全タイルでそのパスの線を飛ばす。既存の「輪郭が多すぎる」と同じ扱い）。
+- 破線の数の上限（`StyledPath::validate` で編集時に拒否）：サブパスごとに制御点を結ぶ折れ線の長さ（弧長の上界）を f64 の四則と sqrt で求める。各サブパスの `ceil(長さ / 周期) * 周期内の「オン」要素数` に、開始点をまたぐ途中の破線と終点の点線の余裕分を加えて合算する。量子化で周期が短くなる場合に備え、Q8〜Q32 で取り得る最短の周期と最大の余裕分を使う。制御点の量子化による長さの増加も見込む。合計が 4096（`MAX_DASHES_PER_PATH`）を超えたら `INVALID_ARGUMENT: dash count`。`validate_paths` はレイヤー合計の上界も 16384（`MAX_DASHES_PER_LAYER`（新規））で拒否する。上界は保守的なので、本当の数が上限以下でも拒否されることがある。
+- 実行時の安全網：整数の折れ線の上で実際に数えた破線が 4096 を超えたら `RasterError::CurveRange`（全タイルでそのパスの線を飛ばす。整数の曲線分割による差もこの上限で扱う）。
 
 **アルゴリズム。**`stroke_q8.rs` の `outline` の中、`flatten_stroke` の直後に入れる（`dash_polylines`（新規））。
 
-1. 量子化：パターンの各要素と offset を、幅と同じ `raster_q8::q_from_f32_bits(x.to_bits(), bits)` でローカルの Q にする。偶奇：奇数個は2回繰り返す。周期 `P` はその合計。`phase = offset_q.rem_euclid(P)`。パターンを `phase` だけ進めた位置から始める（正の offset はパターンを後ろへずらして、途中から始める。SVG の `stroke-dashoffset` と同じ）。
+1. 量子化：パターンの各要素と offset を、幅と同じ `raster_q8::q_from_f32_bits(x.to_bits(), bits)` でローカルの Q にする。すべての要素が 0 に丸まる場合はローカル座標を Q10 に上げる。偶奇：奇数個は2回繰り返す。周期 `P` はその合計。`phase = offset_q.rem_euclid(P)`。パターンを `phase` だけ進めた位置から始める（正の offset はパターンを後ろへずらして、途中から始める。SVG の `stroke-dashoffset` と同じ）。
 2. 長さ：折れ線の各線分の長さは既存の `length`（整数の平方根の切り捨て）。長さ0の線分は無視する。累積はすべて i64。
 3. 分割：各線分の中の位置 `pos`（`0 < pos < L`）の点は `a + div((b - a) * pos, L)`（成分ごと、`div` は0から遠い側への丸め（half-away））。`pos = 0` は `a`、`pos = L` は `b` をそのまま使い、誤差を累積しない。「オン」の区間は、複数の線分をまたいでも**1本の破線**（線分の列）にして、中の頂点には結合を作る。分割で生じた線分は元の線分の `tangent` と `normal` を引き継ぐ（`b - a` から計算し直さない）ので、同じ線分から分かれた断片のあいだに結合は出ず、継ぎ目に隙間もない。
 4. 長さ0のオン（例：`[0, 8]` と round の線端で点線）：その位置の元の線分の向きで、長さ0の線分（`a == b`）1本の破線にする。本体の四角形は面積0で `polygon` が捨て、両端の線端だけが残る。round は円、square は一辺が線幅の正方形、butt は何も描かない。向きは長さ0の線分から取れないので、`tangent` を明示する（上の引き継ぎと同じ仕組み）。
@@ -197,7 +197,7 @@ pub struct Dash { pub pattern: Vec<f32>, #[serde(default)] pub offset: f32 }
 ### 形式と通信
 
 - `format_version`：**上げる**（7。VEC-1 と同じ回）。`dash` は `deny_unknown_fields` の型に増え、古い実装は読めない。`dash` なしの文書のバイト列は変わらない。
-- `format_version` を上げるとき、パッケージの manifest の `document_format` も同じ値に上げる必要がある。書き出しは 5 を固定で書き（`crates/alto-store/src/lib.rs`）、読み込みは 5 以外を `package format` として拒否する。書き出しの定数と読み込みの受け入れを同じ PR で変え、`crates/alto-doc/src/lib.rs` の `DocumentMeta::validate` と合わせる（値は 7。VEC-1 と同じ）。
+- パッケージの manifest の `document_format` はスナップショットの形式を使う。読み込みで参照する `alto_doc::SUPPORTED_FORMATS` に 7 を加え、既存の 5 と 6 も受け入れる。破線と形式6の書式が同居するときは形式7を使う。
 - `PROTOCOL`：上げない（要求の追加なし）。
 - 描画の版：v3 のまま。破線なしの画素は変わらない（共通規則1）。破線の画素は新規。
 - シェーダー：変更なし（輪郭は CPU が作る）。

@@ -572,6 +572,14 @@ impl Document {
         if self.nodes.values().any(|node| {
             matches!(
                 &node.kind,
+                NodeKind::Vector { paths }
+                    if paths.iter().any(|path| path.stroke.as_ref().is_some_and(|s| s.dash.is_some()))
+            )
+        }) {
+            FORMAT_VERSION
+        } else if self.nodes.values().any(|node| {
+            matches!(
+                &node.kind,
                 NodeKind::Text { content, .. }
                     if content.hanging
                         || !content.style.underline.is_none()
@@ -581,7 +589,7 @@ impl Document {
                         })
             )
         }) {
-            FORMAT_VERSION
+            TEXT_FORMAT
         } else {
             BASE_FORMAT
         }
@@ -839,9 +847,9 @@ mod compatibility_tests {
             children.push(id);
         }
         let assert_format_6 = |doc: &Document| {
-            assert_eq!(doc.required_format(), FORMAT_VERSION);
+            assert_eq!(doc.required_format(), TEXT_FORMAT);
             let restored = Document::from_snapshot_bytes(&doc.snapshot_bytes().unwrap()).unwrap();
-            assert_eq!(restored.meta.format_version, FORMAT_VERSION);
+            assert_eq!(restored.meta.format_version, TEXT_FORMAT);
             assert_eq!(restored.node(id).unwrap().kind, doc.node(id).unwrap().kind);
         };
         assert_format_6(&doc);
@@ -875,13 +883,13 @@ mod compatibility_tests {
         if let NodeKind::Group { children, .. } = &mut doc.nodes.get_mut(&doc.root).unwrap().kind {
             children.push(id);
         }
-        assert_eq!(doc.required_format(), FORMAT_VERSION);
+        assert_eq!(doc.required_format(), TEXT_FORMAT);
         let snapshot_format = |doc: &Document| {
             let value: serde_json::Value =
                 serde_json::from_slice(&doc.snapshot_bytes().unwrap()).unwrap();
             value["meta"]["format_version"].as_u64().unwrap() as u32
         };
-        assert_eq!(snapshot_format(&doc), FORMAT_VERSION);
+        assert_eq!(snapshot_format(&doc), TEXT_FORMAT);
 
         let NodeKind::Text { content, .. } = &mut doc.nodes.get_mut(&id).unwrap().kind else {
             unreachable!();
@@ -895,7 +903,7 @@ mod compatibility_tests {
                 ..Default::default()
             },
         });
-        assert_eq!(doc.required_format(), FORMAT_VERSION);
-        assert_eq!(snapshot_format(&doc), FORMAT_VERSION);
+        assert_eq!(doc.required_format(), TEXT_FORMAT);
+        assert_eq!(snapshot_format(&doc), TEXT_FORMAT);
     }
 }

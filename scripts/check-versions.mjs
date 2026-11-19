@@ -19,6 +19,7 @@ const engineVersion = constant("crates/alto-wasm/Cargo.toml", /^version = "([^"]
 const sdkVersion = JSON.parse(read("packages/alto-sdk/package.json")).version;
 const formatVersion = constant("crates/alto-doc/src/lib.rs", /pub const FORMAT_VERSION: u32 = (\d+);/, "FORMAT_VERSION");
 const baseFormat = constant("crates/alto-doc/src/lib.rs", /pub const BASE_FORMAT: u32 = (\d+);/, "BASE_FORMAT");
+const textFormat = constant("crates/alto-doc/src/lib.rs", /const TEXT_FORMAT: u32 = (\d+);/, "TEXT_FORMAT");
 const renderVersion = constant(
   "crates/alto-core/src/lib.rs",
   /pub const RENDER_VERSION_EXACT: u32 = (\d+);/,
@@ -38,8 +39,9 @@ if (sdkProtocol !== null && wasmProtocol !== null && sdkProtocol !== wasmProtoco
       `crates/alto-wasm/src/lib.rs reports ${wasmProtocol}`,
   );
 }
-if (baseFormat !== null && formatVersion !== null && Number(baseFormat) >= Number(formatVersion)) {
-  failures.push(`BASE_FORMAT (${baseFormat}) must be lower than FORMAT_VERSION (${formatVersion})`);
+if ([baseFormat, textFormat, formatVersion].every((format) => format !== null) &&
+    !(Number(baseFormat) < Number(textFormat) && Number(textFormat) < Number(formatVersion))) {
+  failures.push(`Document formats must be in order: BASE_FORMAT (${baseFormat}), TEXT_FORMAT (${textFormat}), FORMAT_VERSION (${formatVersion})`);
 }
 
 const manifestFormat = "2";
@@ -91,8 +93,8 @@ const claims = [
   ],
   [
     "RELEASING.md",
-    /accepts formats (\d+) and (\d+) \/ render v(\d+) only/,
-    [baseFormat, formatVersion, renderVersion],
+    /accepts formats (\d+), (\d+), and (\d+) \/ render v(\d+) only/,
+    [baseFormat, textFormat, formatVersion, renderVersion],
     "accepted formats",
   ],
   [
@@ -103,14 +105,14 @@ const claims = [
   ],
   [
     "doc/MILESTONES.md",
-    /文書format (\d+) \/ manifest (\d+) \/ commit (\d+) \/ 当時の wire protocol は (\d+) です。現行の wire protocol は (\d+) です/,
+    /現行の文書formatは (\d+)、manifest は (\d+)、commit は (\d+) です。当時の wire protocol は (\d+) で、現行は (\d+) です/,
     [formatVersion, manifestFormat, commitFormat, null, protocol],
     "protocol history",
   ],
   [
     "doc/MILESTONES.md",
-    /受け付ける形式はformat (\d+)と(\d+) \/ manifest (\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
-    [baseFormat, formatVersion, manifestFormat, commitFormat, renderVersion],
+    /受け付ける形式はformat (\d+)、(\d+)、(\d+) \/ manifest (\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
+    [baseFormat, textFormat, formatVersion, manifestFormat, commitFormat, renderVersion],
     "accepted formats",
   ],
   [
@@ -154,5 +156,5 @@ if (failures.length) {
 }
 console.log(
   `version references match the source: engine ${engineVersion}, SDK ${sdkVersion}, ` +
-    `protocol ${protocol}, format ${formatVersion} (also ${baseFormat}), render v${renderVersion}`,
+    `protocol ${protocol}, format ${formatVersion} (also ${baseFormat} and ${textFormat}), render v${renderVersion}`,
 );
