@@ -575,7 +575,10 @@ impl Document {
                 NodeKind::Text { content, .. }
                     if content.hanging
                         || !content.style.underline.is_none()
-                        || content.spans.iter().any(|span| span.style.underline.is_some())
+                        || content.style.italic_skew != 0.0
+                        || content.spans.iter().any(|span| {
+                            span.style.underline.is_some() || span.style.italic_skew.is_some()
+                        })
             )
         }) {
             FORMAT_VERSION
@@ -818,6 +821,44 @@ mod compatibility_tests {
         assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION_EXACT);
         assert_eq!(loaded.meta.format_version, 5);
         assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn italic_skew_requires_format_6() {
+        let mut doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let mut content = TextContent {
+            text: "A".into(),
+            ..Default::default()
+        };
+        content.style.italic_skew = 12.0;
+        let mut node = Node::text("Text", content);
+        node.parent = Some(doc.root);
+        let id = node.id;
+        doc.nodes.insert(id, node);
+        if let NodeKind::Group { children, .. } = &mut doc.nodes.get_mut(&doc.root).unwrap().kind {
+            children.push(id);
+        }
+        let assert_format_6 = |doc: &Document| {
+            assert_eq!(doc.required_format(), FORMAT_VERSION);
+            let restored = Document::from_snapshot_bytes(&doc.snapshot_bytes().unwrap()).unwrap();
+            assert_eq!(restored.meta.format_version, FORMAT_VERSION);
+            assert_eq!(restored.node(id).unwrap().kind, doc.node(id).unwrap().kind);
+        };
+        assert_format_6(&doc);
+
+        let NodeKind::Text { content, .. } = &mut doc.nodes.get_mut(&id).unwrap().kind else {
+            unreachable!();
+        };
+        content.style.italic_skew = 0.0;
+        content.spans.push(alto_text::TextSpan {
+            start: 0,
+            end: 1,
+            style: alto_text::StylePatch {
+                italic_skew: Some(0.0),
+                ..Default::default()
+            },
+        });
+        assert_format_6(&doc);
     }
 
     #[test]

@@ -902,6 +902,15 @@ export async function runParityTests(engine, log) {
             style: { ...style([j], 40), underline: { kind: "solid" } },
             writing_mode: "vertical_rl",
           }),
+          "text-v3-skew": (l) => ({
+            text: "Alto",
+            style: { ...style([l], 37.5), italic_skew: 13.2 },
+          }),
+          "text-v3-skew-vertical": (l, j) => ({
+            text: "吾A12回",
+            style: { ...style([l, j], 40), italic_skew: -24.75 },
+            writing_mode: "vertical_rl",
+          }),
         };
         assert(want.size === Object.keys(texts).length, `fixture has ${want.size} rows`);
         const failures = [];
