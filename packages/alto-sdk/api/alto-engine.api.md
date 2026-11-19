@@ -1439,6 +1439,7 @@ export interface TextStyle {
     // (undocumented)
     features?: FontFeature[];
     fonts: string[];
+    italic_skew?: number;
     // (undocumented)
     language?: string | null;
     letter_spacing?: number;

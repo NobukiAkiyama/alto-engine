@@ -107,6 +107,8 @@ export interface TextStyle {
   features?: FontFeature[];
   language?: string | null;
   underline?: Underline;
+  /** Synthetic italic angle in degrees, from -30 to 30. Zero clears an inherited skew. */
+  italic_skew?: number;
 }
 export type StylePatch = Partial<Omit<TextStyle, "line_height">>;
 /** Offsets are UTF-16 code units, the same as JavaScript string indices. */

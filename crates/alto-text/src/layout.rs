@@ -840,8 +840,13 @@ fn place(
     }
     let s = font.map_or(size / 1000.0, |f| size / f.upem);
     let (asc, desc) = font.map_or((880.0, 120.0), |f| (f.ascent, f.descent));
+    let skew = if style.italic_skew == 0.0 {
+        0.0
+    } else {
+        f64::from(style.italic_skew).to_radians().tan()
+    };
     for p in &c.pieces {
-        let transform = match (p.glyph.font, c.mode) {
+        let mut transform = match (p.glyph.font, c.mode) {
             // Placeholder boxes are 1000-unit squares sitting on the baseline / in the cell.
             (None, Mode::Horizontal) => [s * k, 0.0, 0.0, -s, pen, baseline + desc * s],
             (None, _) => [s, 0.0, 0.0, -s, baseline - size / 2.0, pen + size],
@@ -897,6 +902,22 @@ fn place(
                 ]
             }
         };
+        if skew != 0.0 {
+            let [a, b, c_axis, d, e, f] = &mut transform;
+            match c.mode {
+                Mode::Upright => {
+                    // Shear along the column, keeping its baseline fixed.
+                    *b += skew * *a;
+                    *d += skew * *c_axis;
+                    *f += skew * (*e - baseline);
+                }
+                Mode::Horizontal | Mode::Sideways | Mode::Tcy(_) => {
+                    // Shear in font space, before rotating a sideways glyph.
+                    *c_axis += skew * *a;
+                    *d += skew * *b;
+                }
+            }
+        }
         out.glyphs.push(PlacedGlyph {
             glyph: p.glyph,
             transform,

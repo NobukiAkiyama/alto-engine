@@ -421,7 +421,7 @@ pub struct Underline {
 
 ### 現状
 
-- 斜体の合成は無い。字形の変換は `place`（`layout.rs`）が作る `transform: [f64; 6]`（フォント単位の y 上向きからノードの y 下向きへの行列）で、焼き込みでは `m` の4成分を Q24 にする。
+- 実装前は斜体の合成が無かった。字形の変換は `place`（`layout.rs`）が作る `transform: [f64; 6]`（フォント単位の y 上向きからノードの y 下向きへの行列）で、焼き込みでは `m` の4成分を Q24 にする。
 - 行列は向きごとに違う：横組みは `[s·k, 0, 0, -s, ...]`、縦組みの直立は同じ形で原点だけ違い、横倒しは `[0, s·k, s, 0, ...]`、縦中横は横組みと同じ形。
 
 ### 11-04 からの変化
@@ -451,8 +451,9 @@ pub struct Underline {
 
 **Interfaces:** Produces `TextStyle.italic_skew`。
 
-- [ ] 試験 `skew_zero_bakes_the_same_bytes`、`horizontal_skew_moves_the_top_right`（y の大きい点ほど x が増える）、`vertical_upright_skew_shears_along_the_column`、`skew_out_of_range_is_refused`、`skew_applies_to_the_span_only`。
-- [ ] 完了条件・検証：TXT-4 と同じ。ネイティブと WASM（ブラウザ）の `text-v3-skew` が一致。PR。
+- [x] 試験 `skew_zero_bakes_the_same_bytes`、`horizontal_skew_moves_the_top_right`（y の大きい点ほど x が増える）、`vertical_upright_skew_shears_along_the_column`、`skew_out_of_range_is_refused`、`skew_applies_to_the_span_only`。
+- [x] ネイティブとブラウザの WASM で `text-v3-skew`、`text-v3-skew-vertical` を含む8件の焼き込みハッシュが一致。
+- [ ] 完了条件・検証：TXT-4 と同じ。PR。
 
 ### 依存
 

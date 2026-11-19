@@ -123,6 +123,9 @@ pub struct TextStyle {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Underline::is_none")]
     pub underline: Underline,
+    /// Synthetic italic angle in degrees, from -30 to 30.
+    #[serde(default, skip_serializing_if = "zero")]
+    pub italic_skew: f32,
 }
 impl Default for TextStyle {
     fn default() -> Self {
@@ -136,6 +139,7 @@ impl Default for TextStyle {
             features: vec![],
             language: Some("ja".into()),
             underline: Underline::default(),
+            italic_skew: 0.0,
         }
     }
 }
@@ -160,6 +164,8 @@ pub struct StylePatch {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub underline: Option<Underline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic_skew: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -277,6 +283,14 @@ fn language_ok(l: &Option<String>) -> Result<(), TextError> {
     Ok(())
 }
 
+fn zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+fn skew_ok(value: f32) -> bool {
+    (-30.0..=30.0).contains(&value)
+}
+
 impl TextStyle {
     pub fn validate(&self) -> Result<(), TextError> {
         fonts_ok(&self.fonts)?;
@@ -289,6 +303,7 @@ impl TextStyle {
             || !spacing_ok(self.letter_spacing)
             || !scale_ok(self.scale)
             || !self.underline.validate()
+            || !skew_ok(self.italic_skew)
         {
             return Err(invalid("style values out of range"));
         }
@@ -320,6 +335,9 @@ impl TextStyle {
         if let Some(v) = &p.underline {
             s.underline = v.clone();
         }
+        if let Some(v) = p.italic_skew {
+            s.italic_skew = v;
+        }
         s
     }
 }
@@ -337,6 +355,7 @@ impl StylePatch {
             || self.letter_spacing.is_some_and(|v| !spacing_ok(v))
             || self.scale.is_some_and(|v| !scale_ok(v))
             || self.underline.as_ref().is_some_and(|v| !v.validate())
+            || self.italic_skew.is_some_and(|v| !skew_ok(v))
         {
             return Err(invalid("span style values out of range"));
         }
@@ -540,6 +559,29 @@ mod tests {
         c.text.push('\u{7}');
         assert!(c.validate().is_err());
     }
+    #[test]
+    fn skew_out_of_range_is_refused() {
+        for (angle, valid) in [
+            (-30.0, true),
+            (30.0, true),
+            (-30.01, false),
+            (30.01, false),
+            (f32::INFINITY, false),
+            (f32::NAN, false),
+        ] {
+            let base = TextStyle {
+                italic_skew: angle,
+                ..Default::default()
+            };
+            let patch = StylePatch {
+                italic_skew: Some(angle),
+                ..Default::default()
+            };
+            assert_eq!(base.validate().is_ok(), valid, "base angle {angle}");
+            assert_eq!(patch.validate().is_ok(), valid, "span angle {angle}");
+        }
+    }
+
     #[test]
     fn replace_range_moves_spans() {
         let mut c = TextContent {

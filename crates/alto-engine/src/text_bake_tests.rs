@@ -114,6 +114,29 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
                 ..Default::default()
             },
         ),
+        (
+            "text-v3-skew",
+            TextContent {
+                text: "Alto".into(),
+                style: TextStyle {
+                    italic_skew: 13.2,
+                    ..style(vec![latin], 37.5)
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-skew-vertical",
+            TextContent {
+                text: "吾A12回".into(),
+                style: TextStyle {
+                    italic_skew: -24.75,
+                    ..style(vec![latin, jp], 40.0)
+                },
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
     ]
 }
 
@@ -361,6 +384,35 @@ fn text_bake_keeps_a_received_bake() {
     )
     .unwrap();
     assert_eq!(bake_of(&e, d, id), Some(hash));
+}
+
+#[test]
+fn skew_zero_bakes_the_same_bytes() {
+    let (mut engine, doc, latin, _) = document();
+    let mut content = TextContent {
+        text: "Alto".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let plain = insert(&mut engine, doc, content.clone());
+    content.style.italic_skew = -0.0;
+    let zero = insert(&mut engine, doc, content.clone());
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, zero));
+
+    content.style.italic_skew = 18.0;
+    content.spans.push(alto_text::TextSpan {
+        start: 0,
+        end: 4,
+        style: alto_text::StylePatch {
+            italic_skew: Some(0.0),
+            ..Default::default()
+        },
+    });
+    let reset = insert(&mut engine, doc, content);
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, reset));
 }
 
 #[test]

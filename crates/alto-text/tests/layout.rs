@@ -80,6 +80,74 @@ fn line_texts(c: &TextContent, l: &TextLayout) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn horizontal_skew_moves_the_top_right() {
+    let f = fixture();
+    let mut c = content("A", vec![f.latin], false);
+    let plain = layout(&c, &f.set).glyphs[0].transform;
+    c.style.italic_skew = 20.0;
+    let skewed = layout(&c, &f.set).glyphs[0].transform;
+    assert!(skewed[2] > 0.0, "positive font y must move right");
+    assert_eq!(
+        [skewed[0], skewed[1], skewed[3], skewed[4], skewed[5]],
+        [plain[0], plain[1], plain[3], plain[4], plain[5]]
+    );
+}
+
+#[test]
+fn vertical_upright_skew_shears_along_the_column() {
+    let f = fixture();
+    let mut c = content("吾A12回", vec![f.latin, f.jp], true);
+    let plain = layout(&c, &f.set);
+    c.style.italic_skew = -20.0;
+    let skewed = layout(&c, &f.set);
+    let skew = (-20.0_f64).to_radians().tan();
+    let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-10, "{a} != {b}");
+
+    // Upright glyphs shear around the column baseline, including the offset.
+    let [a, b, c_axis, d, e, y] = glyphs_of(&plain, 0)[0].transform;
+    let actual = glyphs_of(&skewed, 0)[0].transform;
+    let baseline = plain.lines[0].baseline;
+    assert_eq!([actual[0], actual[2], actual[4]], [a, c_axis, e]);
+    close(actual[1], b + skew * a);
+    close(actual[3], d + skew * c_axis);
+    close(actual[5], y + skew * (e - baseline));
+
+    // Sideways Latin and tate-chu-yoko digits shear before orientation.
+    for offset in [1, 2] {
+        let [a, b, c_axis, d, e, y] = glyphs_of(&plain, offset)[0].transform;
+        let actual = glyphs_of(&skewed, offset)[0].transform;
+        assert_eq!([actual[0], actual[1], actual[4], actual[5]], [a, b, e, y]);
+        close(actual[2], c_axis + skew * a);
+        close(actual[3], d + skew * b);
+        assert_ne!(actual, [a, b, c_axis, d, e, y]);
+    }
+}
+
+#[test]
+fn skew_applies_to_the_span_only() {
+    let f = fixture();
+    let mut c = content("AAA", vec![f.latin], false);
+    c.spans.push(TextSpan {
+        start: 1,
+        end: 2,
+        style: StylePatch {
+            italic_skew: Some(0.0),
+            ..Default::default()
+        },
+    });
+    let plain = layout(&c, &f.set);
+    c.spans[0].style.italic_skew = Some(15.0);
+    let skewed = layout(&c, &f.set);
+    for offset in [0, 2] {
+        assert_eq!(
+            glyphs_of(&plain, offset)[0].transform,
+            glyphs_of(&skewed, offset)[0].transform
+        );
+    }
+    assert!(glyphs_of(&skewed, 1)[0].transform[2] > 0.0);
+}
+
 fn underlined(mut c: TextContent) -> TextContent {
     c.style.underline = Underline {
         kind: UnderlineKind::Solid,

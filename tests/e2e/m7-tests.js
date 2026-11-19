@@ -185,6 +185,20 @@ export async function runM7Tests(engine, log) {
       assert(span.style.underline.kind === "solid", "underline style not retained");
       assert(after.box && before.box && after.box[3] > before.box[3], `underline did not extend ink below text: ${before.box} -> ${after.box}`);
     });
+    await test("synthetic italic changes rendered text and zero clears it", async () => {
+      await setup();
+      await addText({ text: "AB", style: { fonts: [latin.id], size: 100 } }, 50, 50);
+      const before = await unstable(engine).readTile(0, 0);
+      await doc.text.style(id, 0, 2, { italic_skew: 20 });
+      const skewed = await unstable(engine).readTile(0, 0);
+      assert(!same(before, skewed), "italic skew did not change pixels");
+      const content = doc.getSnapshot().nodes.get(id).content;
+      assert(content.spans[0].style.italic_skew === 20, "span skew not retained");
+      await doc.text.set(id, { ...content, style: { ...content.style, italic_skew: 20 }, spans: [] });
+      assert(same(skewed, await unstable(engine).readTile(0, 0)), "base style skew differs from a full span");
+      await doc.text.style(id, 0, 2, { italic_skew: 0 });
+      assert(same(before, await unstable(engine).readTile(0, 0)), "zero did not clear inherited skew");
+    });
     await test("zoomed text keeps exact outlines (levels -4 .. 2)", async () => {
       await setup();
       await addText(vertical("永", [jp.id]), 200, 50);
