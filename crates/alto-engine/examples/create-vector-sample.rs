@@ -16,6 +16,7 @@ fn path(svg: &str, fill: Option<[f32; 4]>, stroke: Option<([f32; 4], f32)>) -> S
             cap: LineCap::Round,
             join: LineJoin::Round,
             miter_limit: 4.,
+            dash: None,
         }),
         fill_rule: FillRule::NonZero,
     }

@@ -138,3 +138,135 @@ fn invalid_insert_path_and_mask_are_atomic() {
         assert_eq!(before, e.snapshot(h).unwrap());
     }
 }
+
+#[test]
+fn dashed_stroke_roundtrips_through_format_seven_and_replay() {
+    use alto_doc::version::ContentDetail;
+    use alto_vector::{Dash, LineCap, LineJoin, Stroke};
+
+    let mut engine = Engine::new();
+    let doc = engine
+        .create_document(DocumentMeta::srgb_u8(256, 256))
+        .unwrap();
+    let root = engine.document(doc).unwrap().root;
+    let mut path = shape();
+    path.stroke = Some(Stroke {
+        color: [0.0, 0.0, 0.0, 1.0],
+        width: 4.0,
+        cap: LineCap::Round,
+        join: LineJoin::Round,
+        miter_limit: 4.0,
+        dash: None,
+    });
+    let node = alto_doc::Node::vector("line", vec![path.clone()]);
+    let id = node.id;
+    engine
+        .transact(
+            doc,
+            "insert",
+            vec![Op::InsertNode {
+                node,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+    let before = engine.document(doc).unwrap().clone();
+    assert_eq!(before.meta.format_version, 5);
+    let base = engine.save_package(doc).unwrap();
+
+    path.stroke.as_mut().unwrap().dash = Some(Dash {
+        pattern: vec![12.0, 5.0],
+        offset: -2.0,
+    });
+    let ops = vec![Op::SetVector {
+        id,
+        paths: vec![path.clone()],
+    }];
+    engine.transact(doc, "dash", ops.clone(), 1).unwrap();
+    let after = engine.document(doc).unwrap();
+    assert_eq!(after.meta.format_version, 7);
+    assert!(matches!(
+        alto_doc::diff(&before, after).as_slice(),
+        [alto_doc::DiffItem::ContentChanged {
+            detail: ContentDetail::Vector { style: true, .. },
+            ..
+        }]
+    ));
+    let expected = engine.snapshot(doc).unwrap();
+    let record = engine
+        .journal_record(doc, JournalKind::Transact, "dash", &ops)
+        .unwrap();
+    let package = engine.save_package(doc).unwrap();
+    let entries = alto_store::read_entries(&package).unwrap();
+    let manifest: alto_store::Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+    assert_eq!(manifest.document_format, 7);
+    let mut reopened = Engine::new();
+    let (saved, warnings) = reopened.open_package(&package).unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(reopened.snapshot(saved).unwrap(), expected);
+    let (replayed, _) = reopened.open_package(&base).unwrap();
+    reopened.replay_record(replayed, &record).unwrap();
+    assert_eq!(reopened.snapshot(replayed).unwrap(), expected);
+
+    engine.undo(doc).unwrap();
+    assert_eq!(engine.document(doc).unwrap().meta.format_version, 5);
+    engine.redo(doc).unwrap();
+    assert_eq!(engine.snapshot(doc).unwrap(), expected);
+
+    let resize = crate::canvas::CanvasEdit::Resize {
+        width: 512,
+        height: 128,
+    };
+    let intent = resize.intent();
+    let prepared = engine.prepare_canvas_edit(doc, resize).unwrap();
+    let revision = engine.document(doc).unwrap().revision;
+    engine
+        .transact(doc, intent, prepared.ops, revision)
+        .unwrap();
+    engine.release_staged_tiles(prepared.stage);
+    let resized = engine.document(doc).unwrap();
+    assert_eq!(resized.meta.format_version, 7);
+    assert!(matches!(&resized.node(id).unwrap().kind,
+        alto_doc::NodeKind::Vector { paths } if paths == std::slice::from_ref(&path)
+    ));
+
+    let text = alto_doc::Node::text(
+        "format 6 text",
+        alto_text::TextContent {
+            text: "あい。".into(),
+            hanging: true,
+            ..Default::default()
+        },
+    );
+    let revision = resized.revision;
+    engine
+        .transact(
+            doc,
+            "add text",
+            vec![Op::InsertNode {
+                node: text,
+                parent: root,
+                index: 1,
+            }],
+            revision,
+        )
+        .unwrap();
+    assert_eq!(engine.document(doc).unwrap().meta.format_version, 7);
+
+    path.stroke.as_mut().unwrap().dash = None;
+    let revision = engine.document(doc).unwrap().revision;
+    engine
+        .transact(
+            doc,
+            "clear dash",
+            vec![Op::SetVector {
+                id,
+                paths: vec![path],
+            }],
+            revision,
+        )
+        .unwrap();
+    assert_eq!(engine.document(doc).unwrap().meta.format_version, 6);
+}

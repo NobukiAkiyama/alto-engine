@@ -1,4 +1,4 @@
-# Alto Engine — render v3 / format 6（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 13）
+# Alto Engine — render v3 / format 7（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 13）
 
 未リリースの開発版です。旧ファイル・旧通信との互換性はありません。
 
@@ -12,7 +12,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-この開発版は Protocol 13 / format 6 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
+この開発版は Protocol 13 / format 7 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
 
 ```sh
 sh scripts/build.sh                     # WASM パッケージと SDK をビルド
@@ -47,7 +47,7 @@ GCは確認（dry-run）が既定です。SDKのメモリ保存先、OPFSフォ�
 
 ## M7の使い方（テキスト・縦組み）
 
-「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 6に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜4 / render v1・v2の文書は現行エンジンでは開けません。
+「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 7に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜4 / render v1・v2の文書は現行エンジンでは開けません。
 
 ### フォント
 
@@ -318,7 +318,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 6 / manifest 2 / commit 2 / プロトコル13）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 7 / manifest 2 / commit 2 / プロトコル13）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 

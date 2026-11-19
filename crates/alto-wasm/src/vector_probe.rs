@@ -127,6 +127,7 @@ pub async fn compare_vector_backends() -> Result<String, JsValue> {
                     cap: LineCap::Round,
                     join: LineJoin::Round,
                     miter_limit: 4.,
+                    dash: None,
                 }),
                 fill_rule: FillRule::NonZero,
             });
@@ -347,6 +348,7 @@ fn grid_paths() -> Vec<StyledPath> {
                     cap: LineCap::Round,
                     join: LineJoin::Round,
                     miter_limit: 4.,
+                    dash: None,
                 }),
                 fill_rule: FillRule::NonZero,
             }

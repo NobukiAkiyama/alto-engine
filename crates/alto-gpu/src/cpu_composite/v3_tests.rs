@@ -122,6 +122,7 @@ pub(super) fn test_stroke(cap: alto_vector::LineCap) -> alto_vector::StyledPath 
             cap,
             join: alto_vector::LineJoin::Miter,
             miter_limit: 4.0,
+            dash: None,
         }),
         fill_rule: FillRule::NonZero,
     }
@@ -193,6 +194,7 @@ fn v3_stroke_paints_after_the_fill() {
         cap: alto_vector::LineCap::Butt,
         join: alto_vector::LineJoin::Miter,
         miter_limit: 4.0,
+        dash: None,
     });
     let mut document = scene(
         RContent::Mesh(std::sync::Arc::new(vec![path])),
@@ -252,6 +254,49 @@ fn v3_curved_stroke_matches_the_integer_reference() {
         return;
     };
     assert_eq!(image, expected);
+}
+
+#[test]
+fn v3_vector_dashed_stroke_matches_the_integer_reference() {
+    let mut path = test_stroke(alto_vector::LineCap::Butt);
+    let stroke = path.stroke.as_mut().unwrap();
+    stroke.dash = Some(alto_vector::Dash {
+        pattern: vec![10.0, 5.0],
+        offset: 0.0,
+    });
+    let color = crate::raster_q8::color_q14(stroke.color).unwrap();
+    for (transform, on, off) in [
+        ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], (45, 64), (52, 64)),
+        ([0.0, 1.5, -2.0, 0.0, 192.0, 0.0], (64, 67), (64, 78)),
+    ] {
+        let world = alto_core::FixedAffine::from_affine(alto_core::Affine2(transform)).unwrap();
+        let coverage = crate::stroke_q8::rasterize_stroke(
+            &path.data,
+            path.stroke.as_ref().unwrap(),
+            world,
+            0,
+            [0, 0, 256, 256],
+        )
+        .unwrap();
+        assert_eq!(coverage[on.1 * 256 + on.0], 255);
+        assert_eq!(coverage[off.1 * 256 + off.0], 0);
+        let expected: Vec<u8> = coverage
+            .into_iter()
+            .flat_map(|k| {
+                crate::raster_q8::source_over_q14([0; 4], color, k)
+                    .map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8)
+            })
+            .collect();
+        let mut document = scene(
+            RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
+            RFeatures::default(),
+        );
+        document.render_version = alto_core::RENDER_VERSION_EXACT;
+        document.nodes[0].transform = transform;
+        if let Some(image) = v3_vector_test_render(&document) {
+            assert_eq!(image, expected);
+        }
+    }
 }
 
 #[test]

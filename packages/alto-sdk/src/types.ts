@@ -54,6 +54,8 @@ export interface VectorStroke {
   cap?: "butt" | "round" | "square";
   join?: "miter" | "round" | "bevel";
   miter_limit?: number;
+  /** Alternating dash and gap lengths in node coordinates. A positive offset advances into the pattern. */
+  dash?: { pattern: number[]; offset?: number };
 }
 export interface StyledPath {
   data: PathData;
@@ -347,7 +349,7 @@ export interface CommitView {
 }
 /** What changed inside a node, for the host to word. */
 export type ContentDetail =
-  | { kind: "vector"; paths: [number, number]; commands: [number, number] }
+  | { kind: "vector"; paths: [number, number]; commands: [number, number]; style: boolean }
   | {
       kind: "text";
       /** Excerpts before and after, when the text changed. */
