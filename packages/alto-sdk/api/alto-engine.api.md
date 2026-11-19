@@ -913,6 +913,8 @@ export interface LayerEditResult {
     // (undocumented)
     bounds: ImageBounds;
     // (undocumented)
+    missing: number;
+    // (undocumented)
     no_op: boolean;
     // (undocumented)
     node: NodeId;

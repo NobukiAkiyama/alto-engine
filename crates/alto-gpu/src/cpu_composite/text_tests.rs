@@ -210,6 +210,65 @@ pub(super) fn moved(x: f64, y: f64) -> alto_core::FixedAffine {
     alto_core::FixedAffine::from_affine(Affine2([1.0, 0.0, 0.0, 1.0, x, y])).unwrap()
 }
 
+fn rasterize_text_cases() -> impl Iterator<Item = TextHashCase> {
+    text_v3_hash_cases()
+        .into_iter()
+        .filter_map(|(name, bake, transform, tile)| match name.as_str() {
+            "text-v3-latin-atlas" => Some((
+                name,
+                bake_parity_text("Alto 0.25 px/em", 13.5, [0.1, 0.2, 0.9, 1.0]),
+                transform,
+                tile,
+            )),
+            "text-v3-vertical" | "text-v3-placeholder" => Some((name, bake, transform, tile)),
+            _ => None,
+        })
+}
+
+#[test]
+fn text_pixels_q14_matches_the_v3_reference() {
+    for (name, bake, transform, _) in rasterize_text_cases() {
+        let world = alto_core::FixedAffine::from_affine(Affine2(transform)).unwrap();
+        let window = [-128, -16, 512, 512];
+        let reference = text_q14(&bake, world, 0, window);
+        assert!(reference.iter().any(|p| p[3] != 0), "{name}");
+        assert_eq!(
+            crate::glyph_q8::text_pixels_q14(&bake, world, window).unwrap(),
+            reference,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn text_extent_contains_every_painted_pixel() {
+    for (name, bake, transform, _) in rasterize_text_cases() {
+        let world = alto_core::FixedAffine::from_affine(Affine2(transform)).unwrap();
+        let [x, y, w, h] = crate::glyph_q8::text_extent(&bake, world).unwrap().unwrap();
+        let window = [x - 4, y - 4, w + 8, h + 8];
+        let pixels = crate::glyph_q8::text_pixels_q14(&bake, world, window).unwrap();
+        assert!(pixels.iter().any(|p| p[3] != 0), "{name}");
+        for (i, pixel) in pixels.iter().enumerate() {
+            if *pixel != [0; 4] {
+                let px = window[0] + i as i64 % window[2];
+                let py = window[1] + i as i64 / window[2];
+                assert!(
+                    (x..x + w).contains(&px) && (y..y + h).contains(&py),
+                    "{name} painted outside its extent at ({px}, {py})"
+                );
+            }
+        }
+    }
+
+    // A direct glyph straddling the finite ROI is clipped at its right edge.
+    let bake = overlapping_squares(1, 40);
+    let edge = 1 << 24;
+    let world = moved(f64::from(edge - 10), 0.0);
+    let [x, _, w, _] = crate::glyph_q8::text_extent(&bake, world).unwrap().unwrap();
+    assert_eq!(x, i64::from(edge - 10));
+    assert_eq!(x + w, i64::from(edge));
+}
+
 #[test]
 fn glyph_q14_does_not_overflow() {
     // Every coverage byte with the memo's E values for colour and accumulator,

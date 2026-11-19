@@ -75,6 +75,7 @@ pub struct LayerEditResult {
     pub node: NodeId,
     pub bounds: ImageBounds,
     pub no_op: bool,
+    pub missing: usize,
 }
 /// Output hashes stay rooted by `stage` until the ops are applied or dropped.
 pub struct PreparedOps<R> {
@@ -144,6 +145,17 @@ fn plain_raster(node: &Node) -> Result<(ImageBounds, TileMap), EngineError> {
 pub type VectorRasterizer<'a> =
     &'a dyn Fn(&[StyledPath], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>;
 
+pub type TextExtent<'a> = &'a dyn Fn(&[u8], FixedAffine) -> Result<Option<[i64; 4]>, String>;
+
+pub type TextRasterizer<'a> =
+    &'a dyn Fn(&[u8], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>;
+
+pub struct Rasterizers<'a> {
+    pub vector: VectorRasterizer<'a>,
+    pub text_extent: TextExtent<'a>,
+    pub text: TextRasterizer<'a>,
+}
+
 /// The pixels a vector can touch, in node-local coordinates. Generous by design: the
 /// result's image range only has to contain them.
 fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
@@ -205,6 +217,16 @@ fn vector_tiles(
     offset: (i32, i32),
     rasterizer: VectorRasterizer,
 ) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
+    tiles_from_q14(bounds, offset, |window| {
+        rasterizer(paths, matrix, window).map_err(|e| unsupported(&e))
+    })
+}
+
+fn tiles_from_q14(
+    bounds: ImageBounds,
+    offset: (i32, i32),
+    rasterize: impl Fn([i64; 4]) -> Result<Vec<[u16; 4]>, EngineError>,
+) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
     let (tx0, ty0) = (bounds.x.div_euclid(T), bounds.y.div_euclid(T));
     let (tx1, ty1) = (
         (bounds.right() - 1).div_euclid(T),
@@ -220,7 +242,7 @@ fn vector_tiles(
                 i64::from(T),
                 i64::from(T),
             ];
-            let pixels = rasterizer(paths, matrix, window).map_err(|e| unsupported(&e))?;
+            let pixels = rasterize(window)?;
             if pixels.iter().all(|p| p[3] == 0) {
                 continue;
             }
@@ -682,12 +704,12 @@ impl Engine {
         &mut self,
         h: DocHandle,
         edit: LayerEdit,
-        rasterizer: VectorRasterizer,
+        rasterizers: Rasterizers,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         let stage = self.begin_tile_stage();
         let result = match edit {
             LayerEdit::MergeDown { node } => self.prepare_merge_down(h, node, stage),
-            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizer),
+            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizers),
         };
         if result.is_err() {
             self.release_staged_tiles(stage);
@@ -759,6 +781,7 @@ impl Engine {
             node: node.id,
             bounds,
             no_op: false,
+            missing: 0,
         };
         Ok(PreparedOps {
             stage,
@@ -783,9 +806,47 @@ impl Engine {
             next = node.parent;
         }
         let offset = whole_translation(m).ok_or_else(|| {
-            unsupported("a vector can be rasterized only at a whole-pixel position at scale 1")
+            if matches!(
+                doc.node(id).map(|node| &node.kind),
+                Ok(NodeKind::Text { .. })
+            ) {
+                unsupported("text can be rasterized only at a whole-pixel position at scale 1")
+            } else {
+                unsupported("a vector can be rasterized only at a whole-pixel position at scale 1")
+            }
         })?;
         Ok((world(self, h, id)?, offset))
+    }
+
+    fn text_tiles(
+        &mut self,
+        h: DocHandle,
+        id: NodeId,
+        stage: u64,
+        rasterizers: &Rasterizers,
+    ) -> Result<(ImageBounds, TileMap, usize), EngineError> {
+        let (_, bake) = self
+            .text_bake(h, id)?
+            .ok_or_else(|| unsupported("the text has no bake"))?;
+        let (matrix, offset) = self.pixel_aligned_world(h, id)?;
+        let [x, y, width, height] = (rasterizers.text_extent)(&bake, matrix)
+            .map_err(|e| err("RESOURCE_LIMIT", &e))?
+            .ok_or_else(|| err("INVALID_ARGUMENT", "the text layer is empty"))?;
+        let range_error = |_| err("RESOURCE_LIMIT", "text bounds exceed the image range");
+        let bounds = ImageBounds {
+            x: i32::try_from(i128::from(x) - i128::from(offset.0)).map_err(range_error)?,
+            y: i32::try_from(i128::from(y) - i128::from(offset.1)).map_err(range_error)?,
+            width: u32::try_from(width).map_err(range_error)?,
+            height: u32::try_from(height).map_err(range_error)?,
+        };
+        bounds
+            .validate()
+            .map_err(|e| err("RESOURCE_LIMIT", &e.to_string()))?;
+        let missing = self.text_info(h, id)?.missing.len();
+        let out = tiles_from_q14(bounds, offset, |window| {
+            (rasterizers.text)(&bake, matrix, window).map_err(|e| err("RESOURCE_LIMIT", &e))
+        })?;
+        Ok((bounds, stage_map(self, stage, out)?, missing))
     }
 
     fn prepare_rasterize(
@@ -793,7 +854,7 @@ impl Engine {
         h: DocHandle,
         id: NodeId,
         stage: u64,
-        rasterizer: VectorRasterizer,
+        rasterizers: Rasterizers,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         unlocked(self, h, id)?;
         let doc = self.document(h)?;
@@ -807,7 +868,7 @@ impl Engine {
                 // transform stay on the node and mean the same on the new pixels.
                 let (matrix, offset) = self.pixel_aligned_world(h, id)?;
                 let bounds = vector_extent(paths)?;
-                let out = vector_tiles(paths, bounds, matrix, offset, rasterizer)?;
+                let out = vector_tiles(paths, bounds, matrix, offset, rasterizers.vector)?;
                 let tiles = stage_map(self, stage, out)?;
                 let mut next = node.clone();
                 next.kind = NodeKind::Raster { bounds, tiles };
@@ -818,6 +879,22 @@ impl Engine {
                         node: id,
                         bounds,
                         no_op: false,
+                        missing: 0,
+                    },
+                })
+            }
+            NodeKind::Text { .. } => {
+                let (bounds, tiles, missing) = self.text_tiles(h, id, stage, &rasterizers)?;
+                let mut next = node.clone();
+                next.kind = NodeKind::Raster { bounds, tiles };
+                Ok(PreparedOps {
+                    stage,
+                    ops: vec![Op::ReplaceNode { id, node: next }],
+                    result: LayerEditResult {
+                        node: id,
+                        bounds,
+                        no_op: false,
+                        missing,
                     },
                 })
             }
@@ -839,6 +916,7 @@ impl Engine {
                             node: id,
                             bounds: *bounds,
                             no_op: true,
+                            missing: 0,
                         },
                     });
                 }
@@ -859,6 +937,7 @@ impl Engine {
                         node: id,
                         bounds: new_bounds,
                         no_op: false,
+                        missing: 0,
                     },
                 })
             }
@@ -878,6 +957,7 @@ impl Engine {
                     return Err(err("INVALID_ARGUMENT", "the group is empty"));
                 }
                 let mut layers = vec![];
+                let mut missing = 0;
                 let mut bounds: Option<ImageBounds> = None;
                 for child in children {
                     let child = self.document(h)?.node(*child)?.clone();
@@ -892,8 +972,15 @@ impl Engine {
                             plain_props(child)?;
                             let (matrix, offset) = self.pixel_aligned_world(h, child.id)?;
                             let b = vector_extent(paths)?;
-                            let out = vector_tiles(paths, b, matrix, offset, rasterizer)?;
+                            let out = vector_tiles(paths, b, matrix, offset, rasterizers.vector)?;
                             (b, stage_map(self, stage, out)?)
+                        }
+                        NodeKind::Text { .. } => {
+                            plain_props(child)?;
+                            let (bounds, tiles, count) =
+                                self.text_tiles(h, child.id, stage, &rasterizers)?;
+                            missing += count;
+                            (bounds, tiles)
                         }
                         _ => plain_raster(child)?,
                     };
@@ -924,6 +1011,7 @@ impl Engine {
                         node: id,
                         bounds,
                         no_op: false,
+                        missing,
                     },
                 })
             }
@@ -1102,7 +1190,15 @@ mod tests {
         edit: LayerEdit,
     ) -> Result<LayerEditResult, EngineError> {
         let intent = edit.intent();
-        let p = e.prepare_layer_edit(h, edit, &|_, _, _| Err("no rasterizer".into()))?;
+        let p = e.prepare_layer_edit(
+            h,
+            edit,
+            Rasterizers {
+                vector: &|_, _, _| Err("no rasterizer".into()),
+                text_extent: &|_, _| Err("no rasterizer".into()),
+                text: &|_, _, _| Err("no rasterizer".into()),
+            },
+        )?;
         let revision = e.document(h).unwrap().revision;
         if !p.ops.is_empty() {
             e.transact(h, intent, p.ops, revision).unwrap();
@@ -1383,6 +1479,171 @@ mod tests {
         assert_eq!(e.snapshot(h).unwrap(), unchanged);
         let bottom = layer_edit(&mut e, h, LayerEdit::MergeDown { node: lower });
         assert_eq!(code(bottom.err().unwrap()), "INVALID_ARGUMENT");
+    }
+
+    // The engine has no GPU dependency. Inject known Q14 coverage and check the
+    // stored bake at the boundary; alto-gpu tests the production coverage.
+    fn rasterize_test_text(
+        e: &mut Engine,
+        h: DocHandle,
+        id: NodeId,
+    ) -> Result<LayerEditResult, EngineError> {
+        use alto_core::text_bake::{PLACEHOLDER_FONT, TextBake};
+        let p = e.prepare_layer_edit(
+            h,
+            LayerEdit::Rasterize { node: id },
+            Rasterizers {
+                vector: &|_, _, _| panic!("unexpected vector"),
+                text_extent: &|bake, _| {
+                    let bake = TextBake::decode(bake).unwrap();
+                    assert_eq!(bake.glyphs.len(), 1);
+                    assert_eq!(bake.outlines[0].font, PLACEHOLDER_FONT);
+                    Ok(Some([15, 21, 4, 4]))
+                },
+                text: &|_, _, window| {
+                    assert_eq!(window, [12, 18, 256, 256]);
+                    let mut pixels = vec![[0; 4]; 256 * 256];
+                    for y in 3..7 {
+                        for x in 3..7 {
+                            if x == 3 || x == 6 || y == 3 || y == 6 {
+                                pixels[y * 256 + x] = [16384, 0, 0, 16384];
+                            }
+                        }
+                    }
+                    Ok(pixels)
+                },
+            },
+        )?;
+        let revision = e.document(h)?.revision;
+        e.transact(h, "layer.rasterize", p.ops, revision).unwrap();
+        e.release_staged_tiles(p.stage);
+        Ok(p.result)
+    }
+
+    fn insert_text(e: &mut Engine, h: DocHandle, nondefault_props: bool) -> NodeId {
+        let mut node = Node::text(
+            "Missing glyph",
+            alto_text::TextContent {
+                text: "😀".into(),
+                ..Default::default()
+            },
+        );
+        node.props.transform = Affine2([1.0, 0.0, 0.0, 1.0, 12.0, 18.0]);
+        if nondefault_props {
+            node.props.opacity = 0.5;
+            node.props.blend = alto_doc::BlendMode::Multiply;
+        }
+        let id = node.id;
+        let doc = e.document(h).unwrap();
+        e.transact(
+            h,
+            "text",
+            vec![Op::InsertNode {
+                node,
+                parent: doc.root,
+                index: 0,
+            }],
+            doc.revision,
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn text_rasterize_keeps_id_name_opacity_and_blend() {
+        let (mut e, h) = doc(64, 64);
+        let id = insert_text(&mut e, h, true);
+        let before = e.document(h).unwrap().node(id).unwrap().clone();
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        let after = e.document(h).unwrap().node(id).unwrap();
+        assert_eq!(result.node, id);
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.props.opacity, before.props.opacity);
+        assert_eq!(after.props.blend, before.props.blend);
+        assert_eq!(after.props.transform, before.props.transform);
+        assert!(matches!(after.kind, NodeKind::Raster { .. }));
+    }
+
+    #[test]
+    fn text_rasterize_reports_missing_characters() {
+        let (mut e, h) = doc(64, 64);
+        let id = insert_text(&mut e, h, false);
+        let missing = e.text_info(h, id).unwrap().missing.len();
+        assert!(missing > 0);
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        assert_eq!(result.missing, missing);
+        assert_eq!(result.bounds, bounds(3, 3, 4, 4));
+        assert_eq!(
+            e.pick_color(h, id, [3.0, 3.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(e.pick_color(h, id, [4.0, 4.0]).unwrap().bytes, [0; 4]);
+    }
+
+    #[test]
+    fn rasterize_group_accepts_only_pixel_aligned_text_children() {
+        let (mut e, h) = doc(64, 64);
+        let text = insert_text(&mut e, h, false);
+        let group = Node::group("Text group");
+        let id = group.id;
+        let doc = e.document(h).unwrap();
+        e.transact(
+            h,
+            "group",
+            vec![
+                Op::InsertNode {
+                    node: group,
+                    parent: doc.root,
+                    index: 1,
+                },
+                Op::MoveNode {
+                    id: text,
+                    parent: id,
+                    index: 0,
+                },
+                Op::SetProps {
+                    id: text,
+                    patch: PropPatch {
+                        transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 12.5, 18.0])),
+                        ..Default::default()
+                    },
+                },
+            ],
+            doc.revision,
+        )
+        .unwrap();
+
+        let fractional = e.snapshot(h).unwrap();
+        let refused = rasterize_test_text(&mut e, h, id).unwrap_err();
+        assert_eq!(code(refused), "UNSUPPORTED");
+        assert_eq!(e.snapshot(h).unwrap(), fractional);
+        let revision = e.document(h).unwrap().revision;
+        e.transact(
+            h,
+            "align",
+            vec![Op::SetProps {
+                id: text,
+                patch: PropPatch {
+                    transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 12.0, 18.0])),
+                    ..Default::default()
+                },
+            }],
+            revision,
+        )
+        .unwrap();
+
+        let before = e.snapshot(h).unwrap();
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        assert_eq!(result.bounds, bounds(15, 21, 4, 4));
+        assert_eq!(result.missing, 1);
+        assert_eq!(
+            e.pick_color(h, id, [15.0, 21.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert!(e.document(h).unwrap().node(text).is_err());
+        e.undo(h).unwrap();
+        assert_eq!(e.snapshot(h).unwrap(), before);
     }
 
     #[test]

@@ -132,12 +132,23 @@ impl Runtime {
         }
         let edit: alto_engine::canvas::LayerEdit = parse_edit(request)?;
         let intent = edit.intent();
-        let p = self
-            .engine
-            .prepare_layer_edit(self.doc, edit, &|paths, world, window| {
+        let rasterizers = alto_engine::canvas::Rasterizers {
+            vector: &|paths, world, window| {
                 alto_gpu::raster_q8::vector_pixels_q14(paths, world, window)
                     .map_err(|_| "the vector is outside the renderer's coordinate range".into())
-            })
+            },
+            text_extent: &|bake, world| {
+                alto_gpu::glyph_q8::text_extent(bake, world)
+                    .map_err(|_| "the text is outside the renderer's coordinate range".into())
+            },
+            text: &|bake, world, window| {
+                alto_gpu::glyph_q8::text_pixels_q14(bake, world, window)
+                    .map_err(|_| "the text is outside the renderer's coordinate range".into())
+            },
+        };
+        let p = self
+            .engine
+            .prepare_layer_edit(self.doc, edit, rasterizers)
             .map_err(error)?;
         self.apply_prepared(intent, p)
     }

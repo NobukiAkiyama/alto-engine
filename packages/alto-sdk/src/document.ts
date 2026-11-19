@@ -417,8 +417,9 @@ export class DocumentHandle {
     /** Merges a raster into the raster below it. Refused when the result could not look the same. */
     mergeDown: (node: NodeId) => this.layerCommand({ type: "merge_down", node }),
     /**
-     * Bakes a raster's whole-pixel offset, turns a vector layer into a raster on the same node, or
-     * flattens a group of rasters and vectors. A vector must sit at a whole-pixel position at scale 1.
+     * Bakes a raster's whole-pixel offset, rasterizes a vector or text layer on the same node, or
+     * flattens a group of rasters, vectors, and text. Vectors and text must sit at a whole-pixel
+     * position at scale 1. The result's `missing` counts missing characters in rasterized text.
      */
     rasterize: (node: NodeId) => this.layerCommand({ type: "rasterize", node }),
     histogram: (node: NodeId, range?: ImageBounds): Promise<ImageHistogram> => this.request("imageHistogram", range ? { node, range } : { node }),
