@@ -569,14 +569,16 @@ impl Document {
     }
     /// The oldest format that supports all semantics used by this document.
     pub fn required_format(&self) -> u32 {
-        if self.nodes.values().any(|node| {
+        if self.has_high_pass() {
+            FORMAT_VERSION
+        } else if self.nodes.values().any(|node| {
             matches!(
                 &node.kind,
                 NodeKind::Vector { paths }
                     if paths.iter().any(|path| path.stroke.as_ref().is_some_and(|s| s.dash.is_some()))
             )
         }) {
-            FORMAT_VERSION
+            DASH_FORMAT
         } else if self.nodes.values().any(|node| {
             matches!(
                 &node.kind,
@@ -593,6 +595,21 @@ impl Document {
         } else {
             BASE_FORMAT
         }
+    }
+
+    fn has_high_pass(&self) -> bool {
+        self.nodes.values().any(|node| {
+            node.props
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::HighPass { .. }))
+                || matches!(
+                    &node.kind,
+                    NodeKind::Adjustment {
+                        adjustment: Effect::HighPass { .. }
+                    }
+                )
+        })
     }
 
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, DocError> {
@@ -651,6 +668,11 @@ impl Document {
         };
         if doc.assets.len() != asset_count {
             return Err(DocError::Invalid("Duplicate asset ID".into()));
+        }
+        if doc.meta.format_version < FORMAT_VERSION && doc.has_high_pass() {
+            return Err(DocError::Unsupported(format!(
+                "high-pass effects require document format {FORMAT_VERSION}"
+            )));
         }
         doc.validate_graph()?;
         Ok(doc)

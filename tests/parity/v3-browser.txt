@@ -85,3 +85,11 @@ fad6d8190c961ac2 v3-mask-selection-color-adjust
 2bb3c7577b35b59a v3-adjustment-screen-unmasked
 03e5a9697e0db970 v3-mask-rotated
 fd373e2810ae1435 v3-mask-group
+5f83a5f30a722325 effect-high-pass-flat
+f79a2348a412695a effect-high-pass
+2ec24575f91f1b1c effect-high-pass-seam (0, 0)
+416e3fe9031c88d6 effect-high-pass-seam (1, 0)
+af8612917c753e69 effect-high-pass-seam (0, 1)
+6dd0542f592496e9 effect-high-pass-seam (1, 1)
+8ea3ac6b9c0c1719 effect-high-pass-selected
+f79a2348a412695a effect-high-pass-adjustment

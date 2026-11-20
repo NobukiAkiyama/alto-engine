@@ -36,6 +36,11 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
                 .expect("validated Gaussian blur radius"),
         },
+        alto_doc::Effect::HighPass { radius, .. } => REffectKind::HighPass {
+            radius: f(*radius),
+            radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
+                .expect("validated high-pass radius"),
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,

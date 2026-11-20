@@ -20,6 +20,8 @@ const sdkVersion = JSON.parse(read("packages/alto-sdk/package.json")).version;
 const formatVersion = constant("crates/alto-doc/src/lib.rs", /pub const FORMAT_VERSION: u32 = (\d+);/, "FORMAT_VERSION");
 const baseFormat = constant("crates/alto-doc/src/lib.rs", /pub const BASE_FORMAT: u32 = (\d+);/, "BASE_FORMAT");
 const textFormat = constant("crates/alto-doc/src/lib.rs", /const TEXT_FORMAT: u32 = (\d+);/, "TEXT_FORMAT");
+const dashFormat = constant("crates/alto-doc/src/lib.rs", /const DASH_FORMAT: u32 = (\d+);/, "DASH_FORMAT");
+const formats = [baseFormat, textFormat, dashFormat, formatVersion];
 const renderVersion = constant(
   "crates/alto-core/src/lib.rs",
   /pub const RENDER_VERSION_EXACT: u32 = (\d+);/,
@@ -39,9 +41,9 @@ if (sdkProtocol !== null && wasmProtocol !== null && sdkProtocol !== wasmProtoco
       `crates/alto-wasm/src/lib.rs reports ${wasmProtocol}`,
   );
 }
-if ([baseFormat, textFormat, formatVersion].every((format) => format !== null) &&
-    !(Number(baseFormat) < Number(textFormat) && Number(textFormat) < Number(formatVersion))) {
-  failures.push(`Document formats must be in order: BASE_FORMAT (${baseFormat}), TEXT_FORMAT (${textFormat}), FORMAT_VERSION (${formatVersion})`);
+if (formats.every((format) => format !== null) &&
+    formats.some((format, index) => index > 0 && Number(format) <= Number(formats[index - 1]))) {
+  failures.push(`Document formats must be in order: ${formats.join(", ")}`);
 }
 
 const manifestFormat = "2";
@@ -94,8 +96,8 @@ const claims = [
   ],
   [
     "RELEASING.md",
-    /accepts formats (\d+), (\d+), and (\d+) \/ render v(\d+) only/,
-    [baseFormat, textFormat, formatVersion, renderVersion],
+    /accepts formats (\d+), (\d+), (\d+), and (\d+) \/ render v(\d+) only/,
+    [...formats, renderVersion],
     "accepted formats",
   ],
   [
@@ -112,8 +114,8 @@ const claims = [
   ],
   [
     "doc/MILESTONES.md",
-    /受け付ける形式はformat (\d+)、(\d+)、(\d+) \/ manifest (\d+)〜(\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
-    [baseFormat, textFormat, formatVersion, manifestFormat, stashManifestFormat, commitFormat, renderVersion],
+    /受け付ける形式はformat (\d+)、(\d+)、(\d+)、(\d+) \/ manifest (\d+)〜(\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
+    [...formats, manifestFormat, stashManifestFormat, commitFormat, renderVersion],
     "accepted formats",
   ],
   [
@@ -157,5 +159,5 @@ if (failures.length) {
 }
 console.log(
   `version references match the source: engine ${engineVersion}, SDK ${sdkVersion}, ` +
-    `protocol ${protocol}, format ${formatVersion} (also ${baseFormat} and ${textFormat}), render v${renderVersion}`,
+    `protocol ${protocol}, formats ${formats.join(", ")}, render v${renderVersion}`,
 );

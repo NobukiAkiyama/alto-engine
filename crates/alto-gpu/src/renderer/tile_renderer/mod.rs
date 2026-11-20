@@ -112,6 +112,31 @@ impl RoiQ {
             ..self
         })
     }
+    fn grow(self, radius_q8: u32) -> Result<Self> {
+        let (taps, _) = self.taps(radius_q8)?;
+        self.expand(taps, taps)
+    }
+    fn union(self, other: Self) -> Result<Self> {
+        debug_assert_eq!(self.level, other.level);
+        let axis = |a: i64, aw: u32, b: i64, bw: u32| -> Option<(i64, u32)> {
+            let low = a.min(b);
+            let high = a
+                .checked_add(i64::from(aw))?
+                .max(b.checked_add(i64::from(bw))?);
+            Some((low, u32::try_from(high.checked_sub(low)?).ok()?))
+        };
+        let (ox, w) = axis(self.ox, self.w, other.ox, other.w)
+            .ok_or_else(|| RenderError::InvalidArgument("v3 stack ROI width".into()))?;
+        let (oy, h) = axis(self.oy, self.h, other.oy, other.h)
+            .ok_or_else(|| RenderError::InvalidArgument("v3 stack ROI height".into()))?;
+        Ok(Self {
+            ox,
+            oy,
+            w,
+            h,
+            ..self
+        })
+    }
     /// v3 blur works at levels -6..=12 only; checked before any shift.
     fn check_level(level: i32) -> Result<()> {
         if (-6..=12).contains(&level) {

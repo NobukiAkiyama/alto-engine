@@ -1136,6 +1136,43 @@ export function renderBlurV3(image, radii, tile = [0, 0], canvas = [256, 256]) {
   return out;
 }
 
+/** A level-0 high-pass tile. The two separable blur passes need a source halo
+ * equal to the kernel's radius, including neighbor tiles across tile seams. */
+export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 256], selection) {
+  const rho = blurRadiusQ8(radius);
+  const halo = Math.ceil(rho / 256);
+  const weights = blurKernelQ16(halo, rho);
+  const span = 256 + 2 * halo;
+  const origin = tile.map((index) => index * 256);
+  const source = new Array(span * span);
+  for (let y = 0; y < span; y++) for (let x = 0; x < span; x++) {
+    const dx = origin[0] + x - halo, dy = origin[1] + y - halo;
+    const offset = (dy * image.w + dx) * 4;
+    source[y * span + x] = (dx >= 0 && dy >= 0 && dx < image.w && dy < image.h)
+      ? ingressQ14(image.pixels.subarray(offset, offset + 4))
+      : [0, 0, 0, 0];
+  }
+  const horizontal = blurPassQ14(source, span, span, weights, false);
+  const blurred = blurPassQ14(horizontal, span, span, weights, true);
+  const out = new Uint8Array(256 * 256 * 4);
+  const frame = { origin, scale: 1 };
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    if (origin[0] + x < 0 || origin[1] + y < 0 || origin[0] + x >= canvas[0] || origin[1] + y >= canvas[1]) continue;
+    const index = (y + halo) * span + x + halo;
+    const input = source[index].map(BigInt);
+    const low = cqStraight(blurred[index].map(BigInt));
+    const high = cqStraight(input).map((value, channel) => {
+      const straight = value - low[channel] + CQ / 2n;
+      const clamped = straight < 0n ? 0n : straight > CQ ? CQ : straight;
+      return cqMul(clamped, input[3]);
+    });
+    const filtered = [...high, input[3]];
+    const result = selection ? maskSelectQ14(input, filtered, maskCoverage(selection, x, y, frame)) : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
 // Render version 3 vector fill (doc/design/2026-10-28-v3-integer-vector-fill.md),
 // written independently of `raster_q8.rs`: Q8 points from the f64 bits through
 // the Q32 world, a sparse-cell nonzero integration, 16 even-odd sub-scanlines,
@@ -1608,7 +1645,7 @@ export function fnv64(bytes) {
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
 // Every document effect has an integer v3 stage; selections use mode 22.
-const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:

@@ -314,6 +314,10 @@ fn blur_stage(ix: vec2i) -> vec4i {
  }
  return vec4i((accum+vec4u(32768u))>>vec4u(16u));
 }
+fn high_pass_q14(original: vec4i, blurred: vec4i) -> vec4i {
+ let rgb=clamp(straight_q(original)-straight_q(blurred)+vec3i(8192),vec3i(0),vec3i(Q14_ONE));
+ return vec4i(mul_q(rgb.r,original.a),mul_q(rgb.g,original.a),mul_q(rgb.b,original.a),original.a);
+}
 fn resample_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];let m=u32(settings.z);
  let shift=i32(1u<<m);
@@ -358,5 +362,6 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if c.info.x==31u{out=curves_q14(texel_a(ix),u32(settings.x));}
  else if c.info.x==32u{out=levels_q14(texel_a(ix));}
  else if c.info.x==33u{out=hue_saturation_q14(texel_a(ix));}
+ else if c.info.x==34u{out=high_pass_q14(texel_a(ix),texel_b(ix));}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

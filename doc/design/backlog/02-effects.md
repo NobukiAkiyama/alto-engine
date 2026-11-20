@@ -140,12 +140,12 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 **共通基盤（FX-4 で作る）。**
 
 1. `smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow` を作り、`stack` のぼかしの枝を一般化する。既存の `GaussianBlur` の挙動は変えない。（新規）
-2. 評価の重複を避ける。各 `stack` のルート呼び出しに専用の評価結果のメモ（新規）を持たせ、再帰の間だけ `(効果の接頭辞の長さ, ROI)` をキーに共有する。別のノードや調整レイヤー、子孫の `stack` 呼び出しには共有しない。同じ `Context` は複数の入力や変換を扱うので、メモを `Context` 全体で共有すると別の入力と衝突する。粗い平面と元画像では ROI が異なるため、このメモだけで評価回数が線形になるとは限らない。異なる半径・倍率と選択範囲を組み合わせて評価回数と GPU 予算を測り、必要なら ROI をまとめる評価計画を追加する。メモは同じ `Target` の `lease` を共有し、既存の GPU 予算に計上する。予算が逼迫したら使用中でないメモの lease を解放し必要時に再計算する。再計算の増加も測る。必要な作業が予算に収まらない場合は既存の `RenderError::Budget`（`INVALID_ARGUMENT`）を返し、編集済み文書は維持する。
+2. 評価の重複を避ける。各 `stack` が出力から入力へ必要な ROI を伝播し、接頭辞ごとに同じ整数レベルの要求を一つの ROI にまとめる。各平面は一度評価し、最後の読み取りをエンコードした時点で `Target` の lease を解放する。元画像とぼかした画像が異なるレベルを使うときは、それぞれの格子を保持する。ノード、調整レイヤー、子孫の `stack` は個別に計画する。GPU 予算を超える場合は、書き込み範囲を収容できる未使用の大きいプール枠を再利用する。その枠もなければ既存の `RenderError::Budget`（`INVALID_ARGUMENT`）を返す。
 3. 調整レイヤーの判定（`graph.rs`）を述語へ置き換える。
 
 ### 形式と通信
 
-- `format_version`：**上げる**（8。00-ROADMAP の番号の表）。新しい `type` を持つ文書を古い実装は読めない。manifest の `document_format` は `crates/alto-store/src/lib.rs` が 5 を固定で書き、読み込みも 5 以外を `package format` で拒否するので、同じ番号へ上げる変更をこの作業に含める（FX-4 の作業手順の Modify に `crates/alto-store/src/lib.rs`）。FX-1〜FX-6、FX-9 の新しい type は回 8 にまとめる。FX-8 は段階4なので別の回（16）。番号を上げる基盤（`FORMAT_VERSION` など）は回 6 の PR（06）が先に入れるので、この PR は `SUPPORTED_FORMATS` に 8 を足す。（新規）
+- `format_version`：ハイパスを使用する文書は形式8。manifest の `document_format` は既存のスナップショットからの転記経路を使う。読み込みは `SUPPORTED_FORMATS` の5〜8を受け付ける。FX-1〜FX-6、FX-9 の新しい type は回8にまとめる。FX-8 は別の回（16）。
 - `PROTOCOL`：上げない。`setEffects` のペイロードは `unknown[]` のまま。
 - 描画の版：v3 のまま。既存の画素と既存の parity 行は変わらない（`REffectKind` の追加だけ）。
 - シェーダーのモード番号：ハイパスの結合 1 つ（34）。
@@ -156,17 +156,16 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 - Create `crates/alto-gpu/src/cpu_composite/effect_reference.rs`（新規）。
 - Modify `crates/alto-doc/src/effect.rs`、`crates/alto-engine/src/selection.rs`、`crates/alto-scene/src/lib.rs`、`crates/alto-gpu/src/renderer/geometry.rs`、`crates/alto-gpu/src/renderer/tile_renderer/stages.rs`、`crates/alto-gpu/src/renderer/tile_renderer/graph.rs`、`crates/alto-gpu/src/renderer/tile_renderer/mod.rs`、`crates/alto-gpu/shaders/effects-q14.wgsl`、`crates/alto-gpu/src/cpu_composite/mod.rs`、`crates/alto-store/src/lib.rs`、`tests/e2e/cpu-composite.js`、`tests/e2e/parity-tests.js`、`tests/parity/v3-browser.txt`（追記のみ）、`packages/alto-sdk/src/types.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
 
-**Interfaces:** Produces `Effect::HighPass { radius, selection, extra }`、`REffectKind::HighPass { radius, radius_q8 }`、`smoothing_radius_q8`、`effect_growth_q8`、`RoiQ::grow`、評価のメモ、ハイパスの結合モード。
+**Interfaces:** `Effect::HighPass { radius, selection, extra }`、`REffectKind::HighPass { radius, radius_q8 }`、`smoothing_radius`、`RoiQ::grow`、階層別の評価計画、ハイパスの結合モード。
 
-- [ ] 形式の試験：`document_format` を上げた manifest を保存・再オープンでき、旧番号は `package format` で拒否される。
-- [ ] 基盤の試験（先に赤）：`selected_blur_stack_evaluates_each_prefix_once`（十分な予算でメモを保持できる間、同一の接頭辞・ROI を重複評価しない）。選択つきぼかしを異なる半径・倍率で最大 32 個重ねた場合も評価回数と GPU 予算を記録し、指数的な増加を防ぐこと。予算逼迫による解放・再計算も画素一致を検証する。既存のぼかしの parity（`blur-v3-*`）が1バイトも変わらないこと。
-- [ ] 試験：同じ ROI・効果数を持つ異なるレイヤーと調整レイヤーを重ね、メモ有効時も無効時と全画素が一致する。ネストしたグループと異なる変換も含める。
-- [ ] 試験：メモが領域を保持する場合も、従来成功した文書が同じ GPU 予算で描画できることと、予算超過時に既存のエラーを返し文書を保つことを確認する。
-- [ ] 試験（`effect.rs`）`validate_rejects_high_pass_radius_below_half`、`high_pass_defaults_parse_and_roundtrip`、`known_effect_defaults_parse_but_unknown_fields_are_rejected` の形に新しい形を足す。
-- [ ] 試験（`effect_reference.rs`）`high_pass_of_flat_color_is_mid_gray`（RGB が 8192、アルファ維持）、`high_pass_keeps_alpha_and_transparent_pixels`、`high_pass_of_straight_ramp_has_known_values`（手計算した値）。
-- [ ] 試験（`stages.rs`）`high_pass_input_roi_matches_blur`（同じ半径で `input_roi_v3` が同じ）。
-- [ ] WGSL、JS を実装し、parity 症例 `effect-high-pass`（平坦、勾配 `colorAdjustGradient`、タイルの継ぎ目をまたぐ矩形）、`effect-high-pass-selected`（選択つき）を追加。
-- [ ] 完了条件：`git diff tests/parity` が追記のみ。`sh scripts/check.sh native`、`pnpm --dir packages/alto-sdk build`、`node scripts/verify-browser.mjs --functional` が成功。opencode レビュー後に PR。
+実装と検証の記録は [HIGH-PASS.md](../../verification/HIGH-PASS.md) を参照。共通のぼかし半径は `smoothing_radius` が保持し、ハイパスは元のアルファを維持するため出力の範囲を広げない。
+
+- [x] 形式8の manifest とスナップショットの保存・再オープン、未対応番号の拒否、形式5〜7の読込を確認。
+- [x] 選択つきぼかし32段で接頭辞とレベルごとの重複評価を抑え、256 MiB と512 MiB で出力の全画素が一致することを確認。既存のぼかしのハッシュも維持。
+- [x] 異なる変形を持つレイヤー、ネストしたグループ、調整レイヤーを同じシーンで描画し、各効果の適用範囲を確認。
+- [x] 半径と既定値の検証、均一色・透明画素・勾配の整数参照、ぼかしとの入力 ROI の一致を確認。
+- [x] 平坦色、勾配、タイル境界、選択つき効果、調整レイヤーの描画比較を追加。
+- [x] 描画比較データは追記のみ。ネイティブ検証、SDK ビルドと API チェック、Metal の機能試験、Metal・SwiftShader の描画比較、独立レビューを実施。
 
 ### 依存
 

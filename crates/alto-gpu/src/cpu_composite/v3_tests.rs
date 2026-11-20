@@ -19,22 +19,30 @@ pub(super) fn v3_test_try_render(
     store: &alto_raster::ObjectStore,
     key: (i32, i32, i32),
 ) -> Option<Result<Vec<u8>, crate::RenderError>> {
+    v3_test_try_render_with_budget(document, store, key, 256)
+}
+pub(super) fn v3_test_try_render_with_budget(
+    document: &RenderScene,
+    store: &alto_raster::ObjectStore,
+    key: (i32, i32, i32),
+    budget_mb: u32,
+) -> Option<Result<Vec<u8>, crate::RenderError>> {
     let _gpu_lock = GPU_RENDERER_TEST_LOCK.lock().unwrap();
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
     let instance = wgpu::Instance::new(descriptor);
-    let mut renderer = match pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
-    {
-        Ok(renderer) => renderer,
-        Err(err)
-            if !cfg!(target_os = "macos")
-                && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
-        {
-            eprintln!("v3 vector GPU parity skipped: {err}");
-            return None;
-        }
-        Err(err) => panic!("v3 vector GPU parity could not start: {err}"),
-    };
+    let mut renderer =
+        match pollster::block_on(crate::renderer::Renderer::headless(&instance, budget_mb)) {
+            Ok(renderer) => renderer,
+            Err(err)
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("v3 vector GPU parity skipped: {err}");
+                return None;
+            }
+            Err(err) => panic!("v3 vector GPU parity could not start: {err}"),
+        };
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let poller = {
         let (device, done) = (renderer.device.clone(), done.clone());

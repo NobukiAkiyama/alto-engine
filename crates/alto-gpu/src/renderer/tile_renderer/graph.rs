@@ -35,13 +35,10 @@ impl Context<'_> {
                     accum
                 };
                 let desired = input.roi;
-                let filtered = if stack.iter().any(|e| {
-                    if self.resources.exact {
-                        matches!(e.kind,REffectKind::GaussianBlur {radius_q8, ..} if radius_q8>0)
-                    } else {
-                        matches!(e.kind,REffectKind::GaussianBlur {radius, ..} if radius>0.0)
-                    }
-                }) {
+                let filtered = if stack
+                    .iter()
+                    .any(|effect| super::stages::needs_backdrop_halo(effect, self.resources.exact))
+                {
                     let prefix = if node.features.clip {
                         &children[base_position..position]
                     } else {
