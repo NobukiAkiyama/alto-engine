@@ -1,4 +1,6 @@
 #![cfg(target_arch = "wasm32")]
+mod tiff;
+
 use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
@@ -201,7 +203,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        14
+        15
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {

@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 14;
+export const PROTOCOL = 15;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -199,7 +199,14 @@ export interface Requests {
   view: Q<None, WireState>;
   parseVectorPath: Q<{ svg: string }, PathData>;
   vectorPathSvg: Q<{ data: PathData }, string>;
-  exportImage: Q<{ region: Rect; scale: number; type: string }, Blob>;
+  exportImage: Q<{
+    region: Rect;
+    scale: number;
+    type: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
+    quality?: number;
+    background?: [number, number, number];
+    compression?: "none" | "deflate";
+  }, Blob>;
   injectFinishJournalFailure: Q<None, true>;
   injectReadbackFailure: Q<{ after: number }, true>;
   // Diagnostics (unstable entry point).

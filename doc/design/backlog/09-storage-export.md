@@ -302,7 +302,7 @@ export interface ExportImageOptions {
 - 検査は `document.ts` で行い、Worker へ渡す前に `INVALID_ARGUMENT`（reason `quality`、`background`、`compression`（新規の reason））。`quality` は NaN と範囲外を拒否。`background` は長さ3の有限の数で 0〜1。
 - 01 の `depth`（COL-2）、`colorSpace`（COL-6）、`"image/x-exr"`（COL-3）と同じ型に並ぶ。組み合わせの検査（例：`depth: 16` と `image/jpeg` は `UNSUPPORTED`）は後から入る項目が足す。
 
-**JPEG。** Worker の非乗算の画素を、`background` の上に straight で合成する：`c' = round(c × a / 255 + bg × 255 × (255 − a) / 255)`、`a' = 255`。整数で計算する（`bg` は `round(bg × 255)` にしてから）。その後 `OffscreenCanvas` に置き、`convertToBlob({ type: "image/jpeg", quality })`。拡大縮小は合成の後に今の canvas の経路で行う。結果の画素はブラウザの JPEG 符号化に依るので、試験は誤差で比べる。
+**JPEG。** Worker の非乗算の画素を、`background` の上に straight で合成する：`c' = round((c × a + bg × (255 − a)) / 255)`、`a' = 255`。整数で計算する（`bg` は `round(bg × 255)` にしてから）。その後 `OffscreenCanvas` に置き、`convertToBlob({ type: "image/jpeg", quality })`。拡大縮小は合成の後に今の canvas の経路で行う。結果の画素はブラウザの JPEG 符号化に依るので、試験は誤差で比べる。
 
 **TIFF。** 画素は JS のまま、Rust はヘッダーだけを作る。
 
@@ -315,7 +315,7 @@ pub struct TiffStrip { pub rows: u32, pub bytes: u32 } // （新規）
 pub fn rgba8_header(width: u32, height: u32, compression: TiffCompression, strips: &[TiffStrip])
     -> Result<Vec<u8>, TiffError>;            // （新規）
 /// Display は今のエラーと同じ「CODE: detail」。alto-wasm はそのまま JS のエラーにする。
-pub enum TiffError { InvalidArgument(String), ResourceLimit(String) } // （新規）
+pub enum TiffError { InvalidArgument(&'static str), ResourceLimit } // （新規）
 pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが32ビットに収まる上限
 ```
 
@@ -330,7 +330,7 @@ pub const MAX_TIFF_BYTES: u64 = (1 << 32) - 1; // （新規）オフセットが
 ### 形式と通信
 
 - `format_version`、manifest：触れない。
-- `PROTOCOL`：9 に含める（段階1）。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
+- `PROTOCOL`：15 に更新。`exportImage` の引数に `quality`、`background`、`compression` が増える。`tiffHeader` は WASM の関数で、Worker の要求ではない。（新規）
 - 描画の版：触れない。
 
 ### 作業手順

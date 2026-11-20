@@ -645,7 +645,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable" | "undo-steps";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "quality" | "background" | "compression" | "objects-unavailable" | "undo-steps";
 }
 
 // @public
@@ -656,10 +656,13 @@ export interface ExclusiveObjectStorage extends ObjectStorageProvider {
 
 // @public (undocumented)
 export interface ExportImageOptions {
+    background?: [number, number, number];
+    compression?: "none" | "deflate";
+    quality?: number;
     region?: Rect;
     scale?: number;
     // (undocumented)
-    type?: "image/png" | "image/webp";
+    type?: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
 }
 
 // @public

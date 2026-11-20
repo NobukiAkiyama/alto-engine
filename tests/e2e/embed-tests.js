@@ -776,6 +776,94 @@ export async function runEmbedTests(_playground, log) {
       assert(all.width === 64 && all.height === 32, `infinite region gave ${all.width}×${all.height}`);
       assert(all.pixels.every((v) => v === 0), "an empty document exported non-transparent pixels");
     });
+    await test("JPEG export composites alpha over the background", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 128, height: 64 });
+      const canvas = new OffscreenCanvas(128, 64);
+      const source = canvas.getContext("2d");
+      source.fillStyle = "rgba(255,0,0,0.5)";
+      source.fillRect(0, 0, 64, 64);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      await doc.transact("image.import", (tx) => tx.addRasterFromAsset(asset));
+      for (const [options, red, blank] of [
+        [{}, [255, 127, 127, 255], [255, 255, 255, 255]],
+        [{ background: [0, 0, 0], quality: 1, scale: 0.75 }, [128, 0, 0, 255], [0, 0, 0, 255]],
+      ]) {
+        const jpeg = await doc.exportImage({ type: "image/jpeg", ...options });
+        assert(jpeg.type === "image/jpeg", "JPEG MIME type");
+        const bitmap = await createImageBitmap(jpeg);
+        try {
+          const scale = options.scale ?? 1;
+          assert(bitmap.width === 128 * scale && bitmap.height === 64 * scale, "JPEG dimensions");
+          const probe = new OffscreenCanvas(bitmap.width, bitmap.height).getContext("2d");
+          probe.drawImage(bitmap, 0, 0);
+          for (const [x, expected] of [[32, red], [96, blank]]) {
+            const pixel = probe.getImageData(x * scale, 32 * scale, 1, 1).data;
+            assert(pixel.every((v, i) => near(v, expected[i], 3)), `JPEG pixel at ${x}: ${pixel} vs ${expected}`);
+          }
+        } finally {
+          bitmap.close();
+        }
+      }
+      for (const quality of [NaN, -1, 1.01, Infinity]) {
+        assert(await rejectsWith(doc.exportImage({ type: "image/jpeg", quality }), "INVALID_ARGUMENT", "quality"), "invalid JPEG quality");
+      }
+      assert(await rejectsWith(doc.exportImage({ type: "image/unsupported" }), "UNSUPPORTED"), "unknown export format");
+      assert(await rejectsWith(doc.exportImage({ quality: 0.5 }), "INVALID_ARGUMENT", "quality"), "quality on PNG");
+      assert(await rejectsWith(doc.exportImage({ type: "image/jpeg", background: [1, NaN, 0] }), "INVALID_ARGUMENT", "background"), "invalid JPEG background");
+      assert(await rejectsWith(doc.exportImage({ type: "image/webp", background: [1, 1, 1] }), "INVALID_ARGUMENT", "background"), "background on WebP");
+      assert(await rejectsWith(doc.exportImage({ compression: "deflate" }), "INVALID_ARGUMENT", "compression"), "compression on PNG");
+      assert(await rejectsWith(doc.exportImage({ type: "image/tiff", compression: "lzw" }), "INVALID_ARGUMENT", "compression"), "invalid TIFF compression");
+    });
+    await test("TIFF export holds the display pixels in uncompressed and Deflate strips", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 32, height: 270 });
+      const canvas = new OffscreenCanvas(32, 270);
+      const source = canvas.getContext("2d");
+      source.fillStyle = "rgba(137,23,221,0.45)";
+      source.fillRect(0, 0, 30, 256);
+      source.fillStyle = "rgba(3,199,81,0.7)";
+      source.fillRect(0, 256, 20, 13);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      await doc.transact("image.import", (tx) => tx.addRasterFromAsset(asset));
+      for (const [options, compression, expectedStrips] of [
+        [{}, undefined, 2],
+        [{}, "deflate", 2],
+        [{ scale: 0.75, region: { x0: 2, y0: 1, x1: 30, y1: 269 } }, "deflate", 1],
+      ]) {
+        const { pixels, width, height } = await decodePng(await doc.exportImage(options));
+        const tiff = await doc.exportImage({ ...options, type: "image/tiff", compression });
+        const raw = await tiff.arrayBuffer();
+        const view = new DataView(raw);
+        assert(tiff.type === "image/tiff" && view.getUint16(0, true) === 0x4949 && view.getUint16(2, true) === 42, "TIFF signature");
+        const ifd = view.getUint32(4, true);
+        const tags = new Map();
+        for (let n = 0; n < view.getUint16(ifd, true); n++) {
+          const at = ifd + 2 + n * 12;
+          const tag = view.getUint16(at, true), kind = view.getUint16(at + 2, true);
+          const count = view.getUint32(at + 4, true), size = kind === 3 ? 2 : 4;
+          const start = count * size <= 4 ? at + 8 : view.getUint32(at + 8, true);
+          tags.set(tag, Array.from({ length: count }, (_, i) => kind === 3 ? view.getUint16(start + i * size, true) : view.getUint32(start + i * size, true)));
+        }
+        assert(tags.get(256)[0] === width && tags.get(257)[0] === height, "TIFF dimensions");
+        assert(tags.get(338)[0] === 2 && tags.get(278)[0] === 256, "TIFF alpha or rows per strip");
+        assert(tags.get(339)?.length === 4 && tags.get(339).every((v) => v === 1), "TIFF sample format");
+        assert(tags.get(259)[0] === (compression === "deflate" ? 8 : 1), "TIFF compression tag");
+        const offsets = tags.get(273), counts = tags.get(279);
+        assert(offsets.length === expectedStrips && counts.length === expectedStrips, "TIFF strip count");
+        let cursor = 0;
+        for (const [i, offset] of offsets.entries()) {
+          const bytes = raw.slice(offset, offset + counts[i]);
+          const decoded = compression === "deflate" ? await new Response(
+            new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")),
+          ).arrayBuffer() : bytes;
+          const tolerance = options.scale === undefined ? 0 : 1;
+          assert(new Uint8Array(decoded).every((v, j) => near(v, pixels[cursor + j], tolerance)), `TIFF ${compression} strip ${i} differs from PNG`);
+          cursor += decoded.byteLength;
+        }
+        assert(cursor === pixels.length, "TIFF payload size differs from PNG");
+      }
+    });
     await test("exportImage writes the displayed pixels, scaled and cropped", async () => {
       const engine = await engineIn(container(400, 300));
       const doc = await engine.createDocument({ width: 512, height: 256 });

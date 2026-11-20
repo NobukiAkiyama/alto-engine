@@ -12,6 +12,8 @@ import init, { Runtime } from "./pkg/alto_wasm.js";
 import { NO_STREAK, PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
 import { encodePng } from "./png.js";
+import { compositeOverBackground, lossyQuality } from "./jpeg.js";
+import { tiffBlob, tiffStrips, tiffStripsJson, type TiffCompression } from "./tiff.js";
 /**
  * Waits for the frame in flight on the GPU, when a frame was held back for it. The
  * timer bounds the wait: a lost device may never settle its queue, and the next
@@ -668,26 +670,51 @@ async function recoverLostGpu() {
     postMessage({ t: "error", value: structured(error) });
   }
 }
+/** Straight-alpha RGBA pixels to TIFF: strips stay in JS, Rust builds the header. */
+async function encodeTiff(
+  pixels: Uint8Array<ArrayBuffer> | Uint8ClampedArray<ArrayBuffer>,
+  width: number,
+  height: number,
+  compression: TiffCompression,
+): Promise<Blob> {
+  const strips = await tiffStrips(pixels, width, height, compression);
+  const header = runtime.tiffHeader(width, height, compression, tiffStripsJson(strips));
+  return tiffBlob(header, strips);
+}
+
+/**
+ * `convertToBlob` quietly falls back to a type it can encode (usually PNG) when the
+ * requested one is unavailable. An export must not hand back another format, so
+ * every canvas encoding goes through here and a fallback becomes UNSUPPORTED.
+ */
+async function canvasBlob(canvas: OffscreenCanvas, type: string, quality?: number): Promise<Blob> {
+  const blob = await canvas.convertToBlob({ type, quality });
+  if (blob.type !== type) throw Error(`UNSUPPORTED: the browser cannot encode ${type}`);
+  return blob;
+}
+
 /** Display tiles read back per GPU round trip. */
 // Export requests follow the Rust pool capacity; Rust also validates every batch.
 /**
  * The document as an image file, from the same display tiles the canvas shows. A
  * reduced export reads the pyramid level at or above its scale: each level halves the
  * tiles to read. Tiles are premultiplied; image files hold straight alpha.
- * A PNG that needs no resampling holds exactly the unpremultiplied tile bytes, so it
- * is encoded here rather than through a canvas, which would premultiply them again.
+ * A PNG or TIFF that needs no resampling holds exactly the unpremultiplied tile bytes,
+ * so it is encoded here rather than through a canvas, which would premultiply them
+ * again. JPEG is opaque: alpha is composited over `background` before any scaling.
  */
-async function exportImage({ region, scale, type }: Args<"exportImage">) {
+async function exportImage({ region, scale, type, quality, background, compression }: Args<"exportImage">) {
   const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
   const f = 2 ** level;
   const x0 = Math.floor(region.x0 / f), y0 = Math.floor(region.y0 / f);
   const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
   const w = x1 - x0, h = y1 - y0;
   if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
-  // Includes the source/output arrays and bounded readback copies; external encoder
-  // allocations are not physical RAM telemetry.
+  const jpeg = type === "image/jpeg";
+  // Includes the source/output arrays, bounded readback copies, and JPEG's opaque
+  // composite; external encoder allocations are not physical RAM telemetry.
   const outputPixels = Math.max(1, Math.round((region.x1 - region.x0) * scale)) * Math.max(1, Math.round((region.y1 - region.y0) * scale));
-  const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3;
+  const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3 + (jpeg ? w * h * 4 : 0);
   if (requestBytes > 512 * 1048576) throw Error("INVALID_ARGUMENT: export CPU operation exceeds 512 MiB");
   const pixels = new Uint8ClampedArray(w * h * 4);
   const tiles: [number, number][] = [];
@@ -716,15 +743,29 @@ async function exportImage({ region, scale, type }: Args<"exportImage">) {
   const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
   const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
   const exact = sx === 0 && sy === 0 && ow === w && oh === h;
+  if (jpeg) compositeOverBackground(pixels, background ?? [1, 1, 1]);
+  const lossy = lossyQuality(type, quality);
   if (exact && type === "image/png") return encodePng(pixels, w, h);
+  if (exact && type === "image/tiff") return encodeTiff(pixels, w, h, compression ?? "none");
   const full = new OffscreenCanvas(w, h);
   full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
-  if (exact) return full.convertToBlob({ type });
+  if (exact) return canvasBlob(full, type, lossy);
   const out = new OffscreenCanvas(ow, oh);
   const ctx = out.getContext("2d")!;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(full, sx, sy, sw, sh, 0, 0, ow, oh);
-  return out.convertToBlob({ type });
+  // The destination canvas has its own pixels now. Drop the level-sized surface
+  // before the encoder allocates its output.
+  full.width = 0;
+  full.height = 0;
+  if (type === "image/tiff") {
+    const data = ctx.getImageData(0, 0, ow, oh).data;
+    // `getImageData` copied the pixels; release the backing store before Deflate.
+    out.width = 0;
+    out.height = 0;
+    return encodeTiff(data, ow, oh, compression ?? "none");
+  }
+  return canvasBlob(out, type, lossy);
 }
 let savedToken = 0;
 // The state each save wrote, until the page confirms or releases it.
