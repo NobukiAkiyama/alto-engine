@@ -23,7 +23,7 @@ pub(super) fn pyramid_children(scene: &RenderScene, key: CacheKey) -> Vec<CacheK
 
 impl Renderer {
     pub(super) fn downsample_cached(
-        &self,
+        &mut self,
         scene: &RenderScene,
         key: CacheKey,
         slot: u32,
@@ -46,21 +46,26 @@ impl Renderer {
                 children.push((x, y, c.slot));
             }
         }
-        self.downsample_slots(&children, slot)?;
+        self.downsample_slots(key, &children, slot)?;
         Ok(true)
     }
     /// A [`uniform`] subtree: the downsample of four copies of the top-left child.
-    pub(super) fn downsample_uniform(&self, key: CacheKey, slot: u32) -> Result<bool> {
+    pub(super) fn downsample_uniform(&mut self, key: CacheKey, slot: u32) -> Result<bool> {
         let Some(c) = self.cache_map.get(&(key.0 - 1, key.1 * 2, key.2 * 2)) else {
             return Ok(false);
         };
         let children: Vec<_> = (0..4).map(|i| (i % 2, i / 2, c.slot)).collect();
-        self.downsample_slots(&children, slot)?;
+        self.downsample_slots(key, &children, slot)?;
         Ok(true)
     }
     /// Downsample the 2x2 children at `(x, y, slot)` into `slot`; absent ones
-    /// are transparent.
-    pub(super) fn downsample_slots(&self, children: &[(i32, i32, u32)], slot: u32) -> Result<()> {
+    /// are transparent. `key` names the parent tile in diagnostics.
+    pub(super) fn downsample_slots(
+        &mut self,
+        key: CacheKey,
+        children: &[(i32, i32, u32)],
+        slot: u32,
+    ) -> Result<()> {
         let mut e = self.device.create_command_encoder(&Default::default());
         // WebGPU has no command-encoder clear. An empty pass clears reused texels so a
         // missing edge child stays transparent. clear_texture aborts on this backend.
@@ -147,13 +152,26 @@ impl Renderer {
                 },
             ],
         });
+        let timestamp = self
+            .gpu_timestamps
+            .as_mut()
+            .and_then(|timestamps| timestamps.begin(key).map(|token| (&*timestamps, token)));
         {
-            let mut p = e.begin_compute_pass(&Default::default());
+            let mut p = e.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("display pyramid"),
+                timestamp_writes: timestamp.map(|(timestamps, token)| timestamps.writes(token)),
+            });
             p.set_pipeline(pipeline);
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups(16, 16, 1);
         }
+        if let Some((timestamps, token)) = timestamp {
+            timestamps.resolve(&mut e, token);
+        }
         self.queue.submit(Some(e.finish()));
+        if let Some((timestamps, token)) = timestamp {
+            timestamps.submitted(token);
+        }
         // This takes &self; the uniform is its own and the submit above was its use.
         memory::destroy_buffer(&self.governor, &ub, false);
         self.governor.submitted(&self.queue);

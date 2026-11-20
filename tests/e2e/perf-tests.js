@@ -427,30 +427,44 @@ async function measure(engine, name, fixture, log, reps, publish) {
   // Recovery: a Worker restart replays the OPFS journal, then draws. Each round
   // adds a few journal records after the checkpoint the open wrote.
   {
-    const readStages = unstable(engine).recoveryStages;
+    const diag = unstable(engine);
+    const readStages = diag.recoveryStages;
+    const gpuTimestamps = new URLSearchParams(location.search).has("gpuTimestamps");
     const samples = [],
       records = [],
-      stages = [];
-    for (let i = 0; i < reps.recover; i++) {
-      for (let k = 0; k < 3; k++) await doc.transact("rename", (tx) => tx.setProps(target, { name: `r${i}.${k}` }));
-      await doc.durable();
-      const expected = await doc.snapshotHash();
-      records.push((await testing(engine).recoveryStore()).records ?? null);
-      const t = performance.now();
-      await testing(engine).crash();
-      await settle();
-      samples.push(performance.now() - t);
-      if (readStages) {
-        const timing = await readStages();
-        assert(timing?.firstFrame != null, "missing recovery timing after the first display");
-        stages.push(timing);
+      stages = [],
+      gpuTileSamples = [];
+    if (gpuTimestamps) await diag.setGpuTimestampProfiling(true);
+    try {
+      for (let i = 0; i < reps.recover; i++) {
+        for (let k = 0; k < 3; k++) await doc.transact("rename", (tx) => tx.setProps(target, { name: `r${i}.${k}` }));
+        await doc.durable();
+        const expected = await doc.snapshotHash();
+        records.push((await testing(engine).recoveryStore()).records ?? null);
+        const t = performance.now();
+        await testing(engine).crash();
+        await settle();
+        samples.push(performance.now() - t);
+        if (readStages) {
+          const timing = await readStages();
+          assert(timing?.firstFrame != null, "missing recovery timing after the first display");
+          stages.push(timing);
+        }
+        if (gpuTimestamps) {
+          // Give asynchronous GPU query mappings a turn after the wall-clock measurement.
+          await raf();
+          gpuTileSamples.push(await diag.gpuTileTimestamps());
+        }
+        doc = engine.document;
+        assert((await doc.snapshotHash()) === expected, "recovery lost durable edits");
       }
-      doc = engine.document;
-      assert((await doc.snapshotHash()) === expected, "recovery lost durable edits");
+    } finally {
+      if (gpuTimestamps && engine.status.state === "ready") await diag.setGpuTimestampProfiling(false);
     }
     row("recover (Worker restart + journal replay + first display)", samples, {
       journalRecords: records,
       ...(readStages ? { stages } : {}),
+      ...(gpuTileSamples.some((samples) => samples !== null) ? { gpuTileSamples } : {}),
     });
   }
   out.memory.final = await memory(engine, await settle());

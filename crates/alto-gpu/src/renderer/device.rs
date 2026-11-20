@@ -50,13 +50,19 @@ impl Renderer {
             max_texture_array_layers: slots.max(display_layers),
             ..Default::default()
         };
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features,
                 required_limits: limits,
                 ..Default::default()
             })
             .await
             .map_err(|e| RenderError::Internal(e.to_string()))?;
+        let gpu_timestamp_period = required_features
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| queue.get_timestamp_period())
+            .filter(|period| period.is_finite() && *period > 0.0);
         let governor = Governor::new(
             budget_mb as u64 * 1048576,
             readback::capacity(budget_mb as u64 * 1048576),
@@ -283,6 +289,8 @@ impl Renderer {
             presentation: Default::default(),
             clock: || 0.0,
             profile: RenderProfile::default(),
+            gpu_timestamp_period,
+            gpu_timestamps: None,
             uniform_pyramid: true,
             uniform: None,
         })

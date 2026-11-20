@@ -561,7 +561,7 @@
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`recoveryStages`（新規）の要求を追加し、15 から 16 に更新する。
+- `PROTOCOL`：`recoveryStages` の追加で 15 から 16、GPU 計時の要求と Worker 起動オプションの追加で 17 に更新。
 - 公開 API：`@alto/engine/unstable` に1関数。互換の約束の外（`doc/embedding.md` 第1章）。
 
 ### 作業手順
@@ -571,7 +571,7 @@
 - [x] `4k-20` と `fx` の `recover` 行を3回ずつ測り、変更前後を[検証記録](../../verification/RECOVERY-STAGES.md)に記載。
 - [x] ブラウザ試験 `recovery reports its stages in order`（順序、非負値、復旧全体に対する合計）。Rust の試験 `recovery_stages_are_zero_without_a_clock`（時計が省略された場合の全0）。
 - [x] `browser-diagnostics.json` に段階が残り、計測を足す前後で B7 の測定範囲が重なる。
-- [ ] timestamp-query は別の PR（アダプターが持たない環境でも既存の機能試験が通ること）。
+- [x] [親タイルの GPU timestamp query](../../verification/RECOVERY-STAGES.md#親タイルの-gpu-計時)。対応アダプターで診断を有効にすると非同期でサンプルを取得する。
 
 ### 依存
 

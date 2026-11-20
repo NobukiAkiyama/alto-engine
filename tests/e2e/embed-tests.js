@@ -737,6 +737,58 @@ export async function runEmbedTests(_playground, log) {
       assert(next.getSnapshot().history.undo === 0 && next.getSnapshot().nodes.size === 1,
         "the old stroke changed the replacement document");
     });
+    await test("GPU tile timestamps are optional and preserve recovered pixels", async () => {
+      const engine = await engineIn(container(256, 256), { storage: { namespace: name("gpu-timestamps") } });
+      const diag = unstable(engine);
+      const doc = await engine.createDocument({ width: 512, height: 512 });
+      let layer;
+      await doc.transact("paint", (tx) => { layer = tx.addRaster(); });
+      await doc.image.fill(layer, [0, 0], [1, 0, 0, 1]);
+      engine.viewport.set({ center: [256, 256], zoom: 0.5 / diag.pixelRatio(), rotation: 0 });
+      await diag.settle();
+      const before = await diag.readTile(0, 0);
+      const capability = await diag.gpuTileTimestamps();
+      assert(capability === null || capability.length === 0, "timestamps collected by default");
+
+      const checkSamples = async () => {
+        const deadline = performance.now() + 5000;
+        let samples = await diag.gpuTileTimestamps();
+        while (samples?.length === 0 && performance.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 16));
+          samples = await diag.gpuTileTimestamps();
+        }
+        if (capability === null) {
+          assert(samples === null, "unsupported adapter reported timestamps");
+        } else {
+          assert(samples?.length > 0, "completed composition produced no timestamps");
+          assert(samples.every(({ x, y, level, ns }) =>
+            [x, y, level].every(Number.isInteger) && level > 0 && Number.isFinite(ns) && ns >= 0
+          ), "invalid GPU tile timestamps: " + JSON.stringify(samples));
+        }
+      };
+      await diag.setGpuTimestampProfiling(true);
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      await checkSamples();
+      await doc.durable();
+      await testing(engine).crash();
+      await diag.settle();
+      await checkSamples();
+      const after = await diag.readTile(0, 0);
+      assert(after.length === before.length && after.every((byte, i) => byte === before[i]), "timestamp profiling changed pixels");
+      await engine.document.transact("levels", (tx) => {
+        tx.addAdjustment({ type: "levels", in_black: 0.05, in_white: 0.95, gamma: 1.1 });
+      });
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      await checkSamples();
+      await diag.setGpuTimestampProfiling(false);
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      const disabled = await diag.gpuTileTimestamps();
+      assert(disabled === null || disabled.length === 0, "disabled profiling returned tile timestamps");
+      log("GPU-TIMESTAMP " + (capability === null ? "unsupported" : "supported"));
+    });
     await test("recovery reports its stages in order", async () => {
       const engine = await engineIn(container(), { storage: { namespace: name("recovery-stages") } });
       const diag = unstable(engine);

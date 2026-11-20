@@ -8,7 +8,7 @@ import type { PathData } from "./types.js";
 
 /** Numbers the Worker reports after each frame (names vary by build). */
 export type FrameStats = Record<string, unknown>;
-export type { RecoveryStages } from "./protocol.js";
+export type { GpuTileTimestamp, RecoveryStages } from "./protocol.js";
 
 export function unstable(engine: Engine) {
   const core = coreOf(engine);
@@ -28,6 +28,10 @@ export function unstable(engine: Engine) {
     /** Empties the display caches (and the CPU tile cache with `cpu`); pauses prefetching. */
     resetRenderCache: (cpu: boolean) => core.request("resetRenderCache", { cpu }),
     setProfiling: (enabled: boolean) => core.request("setProfiling", { enabled }),
+    /** Enables optional GPU timestamp queries for display tile composition. */
+    setGpuTimestampProfiling: (enabled: boolean) => core.setGpuTimestampProfiling(enabled),
+    /** Drains completed samples. Null means the GPU does not expose timestamp queries. */
+    gpuTileTimestamps: () => core.request("gpuTileTimestamps"),
     /** Resolves to whether decode Workers are running afterwards. */
     setDecodeWorkers: (enabled: boolean) => core.request("setDecodeWorkers", { enabled }),
     /** The device pixel ratio the canvas renders at. */

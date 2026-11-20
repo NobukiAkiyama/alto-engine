@@ -203,7 +203,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        16
+        17
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -672,6 +672,19 @@ impl Runtime {
     #[wasm_bindgen(js_name=setProfiling)]
     pub fn set_profiling(&mut self, enabled: bool) {
         self.renderer.set_profiling(enabled);
+    }
+    #[wasm_bindgen(js_name=setGpuTimestamps)]
+    pub fn set_gpu_timestamps(&mut self, enabled: bool) {
+        self.renderer.set_gpu_timestamps(enabled);
+    }
+    #[wasm_bindgen(js_name=takeGpuTimestamps)]
+    pub fn take_gpu_timestamps(&mut self) -> Result<String, JsValue> {
+        let samples = self.renderer.take_gpu_timestamps().map(|samples| {
+            samples.into_iter().map(|sample| {
+                json!({"x": sample.x, "y": sample.y, "level": sample.level, "ns": sample.ns})
+            }).collect::<Vec<_>>()
+        });
+        serde_json::to_string(&samples).map_err(error)
     }
     #[wasm_bindgen(js_name=beginBrush)]
     #[allow(clippy::too_many_arguments)]

@@ -123,7 +123,7 @@ const readableAfterFailure = new Set<string>([
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
-  "historyStoreAttached", "recoveryStages",
+  "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -132,6 +132,7 @@ let journaling = true;
 let documentEpoch = 0;
 let recoveryPending = false;
 let recoveryStages: RecoveryStages | null = null;
+let gpuTimestamps = false;
 type RecoveryFrame = { start: number | null; waiting: boolean };
 let recoveryFrame: RecoveryFrame | null = null;
 let undoSteps: Args<"init">["undoSteps"];
@@ -673,6 +674,7 @@ async function recoverLostGpu() {
   postMessage({ t: "gpuLost" });
   try {
     await runtime.recoverGpu();
+    runtime.setGpuTimestamps(gpuTimestamps);
     runtime.setViewVersion(viewVersion);
     adapterName = runtime.adapterName();
     postMessage({ t: "gpuRestored" });
@@ -830,6 +832,8 @@ async function execute(m: Queued): Promise<unknown> {
       runtime = await Runtime.create(canvas, budget);
       if (runtime.protocolVersion?.() !== PROTOCOL)
         throw Error("CONFLICT: SDK/WASM version mismatch");
+      gpuTimestamps = m.gpuTimestamps;
+      runtime.setGpuTimestamps(gpuTimestamps);
       undoSteps = m.undoSteps;
       runtime.setMaxUndo(undoSteps);
       postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
@@ -1354,6 +1358,12 @@ async function execute(m: Queued): Promise<unknown> {
       profilingEnabled = !!m.enabled;
       if (!profilingEnabled) diagnosticTickMs = null;
       return true;
+    case "setGpuTimestampProfiling":
+      gpuTimestamps = m.enabled;
+      runtime.setGpuTimestamps(gpuTimestamps);
+      return true;
+    case "gpuTileTimestamps":
+      return JSON.parse(runtime.takeGpuTimestamps());
     case "waitFrame": {
       let frame;
       // Ticks this request took; each one returns control to the Worker loop.

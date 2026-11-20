@@ -4,7 +4,7 @@ Apple M5、Chrome 157.0.8103.79、WebGPU Metal で確認した。GPU の watchdo
 
 `unstable(engine).recoveryStages()` は、現在の Worker で最後に成功したジャーナル復旧を返す。初回描画が GPU で完了すると `firstFrame` に時間が入る。描画を明示的に待つ場合は、`await unstable(engine).settle()` の後に読む。
 
-`load` は採用した候補をストレージから読み込む時間で、Storage Worker のチェックポイント検証を含む。`verify` は Rust でパッケージを検査する時間。復旧全体には、Worker の起動や候補の再試行など、8段階の表に含まれない時間もある。GPU timestamp query は別の作業項目。
+`load` は採用した候補をストレージから読み込む時間で、Storage Worker のチェックポイント検証を含む。`verify` は Rust でパッケージを検査する時間。復旧全体には、Worker の起動や候補の再試行など、8段階の表に含まれない時間もある。
 
 ## Fixture 別の復旧
 
@@ -46,3 +46,20 @@ ALTO_BROWSER_REPORT_DIR=/tmp/alto-recovery-b7 \
 ```
 
 計測版では `perf.json` の `recover` 行と `browser-diagnostics.json` の `recovery` に、各試行の段階別時間を保存する。
+
+## 親タイルの GPU 計時
+
+`await unstable(engine).setGpuTimestampProfiling(true)` で計時を有効にする。復旧時に Worker を再起動しても設定は継続する。`gpuTileTimestamps()` は読み戻し済みのサンプルを取り出し、未対応のアダプターでは `null` を返す。計測を無効にすると、処理中のサンプルは破棄される。
+
+各サンプルの `x`、`y`、`level` は親タイルの座標とレベル。`ns` はダウンサンプリングの compute pass の経過時間で、復旧全体や CPU 側の経過時間とは別の測定値。読み戻し枠は8件で、枠が埋まっている間は計時を省く。実測値はブラウザ側の丸めを受ける場合がある。[Chrome の GPU 計時に関する資料](https://developer.chrome.com/docs/web-platform/webgpu/developer-features?hl=en#disable_timestamp_queries_quantization)
+
+`ALTO_BROWSER_GPU_TIMESTAMPS=1` を付けて perf を実行すると、対応環境の `recover` 行と `browser-diagnostics.json` に `gpuTileSamples` が出る。
+
+Chrome 157.0.8103.79 の Metal で、`4k-20` と `fx` の復旧を各1回計測した。どちらもレベル1と2の親タイルが記録された。
+
+| Fixture | 取得したサンプル数 | 最小–最大（ns） |
+|---|---:|---:|
+| `4k-20` | 8 | 10459–123331 |
+| `fx` | 8 | 10166–18790 |
+
+Metal と SwiftShader の組み込み試験で、計時を有効にした状態から Worker を再起動し、サンプル取得と復旧前後の画素一致を確認した。Chrome の `WebGPUService` で `timestamp-query` を非公開にした条件では、API が `null` を返し、機能試験57件が通過した。
