@@ -1,7 +1,7 @@
 // Embedding: engines a host creates in its own containers, with their own storage
 // namespaces, through the public API. Each test starts and disposes its own engines.
-import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
-import { blobTarget } from "../../packages/alto-sdk/dist/browser.js";
+import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, FileSystemDirectoryProvider, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
+import { blobTarget, fileHandleTarget, forgetFile, openRecent, recentFiles, rememberFile } from "../../packages/alto-sdk/dist/browser.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
@@ -24,6 +24,44 @@ async function event(engine, name, action, match, timeoutMs = 15000) {
 const run = Date.now().toString(36);
 let serial = 0;
 const name = (label) => `test-embed/${run}/${label}-${serial++}`;
+
+/** Keep browser tests separate from the host's real recent list. */
+async function withRecentFiles(runTest) {
+  const opfs = await navigator.storage.getDirectory();
+  const fixture = `alto-recent-tests-${crypto.randomUUID()}`;
+  const folder = await opfs.getDirectoryHandle(fixture, { create: true });
+  const originalOpen = indexedDB.open;
+  indexedDB.open = function (database, version) {
+    return originalOpen.call(this, database === "alto-engine-recent" ? fixture : database, version);
+  };
+  try {
+    await runTest(folder);
+  } finally {
+    delete indexedDB.open;
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(fixture);
+      request.onsuccess = resolve;
+      request.onerror = () => reject(request.error);
+    });
+    await opfs.removeEntry(fixture, { recursive: true });
+  }
+}
+
+async function withFilePermissions(queryPermission, requestPermission, test) {
+  const proto = FileSystemHandle.prototype;
+  const query = Object.getOwnPropertyDescriptor(proto, "queryPermission");
+  const request = Object.getOwnPropertyDescriptor(proto, "requestPermission");
+  try {
+    Object.defineProperty(proto, "queryPermission", { configurable: true, value: queryPermission });
+    Object.defineProperty(proto, "requestPermission", { configurable: true, value: requestPermission });
+    return await test();
+  } finally {
+    if (query) Object.defineProperty(proto, "queryPermission", query);
+    else delete proto.queryPermission;
+    if (request) Object.defineProperty(proto, "requestPermission", request);
+    else delete proto.requestPermission;
+  }
+}
 
 function container(width = 320, height = 240) {
   const el = document.createElement("div");
@@ -172,6 +210,99 @@ export async function runEmbedTests(_playground, log) {
     log("PASS " + label);
   };
   try {
+    await test("recent files keep the newest 32", () => withRecentFiles(async (folder) => {
+      for (let i = 0; i < 34; i++)
+        await rememberFile(await folder.getFileHandle(`${i}.alto`, { create: true }));
+      const entries = await recentFiles();
+      assert(entries.length === 32, "recent file limit");
+      assert(entries.every((entry, i) => entry.name === `${33 - i}.alto`), "newest files in order");
+      await forgetFile(entries[0].id);
+      assert((await recentFiles()).length === 31, "forgotten entry disappeared");
+      assert(await rejectsWith(openRecent(entries[0].id), "NOT_FOUND"), "forgotten entry cannot be reopened");
+      assert((await folder.getFileHandle(entries[0].name)).kind === "file", "forget did not remove the actual file");
+    }));
+    await test("recent files remember the same file once", () => withRecentFiles(async (folder) => {
+      const handle = await folder.getFileHandle("document.alto", { create: true });
+      const anotherFolder = await folder.getDirectoryHandle("other", { create: true });
+      const [a, b] = await Promise.all([rememberFile(handle), rememberFile(await folder.getFileHandle(handle.name))]);
+      assert(a.id === b.id, "simultaneous remembers reused the same ID");
+      const distinct = await rememberFile(await anotherFolder.getFileHandle(handle.name, { create: true }));
+      assert(distinct.id !== a.id, "files with the same name can be distinct");
+      const updated = await rememberFile(handle);
+      const entries = await recentFiles();
+      assert(entries.length === 2 && entries[0].id === a.id && updated.opened > distinct.opened, "remember refreshes recency");
+    }));
+    await test("recent files report revoked permission without removing the entry", () => withRecentFiles(async (folder) => {
+      const { id } = await rememberFile(await folder.getFileHandle("revoked.alto", { create: true }));
+      const checked = [];
+      await withFilePermissions(async ({ mode }) => {
+        checked.push(["query", mode]);
+        return "prompt";
+      }, async ({ mode }) => {
+        checked.push(["request", mode]);
+        return "denied";
+      }, async () => {
+        assert((await recentFiles())[0].id === id && checked.length === 0, "listing does not check access");
+        assert(await rejectsWith(openRecent(id), "STORAGE"), "permission refusal");
+        assert(JSON.stringify(checked) === '[["query","readwrite"],["request","readwrite"]]', "re-requested readwrite permission");
+        assert((await recentFiles())[0].id === id, "denied entry was kept");
+      });
+    }));
+    await test("recent files reopen a thin .alto with its history folder", () => withRecentFiles(async (folder) => {
+      const file = await folder.getFileHandle("thin.alto", { create: true });
+      const history = await folder.getDirectoryHandle("history", { create: true });
+      const engine = await engineIn(container(64, 64));
+      const doc = await engine.createDocument({ width: 32, height: 32 });
+      let layer;
+      await doc.transact("layer", (tx) => { layer = tx.addRaster(); });
+      await doc.image.fill(layer, [0, 0], [1, 0, 0, 1]);
+      const first = await doc.versions.commit("red");
+      await doc.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 });
+      await doc.versions.commit("green");
+      const snapshot = await doc.snapshotHash();
+      await doc.save(fileHandleTarget(file), { history: { folder: new FileSystemDirectoryProvider(history) } });
+      const entry = await rememberFile(file, { history });
+      const stored = await rememberFile(file);
+      assert(await stored.history?.isSameEntry(history), "refresh preserves the history folder");
+      const requested = [];
+      const item = await withFilePermissions(async () => "prompt", async function () {
+        requested.push(this.kind);
+        if (this.kind === "file") {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (!requested.includes("directory")) return "denied";
+        }
+        return "granted";
+      }, () => openRecent(entry.id));
+      assert(item.kind === "file" && item.history, "reopened both handles during one gesture");
+      const reopened = await engine.open(item.source, { history: item.history });
+      assert(await reopened.snapshotHash() === snapshot && reopened.folder, "reopened with its history");
+      await reopened.versions.restore(first.hash);
+      assert((await reopened.image.pickColor(layer, [0, 0])).bytes[0] === 255, "older pixels read from history");
+
+      const project = await openRecent((await rememberFile(history)).id);
+      assert(project.kind === "folder", "folder sources have their own kind");
+      await engine.createDocument({ width: 1, height: 1 });
+      assert(await (await engine.openFolder(project.source)).snapshotHash() === snapshot, "recent project folder opens");
+
+      const unlinked = await rememberFile(file, { history: null });
+      assert(unlinked.id === entry.id && !unlinked.history, "history can be unlinked without changing the ID");
+      const fileOnly = await withFilePermissions(async function () {
+        return this.kind === "file" ? "granted" : "denied";
+      }, async () => "denied", () => openRecent(entry.id));
+      assert(fileOnly.kind === "file" && !fileOnly.history, "unlinked item does not require history permission");
+    }));
+    await test("recent files fall back when IndexedDB is unavailable", async () => {
+      const root = await navigator.storage.getDirectory();
+      const original = Object.getOwnPropertyDescriptor(indexedDB, "open");
+      try {
+        indexedDB.open = () => { throw new DOMException("disabled", "SecurityError"); };
+        assert((await recentFiles()).length === 0, "no recent list without IndexedDB");
+        assert(await rejectsWith(rememberFile(root), "UNSUPPORTED"), "remember needs IndexedDB");
+      } finally {
+        if (original) Object.defineProperty(indexedDB, "open", original);
+        else delete indexedDB.open;
+      }
+    });
     await test("64/128/256 MiB budgets reserve at most half and preserve brush pixels", async () => {
       for (const [budget, fixed] of [[64,32],[128,64],[256,128]]) {
         const engine=await engineIn(container(128,128),{gpu:{memoryBudgetMB:budget}});

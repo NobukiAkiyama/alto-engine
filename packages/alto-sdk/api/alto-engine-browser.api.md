@@ -31,6 +31,9 @@ export function fileHandleTarget(handle: FileSystemFileHandle): ArchiveTarget;
 export function fileSource(file: Blob | FileSystemFileHandle): ArchiveSource;
 
 // @public
+export function forgetFile(id: string): Promise<void>;
+
+// @public
 export function isSupported(): Promise<{
     ok: boolean;
     reason?: "webgpu" | "offscreen-canvas" | "web-locks" | "opfs";
@@ -69,6 +72,16 @@ export interface ObjectStorageProvider {
 }
 
 // @public
+export function openRecent(id: string): Promise<{
+    kind: "file";
+    source: ArchiveSource;
+    history?: ObjectStorageProvider;
+} | {
+    kind: "folder";
+    source: ObjectStorageProvider;
+}>;
+
+// @public
 export function opfsFolder(name: string): Promise<ObjectStorageProvider>;
 
 // @public
@@ -78,6 +91,24 @@ export function pickFolder(): Promise<ObjectStorageProvider>;
 export function pickSaveTarget(options: {
     suggestedName: string;
 }): Promise<ArchiveTarget>;
+
+// @public
+export interface RecentFile {
+    handle: FileSystemFileHandle | FileSystemDirectoryHandle;
+    history?: FileSystemDirectoryHandle;
+    id: string;
+    kind: "file" | "folder";
+    name: string;
+    opened: number;
+}
+
+// @public
+export function recentFiles(): Promise<RecentFile[]>;
+
+// @public
+export function rememberFile(handle: FileSystemFileHandle | FileSystemDirectoryHandle, options?: {
+    history?: FileSystemDirectoryHandle | null;
+}): Promise<RecentFile>;
 
 // (No @packageDocumentation comment for this package)
 
