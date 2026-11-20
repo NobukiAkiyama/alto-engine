@@ -117,11 +117,17 @@ export type SelectionSpec =
     };
 
 export interface ExportImageOptions {
-  type?: "image/png" | "image/webp";
+  type?: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
   /** Greater than 0 and at most 1 (default 1). */
   scale?: number;
   /** Document pixels; defaults to the whole document. */
   region?: Rect;
+  /** JPEG and WebP quality from 0 to 1 (default 0.92). */
+  quality?: number;
+  /** JPEG background in straight sRGB, each channel from 0 to 1 (default white). */
+  background?: [number, number, number];
+  /** TIFF strip compression (default none). */
+  compression?: "none" | "deflate";
 }
 
 /**
@@ -570,15 +576,27 @@ export class DocumentHandle {
   };
 
   /**
-   * The document, or a region of it, as a PNG or WebP image: the pixels the canvas
+   * The document, or a region of it, as a PNG, WebP, JPEG or TIFF image: the pixels the canvas
    * shows, at `scale` (greater than 0, at most 1). Allowed while storage has failed.
    * The region is clamped to the document; infinite bounds reach its edge.
-   * A PNG at scale 1, or at 1/2, 1/4, … when the output size equals the pixels read
+   * PNG and TIFF at scale 1, or at 1/2, 1/4, … when the output size equals the pixels read
    * from that pyramid level, holds the displayed pixels exactly as straight alpha;
-   * transparent pixels are (0, 0, 0, 0). Other scales and WebP are resampled or
-   * encoded by the browser.
+   * transparent pixels are (0, 0, 0, 0). Other scales are resampled by the browser.
+   * JPEG composites transparency over the background before resampling.
    */
   async exportImage(options: ExportImageOptions = {}): Promise<Blob> {
+    const type = options.type ?? "image/png";
+    if (type !== "image/png" && type !== "image/webp" && type !== "image/jpeg" && type !== "image/tiff")
+      throw new AltoError("UNSUPPORTED", "image export format");
+    const { quality, background, compression } = options;
+    if (quality !== undefined && ((type !== "image/jpeg" && type !== "image/webp") ||
+        !Number.isFinite(quality) || quality < 0 || quality > 1))
+      throw new AltoError("INVALID_ARGUMENT", "quality applies to JPEG and WebP and must be between 0 and 1", { reason: "quality" });
+    if (background !== undefined && (type !== "image/jpeg" || !Array.isArray(background) ||
+        background.length !== 3 || ![...background].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)))
+      throw new AltoError("INVALID_ARGUMENT", "JPEG background must contain three channels between 0 and 1", { reason: "background" });
+    if (compression !== undefined && (type !== "image/tiff" || (compression !== "none" && compression !== "deflate")))
+      throw new AltoError("INVALID_ARGUMENT", "compression must be none or deflate for TIFF", { reason: "compression" });
     const scale = options.scale ?? 1;
     if (!(scale > 0 && scale <= 1))
       throw new AltoError("INVALID_ARGUMENT", "scale must be greater than 0 and at most 1", { reason: "scale" });
@@ -594,8 +612,10 @@ export class DocumentHandle {
     };
     if (region.x1 <= region.x0 || region.y1 <= region.y0)
       throw new AltoError("INVALID_ARGUMENT", "region is empty or outside the document");
+    const request: Args<"exportImage"> = { region, scale, type, quality, compression };
+    if (background !== undefined) request.background = [...background];
     await this.endTool();
-    return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
+    return this.request("exportImage", request);
   }
   /**
    * The document's size against the `.alto` cap now. For a folder opened on demand this

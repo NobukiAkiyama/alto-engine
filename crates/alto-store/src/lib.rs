@@ -1,5 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod archive;
+pub mod tiff;
 use alto_core::ContentHash;
 use alto_doc::{BASE_FORMAT, SUPPORTED_FORMATS};
 use serde::{Deserialize, Serialize};

@@ -172,6 +172,7 @@ dependencies = [
  "alto-gpu",
  "alto-raster",
  "alto-scene",
+ "alto-store",
  "alto-vector",
  "futures-channel",
  "js-sys",
