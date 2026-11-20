@@ -145,6 +145,12 @@ const reopened = await engine.openFolder(folder);
 
 独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **15** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
 
+### 最近使ったファイル
+
+ホストアプリは `@alto/engine/browser` の `rememberFile(handle)` で、選択済みのファイルやプロジェクトフォルダを記録できます。薄い `.alto` は `rememberFile(fileHandle, { history: historyFolderHandle })` で版履歴の保存先も記録します。完全なアーカイブに保存し直した場合は `{ history: null }` で保存先との関連を外せます。一覧は `recentFiles()` で新しい順に最大32件取得でき、`forgetFile(id)` で一覧から外せます。
+
+`openRecent(id)` はクリックなどのユーザー操作から呼び出してください。ファイルの場合は返った `source` と `history` を `engine.open(source, { history })` に、フォルダの場合は `source` を `engine.openFolder(source)` に渡します。ブラウザがアクセスを拒否すると `STORAGE` が返り、一覧には項目が残ります。
+
 Undo の保持件数は `createEngine({ container, undo: { steps: 100 } })` で 1〜1000 に設定できます（既定値 100）。Worker が再起動しても設定は維持されます。
 
 ## M6の使い方

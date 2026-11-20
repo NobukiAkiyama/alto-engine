@@ -3,9 +3,11 @@
  * opens a picker; a host that wants one calls these.
  */
 import { AltoError } from "./errors.js";
+import { permittedRecentFile } from "./recent-files.js";
 import { FileSystemDirectoryProvider, OpfsFolderProvider, type ArchiveSource, type ArchiveTarget, type ObjectStorageProvider } from "./storage.js";
 
 export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider };
+export { forgetFile, recentFiles, rememberFile, type RecentFile } from "./recent-files.js";
 
 /** Writes to a file handle from the File System Access API, replacing it on success. */
 export function fileHandleTarget(handle: FileSystemFileHandle): ArchiveTarget {
@@ -60,6 +62,21 @@ export async function pickSaveTarget(options: { suggestedName: string }): Promis
 /** Reads a picked or dropped file. */
 export function fileSource(file: Blob | FileSystemFileHandle): ArchiveSource {
   return { read: async () => (file instanceof Blob ? file : file.getFile()) };
+}
+
+/**
+ * Gets the sources for a remembered file or project folder. Call from a user
+ * action such as a click so the browser can request read/write access if needed.
+ */
+export async function openRecent(id: string): Promise<
+  | { kind: "file"; source: ArchiveSource; history?: ObjectStorageProvider }
+  | { kind: "folder"; source: ObjectStorageProvider }
+> {
+  const { handle, history } = await permittedRecentFile(id);
+  if (handle.kind === "directory")
+    return { kind: "folder", source: new FileSystemDirectoryProvider(handle) };
+  const source = fileSource(handle);
+  return history ? { kind: "file", source, history: new FileSystemDirectoryProvider(history) } : { kind: "file", source };
 }
 /** Picks a folder for the `.altoproj` form (File System Access API). */
 export async function pickFolder(): Promise<ObjectStorageProvider> {
