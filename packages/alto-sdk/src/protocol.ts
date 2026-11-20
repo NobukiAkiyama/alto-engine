@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 15;
+export const PROTOCOL = 16;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -32,6 +32,16 @@ export interface RecoveryInfo {
   records: number;
   latestGeneration: number;
   truncated?: boolean;
+}
+export interface RecoveryStages {
+  candidates: number;
+  load: number;
+  verify: number;
+  restore: number;
+  register: number;
+  replay: number;
+  activate: number;
+  firstFrame: number | null;
 }
 /** A piecewise-linear curve with 2–8 points. Input coordinates increase from 0 to 1. */
 export type BrushCurve = {
@@ -193,6 +203,7 @@ export interface Requests {
   releaseSave: Q<{ token: number }, boolean>;
   open: Q<{ bytes: ArrayBuffer }, WireState>;
   recover: Q<None, WireState>;
+  recoveryStages: Q<None, RecoveryStages | null>;
   discardRecovery: Q<None, true>;
   /** Answered beside the queue, once the journal holds every edit so far. */
   durable: Q<None, true>;

@@ -737,6 +737,33 @@ export async function runEmbedTests(_playground, log) {
       assert(next.getSnapshot().history.undo === 0 && next.getSnapshot().nodes.size === 1,
         "the old stroke changed the replacement document");
     });
+    await test("recovery reports its stages in order", async () => {
+      const engine = await engineIn(container(), { storage: { namespace: name("recovery-stages") } });
+      const diag = unstable(engine);
+      assert(await diag.recoveryStages() === null, "a fresh engine has recovery timings");
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      await doc.transact("layer.add", (tx) => tx.addRaster({ name: "recovered" }));
+      await doc.durable();
+      const expected = await doc.snapshotHash();
+      const start = performance.now();
+      await testing(engine).crash();
+      // Let the regular frame loop complete the timing on its own.
+      const deadline = performance.now() + 15_000;
+      let stages = await diag.recoveryStages();
+      while (stages?.firstFrame == null && performance.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 16));
+        stages = await diag.recoveryStages();
+      }
+      const elapsed = performance.now() - start;
+      assert(stages?.firstFrame != null, "missing recovery timings after the first frame");
+      const names = ["candidates", "load", "verify", "restore", "register", "replay", "activate", "firstFrame"];
+      assert(Object.keys(stages).join(",") === names.join(","), "incorrect stage order");
+      const values = Object.values(stages);
+      assert(values.every((ms) => Number.isFinite(ms) && ms >= 0), "invalid duration: " + JSON.stringify(stages));
+      // Page and Worker clocks can be rounded independently.
+      assert(values.reduce((sum, ms) => sum + ms, 0) <= elapsed + 1, "recovery stages exceed total elapsed time");
+      assert(await engine.document.snapshotHash() === expected, "recovery changed the document");
+    });
     await test("restore and discard cannot race to delete the restored journal", async () => {
       const el = container();
       const namespace = name("restore-discard");

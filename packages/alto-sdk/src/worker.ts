@@ -1,4 +1,4 @@
-import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, validBrushTextureParams, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, validBrushTextureParams, type Args, type FrameStats, type RecoveryInfo, type RecoveryStages, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -123,7 +123,7 @@ const readableAfterFailure = new Set<string>([
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
-  "historyStoreAttached",
+  "historyStoreAttached", "recoveryStages",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -131,6 +131,9 @@ let journaling = true;
 // A document epoch belongs to its SDK handle, not to this Worker's lifetime.
 let documentEpoch = 0;
 let recoveryPending = false;
+let recoveryStages: RecoveryStages | null = null;
+type RecoveryFrame = { start: number | null; waiting: boolean };
+let recoveryFrame: RecoveryFrame | null = null;
 let undoSteps: Args<"init">["undoSteps"];
 function checkDocument(epoch: number | undefined) {
   if (epoch !== undefined && epoch !== documentEpoch)
@@ -139,6 +142,7 @@ function checkDocument(epoch: number | undefined) {
 function adoptDocument(epoch: number | undefined) {
   documentEpoch = epoch ?? documentEpoch + 1;
   recoveryPending = false;
+  recoveryFrame = null;
 }
 /**
  * A WASM trap (release builds abort on a Rust panic) can leave the Runtime borrowed
@@ -635,6 +639,7 @@ function decodeFrame(numbers: Float64Array): FrameStats {
  * the cap before the request that is supposed to observe it.
  */
 function takeFrame(budget: number, stick: boolean): FrameStats {
+  if (recoveryFrame?.start === null) recoveryFrame.start = performance.now();
   const frame = decodeFrame(runtime.tick(budget));
   (frame as FrameStats & { gpuWait?: boolean }).gpuWait = runtime.takeGpuWaitRequested();
   if (stick && forceDeferred) {
@@ -643,6 +648,11 @@ function takeFrame(budget: number, stick: boolean): FrameStats {
     frame.composed = 0;
   }
   return frame;
+}
+function finishRecoveryFrame(frame: RecoveryFrame) {
+  if (recoveryFrame !== frame || frame.start === null || !recoveryStages) return;
+  recoveryStages.firstFrame = performance.now() - frame.start;
+  recoveryFrame = null;
 }
 /**
  * Called before the tick's wait, so `lastWaitBusy` is the previous wait's outcome.
@@ -655,6 +665,7 @@ function noteDeferred(frame: FrameStats, where: "wait" | "drain") {
 }
 /** Recreate the device from the document. The next tick draws it again. */
 async function recoverLostGpu() {
+  if (recoveryFrame) recoveryFrame = { start: null, waiting: false };
   forceDeferred = false;
   deferLimit = PRESENT_DEFER_LIMIT;
   deferredWaits = NO_STREAK;
@@ -1094,7 +1105,9 @@ async function execute(m: Queued): Promise<unknown> {
       // or not; inspect().available is false for a saved one, but it is valid.
       if (documentEpoch !== 0) throw Error("CONFLICT: no-recovery: a document is already open");
       await writesIdle();
+      const candidatesStart = performance.now();
       const candidates = await io<Candidate[]>("loadCandidates");
+      const candidatesMs = performance.now() - candidatesStart;
       if (!candidates.length) {
         const state = await io<StoreState>("inspect");
         recoveryPending = false;
@@ -1102,12 +1115,17 @@ async function execute(m: Queued): Promise<unknown> {
           ? "CORRUPT_DATA: no usable recovery generation"
           : "NOT_FOUND: recovery journal");
       }
-      let recovery: Candidate | null = null;
-      let checkpointUndoSteps = DEFAULT_UNDO_STEPS;
+      let recovered: {
+        candidate: Candidate;
+        checkpointUndoSteps: number;
+        stages: Pick<RecoveryStages, "load" | "verify" | "restore" | "register" | "replay">;
+      } | null = null;
       let lastError: unknown;
       for (const candidate of candidates) {
         // Transient storage failures propagate so the caller can retry without replacing a generation.
+        const loadStart = performance.now();
         const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents | { damaged: string };
+        const load = performance.now() - loadStart;
         if ("damaged" in full) {
           lastError = full.damaged;
           continue;
@@ -1120,16 +1138,29 @@ async function execute(m: Queued): Promise<unknown> {
           if (!Number.isInteger(savedUndoSteps) || savedUndoSteps < 1 || savedUndoSteps > MAX_UNDO_STEPS)
             throw Error("CORRUPT_DATA: invalid checkpoint undo limit");
           runtime.setMaxUndo(savedUndoSteps);
-          if (full.metadata && full.metadata.format >= 3)
-            runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
-          else if (full.metadata)
-            runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
-          else runtime.openPackage(full.base);
+          let stages: Pick<RecoveryStages, "verify" | "restore" | "register">;
+          if (full.metadata) {
+            const opaque = JSON.stringify(full.metadata.opaque);
+            const report = full.metadata.format >= 3
+              ? runtime.openRecoveryEntries(full.base, opaque, true)
+              : runtime.openRecoveryPackage(full.base, opaque, true);
+            stages = JSON.parse(report).stages;
+          } else {
+            // Legacy checkpoints use the normal archive path, which returns no breakdown.
+            const start = performance.now();
+            runtime.openPackage(full.base);
+            stages = { verify: 0, restore: performance.now() - start, register: 0 };
+          }
+          const replayStart = performance.now();
           runtime.replayRecords(framedRecords);
+          const replay = performance.now() - replayStart;
           runtime.setMaxUndo(undoSteps);
           if (full.metadata?.dirty) runtime.markUnsaved();
-          checkpointUndoSteps = savedUndoSteps;
-          recovery = candidate;
+          recovered = {
+            candidate,
+            checkpointUndoSteps: savedUndoSteps,
+            stages: { load, verify: stages.verify, restore: stages.restore, register: stages.register, replay },
+          };
           break;
         } catch (error) {
           // A trap is not a damaged candidate: trying the next one would run on a broken Runtime.
@@ -1138,11 +1169,14 @@ async function execute(m: Queued): Promise<unknown> {
           lastError = error;
         }
       }
-      if (!recovery) {
+      if (!recovered) {
         recoveryPending = false;
         throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
       }
+      const { candidate: recovery, checkpointUndoSteps, stages } = recovered;
+      const activateStart = performance.now();
       const forgotten = await io<string[]>("activate", { generation: recovery.generation });
+      const activate = performance.now() - activateStart;
       if (forgotten.length) runtime.forgetStoredObjectPaths(JSON.stringify(forgotten));
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
@@ -1160,8 +1194,12 @@ async function execute(m: Queued): Promise<unknown> {
           freezeStorage(Error("STORAGE: recovery checkpoint failed: " + String((error as Error).message || error)));
         }
       }
+      recoveryStages = { candidates: candidatesMs, ...stages, activate, firstFrame: null };
+      recoveryFrame = { start: null, waiting: false };
       return s;
     }
+    case "recoveryStages":
+      return recoveryStages;
     case "validateFrame":
       await runtime.validateFrame();
       return true;
@@ -1345,6 +1383,7 @@ async function execute(m: Queued): Promise<unknown> {
         throw error;
       }
       await runtime.gpuIdle();
+      if (recoveryFrame) finishRecoveryFrame(recoveryFrame);
       diagnosticProfiles = null;
       diagnosticTickMs = null;
       frameSettled = true;
@@ -1418,6 +1457,12 @@ async function drain() {
             pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0 && !value.presentDeferred;
+            const timing = recoveryFrame;
+            if (frameSettled && timing && !timing.waiting) {
+              timing.waiting = true;
+              // Observe completion without blocking the drain or borrowing the Runtime.
+              void runtime.submittedWorkDone().then(() => finishRecoveryFrame(timing));
+            }
             if (!frameSettled) wantTick = true;
             if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });

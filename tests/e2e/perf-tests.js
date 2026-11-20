@@ -427,8 +427,10 @@ async function measure(engine, name, fixture, log, reps, publish) {
   // Recovery: a Worker restart replays the OPFS journal, then draws. Each round
   // adds a few journal records after the checkpoint the open wrote.
   {
+    const readStages = unstable(engine).recoveryStages;
     const samples = [],
-      records = [];
+      records = [],
+      stages = [];
     for (let i = 0; i < reps.recover; i++) {
       for (let k = 0; k < 3; k++) await doc.transact("rename", (tx) => tx.setProps(target, { name: `r${i}.${k}` }));
       await doc.durable();
@@ -438,10 +440,18 @@ async function measure(engine, name, fixture, log, reps, publish) {
       await testing(engine).crash();
       await settle();
       samples.push(performance.now() - t);
+      if (readStages) {
+        const timing = await readStages();
+        assert(timing?.firstFrame != null, "missing recovery timing after the first display");
+        stages.push(timing);
+      }
       doc = engine.document;
       assert((await doc.snapshotHash()) === expected, "recovery lost durable edits");
     }
-    row("recover (Worker restart + journal replay + first display)", samples, { journalRecords: records });
+    row("recover (Worker restart + journal replay + first display)", samples, {
+      journalRecords: records,
+      ...(readStages ? { stages } : {}),
+    });
   }
   out.memory.final = await memory(engine, await settle());
   out.complete = true;

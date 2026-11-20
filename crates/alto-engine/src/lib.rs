@@ -12,6 +12,7 @@ use alto_raster::{DecodeCache, ObjectStore, TileData, TileStore};
 use alto_scene::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
 use std::collections::{BTreeMap, BTreeSet};
 pub use text::{CaretInfo, ImportedFont, TextInfo};
+use versions::RecoveryTimer;
 
 fn render_blend(mode: BlendMode) -> RenderBlend {
     match mode {
@@ -37,7 +38,7 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
 /// The `.alto` cap a save checks, as `package_bytes` counts it.
 pub use alto_store::{MAX_PACKAGE_BYTES, object_path};
 pub use versions::StoreMismatch;
-pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
+pub use versions::{CommitView, RecoveryCheckpoint, RecoveryStages, VersionRef, VersionStatus};
 pub use warning::{HISTORY_STORE_UNAVAILABLE, Warning};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -862,6 +863,7 @@ impl Engine {
         snapshot: &[u8],
         mut warnings: Vec<Warning>,
         deferred_verify: bool,
+        timer: &mut RecoveryTimer<'_>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
@@ -885,6 +887,7 @@ impl Engine {
                 self.install_object(h, &b)?;
             }
         }
+        timer.split_register();
         let handle = self.open_snapshot(snapshot)?;
         let doc = self.document(handle)?;
         let mut hashes = std::collections::BTreeSet::new();
@@ -900,6 +903,7 @@ impl Engine {
                 warnings.push(Warning::new("MISSING_TILE").with("hash", h));
             }
         }
+        timer.split_restore();
         Ok((handle, warnings))
     }
     /// A journal record for the step just applied to `h`. `ops` are what the step
@@ -1605,6 +1609,27 @@ mod package_tests {
         let mut fresh = Engine::new();
         let (r, warnings) = fresh.open_recovery_entries(entries, &opaque).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
+    }
+
+    #[test]
+    fn recovery_stages_are_zero_without_a_clock() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let checkpoint = e
+            .recovery_checkpoint(d, &std::collections::BTreeSet::new())
+            .unwrap();
+        let mut entries = checkpoint.entries;
+        let meta: serde_json::Value =
+            serde_json::from_slice(&entries.remove("checkpoint.json").unwrap()).unwrap();
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_value(meta["opaque"].clone()).unwrap();
+        let mut fresh = Engine::new();
+        let (r, warnings, stages) = fresh
+            .open_recovery_entries_with_clock(entries, &opaque, None)
+            .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(stages, RecoveryStages::default());
         assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
     }
 

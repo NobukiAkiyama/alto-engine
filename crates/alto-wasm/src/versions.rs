@@ -1,5 +1,5 @@
 //! Versions, folder packages and recovery checkpoints at the WASM boundary.
-use crate::{Runtime, error};
+use crate::{Runtime, clock, error};
 use alto_core::ContentHash;
 use alto_engine::versions::ObjectTarget;
 use alto_engine::{Engine, JournalKind, VersionRef};
@@ -377,19 +377,29 @@ impl Runtime {
         self.stored_objects.clear();
     }
     /// Only called by the journal worker after verifying the checkpoint digest.
+    /// With `timed`, returns the verify/restore/register milliseconds in `stages`.
     #[wasm_bindgen(js_name=openRecoveryEntries)]
     pub fn open_recovery_entries(
         &mut self,
         framed: &[u8],
         opaque: &str,
+        timed: Option<bool>,
     ) -> Result<String, JsValue> {
         let opaque: std::collections::BTreeSet<ContentHash> =
             serde_json::from_str(opaque).map_err(error)?;
         let mut engine = self.fresh_engine()?;
-        let (doc, warnings) = engine
-            .open_recovery_entries(unframe(framed)?, &opaque)
+        let timed = timed.unwrap_or(false);
+        let clock = &clock as &dyn Fn() -> f64;
+        let (doc, warnings, stages) = engine
+            .open_recovery_entries_with_clock(unframe(framed)?, &opaque, timed.then_some(clock))
             .map_err(error)?;
-        self.install(engine, doc, warnings)
+        if timed {
+            // The recovery caller reads only the stages; skip building the full view.
+            self.adopt_engine(engine, doc, warnings)?;
+            serde_json::to_string(&json!({ "stages": stages })).map_err(error)
+        } else {
+            self.install(engine, doc, warnings)
+        }
     }
     /// The canonical .alto bytes for a folder, used as the recovery checkpoint.
     #[wasm_bindgen(js_name=checkpointBytes)]

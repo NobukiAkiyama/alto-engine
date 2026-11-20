@@ -203,7 +203,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        15
+        16
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
@@ -1139,15 +1139,29 @@ impl Runtime {
         .map_err(error)
     }
     /// Only called by the journal worker after verifying the checkpoint digest.
+    /// With `timed`, returns the verify/restore/register milliseconds in `stages`.
     #[wasm_bindgen(js_name=openRecoveryPackage)]
-    pub fn open_recovery_package(&mut self, bytes: &[u8], opaque: &str) -> Result<String, JsValue> {
+    pub fn open_recovery_package(
+        &mut self,
+        bytes: &[u8],
+        opaque: &str,
+        timed: Option<bool>,
+    ) -> Result<String, JsValue> {
         let opaque: std::collections::BTreeSet<ContentHash> =
             serde_json::from_str(opaque).map_err(error)?;
         let mut engine = self.fresh_engine()?;
-        let (doc, warnings) = engine
-            .open_recovery_package(bytes, &opaque)
+        let timed = timed.unwrap_or(false);
+        let clock = &clock as &dyn Fn() -> f64;
+        let (doc, warnings, stages) = engine
+            .open_recovery_package_with_clock(bytes, &opaque, timed.then_some(clock))
             .map_err(error)?;
-        self.install(engine, doc, warnings)
+        if timed {
+            // The recovery caller reads only the stages; skip building the full view.
+            self.adopt_engine(engine, doc, warnings)?;
+            serde_json::to_string(&json!({ "stages": stages })).map_err(error)
+        } else {
+            self.install(engine, doc, warnings)
+        }
     }
     #[wasm_bindgen(js_name=openPackage)]
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
@@ -1321,6 +1335,17 @@ impl Runtime {
         doc: DocHandle,
         warnings: Vec<alto_engine::Warning>,
     ) -> Result<String, JsValue> {
+        self.adopt_engine(engine, doc, warnings)?;
+        self.view()
+    }
+    /// Takes the opened engine and document into the Runtime without building the
+    /// view JSON. Timed recovery returns only its stages, so the view is wasted there.
+    pub(crate) fn adopt_engine(
+        &mut self,
+        engine: Engine,
+        doc: DocHandle,
+        warnings: Vec<alto_engine::Warning>,
+    ) -> Result<(), JsValue> {
         self.renderer.cancel_stroke();
         self.engine = engine;
         self.doc = doc;
@@ -1332,7 +1357,7 @@ impl Runtime {
         let meta = &self.engine.document(doc).map_err(error)?.meta;
         self.viewport.center = [meta.width as f64 / 2.0, meta.height as f64 / 2.0];
         self.reload()?;
-        self.view()
+        Ok(())
     }
     /// Identity of what a save writes: the document content and the version head.
     pub(crate) fn state_hash(&self) -> Result<ContentHash, JsValue> {
