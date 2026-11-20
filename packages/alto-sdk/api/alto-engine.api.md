@@ -136,7 +136,7 @@ export interface BrushOptions {
 }
 
 // @public
-export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "render.upgrade" | "recovered.edit";
+export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "version.stash_apply" | "render.upgrade" | "recovered.edit";
 
 // @public
 export interface CanvasEditResult {
@@ -429,6 +429,15 @@ export class DocumentHandle {
         deleteTag: (name: string) => Promise<void>;
         pin: (hash: string) => Promise<void>;
         unpin: (hash: string) => Promise<void>;
+        stash: (message?: string, options?: {
+            author?: string;
+        }) => Promise<StashEntry>;
+        stashList: () => StashEntry[];
+        stashApply: (commit: string, options?: {
+            drop?: boolean;
+        }) => Promise<MergePlan | null>;
+        stashPop: (commit?: string) => Promise<MergePlan | null>;
+        stashDrop: (commit: string) => Promise<void>;
         prepareMerge: (name: string) => Promise<MergePlan>;
         cancelMerge: () => Promise<void>;
         finishMerge: (token: string, resolutions: MergeResolution[], options?: {
@@ -983,7 +992,7 @@ export interface MergePlan {
     // (undocumented)
     conflicts: MergeConflict[];
     // (undocumented)
-    kind: "no_op" | "fast_forward" | "three_way";
+    kind: "no_op" | "fast_forward" | "three_way" | "stash";
     // (undocumented)
     ours: string;
     // (undocumented)
@@ -1009,7 +1018,7 @@ export interface MergeResult {
     // (undocumented)
     head: string;
     // (undocumented)
-    kind: "no_op" | "fast_forward" | "committed";
+    kind: "no_op" | "fast_forward" | "committed" | "stash";
 }
 
 // @public (undocumented)
@@ -1319,6 +1328,16 @@ export type SelectionSpec = {
 // @public (undocumented)
 export function sha256Hex(data: Uint8Array): Promise<string>;
 
+// @public
+export interface StashEntry {
+    // (undocumented)
+    commit: string;
+    // (undocumented)
+    created_at: number;
+    // (undocumented)
+    message: string;
+}
+
 // @public (undocumented)
 export interface StyledPath {
     // (undocumented)
@@ -1595,6 +1614,7 @@ export interface VersionRefs {
     generation: number;
     // (undocumented)
     pinned: string[];
+    stashes?: StashEntry[];
     // (undocumented)
     tags: Record<string, string>;
 }

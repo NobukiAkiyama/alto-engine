@@ -201,7 +201,7 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        13
+        14
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {

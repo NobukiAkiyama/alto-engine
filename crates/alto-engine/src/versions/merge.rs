@@ -46,9 +46,14 @@ pub struct MergePlan {
     pub conflicts: Vec<MergeConflict>,
 }
 #[derive(Clone)]
+pub(super) enum MergeTarget {
+    Branch { name: String },
+    Stash { commit: ContentHash, drop: bool },
+}
+#[derive(Clone)]
 pub(super) struct MergeSession {
     view: MergePlan,
-    target_branch: String,
+    target: MergeTarget,
     refs: ContentHash,
     revision: u64,
     working: ContentHash,
@@ -179,6 +184,15 @@ fn value(doc: &Document) -> Result<Value, EngineError> {
     v["meta"]["format_version"] = Value::from(alto_doc::BASE_FORMAT);
     Ok(v)
 }
+fn stash_label(message: &str) -> String {
+    message
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(40)
+        .collect()
+}
 fn result_doc(v: Value) -> Result<Document, EngineError> {
     let doc: Document =
         serde_json::from_value(v).map_err(|e| fail("INVALID_MERGE_RESULT", e.to_string()))?;
@@ -213,6 +227,148 @@ fn set_path(
     Ok(())
 }
 impl Engine {
+    /// Applies a merged document to the working document as one undoable edit.
+    fn apply_stash_result(
+        &mut self,
+        h: DocHandle,
+        target: Document,
+        message: &str,
+        drop: bool,
+        commit: ContentHash,
+    ) -> Result<(), EngineError> {
+        // Checked before the edit so a failed reference update cannot leave it applied.
+        let generation = if drop {
+            Some(
+                self.versions(h)?
+                    .refs
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| fail("RESOURCE_LIMIT", "generation overflow"))?,
+            )
+        } else {
+            None
+        };
+        if self.state_digest(h)? != alto_doc::digest::StateDigest::of(&target).value() {
+            let current = self.document(h)?;
+            let revision = current.revision;
+            if revision == u64::MAX {
+                return Err(fail("RESOURCE_LIMIT", "revision overflow"));
+            }
+            let ops =
+                alto_doc::restore_ops(current, &target).map_err(|e| invalid(e.to_string()))?;
+            let intent = alto_doc::Intent::labeled("version.stash_apply", stash_label(message));
+            self.transact(h, intent, ops, revision)?;
+        }
+        let s = self.versions.get_mut(&h).unwrap();
+        s.merge = None;
+        if let Some(generation) = generation {
+            s.refs.stashes.retain(|entry| entry.commit != commit);
+            s.refs.generation = generation;
+        }
+        Ok(())
+    }
+    /// Validates a merge result as a document before it is applied.
+    fn merge_result_document(&self, h: DocHandle, result: Value) -> Result<Document, EngineError> {
+        let mut target = result_doc(result)?;
+        if target.root != self.document(h)?.root {
+            return Err(fail("INVALID_MERGE_RESULT", "document identity changed"));
+        }
+        for hash in doc_hashes(&target) {
+            if !self.tiles.reachable(&hash) && !self.blobs.contains_key(&hash) {
+                return Err(EngineError::MissingTile(hash));
+            }
+        }
+        for node in target.nodes.values() {
+            self.validate_node_content(node)?;
+        }
+        target.meta.format_version = target.required_format();
+        Ok(target)
+    }
+    /// Merges a stash into the head. A clean result is applied at once and `None`
+    /// returned; conflicts leave a stash-targeted session for `finish_merge`.
+    pub fn stash_apply(
+        &mut self,
+        h: DocHandle,
+        commit: ContentHash,
+        drop: bool,
+    ) -> Result<Option<MergePlan>, EngineError> {
+        self.document(h)?;
+        let ours = self.clean_head(h)?;
+        let entry = self
+            .versions(h)?
+            .refs
+            .stashes
+            .iter()
+            .find(|entry| entry.commit == commit)
+            .cloned()
+            .ok_or_else(|| fail("NOT_FOUND", "stash"))?;
+        self.require_objects(h, &super::lazy::ObjectTarget::Stash { commit })?;
+        let s = self.versions(h)?;
+        let stash = s
+            .commits
+            .get(&commit)
+            .ok_or_else(|| fail("CORRUPT_DATA", "stash commit is missing"))?;
+        let base = stash.parents.first().copied();
+        let o = self.resolve(h, VersionRef::Commit(ours))?;
+        let t = self.resolve(h, VersionRef::Commit(commit))?;
+        if ![o.meta.format_version, t.meta.format_version]
+            .iter()
+            .all(|format| alto_doc::SUPPORTED_FORMATS.contains(format))
+        {
+            return Err(fail("UNSUPPORTED", "document format"));
+        }
+        if o.root != t.root {
+            return Err(fail("UNRELATED_HISTORY", "different document identity"));
+        }
+        let ov = value(&o)?;
+        let tv = value(&t)?;
+        let bv = match base {
+            Some(base) => Some(value(&self.resolve(h, VersionRef::Commit(base))?)?),
+            None => None,
+        };
+        let mut conflicts = vec![];
+        let result = merge_value(
+            bv.as_ref(),
+            Some(&ov),
+            Some(&tv),
+            &mut vec![],
+            &mut conflicts,
+        )
+        .ok_or_else(|| fail("INVALID_MERGE_RESULT", "stash merge produced no document"))?;
+        if conflicts.is_empty() && result_doc(result.clone()).is_err() {
+            conflicts.push(MergeConflict {
+                id: "0".into(),
+                kind: "structure".into(),
+                path: vec![],
+                base: MergeValue::of(bv.as_ref()),
+                ours: MergeValue::of(Some(&ov)),
+                theirs: MergeValue::of(Some(&tv)),
+            });
+        }
+        let plan = MergePlan {
+            kind: "stash".into(),
+            token: NodeId::new().0.to_string(),
+            ours,
+            theirs: commit,
+            base,
+            conflicts,
+        };
+        if plan.conflicts.is_empty() {
+            let target = self.merge_result_document(h, result)?;
+            self.apply_stash_result(h, target, &entry.message, drop, commit)?;
+            return Ok(None);
+        }
+        let session = MergeSession {
+            view: plan.clone(),
+            target: MergeTarget::Stash { commit, drop },
+            refs: self.versions_digest(h)?,
+            revision: self.document(h)?.revision,
+            working: ContentHash::of(&self.snapshot(h)?),
+            result,
+        };
+        self.versions.get_mut(&h).unwrap().merge = Some(session);
+        Ok(Some(plan))
+    }
     pub fn prepare_merge(&mut self, h: DocHandle, name: &str) -> Result<MergePlan, EngineError> {
         let ours = self.clean_head(h)?;
         let name = super::branches::ref_name(name)?;
@@ -298,7 +454,7 @@ impl Engine {
         };
         let session = MergeSession {
             view: plan.clone(),
-            target_branch: name,
+            target: MergeTarget::Branch { name },
             refs: self.versions_digest(h)?,
             revision: self.document(h)?.revision,
             working: ContentHash::of(&self.snapshot(h)?),
@@ -330,14 +486,32 @@ impl Engine {
             .merge
             .clone()
             .ok_or_else(|| fail("STALE_MERGE", "merge plan expired"))?;
+        let target_ok = match &plan.target {
+            MergeTarget::Branch { name } => {
+                s.refs.branches.get(name).map(|b| b.head) == Some(plan.view.theirs)
+            }
+            MergeTarget::Stash { commit, .. } => {
+                plan.view.theirs == *commit
+                    && s.refs.stashes.iter().any(|entry| entry.commit == *commit)
+            }
+        };
         if plan.view.token != token
             || plan.refs != self.versions_digest(h)?
             || plan.revision != self.document(h)?.revision
             || plan.working != ContentHash::of(&self.snapshot(h)?)
-            || s.refs.branches.get(&plan.target_branch).map(|b| b.head) != Some(plan.view.theirs)
+            || !target_ok
         {
             return Err(fail("STALE_MERGE", "document or references changed"));
         }
+        let stash_message = match &plan.target {
+            MergeTarget::Stash { commit, .. } => self
+                .versions(h)?
+                .commits
+                .get(commit)
+                .map(|c| c.message.clone())
+                .unwrap_or_default(),
+            MergeTarget::Branch { .. } => String::new(),
+        };
         self.clean_head(h)?;
         let mut supplied = BTreeMap::new();
         for resolution in resolutions {
@@ -377,71 +551,72 @@ impl Engine {
                 base: None,
             });
         }
-        let mut target = result_doc(result)?;
-        if target.root != self.document(h)?.root {
-            return Err(fail("INVALID_MERGE_RESULT", "document identity changed"));
-        }
-        for hash in doc_hashes(&target) {
-            if !self.tiles.reachable(&hash) && !self.blobs.contains_key(&hash) {
-                return Err(EngineError::MissingTile(hash));
-            }
-        }
-        for node in target.nodes.values() {
-            self.validate_node_content(node)?;
-        }
-        target.meta.format_version = target.required_format();
-        let snapshot = target.snapshot_bytes()?;
-        let commit = if plan.view.kind == "three_way" {
-            let c = Commit {
-                format: 2,
-                parents: vec![plan.view.ours, plan.view.theirs],
-                snapshot: ContentHash::of(&snapshot),
-                message: message.trim_end().into(),
-                intents: vec![],
-                created_at,
-                author,
-                merge_base: plan.view.base,
-            };
-            c.validate().map_err(invalid)?;
-            Some(c)
-        } else {
-            None
-        };
+        let target = self.merge_result_document(h, result)?;
         let revision = self.document(h)?.revision;
         revision
             .checked_add(1)
             .ok_or_else(|| fail("RESOURCE_LIMIT", "revision overflow"))?;
-        let s = self.versions.get_mut(&h).unwrap();
-        let head = commit
-            .as_ref()
-            .map(Commit::hash)
-            .unwrap_or(plan.view.theirs);
-        let generation = s
-            .refs
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| fail("RESOURCE_LIMIT", "generation overflow"))?;
-        if let Some(c) = commit {
-            let bytes = c.bytes();
-            s.insert(head, c, bytes, snapshot)?;
-        }
-        let current = s
-            .refs
-            .current_branch
-            .clone()
-            .ok_or_else(|| fail("STALE_MERGE", "detached"))?;
-        s.refs.branches.get_mut(&current).unwrap().head = head;
-        s.refs.generation = generation;
-        s.set_head(Some(head));
-        s.merge = None;
-        self.install_version_document(h, target, revision)?;
-        Ok(MergeResult {
-            kind: if plan.view.kind == "fast_forward" {
-                "fast_forward"
-            } else {
-                "committed"
+        let (kind, head) = match &plan.target {
+            MergeTarget::Branch { .. } => {
+                let snapshot = target.snapshot_bytes()?;
+                let commit = if plan.view.kind == "three_way" {
+                    let c = Commit {
+                        format: 2,
+                        parents: vec![plan.view.ours, plan.view.theirs],
+                        snapshot: ContentHash::of(&snapshot),
+                        message: message.trim_end().into(),
+                        intents: vec![],
+                        created_at,
+                        author,
+                        merge_base: plan.view.base,
+                    };
+                    c.validate().map_err(invalid)?;
+                    Some(c)
+                } else {
+                    None
+                };
+                let s = self.versions.get_mut(&h).unwrap();
+                let head = commit
+                    .as_ref()
+                    .map(Commit::hash)
+                    .unwrap_or(plan.view.theirs);
+                let generation = s
+                    .refs
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| fail("RESOURCE_LIMIT", "generation overflow"))?;
+                if let Some(c) = commit {
+                    let bytes = c.bytes();
+                    s.insert(head, c, bytes, snapshot)?;
+                }
+                let current = s
+                    .refs
+                    .current_branch
+                    .clone()
+                    .ok_or_else(|| fail("STALE_MERGE", "detached"))?;
+                s.refs.branches.get_mut(&current).unwrap().head = head;
+                s.refs.generation = generation;
+                s.set_head(Some(head));
+                s.merge = None;
+                self.install_version_document(h, target, revision)?;
+                (
+                    if plan.view.kind == "fast_forward" {
+                        "fast_forward"
+                    } else {
+                        "committed"
+                    },
+                    head,
+                )
             }
-            .into(),
+            MergeTarget::Stash { commit, drop } => {
+                // No commit and no branch or head movement: the stash result is an
+                // undoable working edit, and only a successful finish drops it.
+                self.apply_stash_result(h, target, &stash_message, *drop, *commit)?;
+                ("stash", plan.view.ours)
+            }
+        };
+        Ok(MergeResult {
+            kind: kind.into(),
             head,
             base: plan.view.base,
         })

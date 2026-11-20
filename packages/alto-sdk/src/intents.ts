@@ -32,6 +32,7 @@ export type BuiltInIntent =
   | "image.flip"
   | "image.resize"
   | "version.restore"
+  | "version.stash_apply"
   | "render.upgrade"
   | "recovered.edit";
 

@@ -45,6 +45,7 @@ if ([baseFormat, textFormat, formatVersion].every((format) => format !== null) &
 }
 
 const manifestFormat = "2";
+const stashManifestFormat = "4";
 const commitFormat = "2";
 
 // Each entry: file, pattern, expected values (in capture order), label.
@@ -81,14 +82,14 @@ const claims = [
   ],
   [
     "README.md",
-    /（文書format (\d+) \/ manifest (\d+) \/ commit (\d+) \/ プロトコル(\d+)）/,
-    [formatVersion, manifestFormat, commitFormat, protocol],
+    /（文書format (\d+) \/ manifest (\d+)〜(\d+) \/ commit (\d+) \/ プロトコル(\d+)）/,
+    [formatVersion, manifestFormat, stashManifestFormat, commitFormat, protocol],
     "supported-formats summary",
   ],
   [
     "RELEASING.md",
-    /Engine\/WASM `([\d.]+)`, TypeScript SDK `([\d.]+)`, wire protocol `(\d+)`, document format `(\d+)`, package manifest format `(\d+)`, and commit format `(\d+)`/,
-    [engineVersion, sdkVersion, protocol, formatVersion, manifestFormat, commitFormat],
+    /Engine\/WASM `([\d.]+)`, TypeScript SDK `([\d.]+)`, wire protocol `(\d+)`, document format `(\d+)`, package manifest formats `(\d+)`–`(\d+)`, and commit format `(\d+)`/,
+    [engineVersion, sdkVersion, protocol, formatVersion, manifestFormat, stashManifestFormat, commitFormat],
     "version policy",
   ],
   [
@@ -105,14 +106,14 @@ const claims = [
   ],
   [
     "doc/MILESTONES.md",
-    /現行の文書formatは (\d+)、manifest は (\d+)、commit は (\d+) です。当時の wire protocol は (\d+) で、現行は (\d+) です/,
-    [formatVersion, manifestFormat, commitFormat, null, protocol],
+    /現行の文書formatは (\d+)、manifest は (\d+)〜(\d+)、commit は (\d+) です。当時の wire protocol は (\d+) で、現行は (\d+) です/,
+    [formatVersion, manifestFormat, stashManifestFormat, commitFormat, null, protocol],
     "protocol history",
   ],
   [
     "doc/MILESTONES.md",
-    /受け付ける形式はformat (\d+)、(\d+)、(\d+) \/ manifest (\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
-    [baseFormat, textFormat, formatVersion, manifestFormat, commitFormat, renderVersion],
+    /受け付ける形式はformat (\d+)、(\d+)、(\d+) \/ manifest (\d+)〜(\d+) \/ commit (\d+) \/ render v(\d+)のみです/,
+    [baseFormat, textFormat, formatVersion, manifestFormat, stashManifestFormat, commitFormat, renderVersion],
     "accepted formats",
   ],
   [

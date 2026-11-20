@@ -82,6 +82,7 @@ export const intentText = {
   "image.flip": "反転",
   "image.resize": "画像サイズ",
   "version.restore": "版を復元",
+  "version.stash_apply": "退避した変更を適用",
   "recovered.edit": "復旧した編集",
 };
 /** An intent from history or a commit, in Japanese. */

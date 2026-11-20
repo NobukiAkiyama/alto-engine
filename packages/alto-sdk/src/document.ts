@@ -1,4 +1,4 @@
-import type { ObjectTarget, CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
+import type { ObjectTarget, CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergePlan, MergeResolution, MergeResult, StashEntry, GcOptions, GcReport } from "./image-types.js";
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
 import { intentRecord, type Intent } from "./intents.js";
@@ -365,9 +365,28 @@ export class DocumentHandle {
   private layerCommand(edit: Record<string, unknown>): Promise<LayerEditResult> {
     return this.edit(async () => { const r = await this.request("layerEdit", { edit }); this.apply(r.state); return r.result; });
   }
-  private historyCommand(command: Record<string, unknown>, target?: ObjectTarget): Promise<MergeResult | null> {
+  private async runHistoryCommand(command: Record<string, unknown>, target?: ObjectTarget) {
     const run = async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; };
-    return this.edit(() => (target ? this.withObjects(target, run) : run()));
+    return target ? this.withObjects(target, run) : run();
+  }
+  private historyCommand(command: Record<string, unknown>, target?: ObjectTarget) {
+    return this.edit(() => this.runHistoryCommand(command, target));
+  }
+  private applyStash(commit: string | undefined, drop: boolean): Promise<MergePlan | null> {
+    return this.edit(async () => {
+      const versions = this.getSnapshot().versions;
+      const stashes = versions.refs.stashes ?? [];
+      const selected = commit ?? stashes[0]?.commit;
+      if (selected === undefined) throw new AltoError("NOT_FOUND", "there is no stash to apply");
+      // The worker reports dirty HEAD and unknown stash errors before checking objects.
+      const shouldLoad = !versions.changed && stashes.some((entry) => entry.commit === selected.toLowerCase());
+      const result = await this.runHistoryCommand(
+        { type: "stash_apply", commit: selected, drop },
+        shouldLoad ? { type: "stash", commit: selected } : undefined,
+      );
+      if (result === null || "conflicts" in result) return result;
+      throw new AltoError("INTERNAL", "stash apply returned an unexpected result");
+    });
   }
   /**
    * @internal Runs `run` with the target's objects in memory, reading any the document left in
@@ -496,11 +515,31 @@ export class DocumentHandle {
     deleteTag: (name: string) => this.historyCommand({ type: "delete_tag", name }).then(() => {}),
     pin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: true }).then(() => {}),
     unpin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: false }).then(() => {}),
+    /** Saves working changes and restores HEAD. */
+    stash: (message = "Stash", options: { author?: string } = {}): Promise<StashEntry> =>
+      this.edit(async () => {
+        const head = this.getSnapshot().versions.head;
+        const result = await this.runHistoryCommand(
+          { type: "stash", message, created_at: Date.now(), author: options.author ?? null },
+          head ? { type: "commit", hash: head } : undefined,
+        );
+        if (!result || !("commit" in result)) throw new AltoError("INTERNAL", "stash returned no entry");
+        return result;
+      }),
+    /** Lists the saved working changes, newest first. */
+    stashList: (): StashEntry[] => (this.getSnapshot().versions.refs.stashes ?? []).map((entry) => ({ ...entry })),
+    /** Applies a stash, returning a merge plan only when there are conflicts. */
+    stashApply: (commit: string, options: { drop?: boolean } = {}): Promise<MergePlan | null> =>
+      this.applyStash(commit, options.drop ?? false),
+    /** Applies a stash and removes it once the apply succeeds. Defaults to the newest stash. */
+    stashPop: (commit?: string): Promise<MergePlan | null> => this.applyStash(commit, true),
+    /** Removes a stash reference. */
+    stashDrop: (commit: string): Promise<void> => this.historyCommand({ type: "stash_drop", commit }).then(() => {}),
     prepareMerge: (name: string) => this.edit(() => this.withObjects({ type: "merge", name }, () => this.request("prepareMerge", { name }))),
     cancelMerge: () => this.edit(() => this.request("cancelMerge").then(() => {})),
     finishMerge: (token: string, resolutions: MergeResolution[], options: { message?: string; author?: string } = {}) =>
       this.historyCommand({ type: "finish_merge", token, resolutions, message: options.message ?? "Merge", author: options.author ?? null, created_at: Date.now() }, { type: "merge_plan" }).then((r) => {
-        if (!r) throw new AltoError("INTERNAL", "merge returned no result"); return r;
+        if (!r || !("head" in r)) throw new AltoError("INTERNAL", "merge returned no result"); return r;
       }),
     /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
     commit: (message: string, options: { author?: string; allowEmpty?: boolean } = {}): Promise<CommitView> =>
