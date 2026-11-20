@@ -293,6 +293,7 @@ fn mirror_manifest(p: &Opened, h: &ContentHash, c: &Commit, document_format: u32
     view.branches.retain(|_, b| inside.contains(&b.head));
     view.tags.retain(|_, t| inside.contains(t));
     view.pinned.retain(|t| inside.contains(t));
+    view.stashes.clear();
     alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), document_format, view, None)
 }
 

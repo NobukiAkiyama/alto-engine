@@ -8,6 +8,7 @@ pub use lazy::{ObjectTarget, StoreMismatch};
 mod merge;
 pub use merge::{MergeConflict, MergePlan, MergeResolution, MergeResult, MergeValue};
 mod branches;
+pub use alto_store::MAX_STASHES;
 pub use branches::BranchView;
 // M8: version commits, history, semantic diff, restore, and the package parts that
 // carry history in both the single-file and folder forms.
@@ -673,7 +674,7 @@ impl Engine {
             );
         }
         let mut required = BTreeSet::new();
-        let mut stack: Vec<_> = p.refs.roots().chain(p.head).collect();
+        let mut stack: Vec<_> = p.refs.all_roots().chain(p.head).collect();
         while let Some(hash) = stack.pop() {
             if required.insert(hash) {
                 let c = parsed.get(&hash).ok_or_else(|| {

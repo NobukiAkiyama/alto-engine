@@ -60,6 +60,19 @@ enum HistoryCommand {
     AdoptGc {
         manifest: String,
     },
+    Stash {
+        message: String,
+        created_at: i64,
+        author: Option<String>,
+    },
+    StashApply {
+        commit: String,
+        #[serde(default)]
+        drop: bool,
+    },
+    StashDrop {
+        commit: String,
+    },
     FinishMerge {
         token: String,
         resolutions: Vec<alto_engine::versions::MergeResolution>,
@@ -335,6 +348,28 @@ impl Runtime {
                 HistoryCommand::AdoptGc { manifest } => {
                     self.engine
                         .adopt_gc(self.doc, manifest.as_bytes())
+                        .map_err(error)?;
+                    Value::Null
+                }
+                HistoryCommand::Stash {
+                    message,
+                    created_at,
+                    author,
+                } => serde_json::to_value(
+                    self.engine
+                        .stash(self.doc, &message, created_at, author)
+                        .map_err(error)?,
+                )
+                .map_err(error)?,
+                HistoryCommand::StashApply { commit, drop } => serde_json::to_value(
+                    self.engine
+                        .stash_apply(self.doc, hash(&commit)?, drop)
+                        .map_err(error)?,
+                )
+                .map_err(error)?,
+                HistoryCommand::StashDrop { commit } => {
+                    self.engine
+                        .stash_drop(self.doc, hash(&commit)?)
                         .map_err(error)?;
                     Value::Null
                 }

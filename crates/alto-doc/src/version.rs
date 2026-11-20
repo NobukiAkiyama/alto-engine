@@ -42,15 +42,18 @@ impl Commit {
     pub fn hash(&self) -> ContentHash {
         ContentHash::of(&self.bytes())
     }
-    pub fn validate(&self) -> Result<(), String> {
-        if self.message.chars().count() > MAX_MESSAGE
-            || self
-                .message
+    pub fn validate_message(message: &str) -> Result<(), String> {
+        if message.chars().count() > MAX_MESSAGE
+            || message
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
             return Err("commit message must be at most 4096 printable characters".into());
         }
+        Ok(())
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        Self::validate_message(&self.message)?;
         if self.format != 2
             || self.parents.len() > 2
             || self.intents.len() > 4096

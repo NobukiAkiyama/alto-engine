@@ -220,7 +220,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 ## VER-4 stash
 
-### 現状
+### 実装前
 
 - 未コミットの作業を退避する手段は無い。ブランチの切り替え（`checkout`、`detach`）、マージは `clean_head` で、未コミットの変更があれば `CONFLICT`。
 - ブランチの切り替えは `switch_version` → `install_version_document` で作業文書を版の内容に置き換え、Undo 履歴を空にする（`alto_doc::Editor::new`）。
@@ -249,7 +249,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 - `Engine::stash(h, message, created_at, author)`（新規）：HEAD が要る（無ければ `NO_COMMIT`）。detached でもよい（ブランチを動かさないため）。作業文書が HEAD と同じなら `INVALID_ARGUMENT`（`"nothing to stash"`）。HEAD の版のオブジェクトが要る（`require_objects(Commit { head })`。無ければ `STORAGE`）。コミットを作って `stashes` の先頭に入れ、作業文書を HEAD の内容に戻す（`install_version_document`。Undo 履歴は空になる）。進行中のマージは捨てる（`bump`）。
 - `Engine::stash_apply(h, commit, drop)`（新規）：作業文書が HEAD と同じであること（`clean_head`）。base = stash の親、ours = HEAD、theirs = stash のスナップショットで、マージと同じ 3-way（`merge_value`、VER-2、VER-3 を含む）。
   - 競合が無ければ、結果を作業文書へ1つの可逆トランザクションで適用する（`restore_version` と同じく `alto_doc::restore_ops` → `transact`。意図は `version.stash_apply`（新規））。1回の Undo で戻せる。`drop` なら stash を外す。
-  - 競合があれば、`MergePlan`（`kind: "stash"`（新規））を返し、`MergeSession` の行き先を `MergeTarget::Stash { commit, drop }`（新規）にする。`finish_merge` は行き先で分岐する。今の確定の経路（`current_branch` が無ければ `STALE_MERGE`（`detached`）、コミットを作ってブランチと HEAD を動かす、`install_version_document`）は `MergeTarget::Branch` だけが通る。`MergeTarget::Stash` はブランチも HEAD も動かさず、コミットも作らず、上と同じトランザクション（`restore_ops` → `transact`）で作業文書に適用する。したがって detached でも確定できる。結果の検証（`result_doc`、`format_version == 5`、オブジェクトの存在、`validate_node_content`）は共通に行う。確定まで stash を外さない。
+  - 競合があれば、`MergePlan`（`kind: "stash"`（新規））を返し、`MergeSession` の行き先を `MergeTarget::Stash { commit, drop }`（新規）にする。`finish_merge` は行き先で分岐する。今の確定の経路（`current_branch` が無ければ `STALE_MERGE`（`detached`）、コミットを作ってブランチと HEAD を動かす、`install_version_document`）は `MergeTarget::Branch` だけが通る。`MergeTarget::Stash` はブランチも HEAD も動かさず、コミットも作らず、上と同じトランザクション（`restore_ops` → `transact`）で作業文書に適用する。したがって detached でも確定できる。結果の検証（`result_doc`、`SUPPORTED_FORMATS`、オブジェクトの存在、`validate_node_content`）は共通に行う。確定まで stash を外さない。
   - stash の親が HEAD の祖先でなくてもよい（3-way の base は stash の親）。共通祖先を求めない。
 - `Engine::stash_drop(h, commit)`（新規）：参照を外すだけ。オブジェクトは次の GC で消える。
 - SDK（`doc.versions`）：
@@ -262,7 +262,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
   stashDrop(commit: string): Promise<void>;
   ```
 
-  `stash` は `historyCommand` の `stash`（新規）で、`ObjectTarget::Commit { head }` を `withObjects` で読む。`stashApply` は `ObjectTarget::Stash { commit }`（新規。stash、その親、HEAD）を読む。競合の確定は既存の `finishMerge` をそのまま使う。
+  `stash` は `historyCommand` の `stash`（新規）で、`ObjectTarget::Commit { hash: head }` を `withObjects` で読む。`stashApply` は `ObjectTarget::Stash { commit }`（新規。stash、その親、HEAD）を読む。競合の確定は既存の `finishMerge` をそのまま使う。
 - 上限：`MAX_STASHES`（新規）= 64。超えたら `RESOURCE_LIMIT`。メッセージは `MAX_MESSAGE`。
 - 保存：stash は manifest の参照なので、`.alto`、`.altoproj`、薄い `.alto`（版の置き場に stash のオブジェクトが入る。`version_only_objects` は `retained` から求めるので、stash のスナップショットのオブジェクトも外へ出る）のどれでも残る。置き場の検査（`store_roots_contained`）は `all_roots` を使う。（新規）
 - ジャーナル：`historyCommand` の版の記録で残る。stash の作業文書のタイルはチェックポイントに入る。
@@ -271,7 +271,7 @@ fn merge_text(b: &TextContent, o: &TextContent, t: &TextContent)
 
 - manifest：`stashes` を持つ manifest は `format` を上げる（4。「共通の設計」の案 B が既定）。stash が空なら今の形式のまま書く。
 - `format_version`（文書）：上げない。描画の版：触れない。
-- `PROTOCOL`：9 に含める（段階1）。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
+- `PROTOCOL`：実装時点の13から14へ上げる。`historyCommand` に `stash`、`stash_apply`、`stash_drop` を足す。（新規）
 - SDK の型：`VersionRefs.stashes`（`packages/alto-sdk/src/image-types.ts`）、`StashEntry`、`MergePlan.kind` に `"stash"`。API 報告を更新する。（新規）
 
 ### 作業手順

@@ -4,7 +4,7 @@ use alto_core::ContentHash;
 use alto_doc::{BASE_FORMAT, SUPPORTED_FORMATS};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Cursor, Read, Write},
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
@@ -30,9 +30,25 @@ pub struct Manifest {
     pub head: Option<ContentHash>,
     #[serde(flatten)]
     pub refs: VersionRefs,
-    /// Present exactly in format 3: versions' objects live outside this .alto.
+    /// Present exactly in format 3 (and optional in format 4): versions' objects live outside this .alto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_history: Option<ExternalHistory>,
+}
+impl Manifest {
+    pub fn is_full(&self) -> bool {
+        self.external_history.is_none() && self.format == manifest_format(&self.refs, false)
+    }
+}
+/// Maximum number of saved working states on a document.
+pub const MAX_STASHES: usize = 64;
+
+/// Stashed working document commit with user message and timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StashEntry {
+    pub commit: ContentHash,
+    pub message: String,
+    pub created_at: i64,
 }
 /// Where a thin .alto's version objects are: a count and digest of `external-objects.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +78,8 @@ pub struct VersionRefs {
     pub pinned: std::collections::BTreeSet<ContentHash>,
     pub generation: u64,
     pub gc_generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stashes: Vec<StashEntry>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +95,12 @@ impl VersionRefs {
             .chain(self.tags.values().copied())
             .chain(self.pinned.iter().copied())
     }
+    pub fn local_roots(&self) -> impl Iterator<Item = ContentHash> + '_ {
+        self.stashes.iter().map(|s| s.commit)
+    }
+    pub fn all_roots(&self) -> impl Iterator<Item = ContentHash> + '_ {
+        self.roots().chain(self.local_roots())
+    }
     pub fn validate(&self, head: Option<ContentHash>) -> Result<()> {
         if let Some(name) = &self.current_branch
             && (self.branches.get(name).map(|b| b.head) != head || head.is_none())
@@ -85,8 +109,18 @@ impl VersionRefs {
                 "current branch does not match head".into(),
             ));
         }
-        if head.is_none() && (self.current_branch.is_some() || self.roots().next().is_some()) {
+        if head.is_none() && (self.current_branch.is_some() || self.all_roots().next().is_some()) {
             return Err(StoreError::Corrupt("references without a head".into()));
+        }
+        if self.stashes.len() > MAX_STASHES {
+            return Err(StoreError::Corrupt("too many stashes".into()));
+        }
+        let mut stashes = BTreeSet::new();
+        for entry in &self.stashes {
+            if !stashes.insert(entry.commit) {
+                return Err(StoreError::Corrupt("duplicate stash commit".into()));
+            }
+            alto_doc::Commit::validate_message(&entry.message).map_err(StoreError::Corrupt)?;
         }
         Ok(())
     }
@@ -232,6 +266,16 @@ pub fn manifest_bytes(
         None,
     )
 }
+fn manifest_format(refs: &VersionRefs, external: bool) -> u32 {
+    if !refs.stashes.is_empty() {
+        4
+    } else if external {
+        3
+    } else {
+        2
+    }
+}
+
 pub fn manifest_bytes_with_refs(
     snapshot: ContentHash,
     head: Option<ContentHash>,
@@ -240,7 +284,7 @@ pub fn manifest_bytes_with_refs(
     external: Option<&ExternalObjects>,
 ) -> Vec<u8> {
     let manifest = Manifest {
-        format: if external.is_some() { 3 } else { 2 },
+        format: manifest_format(&refs, external.is_some()),
         external_history: external.map(|e| ExternalHistory {
             document: e.document,
             objects: e.objects.len() as u64,
@@ -542,7 +586,7 @@ fn decode_entries_impl(
                 value.get("format").and_then(|v| v.as_u64()),
                 value.get("external_history").is_some_and(|v| !v.is_null())
             ),
-            (Some(2), false) | (Some(3), true)
+            (Some(2), false) | (Some(3), true) | (Some(4), _)
         ) || !value
             .get("document_format")
             .and_then(|v| v.as_u64())
@@ -560,6 +604,9 @@ fn decode_entries_impl(
         .map_err(|e| StoreError::Corrupt(format!("manifest: {e}")))?,
     );
     if let Some(m) = &manifest {
+        if m.format != manifest_format(&m.refs, m.external_history.is_some()) {
+            return Err(StoreError::Unsupported("package format".into()));
+        }
         m.refs.validate(m.head)?;
     }
     let refs = manifest
@@ -1051,7 +1098,7 @@ mod tests {
         set_manifest(&mut e, |m| m["format"] = 2.into());
         unsupported(e);
         let mut e = thin.clone();
-        set_manifest(&mut e, |m| m["format"] = 4.into());
+        set_manifest(&mut e, |m| m["format"] = 99.into());
         unsupported(e);
         let mut e = thin;
         set_manifest(&mut e, |m| m["external_history"] = serde_json::Value::Null);
@@ -1305,6 +1352,203 @@ mod tests {
         let mut reader = std::io::repeat(1u8).take(10_000);
         let err = read_limited(&mut reader, 100).unwrap_err();
         assert!(err.to_string().contains("512 MiB"), "{err}");
+    }
+
+    #[test]
+    fn old_reader_refuses_unknown_ref_keys() {
+        let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let snapshot = doc.snapshot_bytes().unwrap();
+        let package = encode_package(&snapshot, BTreeMap::new()).unwrap();
+        let mut entries = read_entries(&package).unwrap();
+        set_manifest(&mut entries, |m| {
+            m["unknown_ref_key"] = serde_json::json!({"foo": "bar"});
+        });
+        assert!(matches!(
+            decode_entries(entries),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn new_ref_fields_raise_the_manifest_format() {
+        let (parts, _) = thin_parts();
+        let commit = b"{\"snapshot\":\"x\",\"created_at\":1}\n".to_vec();
+        let head = ContentHash::of(&commit);
+        let mut with_stash = parts.clone();
+        with_stash.commits.insert(head, commit.clone());
+        with_stash.head = Some(head);
+        let stash_commit = ContentHash::of(b"commit1");
+        with_stash.refs.stashes.push(StashEntry {
+            commit: stash_commit,
+            message: "WIP test".into(),
+            created_at: 123456789,
+        });
+
+        // Thin package with stashes raises format to 4
+        let thin_entries = package_entries(&with_stash).unwrap();
+        let thin_m = manifest_of(&thin_entries);
+        assert_eq!(thin_m["format"], 4);
+        assert!(thin_m["external_history"].is_object());
+        assert_eq!(thin_m["stashes"][0]["commit"], stash_commit.to_string());
+        let mut old_format = thin_entries.clone();
+        set_manifest(&mut old_format, |m| m["format"] = 3.into());
+        assert!(matches!(
+            decode_entries(old_format),
+            Err(StoreError::Unsupported(_))
+        ));
+        let mut empty = thin_entries.clone();
+        set_manifest(&mut empty, |m| {
+            m.as_object_mut().unwrap().remove("stashes");
+        });
+        assert!(matches!(
+            decode_entries(empty),
+            Err(StoreError::Unsupported(_))
+        ));
+        let decoded_thin = decode_entries(thin_entries).unwrap();
+        assert_eq!(decoded_thin.refs.stashes.len(), 1);
+        assert_eq!(decoded_thin.refs.stashes[0].commit, stash_commit);
+        assert!(decoded_thin.external.is_some());
+
+        // Complete package with stashes raises format to 4
+        let mut full_with_stash = parts.clone();
+        full_with_stash.commits.insert(head, commit);
+        full_with_stash.head = Some(head);
+        full_with_stash.external = None;
+        full_with_stash.refs.stashes.push(StashEntry {
+            commit: stash_commit,
+            message: "WIP complete".into(),
+            created_at: 123456789,
+        });
+        let full_entries = package_entries(&full_with_stash).unwrap();
+        let full_m = manifest_of(&full_entries);
+        assert_eq!(full_m["format"], 4);
+        assert!(full_m.get("external_history").is_none());
+        assert_eq!(full_m["stashes"][0]["commit"], stash_commit.to_string());
+        let decoded_full = decode_entries(full_entries).unwrap();
+        assert_eq!(decoded_full.refs.stashes.len(), 1);
+        assert!(decoded_full.external.is_none());
+    }
+
+    #[test]
+    fn invalid_stash_refs_are_rejected() {
+        let head = ContentHash::of(b"head");
+        let entry = StashEntry {
+            commit: ContentHash::of(b"stash"),
+            message: "WIP".into(),
+            created_at: 1,
+        };
+        let mut refs = VersionRefs {
+            stashes: vec![entry.clone(); 2],
+            ..Default::default()
+        };
+        assert!(matches!(
+            refs.validate(Some(head)),
+            Err(StoreError::Corrupt(_))
+        ));
+        refs.stashes = vec![entry.clone(); MAX_STASHES + 1];
+        assert!(matches!(
+            refs.validate(Some(head)),
+            Err(StoreError::Corrupt(_))
+        ));
+        refs.stashes = vec![entry];
+        refs.stashes[0].message = "invalid\rmessage".into();
+        assert!(matches!(
+            refs.validate(Some(head)),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_manifest_without_stashes_keeps_its_bytes() {
+        let (parts, _) = thin_parts();
+        // Thin package without stashes stays format 3 and skips stashes key
+        let thin_entries = package_entries(&parts).unwrap();
+        let thin_m = manifest_of(&thin_entries);
+        assert_eq!(thin_m["format"], 3);
+        assert!(thin_m.get("stashes").is_none());
+
+        // Full package without stashes stays format 2 and skips stashes key
+        let mut full_parts = parts.clone();
+        full_parts.external = None;
+        let full_entries = package_entries(&full_parts).unwrap();
+        let full_m = manifest_of(&full_entries);
+        assert_eq!(full_m["format"], 2);
+        assert!(full_m.get("stashes").is_none());
+
+        let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let snapshot = doc.snapshot_bytes().unwrap();
+        let raw = manifest_bytes_with_refs(
+            ContentHash::of(&snapshot),
+            None,
+            5,
+            VersionRefs::default(),
+            None,
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(parsed["format"], 2);
+        assert!(parsed.get("stashes").is_none());
+        assert_eq!(
+            manifest_bytes(ContentHash([0; 32]), None, 5),
+            concat!(
+                "{\n",
+                "  \"format\": 2,\n",
+                "  \"document_format\": 5,\n",
+                "  \"snapshot\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n",
+                "  \"creator\": \"Alto Engine 0.4.0\",\n",
+                "  \"current_branch\": null,\n",
+                "  \"branches\": {},\n",
+                "  \"tags\": {},\n",
+                "  \"pinned\": [],\n",
+                "  \"generation\": 0,\n",
+                "  \"gc_generation\": 0\n",
+                "}\n"
+            ).as_bytes()
+        );
+    }
+
+    #[test]
+    fn format_4_manifest_supports_both_complete_and_thin() {
+        let (parts, _) = thin_parts();
+        let commit = b"{\"snapshot\":\"x\",\"created_at\":1}\n".to_vec();
+        let head = ContentHash::of(&commit);
+        let stash_commit = ContentHash::of(b"stash_commit_hash");
+        let stash = StashEntry {
+            commit: stash_commit,
+            message: "checkpoint".into(),
+            created_at: 1000,
+        };
+
+        // Complete format 4:
+        let mut full = parts.clone();
+        full.commits.insert(head, commit.clone());
+        full.head = Some(head);
+        full.external = None;
+        full.refs.stashes = vec![stash.clone()];
+        let full_entries = package_entries(&full).unwrap();
+        let full_manifest: Manifest =
+            serde_json::from_slice(&full_entries["manifest.json"]).unwrap();
+        assert_eq!(full_manifest.format, 4);
+        assert!(full_manifest.is_full());
+        let decoded_full = decode_entries(full_entries).unwrap();
+        assert_eq!(decoded_full.refs.stashes, vec![stash.clone()]);
+        assert_eq!(
+            decoded_full.refs.local_roots().collect::<Vec<_>>(),
+            vec![stash_commit]
+        );
+        assert!(decoded_full.refs.all_roots().any(|c| c == stash_commit));
+
+        // Thin format 4:
+        let mut thin = parts.clone();
+        thin.commits.insert(head, commit);
+        thin.head = Some(head);
+        thin.refs.stashes = vec![stash.clone()];
+        let thin_entries = package_entries(&thin).unwrap();
+        let thin_manifest: Manifest =
+            serde_json::from_slice(&thin_entries["manifest.json"]).unwrap();
+        assert_eq!(thin_manifest.format, 4);
+        assert!(!thin_manifest.is_full());
+        let decoded_thin = decode_entries(thin_entries).unwrap();
+        assert_eq!(decoded_thin.refs.stashes, vec![stash]);
     }
 }
 

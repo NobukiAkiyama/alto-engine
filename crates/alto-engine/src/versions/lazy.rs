@@ -37,10 +37,20 @@ impl StoreMismatch {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObjectTarget {
-    Commit { hash: ContentHash },
-    Branch { name: String },
-    Merge { name: String },
+    Commit {
+        hash: ContentHash,
+    },
+    Branch {
+        name: String,
+    },
+    Merge {
+        name: String,
+    },
     MergePlan,
+    /// A stash, the head it was taken from, and the head it returns to.
+    Stash {
+        commit: ContentHash,
+    },
     All,
 }
 
@@ -81,6 +91,13 @@ impl Engine {
                 if let Some(plan) = &s.merge {
                     commits.extend(plan.roots());
                 }
+            }
+            ObjectTarget::Stash { commit } => {
+                commits.insert(*commit);
+                if let Some(stash) = s.commits.get(commit) {
+                    commits.extend(stash.parents.iter().copied());
+                }
+                commits.extend(s.head);
             }
             ObjectTarget::All => {
                 let mut docs = vec![];
@@ -309,9 +326,10 @@ impl Engine {
             Ok(Some(StoreMismatch::Missing))
         }
     }
-    /// Whether every root of a store's `manifest.json` (head, branch heads, tags, pins) is
-    /// a version this document has. If not, the store moved on past this document: saving
-    /// its refs there would drop versions. A manifest that cannot be read is not contained.
+    /// Whether every root of a store's `manifest.json` (head, branch heads, tags, pins,
+    /// stashes) is a version this document has. If not, the store moved on past this
+    /// document: saving its refs there would drop versions. A manifest that cannot be
+    /// read is not contained.
     pub fn store_roots_contained(
         &self,
         h: DocHandle,
@@ -323,7 +341,7 @@ impl Engine {
         };
         Ok(m.head
             .into_iter()
-            .chain(m.refs.roots())
+            .chain(m.refs.all_roots())
             .all(|root| commits.contains_key(&root)))
     }
     /// A thin package's parts, without object bytes, and the objects it holds: the
@@ -1060,5 +1078,55 @@ mod tests {
             .unwrap();
         lazy.release_objects(h);
         assert_eq!(lazy.pick_color(h, layer, [0.0, 0.0]).unwrap().bytes, [2; 4]);
+    }
+
+    #[test]
+    fn stash_survives_a_thin_save_and_reopen_with_the_store() {
+        let f = fixture();
+        let (mut e, d) = whole(&f);
+        let stashed = paint(&mut e, d, f.layer, 30);
+        let entry = e.stash(d, "wip", 3, None).unwrap();
+        // A full folder of the same document is the history store.
+        let store = e.folder_entries(d).unwrap();
+        let thin = e.save_thin_package(d).unwrap();
+
+        let mut reopened = Engine::new();
+        let (d, warnings) = reopened.open_package(&thin).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            reopened.version_refs(d).unwrap().stashes,
+            vec![entry.clone()]
+        );
+        let target = ObjectTarget::Stash {
+            commit: entry.commit,
+        };
+        let missing = reopened.missing_objects(d, &target).unwrap();
+        assert_eq!(missing, vec![alto_store::object_path(&stashed)]);
+        let error = reopened.stash_apply(d, entry.commit, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("STORAGE: objects-unavailable"),
+            "{error}"
+        );
+        let provided: BTreeMap<_, _> = missing
+            .into_iter()
+            .map(|path| {
+                let bytes = store[&path].clone();
+                (path, bytes)
+            })
+            .collect();
+        reopened.provide_objects(d, provided, &target).unwrap();
+        assert!(
+            reopened
+                .stash_apply(d, entry.commit, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reopened.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes,
+            [30; 4]
+        );
+        assert!(reopened.version_refs(d).unwrap().stashes.is_empty());
     }
 }

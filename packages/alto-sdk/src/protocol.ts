@@ -1,4 +1,4 @@
-import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, StashEntry, PickedColor, SvgImportResult } from "./image-types.js";
 /**
  * @internal The messages between the SDK and its engine Worker, written once. The SDK's
  * `request` and the Worker's `execute` are both checked against `Requests`. Not part
@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 13;
+export const PROTOCOL = 14;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -185,7 +185,7 @@ export interface Requests {
   listBranches: Q<None, BranchView[]>;
   prepareMerge: Q<{ name: string }, MergePlan>;
   cancelMerge: Q<None, true>;
-  historyCommand: Q<{ command: Record<string, unknown> }, { state: WireState; result: MergeResult | null }>;
+  historyCommand: Q<{ command: Record<string, unknown> }, { state: WireState; result: MergeResult | MergePlan | StashEntry | null }>;
   versionLog: Q<{ dag?: boolean; allBranches?: boolean }, CommitView[]>;
   versionDiff: Q<{ from: string; to: string }, VersionDiff>;
   restoreVersion: Q<{ hash: string }, WireState>;

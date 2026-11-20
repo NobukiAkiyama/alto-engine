@@ -25,7 +25,7 @@ pub struct GcPlan {
 }
 impl VersionStore {
     pub(super) fn root_commits(&self) -> BTreeSet<ContentHash> {
-        let mut roots: BTreeSet<_> = self.refs.roots().chain(self.head).collect();
+        let mut roots: BTreeSet<_> = self.refs.all_roots().chain(self.head).collect();
         if let Some(plan) = &self.merge {
             roots.extend(plan.roots());
         }
@@ -51,8 +51,7 @@ impl Engine {
             .ok_or_else(|| fail("CORRUPT_DATA", "missing manifest"))?;
         let manifest: Manifest = serde_json::from_slice(manifest_bytes)
             .map_err(|e| fail("CORRUPT_DATA", e.to_string()))?;
-        if manifest.format != 2 || !alto_doc::SUPPORTED_FORMATS.contains(&manifest.document_format)
-        {
+        if !manifest.is_full() || !alto_doc::SUPPORTED_FORMATS.contains(&manifest.document_format) {
             return Err(fail("UNSUPPORTED", "GC package format"));
         }
         let baseline = alto_store::sha256_hex(manifest_bytes);
@@ -196,7 +195,7 @@ impl Engine {
             .gc_generation
             .checked_add(1)
             .ok_or_else(|| fail("RESOURCE_LIMIT", "generation overflow"))?;
-        if manifest.format != 2
+        if !manifest.is_full()
             || !alto_doc::SUPPORTED_FORMATS.contains(&manifest.document_format)
             || manifest.head != s.head
             || manifest.refs != refs
