@@ -284,6 +284,7 @@ try {
   if (embedTest) query.set("embedTest", embedTest);
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
+  if (process.env.ALTO_BROWSER_GPU_TIMESTAMPS === "1") query.set("gpuTimestamps", "1");
   const pageUrl = `http://127.0.0.1:${address.port}/${behindOnly ? "tests/diagnostics/behind-resize.html" : vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;

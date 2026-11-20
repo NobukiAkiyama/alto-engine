@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 16;
+export const PROTOCOL = 17;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -42,6 +42,13 @@ export interface RecoveryStages {
   replay: number;
   activate: number;
   firstFrame: number | null;
+}
+export interface GpuTileTimestamp {
+  x: number;
+  y: number;
+  level: number;
+  /** Estimated GPU elapsed time in nanoseconds, subject to browser rounding. */
+  ns: number;
 }
 /** A piecewise-linear curve with 2–8 points. Input coordinates increase from 0 to 1. */
 export type BrushCurve = {
@@ -131,7 +138,7 @@ type Q<A, R> = { args: A; result: R };
 /** Every request: its arguments and what the reply carries. */
 export interface Requests {
   init: Q<
-    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean; undoSteps: number },
+    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean; undoSteps: number; gpuTimestamps: boolean },
     { protocol: number; recovery: RecoveryInfo }
   >;
   createDocument: Q<{ width: number; height: number; renderVersion?: 3 }, WireState>;
@@ -231,6 +238,8 @@ export interface Requests {
   resetRenderCache: Q<{ cpu: boolean }, true>;
   enablePrefetch: Q<None, true>;
   setProfiling: Q<{ enabled: boolean }, true>;
+  setGpuTimestampProfiling: Q<{ enabled: boolean }, true>;
+  gpuTileTimestamps: Q<None, GpuTileTimestamp[] | null>;
   setDecodeWorkers: Q<{ enabled: boolean }, boolean>;
   // Test hooks (testing entry point).
   validateFrame: Q<None, true>;

@@ -186,7 +186,7 @@ const readableAfterStorageFailure = new Set([
   "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
-  "historyStoreAttached", "recoveryStages",
+  "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 
@@ -272,6 +272,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     });
   }
   private raf = 0;
+  private gpuTimestamps = false;
   private disposed = false;
   private pixelRatio: number;
   private state: EngineStatus = { state: "starting", error: null };
@@ -487,6 +488,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         undoSteps: this.undoSteps,
         namespace: this.namespace,
         journal: this.journaled,
+        gpuTimestamps: this.gpuTimestamps,
       },
       [offscreen],
       true,
@@ -562,6 +564,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   ): Promise<Result<K>> {
     const [args, transfer = []] = rest;
     return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false) as Promise<Result<K>>;
+  }
+  /** @internal Keeps the diagnostic enabled across Worker restarts. */
+  async setGpuTimestampProfiling(enabled: boolean): Promise<void> {
+    await this.request("setGpuTimestampProfiling", { enabled });
+    this.gpuTimestamps = enabled;
   }
   /** @internal Any request by name, for the testing entry point. */
   requestRaw(t: string, payload: Record<string, unknown> = {}): Promise<unknown> {

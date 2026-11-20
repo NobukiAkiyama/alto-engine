@@ -36,6 +36,7 @@ use pyramid::pyramid_children;
 mod scene;
 mod stroke;
 mod tile_read;
+mod timestamps;
 mod upload;
 
 pub use crate::RenderError;
@@ -442,6 +443,10 @@ pub struct Renderer {
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
+    /// The adapter exposes timestamp queries; only then are they requested.
+    gpu_timestamp_period: Option<f32>,
+    /// Present once diagnostics first enable timestamps.
+    gpu_timestamps: Option<timestamps::GpuTimestamps>,
     /// Build v3 subtrees away from every edge from one leaf (`uniform`).
     uniform_pyramid: bool,
     uniform: Option<uniform::Memo>,
