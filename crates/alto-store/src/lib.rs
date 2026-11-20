@@ -1322,6 +1322,44 @@ mod tests {
     }
 
     #[test]
+    fn high_pass_documents_roundtrip_in_format_eight_packages() {
+        let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let mut layer = alto_doc::Node::raster("High pass");
+        layer.props.effects.push(alto_doc::Effect::HighPass {
+            radius: 2.0,
+            selection: None,
+            extra: Default::default(),
+        });
+        let root = doc.root;
+        let mut editor = alto_doc::Editor::new(doc);
+        editor
+            .transact(
+                "add",
+                vec![alto_doc::Op::InsertNode {
+                    node: layer,
+                    parent: root,
+                    index: 0,
+                }],
+                0,
+            )
+            .unwrap();
+        let snapshot = editor.doc.snapshot_bytes().unwrap();
+        let package = encode_package(&snapshot, BTreeMap::new()).unwrap();
+        let mut entries = read_entries(&package).unwrap();
+        let manifest: Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!((manifest.format, manifest.document_format), (2, 8));
+        assert_eq!(decode_package(&package).unwrap().snapshot, snapshot);
+
+        let mut value = serde_json::to_value(manifest).unwrap();
+        value["document_format"] = serde_json::json!(4);
+        entries.insert("manifest.json".into(), serde_json::to_vec(&value).unwrap());
+        assert!(matches!(
+            decode_entries(entries),
+            Err(StoreError::Unsupported(message)) if message == "package format"
+        ));
+    }
+
+    #[test]
     fn unknown_document_format_is_unsupported() {
         let parts = PackageParts {
             snapshot: br#"{"meta":{"format_version":99}}"#.to_vec(),

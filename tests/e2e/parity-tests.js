@@ -2,7 +2,7 @@
 // CPU reference. A mismatch names the first pixel and the number of pixels that differ.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -1057,6 +1057,53 @@ export async function runParityTests(engine, log) {
           const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
           assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
           return formatMeasure(row);
+        });
+      }
+    }
+    // Rebuild the filtered plane from source pixels, including the neighbors of
+    // every requested tile, and verify the real layer and adjustment paths.
+    {
+      const seam = solid(512, 512, [0, 0, 0, 0]);
+      for (let y = 224; y < 288; y++) for (let x = 220; x < 292; x++) {
+        seam.pixels.set(x < 256 ? [240, 64, 32, 200] : [50, y < 256 ? 100 : 220, 250, 255], (y * 512 + x) * 4);
+      }
+      const feather = 64;
+      const selection = { kind: "rectangle", x: 40.25, y: 40.75, width: 176.25, height: 175.25, feather };
+      const mask = { bytes: featheredRectangle([40.25, 40.75, 216.5, 216], feather) };
+      const gradient = colorAdjustGradient();
+      const cases = [
+        { name: "effect-high-pass-flat", image: solid(256, 256, [72, 231, 17, 128]), radius: 0.5 },
+        { name: "effect-high-pass", image: gradient, radius: 8 },
+        { name: "effect-high-pass-seam", image: seam, radius: 12, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-high-pass-selected", image: gradient, radius: 8, selection, mask },
+        { name: "effect-high-pass-adjustment", image: gradient, radius: 8, adjustment: true },
+      ];
+      for (const { name, image, radius, tiles, selection, mask, adjustment } of cases) {
+        await test(name, async () => {
+          const doc = await engine.createDocument({ width: image.w, height: image.h });
+          const asset = await imported(engine, image);
+          const effect = { type: "high_pass", radius };
+          let layer;
+          await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+          if (selection) await doc.selection.apply(selection);
+          if (adjustment) await doc.transact("adjustment", (tx) => { tx.addAdjustment(effect); });
+          else await doc.effects.set(layer, [effect]);
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          for (const [tx, ty] of tiles ?? [[0, 0]]) {
+            const key = tiles ? `${name} (${tx}, ${ty})` : name;
+            const cpu = renderHighPassV3(image, radius, [tx, ty], [image.w, image.h], mask);
+            const gpu = await gpuTile(engine, { level: 0, tx, ty });
+            const row = {
+              ...measureRow({ name: key, nodes: [], level: 0, tx, ty }, cpu, gpu),
+              renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch",
+            };
+            compositeV3.push(row);
+            assert(same(cpu, gpu), `${key}: ${formatMeasure(row)}`);
+            assertV3Locked(key, cpu, gpu);
+            const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
+            assert(same(cpu, cold), `${key} cold: ${diff(cpu, cold)}`);
+          }
         });
       }
     }

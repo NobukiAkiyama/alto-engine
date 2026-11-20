@@ -506,6 +506,9 @@ export type Effect = ({
     type: "gaussian_blur";
     radius?: number;
 } & EffectScope) | ({
+    type: "high_pass";
+    radius?: number;
+} & EffectScope) | ({
     type: "color_adjust";
     brightness?: number;
     contrast?: number;

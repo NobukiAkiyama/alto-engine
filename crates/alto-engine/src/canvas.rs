@@ -484,27 +484,39 @@ fn moved_selection(
     Ok(out)
 }
 
-/// Blur radii are in document pixels, so a scale changes them. A non-uniform scale
+/// Smoothing radii are in document pixels, so a scale changes them. A non-uniform scale
 /// has no equivalent radius, and refusing beats a different picture.
 fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effect>>, EngineError> {
-    if !effects
+    let Some(effect) = effects
         .iter()
-        .any(|e| matches!(e, Effect::GaussianBlur { .. }))
-    {
+        .find(|e| matches!(e, Effect::GaussianBlur { .. } | Effect::HighPass { .. }))
+    else {
         return Ok(None);
-    }
+    };
     if (sx - sy).abs() > 1e-9 {
-        return Err(unsupported(
-            "a non-uniform canvas resize cannot keep a Gaussian blur",
-        ));
+        let message = if matches!(effect, Effect::GaussianBlur { .. }) {
+            "a non-uniform canvas resize cannot keep a Gaussian blur"
+        } else {
+            "a non-uniform canvas resize cannot keep a high-pass radius"
+        };
+        return Err(unsupported(message));
     }
     let mut out = effects.to_vec();
     for effect in &mut out {
-        if let Effect::GaussianBlur { radius, .. } = effect {
-            *radius *= sx;
-            if *radius > 64.0 {
-                return Err(unsupported("the resized blur radius would exceed 64"));
+        match effect {
+            Effect::GaussianBlur { radius, .. } => {
+                *radius *= sx;
+                if *radius > 64.0 {
+                    return Err(unsupported("the resized blur radius would exceed 64"));
+                }
             }
+            Effect::HighPass { radius, .. } => {
+                *radius *= sx;
+                if !(0.5..=64.0).contains(radius) {
+                    return Err(unsupported("the resized high-pass radius is out of range"));
+                }
+            }
+            _ => {}
         }
     }
     Ok(Some(out))
@@ -1413,6 +1425,20 @@ mod tests {
         );
         assert_eq!(code(refused.err().unwrap()), "UNSUPPORTED");
         assert_eq!(e.snapshot(h).unwrap(), before);
+    }
+
+    #[test]
+    fn canvas_resize_scales_high_pass_within_its_radius_limits() {
+        let effects = [Effect::HighPass {
+            radius: 2.0,
+            selection: None,
+            extra: Default::default(),
+        }];
+        let scaled = scale_effects(&effects, 0.25, 0.25).unwrap().unwrap();
+        assert!(matches!(scaled[0], Effect::HighPass { radius: 0.5, .. }));
+        assert!(scale_effects(&effects, 2.0, 1.0).is_err());
+        assert!(scale_effects(&effects, 0.125, 0.125).is_err());
+        assert!(scale_effects(&effects, 33.0, 33.0).is_err());
     }
 
     #[test]

@@ -28,6 +28,11 @@ pub enum Effect {
         selection: Option<TileMap>,
         extra: serde_json::Map<String, serde_json::Value>,
     },
+    HighPass {
+        radius: f64,
+        selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
     ColorAdjust {
         brightness: f64,
         contrast: f64,
@@ -95,6 +100,11 @@ fn effect_from_map(mut obj: serde_json::Map<String, serde_json::Value>) -> Resul
             selection: effect_selection(&mut obj)?,
             extra: obj,
         }),
+        "high_pass" => Ok(Effect::HighPass {
+            radius: effect_f64(&mut obj, "radius", 8.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
         "color_adjust" => Ok(Effect::ColorAdjust {
             brightness: effect_f64(&mut obj, "brightness", 0.0)?,
             contrast: effect_f64(&mut obj, "contrast", 1.0)?,
@@ -153,6 +163,14 @@ impl Serialize for Effect {
             } => {
                 map.insert("radius".into(), serde_json::json!(radius));
                 ("gaussian_blur", selection, extra)
+            }
+            Self::HighPass {
+                radius,
+                selection,
+                extra,
+            } => {
+                map.insert("radius".into(), serde_json::json!(radius));
+                ("high_pass", selection, extra)
             }
             Self::ColorAdjust {
                 brightness,
@@ -240,6 +258,7 @@ impl Effect {
     pub fn selection(&self) -> Option<&TileMap> {
         match self {
             Self::GaussianBlur { selection, .. }
+            | Self::HighPass { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -250,6 +269,7 @@ impl Effect {
     pub fn selection_mut(&mut self) -> &mut Option<TileMap> {
         match self {
             Self::GaussianBlur { selection, .. }
+            | Self::HighPass { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -260,6 +280,7 @@ impl Effect {
     pub fn validate(&self) -> Result<(), DocError> {
         let extra = match self {
             Self::GaussianBlur { extra, .. }
+            | Self::HighPass { extra, .. }
             | Self::ColorAdjust { extra, .. }
             | Self::Levels { extra, .. }
             | Self::HueSaturation { extra, .. }
@@ -278,6 +299,7 @@ impl Effect {
         };
         match self {
             Self::GaussianBlur { radius, .. } => finite("radius", *radius, 0.0, 64.0)?,
+            Self::HighPass { radius, .. } => finite("radius", *radius, 0.5, 64.0)?,
             Self::ColorAdjust {
                 brightness,
                 contrast,
@@ -357,6 +379,7 @@ mod tests {
             r#"{"type":"gaussian_blur","radius":12}"#,
             r#"{"type":"gaussian_blur"}"#,
             r#"{"type":"gaussian_blur","radius":12,"legacy":true}"#,
+            r#"{"type":"high_pass","legacy":true}"#,
             r#"{"type":"color_adjust","brightness":0.25,"contrast":1.5,"saturation":0.5}"#,
             r#"{"type":"color_adjust"}"#,
             r#"{"type":"levels","in_black":0.1,"in_white":0.9,"gamma":1.2,"out_black":0.0,"out_white":1.0}"#,
@@ -426,5 +449,86 @@ mod tests {
         let error =
             Document::from_snapshot_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
         assert!(error.to_string().contains("unknown effect fields"));
+    }
+
+    #[test]
+    fn high_pass_defaults_parse_and_roundtrip() {
+        let effect: Effect = serde_json::from_str(r#"{"type":"high_pass"}"#).unwrap();
+        assert_eq!(
+            effect,
+            Effect::HighPass {
+                radius: 8.0,
+                selection: None,
+                extra: Default::default(),
+            }
+        );
+        effect.validate().unwrap();
+        let json = serde_json::to_string(&effect).unwrap();
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), effect);
+    }
+
+    #[test]
+    fn validate_rejects_high_pass_radius_outside_range() {
+        for radius in [0.0, 0.499, 64.001] {
+            let effect = Effect::HighPass {
+                radius,
+                selection: None,
+                extra: Default::default(),
+            };
+            assert!(matches!(effect.validate(), Err(DocError::Invalid(_))));
+        }
+        for radius in [0.5, 64.0] {
+            let effect = Effect::HighPass {
+                radius,
+                selection: None,
+                extra: Default::default(),
+            };
+            effect.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn high_pass_upgrades_layer_and_adjustment_snapshots_to_format_eight() {
+        for adjustment in [false, true] {
+            let effect = Effect::HighPass {
+                radius: 4.0,
+                selection: None,
+                extra: Default::default(),
+            };
+            let mut layer = Node::raster("High pass");
+            if adjustment {
+                layer.kind = NodeKind::Adjustment { adjustment: effect };
+            } else {
+                layer.props.effects.push(effect);
+            }
+            let mut editor = editor();
+            assert_eq!(editor.doc.meta.format_version, BASE_FORMAT);
+            editor
+                .transact(
+                    "add",
+                    vec![Op::InsertNode {
+                        node: layer,
+                        parent: editor.doc.root,
+                        index: 0,
+                    }],
+                    0,
+                )
+                .unwrap();
+            assert_eq!(editor.doc.meta.format_version, 8);
+            let bytes = editor.doc.snapshot_bytes().unwrap();
+            let reopened = Document::from_snapshot_bytes(&bytes).unwrap();
+            assert_eq!(reopened.snapshot_bytes().unwrap(), bytes);
+
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["meta"]["format_version"] = serde_json::json!(7);
+            assert!(matches!(
+                Document::from_snapshot_bytes(&serde_json::to_vec(&value).unwrap()),
+                Err(DocError::Unsupported(_))
+            ));
+            editor.undo().unwrap();
+            assert_eq!(editor.doc.meta.format_version, BASE_FORMAT);
+            editor.redo().unwrap();
+            assert_eq!(editor.doc.meta.format_version, 8);
+        }
     }
 }

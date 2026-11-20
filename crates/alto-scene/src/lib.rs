@@ -82,6 +82,10 @@ pub enum REffectKind {
         radius: f32,
         radius_q8: u32,
     },
+    HighPass {
+        radius: f32,
+        radius_q8: u32,
+    },
     ColorAdjust {
         brightness: f32,
         contrast: f32,

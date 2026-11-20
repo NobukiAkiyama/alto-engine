@@ -433,6 +433,7 @@ pub fn v3_gap(scene: &RenderScene) -> Option<&'static str> {
             e.kind,
             crate::REffectKind::ColorAdjust { .. }
                 | crate::REffectKind::GaussianBlur { .. }
+                | crate::REffectKind::HighPass { .. }
                 | crate::REffectKind::Invert
                 | crate::REffectKind::Curves { .. }
                 | crate::REffectKind::Levels { .. }
