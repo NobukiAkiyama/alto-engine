@@ -8,12 +8,15 @@ import type { PathData } from "./types.js";
 
 /** Numbers the Worker reports after each frame (names vary by build). */
 export type FrameStats = Record<string, unknown>;
+export type { RecoveryStages } from "./protocol.js";
 
 export function unstable(engine: Engine) {
   const core = coreOf(engine);
   return {
     /** Resolves when the current view has finished drawing. */
     settle: () => core.request("waitFrame"),
+    /** Journal recovery durations in milliseconds. First-frame timing remains null until the GPU finishes. */
+    recoveryStages: () => core.request("recoveryStages"),
     readTile: (x: number, y: number) => core.request("readTile", { x, y }),
     readTileLevel: (level: number, x: number, y: number) => core.request("readTileLevel", { level, x, y }),
     vectorStats: () => core.request("vectorStats"),

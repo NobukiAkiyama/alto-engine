@@ -554,6 +554,12 @@ try {
         await writeFile(file, report.endsWith("\n") ? report : report + "\n");
       }
       const parsed = report ? JSON.parse(report) : null;
+      if (name === "perf" && parsed) {
+        diagnostics.recovery = (parsed.fixtures ?? []).flatMap(({ fixture, rows }) => {
+          const recover = rows?.["recover (Worker restart + journal replay + first display)"];
+          return recover?.stages ? [{ fixture, ...recover }] : [];
+        });
+      }
       const results = parsed?.results || [];
       const failed = results.filter((result) => result.pass === false);
       const ok = !suiteError && results.length > 0 && failed.length === 0;

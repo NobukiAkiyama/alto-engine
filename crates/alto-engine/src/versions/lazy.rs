@@ -282,7 +282,8 @@ impl Engine {
         known: BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let p = decode_folder(entries)?;
-        self.open_decoded_package(p, false, None, Some(known))
+        let mut timer = RecoveryTimer::new(None);
+        self.open_decoded_package(p, false, None, Some(known), &mut timer)
     }
     /// Objects only versions reference: what a thin .alto leaves outside.
     pub fn version_only_objects(&self, h: DocHandle) -> Result<BTreeSet<ContentHash>, EngineError> {

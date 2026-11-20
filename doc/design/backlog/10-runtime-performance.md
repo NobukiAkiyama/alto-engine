@@ -555,23 +555,23 @@
 
 - Rust 側の3つは、`open_recovery_package`、`open_recovery_entries` の引数に時計（`&dyn Fn() -> f64`）を渡し、`RecoveryStages`（新規）を返す。時計を渡さない呼び出しは時刻を取らない（本番の既存の経路を変えない）。
 - GPU の時間。アダプターが timestamp-query を持つときだけ機能を要求し、親タイルごとの GPU 完了時間を、診断として別の欄に出す。持たない環境では欄を出さない。値は画素の計算に使わない（共通規則6）。ブラウザは時刻を丸めることがあるので、値は目安であり、判定に使う場合は桁数を記録する。
-- 返し方。`unstable(engine).recoveryStages()`（新規）が、最後の復旧の段階の数値（ms）の表を返す。復旧がなければ `null`。診断を有効にしないときの費用は、時刻の読み取り数回だけで、復旧は1回きりの処理なので、フレーム時間は増えない。
+- 返し方。`unstable(engine).recoveryStages()` が、現在の Worker で最後に成功したジャーナル復旧の段階の数値（ms）を返す。復旧前は `null`、復旧後の描画完了までは `firstFrame` のみ `null`。複数の候補を試した場合、`load` と Rust 内の計時、`replay` は採用した候補の所要時間。メタデータのない旧チェックポイントでは、アーカイブを開く時間を `restore` にまとめる。
 - `browser-diagnostics.json` への記録。perf 群の `recover` 行の追加情報（`stages`）として残し、`scripts/verify-browser.mjs` が `diagnostics.recovery`（新規の欄）へ書く。
 
 ### 形式と通信
 
 - 文書の形式、描画の版：変えない。
-- `PROTOCOL`：`recoveryStages`（新規）の要求を足すので9 に含める（段階1）。
+- `PROTOCOL`：`recoveryStages`（新規）の要求を追加し、15 から 16 に更新する。
 - 公開 API：`@alto/engine/unstable` に1関数。互換の約束の外（`doc/embedding.md` 第1章）。
 
 ### 作業手順
 
-**Files:** Modify `crates/alto-engine/src/versions.rs`（時計を受け取る版）、`crates/alto-wasm/src/versions.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/worker.ts`、`packages/alto-sdk/src/protocol.ts`、`packages/alto-sdk/src/unstable.ts`、`tests/e2e/perf-tests.js`、`scripts/verify-browser.mjs`、`packages/alto-sdk/api/`（更新）。
+**Files:** `crates/alto-engine/src/versions.rs`（時計を受け取る版）、`crates/alto-wasm/src/versions.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/worker.ts`、`packages/alto-sdk/src/protocol.ts`、`packages/alto-sdk/src/unstable.ts`、`tests/e2e/perf-tests.js`、`scripts/verify-browser.mjs`。SDK の公開 API レポートは `api:check` で確認する。
 
-- [ ] 最初に `4k-20` と `fx` の `recover` 行を3回測り、段階に分ける前の値を記録する。
-- [ ] ブラウザ試験 `recovery reports its stages in order`（段階が表の順に並び、各値が0以上で、合計が `recover` の全体の時間を超えない）。Rust の試験 `recovery_stages_are_zero_without_a_clock`（時計を渡さなければ時刻を取らない）。
-- [ ] 実装、PR。timestamp-query は別の PR（アダプターが持たない環境でも、既存の機能試験が通ること）。
-- [ ] 完了条件：`browser-diagnostics.json` に段階が残る。計測を足す前後で B7 の中央値の範囲が重なる。`sh scripts/check.sh native`、`pnpm --dir packages/alto-sdk build`（`api:check` を含む）、`node scripts/verify-browser.mjs --functional`。
+- [x] `4k-20` と `fx` の `recover` 行を3回ずつ測り、変更前後を[検証記録](../../verification/RECOVERY-STAGES.md)に記載。
+- [x] ブラウザ試験 `recovery reports its stages in order`（順序、非負値、復旧全体に対する合計）。Rust の試験 `recovery_stages_are_zero_without_a_clock`（時計が省略された場合の全0）。
+- [x] `browser-diagnostics.json` に段階が残り、計測を足す前後で B7 の測定範囲が重なる。
+- [ ] timestamp-query は別の PR（アダプターが持たない環境でも既存の機能試験が通ること）。
 
 ### 依存
 
