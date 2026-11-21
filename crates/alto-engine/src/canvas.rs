@@ -490,6 +490,7 @@ fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effe
     let Some(effect_name) = effects.iter().find_map(|effect| match effect {
         Effect::GaussianBlur { .. } => Some("a Gaussian blur"),
         Effect::HighPass { .. } => Some("a high-pass radius"),
+        Effect::MotionBlur { distance, .. } if *distance != 0.0 => Some("a motion-blur distance"),
         Effect::UnsharpMask { radius, .. } if *radius != 0.0 => Some("an unsharp-mask radius"),
         _ => None,
     }) else {
@@ -523,10 +524,33 @@ fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effe
                     ));
                 }
             }
+            Effect::MotionBlur { distance, .. } => {
+                *distance *= sx;
+                if *distance > 128.0 {
+                    return Err(unsupported(
+                        "the resized motion-blur distance would exceed 128",
+                    ));
+                }
+            }
             _ => {}
         }
     }
     Ok(Some(out))
+}
+
+fn rotate_effects(effects: &[Effect], quarter_turns: u8) -> Option<Vec<Effect>> {
+    if quarter_turns == 0 {
+        return None;
+    }
+    let mut rotated = effects.to_vec();
+    let mut changed = false;
+    for effect in &mut rotated {
+        if let Effect::MotionBlur { angle, .. } = effect {
+            *angle = (*angle + 90.0 * f64::from(quarter_turns) + 180.0).rem_euclid(360.0) - 180.0;
+            changed = true;
+        }
+    }
+    changed.then_some(rotated)
 }
 
 impl Engine {
@@ -664,6 +688,18 @@ impl Engine {
                     ops.push(Op::SetAdjustment {
                         id: node.id,
                         adjustment: scaled.into_iter().next().expect("one adjustment"),
+                    });
+                }
+            }
+            if let CanvasEdit::Rotate { quarter_turns } = edit {
+                patch.effects = rotate_effects(&node.props.effects, quarter_turns);
+                if let NodeKind::Adjustment { adjustment } = &node.kind
+                    && let Some(rotated) =
+                        rotate_effects(std::slice::from_ref(adjustment), quarter_turns)
+                {
+                    ops.push(Op::SetAdjustment {
+                        id: node.id,
+                        adjustment: rotated.into_iter().next().expect("one adjustment"),
                     });
                 }
             }
@@ -1382,11 +1418,19 @@ mod tests {
                     id,
                     patch: PropPatch {
                         mask_linked: Some(false),
-                        effects: Some(vec![Effect::GaussianBlur {
-                            radius: 2.0,
-                            selection: None,
-                            extra: Default::default(),
-                        }]),
+                        effects: Some(vec![
+                            Effect::GaussianBlur {
+                                radius: 2.0,
+                                selection: None,
+                                extra: Default::default(),
+                            },
+                            Effect::MotionBlur {
+                                angle: -45.0,
+                                distance: 4.0,
+                                selection: None,
+                                extra: Default::default(),
+                            },
+                        ]),
                         ..Default::default()
                     },
                 },
@@ -1405,6 +1449,10 @@ mod tests {
         );
         let props = &d.node(id).unwrap().props;
         assert_eq!(props.mask_transform.0, [0.0, 1.0, -1.0, 0.0, 4.0, 0.0]);
+        assert!(matches!(
+            props.effects[1],
+            Effect::MotionBlur { angle, distance: 4.0, .. } if angle == 45.0
+        ));
         e.undo(h).unwrap();
         assert_eq!(e.snapshot(h).unwrap(), before);
 
@@ -1420,6 +1468,10 @@ mod tests {
         assert!(matches!(
             d.node(id).unwrap().props.effects[0],
             Effect::GaussianBlur { radius, .. } if radius == 4.0
+        ));
+        assert!(matches!(
+            d.node(id).unwrap().props.effects[1],
+            Effect::MotionBlur { angle, distance, .. } if angle == -45.0 && distance == 8.0
         ));
         assert!(!d.selection.as_ref().unwrap().tiles.is_empty());
         e.undo(h).unwrap();
@@ -1465,6 +1517,40 @@ mod tests {
         assert!(scale_effects(&effects, 2.0, 1.0).is_err());
         assert!(scale_effects(&effects, 33.0, 33.0).is_err());
         assert!(scale_effects(&[unsharp(0.0)], 2.0, 1.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn canvas_rotate_turns_the_motion_blur_angle() {
+        let motion = |angle| Effect::MotionBlur {
+            angle,
+            distance: 4.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        for (turns, expected) in [(1, 90.0), (2, -180.0), (3, -90.0)] {
+            let rotated = rotate_effects(&[motion(0.0)], turns).unwrap();
+            assert!(
+                matches!(rotated[0], Effect::MotionBlur { angle, distance: 4.0, .. } if angle == expected)
+            );
+        }
+        assert!(rotate_effects(&[motion(0.0)], 0).is_none());
+    }
+
+    #[test]
+    fn canvas_resize_scales_motion_blur_distance_and_refuses_nonuniform() {
+        let motion = |distance| Effect::MotionBlur {
+            angle: 27.0,
+            distance,
+            selection: None,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            scale_effects(&[motion(4.0)], 2.0, 2.0).unwrap(),
+            Some(vec![motion(8.0)])
+        );
+        assert!(scale_effects(&[motion(4.0)], 2.0, 1.0).is_err());
+        assert!(scale_effects(&[motion(100.0)], 2.0, 2.0).is_err());
+        assert!(scale_effects(&[motion(0.0)], 2.0, 1.0).unwrap().is_none());
     }
 
     #[test]

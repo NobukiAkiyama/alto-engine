@@ -2,7 +2,7 @@
 // CPU reference. A mismatch names the first pixel and the number of pixels that differ.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderMotionBlurV3, hueSinCosQ14, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -1071,6 +1071,21 @@ export async function runParityTests(engine, log) {
       const selection = { kind: "rectangle", x: 40.25, y: 40.75, width: 176.25, height: 175.25, feather };
       const mask = { bytes: featheredRectangle([40.25, 40.75, 216.5, 216], feather) };
       const gradient = colorAdjustGradient();
+      await test("hue_sincos_q14_reference_matches_the_shader_on_all_angles", async () => {
+        const bytes = new Uint8Array(5761 * 8);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0, angle = -11796480; angle <= 11796480; index++, angle += 4096) {
+          const [cos, sin] = hueSinCosQ14(angle);
+          view.setInt32(index * 8, cos, true);
+          view.setInt32(index * 8 + 4, sin, true);
+        }
+        assert(fnv64(bytes) === "34dc80985aabbfab", `Rust/GPU CORDIC table differs: ${fnv64(bytes)}`);
+      });
+      for (let angle = -11796480; angle <= 11796480; angle += 4096) {
+        const [cos, sin] = hueSinCosQ14(angle);
+        assert(cos >= -16384 && cos <= 16384 && sin >= -16384 && sin <= 16384,
+          `hue_sincos out of range at ${angle}: ${cos},${sin}`);
+      }
       const cases = [
         { name: "effect-high-pass-flat", image: solid(256, 256, [72, 231, 17, 128]), radius: 0.5 },
         { name: "effect-high-pass", image: gradient, radius: 8 },
@@ -1084,13 +1099,23 @@ export async function runParityTests(engine, log) {
         { name: "effect-unsharp-adjustment", image: gradient, radius: 8, amount: 1.25, threshold: 8, adjustment: true },
         { name: "effect-unsharp-zero-amount", image: gradient, radius: 64, amount: 0, threshold: 0 },
         { name: "effect-unsharp-zero-radius", image: gradient, radius: 0, amount: 5, threshold: 0 },
+        { name: "effect-motion-blur", image: gradient, angle: 0, distance: 12 },
+        { name: "effect-motion-blur-45", image: gradient, angle: 45, distance: 12 },
+        { name: "effect-motion-blur-90", image: gradient, angle: 90, distance: 12 },
+        { name: "effect-motion-blur-neg135", image: gradient, angle: -135, distance: 12 },
+        { name: "effect-motion-blur-tile-seam", image: seam, angle: 45, distance: 16, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-motion-blur-selected", image: gradient, angle: 90, distance: 8, selection, mask },
+        { name: "effect-motion-blur-adjustment", image: gradient, angle: -45, distance: 10, adjustment: true },
+        { name: "effect-motion-blur-zero", image: gradient, angle: 0, distance: 0 },
       ];
-      for (const { name, image, radius, amount, threshold, tiles, selection, mask, adjustment } of cases) {
+      for (const { name, image, radius, amount, threshold, angle, distance, tiles, selection, mask, adjustment } of cases) {
         await test(name, async () => {
           const doc = await engine.createDocument({ width: image.w, height: image.h });
           const asset = await imported(engine, image);
           const unsharp = amount !== undefined;
-          const effect = unsharp ? { type: "unsharp_mask", radius, amount, threshold } : { type: "high_pass", radius };
+          const motion = angle !== undefined;
+          const effect = motion ? { type: "motion_blur", angle, distance }
+            : unsharp ? { type: "unsharp_mask", radius, amount, threshold } : { type: "high_pass", radius };
           let layer;
           await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
           if (selection) await doc.selection.apply(selection);
@@ -1103,7 +1128,8 @@ export async function runParityTests(engine, log) {
             const canvas = [image.w, image.h];
             const cpu = unsharp
               ? renderUnsharpMaskV3(image, effect, [tx, ty], canvas, mask)
-              : renderHighPassV3(image, radius, [tx, ty], canvas, mask);
+              : motion ? renderMotionBlurV3(image, effect, [tx, ty], canvas, mask)
+                : renderHighPassV3(image, radius, [tx, ty], canvas, mask);
             const gpu = await gpuTile(engine, { level: 0, tx, ty });
             const row = {
               ...measureRow({ name: key, nodes: [], level: 0, tx, ty }, cpu, gpu),

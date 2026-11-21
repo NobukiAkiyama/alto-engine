@@ -1322,11 +1322,17 @@ mod tests {
     }
 
     #[test]
-    fn high_pass_documents_roundtrip_in_format_eight_packages() {
+    fn format_eight_blur_effects_roundtrip_in_packages() {
         let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
         let mut layer = alto_doc::Node::raster("High pass");
         layer.props.effects.push(alto_doc::Effect::HighPass {
             radius: 2.0,
+            selection: None,
+            extra: Default::default(),
+        });
+        layer.props.effects.push(alto_doc::Effect::MotionBlur {
+            angle: 45.0,
+            distance: 12.0,
             selection: None,
             extra: Default::default(),
         });

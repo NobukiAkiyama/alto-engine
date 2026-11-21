@@ -92,6 +92,10 @@ pub enum REffectKind {
         amount_q8: u32,
         threshold_q14: u32,
     },
+    MotionBlur {
+        angle_q16: i32,
+        distance_q8: u32,
+    },
     ColorAdjust {
         brightness: f32,
         contrast: f32,

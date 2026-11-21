@@ -103,3 +103,14 @@ cc8be4e6a78e654c effect-unsharp-tile-seam (1, 1)
 7ac53844709f1eca effect-unsharp-adjustment
 426e4e110a8bc6f0 effect-unsharp-zero-amount
 426e4e110a8bc6f0 effect-unsharp-zero-radius
+6eca46b897d88bd7 effect-motion-blur
+aabce0061132e290 effect-motion-blur-45
+967fa91f29c47060 effect-motion-blur-90
+aabce0061132e290 effect-motion-blur-neg135
+612dd10983b51deb effect-motion-blur-tile-seam (0, 0)
+2b3961ff808a19b5 effect-motion-blur-tile-seam (1, 0)
+e9de86db85c6d3e3 effect-motion-blur-tile-seam (0, 1)
+f7e97465f33ab378 effect-motion-blur-tile-seam (1, 1)
+bb2ed6e1a45a84df effect-motion-blur-selected
+3b89588525810dfa effect-motion-blur-adjustment
+426e4e110a8bc6f0 effect-motion-blur-zero
