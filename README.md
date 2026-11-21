@@ -6,6 +6,8 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 [ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [リリース手順とバージョン方針](RELEASING.md) / [追加実装の検証](doc/verification/VERSIONING-IMAGE-EDITING-2026-11-03.md) / [既存の検証記録](doc/verification/RESULTS.md) / [M7/M8サンプル文書（format 5）](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
 
+対応ブラウザーは **Chrome、Edge、Firefox、Safari** です。WebGPUが利用できる最新バージョンを使ってください。機能ごとの対応状況と確認済み範囲は[対応ブラウザー](doc/BROWSER-SUPPORT.md)に記載しています。ブラウザー標準APIの違いにより、一部のファイル操作では保存・ダウンロードなど別の操作になります。
+
 [コールド表示の実装・測定結果](doc/verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](doc/design/COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
 [エンジン再設計（差分描画・エラー一本化）](doc/design/2026-10-24-engine-redesign.md)。編集後は、変更した範囲の表示タイルだけを作り直します。
@@ -20,7 +22,7 @@ sh scripts/build-vector-comparison.sh   # 比較ページを使う場合
 sh scripts/run.sh
 ```
 
-ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/browser-playground/** を開きます。サーバーはプロジェクトのルートから起動してください。`file://` では動作しません。別ポートは `ALTO_PORT=8766 sh scripts/run.sh` で指定できます。
+WebGPU対応のChrome、Edge、FirefoxまたはSafariで **http://localhost:8765/examples/browser-playground/** を開きます。サーバーはプロジェクトのルートから起動してください。`file://` では動作しません。別ポートは `ALTO_PORT=8766 sh scripts/run.sh` で指定できます。
 
 ### 操作
 
@@ -109,7 +111,7 @@ const info = await doc.text.info(id); // 行、未表示文字、使用フォン
 
 ### フォルダ形式（`.altoproj`）
 
-「フォルダに保存」で保存先フォルダを選ぶと、`manifest.json`・`document.json`・`snapshots/`・`commits/`・`objects/` を書きます（Chrome/EdgeのFile System Access APIが必要）。2回目以降は新しいオブジェクトだけを書き、最後に `manifest.json` を置き換えます。別の場所でフォルダが変更されていれば、上書きせずにエラーにします。「フォルダを開く」で読み込みます。
+「フォルダに保存」で保存先フォルダを選ぶと、`manifest.json`・`document.json`・`snapshots/`・`commits/`・`objects/` を書きます（File System Access API対応ブラウザーが必要。現状はChrome/Edge）。Safari/Firefoxでは `.alto` ファイルへの保存・読み込みを使ってください。2回目以降は新しいオブジェクトだけを書き、最後に `manifest.json` を置き換えます。別の場所でフォルダが変更されていれば、上書きせずにエラーにします。「フォルダを開く」で読み込みます。
 
 ### Gitで管理する（alto-git）
 
