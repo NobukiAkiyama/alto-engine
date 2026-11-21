@@ -326,40 +326,39 @@ fn noise_reference_matches_renderer_at_level_zero_and_zoom_in() {
     );
     document.render_version = alto_core::RENDER_VERSION_EXACT;
 
-    for level in [0] {
-        let shift = (-level) as u32;
-        let reference: Vec<u8> = (0..W * W)
-            .flat_map(|i| {
-                let x = ((i % W) as i64).div_euclid(1_i64 << shift);
-                let y = ((i / W) as i64).div_euclid(1_i64 << shift);
-                noise_q14(
-                    source[y as usize * W + x as usize],
-                    x,
-                    y,
-                    SEED,
-                    AMOUNT_Q14,
-                    false,
-                )
-                .map(|v| ((v * 255 + Q / 2) / Q) as u8)
-            })
-            .collect();
-        if let Some(gpu) = v3_test_render_with(&document, &store, (level, 0, 0)) {
-            assert_eq!(gpu.len(), reference.len());
-            if let Some(i) = gpu
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(reference.as_chunks::<4>().0)
-                .position(|(actual, expected)| actual != expected)
-            {
-                panic!(
-                    "noise pixel at level {level} ({}, {}): GPU {:?}, reference {:?}",
-                    i % W,
-                    i / W,
-                    &gpu[i * 4..i * 4 + 4],
-                    &reference[i * 4..i * 4 + 4],
-                );
-            }
+    let level = 0i32;
+    let shift = (-level) as u32;
+    let reference: Vec<u8> = (0..W * W)
+        .flat_map(|i| {
+            let x = ((i % W) as i64).div_euclid(1_i64 << shift);
+            let y = ((i / W) as i64).div_euclid(1_i64 << shift);
+            noise_q14(
+                source[y as usize * W + x as usize],
+                x,
+                y,
+                SEED,
+                AMOUNT_Q14,
+                false,
+            )
+            .map(|v| ((v * 255 + Q / 2) / Q) as u8)
+        })
+        .collect();
+    if let Some(gpu) = v3_test_render_with(&document, &store, (level, 0, 0)) {
+        assert_eq!(gpu.len(), reference.len());
+        if let Some(i) = gpu
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.as_chunks::<4>().0)
+            .position(|(actual, expected)| actual != expected)
+        {
+            panic!(
+                "noise pixel at level {level} ({}, {}): GPU {:?}, reference {:?}",
+                i % W,
+                i / W,
+                &gpu[i * 4..i * 4 + 4],
+                &reference[i * 4..i * 4 + 4],
+            );
         }
     }
 
