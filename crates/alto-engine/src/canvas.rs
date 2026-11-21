@@ -1193,6 +1193,50 @@ mod tests {
         assert_eq!(e.snapshot(reopened).unwrap(), e.snapshot(h).unwrap());
     }
 
+    /// Rotating on one branch and flipping on the other both move the root transform.
+    /// Whichever side the conflict keeps, the canvas size has to come from the same side,
+    /// because a rotation's transform only makes sense on the rotated canvas.
+    #[test]
+    fn canvas_size_follows_the_root_transform_side_in_a_merge() {
+        for choice in ["ours", "theirs"] {
+            let (mut e, h) = doc(300, 200);
+            let id = layer(&mut e, h, bounds(0, 0, 300, 200));
+            e.commit(h, "base", 1, None, false).unwrap();
+            e.create_branch(h, "rotated", None, true).unwrap();
+            canvas(&mut e, h, CanvasEdit::Rotate { quarter_turns: 1 });
+            let rotated = placed(&e, h, id, 10.5, 20.5);
+            e.commit(h, "rotate", 2, None, false).unwrap();
+            e.checkout(h, "main").unwrap();
+            canvas(
+                &mut e,
+                h,
+                CanvasEdit::Flip {
+                    axis: FlipAxis::Horizontal,
+                },
+            );
+            let flipped = placed(&e, h, id, 10.5, 20.5);
+            e.commit(h, "flip", 3, None, false).unwrap();
+
+            let plan = e.prepare_merge(h, "rotated").unwrap();
+            assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+            let r = crate::versions::MergeResolution {
+                conflict_id: plan.conflicts[0].id.clone(),
+                choice: choice.into(),
+                value: None,
+            };
+            e.finish_merge(h, &plan.token, vec![r], "merge", 4, None)
+                .unwrap();
+            let meta = &e.document(h).unwrap().meta;
+            let (size, point) = if choice == "ours" {
+                ((300, 200), flipped)
+            } else {
+                ((200, 300), rotated)
+            };
+            assert_eq!((meta.width, meta.height), size, "{choice}");
+            assert_eq!(placed(&e, h, id, 10.5, 20.5), point, "{choice}");
+        }
+    }
+
     #[test]
     fn canvas_edit_failures_change_nothing() {
         let (mut e, h) = doc(300, 200);
