@@ -155,7 +155,9 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
   protected async write(path: string, data: Uint8Array) {
     try {
       const w = await (await this.file(path, true)).createWritable();
-      try { await w.write(data as BufferSource); await w.close(); } catch (e) { await w.abort(); throw e; }
+      // Safari can write the entire backing buffer when passed a partial view.
+      const bytes = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();
+      try { await w.write(bytes as BufferSource); await w.close(); } catch (e) { await w.abort(); throw e; }
     } catch (e) {
       throw e instanceof AltoError ? e : new AltoError("STORAGE", String(e));
     }
