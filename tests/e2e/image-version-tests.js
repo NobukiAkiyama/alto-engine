@@ -128,11 +128,76 @@ export async function runImageVersionTests(engine, log) {
       for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - after[i].bytes[c]) <= 1), `vector picture changed at ${p}: ${before[i].bytes} ${after[i].bytes}`);
       assert(eq((await d.image.pickComposite([255, 15])).bytes, [255, 0, 0, 255]), "opaque interior is exact");
       await d.undo(); assert(await d.snapshotHash() === hash, "vector bake Undo");
-      await d.transact("layer.props", (tx) => tx.setProps(vector, { transform: [2, 0, 0, 2, 0, 0] })); const scaled = await d.snapshotHash();
-      await reject(d.image.rasterize(vector), "UNSUPPORTED"); assert(await d.snapshotHash() === scaled, "refused bake changed the document"); await d.undo();
+      await d.transact("scale vector", (tx) => tx.setTransform(vector, [2, 0, 0, 2, -450, 0]));
+      const scaled = await d.snapshotHash();
+      const scaledSamples = [[55, 25], [65, 48], [75, 56], [20, 20]];
+      const scaledPixels = await Promise.all(scaledSamples.map((point) => d.image.pickComposite(point)));
+      await d.image.rasterize(vector);
+      assert(eq(d.getSnapshot().nodes.get(vector).props.transform, [1, 0, 0, 1, 0, 0]), "expected an identity transform after baking the scale");
+      for (const [i, point] of scaledSamples.entries()) {
+        const bakedPixel = (await d.image.pickComposite(point)).bytes;
+        assert(scaledPixels[i].bytes.every((value, channel) => Math.abs(value - bakedPixel[channel]) <= 1), "scaled vector changed at " + point);
+      }
+      assert(eq((await d.image.pickComposite([55, 25])).bytes, [255, 0, 0, 255]), "scaled opaque interior");
+      await d.undo();
+      assert(await d.snapshotHash() === scaled, "scaled rasterize Undo");
+      await d.undo();
       if (group) { const merged = await d.image.rasterize(group); assert(merged.node === group && d.getSnapshot().nodes.get(group).type === "raster" && !d.getSnapshot().nodes.has(vector), "group bake");
         const flat = await Promise.all(samples.map((p) => d.image.pickComposite(p))); for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - flat[i].bytes[c]) <= 1), `group picture changed at ${p}`); }
       const saved = blobTarget(), done = await d.snapshotHash(); await d.save(saved); d = await engine.open(saved.blob); assert(await d.snapshotHash() === done, "bake reopen");
+    });
+    await test("a rotated vector bakes on the parent grid and keeps its masks", async () => {
+      d = await engine.createDocument({ width: 128, height: 128 });
+      let group, vector;
+      const square = await engine.vectors.parseSvg("M0 0 H40 V40 H0 Z");
+      const half = await engine.vectors.parseSvg("M0 0 H20 V40 H0 Z");
+      const clip = await engine.vectors.parseSvg("M0 0 H40 V20 H0 Z");
+      const t = Math.SQRT1_2;
+      await d.transact("transformed vector", (tx) => {
+        group = tx.addGroup();
+        tx.setTransform(group, [1, 0, 0, 1, 11, 7]);
+        vector = tx.addVector([{ data: square, fill: [1, 0, 0, 1], stroke: null }], { parent: group });
+        tx.setTransform(vector, [t, t, -t, t, 40.25, 20.5]);
+      });
+      await d.selection.apply({ kind: "rectangle", x: 38, y: 33, width: 23, height: 24 });
+      await d.effects.set(vector, [{ type: "invert" }]);
+      const limited = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "UNSUPPORTED");
+      assert(await d.snapshotHash() === limited, "limited-effect failure changed the document");
+      await d.undo();
+      await d.transact("fractional ancestor", (tx) => tx.setTransform(group, [1, 0, 0, 1, 11.5, 7]));
+      const fractional = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "UNSUPPORTED");
+      assert(await d.snapshotHash() === fractional, "ancestor failure changed the document");
+      await d.undo();
+      await d.transact("out of range", (tx) => tx.setTransform(vector, [20000, 0, 0, 2, 0, 0]));
+      const outOfRange = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "INVALID_ARGUMENT");
+      assert(await d.snapshotHash() === outOfRange, "out-of-range failure changed the document");
+      await d.undo();
+      await d.masks.fromSelection(vector);
+      await d.selection.clear();
+      await d.vectors.setMask(vector, { path: half });
+      await d.vectors.setClipPath(vector, { path: clip });
+      const locations = [[50, 40], [56, 46], [45, 46], [51, 28], [61, 41], [43, 56], [63, 51]];
+      const before = await Promise.all(locations.map((point) => d.image.pickComposite(point)));
+      assert(before.some(({ bytes }) => bytes[3] === 255) && before.some(({ bytes }) => bytes[3] === 0), "mask samples do not exercise inside and outside");
+      const start = await d.snapshotHash();
+      const baked = await d.image.rasterize(vector);
+      const node = d.getSnapshot().nodes.get(vector);
+      assert(node.type === "raster" && node.parent === group, "lost layer or parent");
+      assert(baked.bounds.x < 25 && baked.bounds.x + baked.bounds.width > 65, "bounds lost the rotated shape");
+      for (const [i, point] of locations.entries()) {
+        const after = (await d.image.pickComposite(point)).bytes;
+        assert(before[i].bytes.every((value, channel) => Math.abs(value - after[channel]) <= 1), `rotated mask sample ${point}: ${before[i].bytes} vs ${after}`);
+      }
+      const bakedHash = await d.snapshotHash();
+      const target = blobTarget();
+      await d.save(target);
+      await d.undo();
+      assert(await d.snapshotHash() === start, "rotated rasterize Undo");
+      d = await engine.open(target.blob);
+      assert(await d.snapshotHash() === bakedHash, "rotated raster survives reopening");
     });
     const addBakedText = async (value = "A", spans = []) => {
       d = await engine.createDocument({ width: 320, height: 64 });

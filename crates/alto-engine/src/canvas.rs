@@ -158,17 +158,22 @@ pub struct Rasterizers<'a> {
 
 /// The pixels a vector can touch, in node-local coordinates. Generous by design: the
 /// result's image range only has to contain them.
-fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
+fn vector_extent(paths: &[StyledPath], transform: Affine2) -> Result<ImageBounds, EngineError> {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for path in paths {
         let margin = path.stroke.as_ref().map_or(1.0, |s| {
             f64::from(s.width) * 0.5 * f64::from(s.miter_limit).max(1.5) + 1.0
         });
+        let [a, b, c, d, _, _] = transform.0;
+        // Transform the stroke margin's enclosing square as well as its path.
+        let mx = margin * (a.abs() + c.abs());
+        let my = margin * (b.abs() + d.abs());
         let mut add = |x: f64, y: f64| {
-            x0 = x0.min(x - margin);
-            y0 = y0.min(y - margin);
-            x1 = x1.max(x + margin);
-            y1 = y1.max(y + margin);
+            let [x, y] = transform.apply([x, y]);
+            x0 = x0.min(x - mx);
+            y0 = y0.min(y - my);
+            x1 = x1.max(x + mx);
+            y1 = y1.max(y + my);
         };
         for command in &path.data.commands {
             match *command {
@@ -197,16 +202,87 @@ fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
         return Err(err("INVALID_ARGUMENT", "the vector layer is empty"));
     }
     let (left, top) = (x0.floor(), y0.floor());
+    if [left, top]
+        .into_iter()
+        .any(|origin| !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&origin))
+    {
+        return Err(err(
+            "RESOURCE_LIMIT",
+            "vector bounds exceed the image range",
+        ));
+    }
+    let width = x1.ceil() - left;
+    let height = y1.ceil() - top;
+    if ![width, height]
+        .into_iter()
+        .all(|size| (1.0..=65536.0).contains(&size))
+    {
+        return Err(err(
+            "RESOURCE_LIMIT",
+            "vector bounds exceed the image range",
+        ));
+    }
     let bounds = ImageBounds {
         x: left as i32,
         y: top as i32,
-        width: (x1.ceil() - left) as u32,
-        height: (y1.ceil() - top) as u32,
+        width: width as u32,
+        height: height as u32,
     };
     bounds
         .validate()
         .map_err(|e| err("RESOURCE_LIMIT", &e.to_string()))?;
     Ok(bounds)
+}
+
+fn fixed_translation(matrix: FixedAffine) -> Option<(i32, i32)> {
+    const SCALE: i64 = 1 << 16;
+    let [x, y] = matrix.t;
+    if matrix.m != FixedAffine::IDENTITY.m || x % SCALE != 0 || y % SCALE != 0 {
+        return None;
+    }
+    Some((
+        i32::try_from(x / SCALE).ok()?,
+        i32::try_from(y / SCALE).ok()?,
+    ))
+}
+
+fn affine_from_fixed(fixed: FixedAffine) -> Affine2 {
+    let [a, b, c, d] = fixed.m.map(|value| value as f64 / (1u64 << 32) as f64);
+    let [x, y] = fixed.t.map(|value| value as f64 / f64::from(1u32 << 16));
+    Affine2([a, b, c, d, x, y])
+}
+
+/// Move local masks onto the parent pixel grid, preserving the renderer's
+/// fixed-point composition. Unlinked pixel masks already use document coordinates.
+fn bake_relocate(node: &mut Node, local: FixedAffine) -> Result<(), EngineError> {
+    let props = &mut node.props;
+    if props
+        .effects
+        .iter()
+        .any(|effect| effect.selection().is_some())
+    {
+        return Err(unsupported(
+            "a layer with a limited effect cannot be rasterized under a transform",
+        ));
+    }
+    let relocate = |transform: &mut Affine2| -> Result<(), EngineError> {
+        let fixed = FixedAffine::from_affine(*transform)
+            .and_then(|mask| local.concat(mask))
+            .ok_or_else(|| unsupported("a relocated mask transform would be out of range"))?;
+        *transform = affine_from_fixed(fixed);
+        Ok(())
+    };
+    if props.mask_linked && props.mask.is_some() {
+        relocate(&mut props.mask_transform)?;
+    }
+    if let Some(mask) = &mut props.vector_mask {
+        relocate(&mut mask.transform)?;
+    }
+    if let Some(path) = &mut props.clip_path {
+        relocate(&mut path.transform)?;
+    }
+    props.transform = Affine2::default();
+    Ok(())
 }
 
 /// Straight RGBA8 tiles of a vector, on the node's local pixel grid.
@@ -914,18 +990,29 @@ impl Engine {
         unlocked(self, h, id)?;
         let doc = self.document(h)?;
         let node = doc.node(id)?.clone();
-        if node.parent.is_none() {
-            return Err(err("INVALID_ARGUMENT", "the root cannot be rasterized"));
-        }
+        let parent = node
+            .parent
+            .ok_or_else(|| err("INVALID_ARGUMENT", "the root cannot be rasterized"))?;
         match &node.kind {
             NodeKind::Vector { paths } => {
-                // Only the content changes kind. Opacity, blend, masks, effects and the
-                // transform stay on the node and mean the same on the new pixels.
-                let (matrix, offset) = self.pixel_aligned_world(h, id)?;
-                let bounds = vector_extent(paths)?;
+                let matrix = world(self, h, id)?;
+                let mut next = node.clone();
+                let (offset, bounds_transform) = if let Some(offset) = fixed_translation(matrix) {
+                    // Retain the local pixel grid and all properties for an aligned vector.
+                    (offset, Affine2::default())
+                } else {
+                    let parent_world = world(self, h, parent)?;
+                    let offset = fixed_translation(parent_world).ok_or_else(|| {
+                        unsupported("a vector's ancestors must be whole-pixel translations")
+                    })?;
+                    let local = FixedAffine::from_affine(node.props.transform)
+                        .ok_or_else(|| err("INVALID_ARGUMENT", "image transform out of range"))?;
+                    bake_relocate(&mut next, local)?;
+                    (offset, affine_from_fixed(local))
+                };
+                let bounds = vector_extent(paths, bounds_transform)?;
                 let out = vector_tiles(paths, bounds, matrix, offset, rasterizers.vector)?;
                 let tiles = stage_map(self, stage, out)?;
-                let mut next = node.clone();
                 next.kind = NodeKind::Raster { bounds, tiles };
                 Ok(PreparedOps {
                     stage,
@@ -1026,7 +1113,7 @@ impl Engine {
                         NodeKind::Vector { paths } => {
                             plain_props(child)?;
                             let (matrix, offset) = self.pixel_aligned_world(h, child.id)?;
-                            let b = vector_extent(paths)?;
+                            let b = vector_extent(paths, Affine2::default())?;
                             let out = vector_tiles(paths, b, matrix, offset, rasterizers.vector)?;
                             (b, stage_map(self, stage, out)?)
                         }
@@ -1782,6 +1869,48 @@ mod tests {
         assert!(e.document(h).unwrap().node(text).is_err());
         e.undo(h).unwrap();
         assert_eq!(e.snapshot(h).unwrap(), before);
+    }
+
+    #[test]
+    fn vector_bake_keeps_an_unlinked_mask_in_document_coordinates() {
+        let mut node = Node::vector("vector", vec![]);
+        let transform = Affine2([1.0, 0.5, 0.25, 1.5, 13.25, -4.0]);
+        let mask = Affine2([1.0, 0.0, 0.0, 1.0, 9.0, 17.0]);
+        node.props.transform = transform;
+        node.props.mask = Some(TileMap::new(PixelFormat::R8));
+        node.props.mask_linked = false;
+        node.props.mask_transform = mask;
+        bake_relocate(&mut node, FixedAffine::from_affine(transform).unwrap()).unwrap();
+        assert_eq!(node.props.transform, Affine2::default());
+        assert_eq!(node.props.mask_transform, mask);
+    }
+
+    #[test]
+    fn vector_extent_includes_the_transformed_stroke_margin() {
+        let path = StyledPath {
+            data: alto_vector::PathData::from_svg("M0 0 L20 10 L15 30").unwrap(),
+            fill: None,
+            stroke: Some(alto_vector::Stroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 6.0,
+                cap: Default::default(),
+                join: Default::default(),
+                miter_limit: 3.0,
+                dash: None,
+            }),
+            fill_rule: Default::default(),
+        };
+        let transform = Affine2([1.0, 0.5, -0.75, 2.0, 4.0, -5.0]);
+        let extent = vector_extent(std::slice::from_ref(&path), transform).unwrap();
+        for point in [[-10.0, -10.0], [29.5, 0.5], [5.0, 39.0], [24.0, 39.0]] {
+            let [x, y] = transform.apply(point);
+            assert!(extent.contains(x.floor() as i32, y.floor() as i32));
+        }
+        let too_wide = Affine2([5000.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            code(vector_extent(&[path], too_wide).unwrap_err()),
+            "RESOURCE_LIMIT"
+        );
     }
 
     #[test]
