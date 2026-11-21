@@ -436,6 +436,11 @@ jobs:
       - name: Enable Safari WebDriver
         if: matrix.browser == 'safari'
         run: |
+          # GH-hosted Safari has these WebKit APIs disabled in its automation
+          # profile; opt the automation profile into the shipped APIs.
+          defaults write com.apple.Safari WebKitPreferences.WebGPUEnabled -bool true
+          defaults write com.apple.Safari WebKitPreferences.OffscreenCanvasEnabled -bool true
+          defaults write com.apple.Safari WebKitPreferences.OffscreenCanvasInWorkersEnabled -bool true
           sudo safaridriver --enable
           safaridriver --port 4444 > "$RUNNER_TEMP/safaridriver.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/webdriver.pid"
