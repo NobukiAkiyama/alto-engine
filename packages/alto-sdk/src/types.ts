@@ -189,6 +189,7 @@ export type Effect =
   | ({ type: "high_pass"; radius?: number } & EffectScope)
   | ({ type: "unsharp_mask"; radius?: number; amount?: number; threshold?: number } & EffectScope)
   | ({ type: "motion_blur"; angle?: number; distance?: number } & EffectScope)
+  | ({ type: "noise"; amount?: number; seed?: number; monochrome?: boolean } & EffectScope)
   | ({ type: "color_adjust"; brightness?: number; contrast?: number; saturation?: number } & EffectScope)
   | ({
       type: "levels";

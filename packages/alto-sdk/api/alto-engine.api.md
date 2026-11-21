@@ -518,6 +518,11 @@ export type Effect = ({
     angle?: number;
     distance?: number;
 } & EffectScope) | ({
+    type: "noise";
+    amount?: number;
+    seed?: number;
+    monochrome?: boolean;
+} & EffectScope) | ({
     type: "color_adjust";
     brightness?: number;
     contrast?: number;

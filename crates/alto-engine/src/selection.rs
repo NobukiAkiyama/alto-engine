@@ -62,6 +62,17 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             distance_q8: alto_core::q_from_f64_bits(distance.to_bits(), 8)
                 .expect("validated motion-blur distance") as u32,
         },
+        alto_doc::Effect::Noise {
+            amount,
+            seed,
+            monochrome,
+            ..
+        } => REffectKind::Noise {
+            seed: *seed,
+            amount_q14: alto_core::q_from_f64_bits(amount.to_bits(), 14)
+                .expect("validated noise amount") as u32,
+            monochrome: *monochrome,
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,

@@ -46,6 +46,13 @@ pub enum Effect {
         selection: Option<TileMap>,
         extra: serde_json::Map<String, serde_json::Value>,
     },
+    Noise {
+        amount: f64,
+        seed: u32,
+        monochrome: bool,
+        selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
     ColorAdjust {
         brightness: f64,
         contrast: f64,
@@ -94,6 +101,28 @@ fn effect_f64(
         .filter(|n| n.is_finite())
         .ok_or_else(|| format!("Invalid {key}"))
 }
+fn effect_u32(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<u32, String> {
+    let Some(value) = obj.remove(key) else {
+        return Ok(0);
+    };
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("Invalid {key}"))
+}
+fn effect_bool(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    default: bool,
+) -> Result<bool, String> {
+    let Some(value) = obj.remove(key) else {
+        return Ok(default);
+    };
+    value.as_bool().ok_or_else(|| format!("Invalid {key}"))
+}
 fn effect_selection(
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<Option<TileMap>, String> {
@@ -121,6 +150,13 @@ fn effect_from_map(mut obj: serde_json::Map<String, serde_json::Value>) -> Resul
         "motion_blur" => Ok(Effect::MotionBlur {
             angle: effect_f64(&mut obj, "angle", 0.0)?,
             distance: effect_f64(&mut obj, "distance", 4.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "noise" => Ok(Effect::Noise {
+            amount: effect_f64(&mut obj, "amount", 0.1)?,
+            seed: effect_u32(&mut obj, "seed")?,
+            monochrome: effect_bool(&mut obj, "monochrome", true)?,
             selection: effect_selection(&mut obj)?,
             extra: obj,
         }),
@@ -261,6 +297,18 @@ impl Serialize for Effect {
                 map.insert("distance".into(), serde_json::json!(distance));
                 ("motion_blur", selection, extra)
             }
+            Self::Noise {
+                amount,
+                seed,
+                monochrome,
+                selection,
+                extra,
+            } => {
+                map.insert("amount".into(), serde_json::json!(amount));
+                map.insert("seed".into(), serde_json::json!(seed));
+                map.insert("monochrome".into(), serde_json::json!(monochrome));
+                ("noise", selection, extra)
+            }
             Self::Curves {
                 channel,
                 points,
@@ -306,7 +354,10 @@ impl Effect {
     pub(crate) fn requires_format_eight(&self) -> bool {
         matches!(
             self,
-            Self::HighPass { .. } | Self::UnsharpMask { .. } | Self::MotionBlur { .. }
+            Self::HighPass { .. }
+                | Self::UnsharpMask { .. }
+                | Self::MotionBlur { .. }
+                | Self::Noise { .. }
         )
     }
 
@@ -318,6 +369,7 @@ impl Effect {
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::MotionBlur { selection, .. }
+            | Self::Noise { selection, .. }
             | Self::HueSaturation { selection, .. }
             | Self::Invert { selection, .. }
             | Self::Curves { selection, .. } => selection.as_ref(),
@@ -329,6 +381,7 @@ impl Effect {
             | Self::HighPass { selection, .. }
             | Self::UnsharpMask { selection, .. }
             | Self::MotionBlur { selection, .. }
+            | Self::Noise { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -346,7 +399,8 @@ impl Effect {
             | Self::HueSaturation { extra, .. }
             | Self::Invert { extra, .. }
             | Self::Curves { extra, .. }
-            | Self::MotionBlur { extra, .. } => extra,
+            | Self::MotionBlur { extra, .. }
+            | Self::Noise { extra, .. } => extra,
         };
         if !extra.is_empty() {
             return Err(DocError::Unsupported("unknown effect fields".into()));
@@ -387,6 +441,7 @@ impl Effect {
                     return Err(DocError::Invalid("distance must be in [0, 128]".into()));
                 }
             }
+            Self::Noise { amount, .. } => finite("amount", *amount, 0.0, 1.0)?,
             Self::ColorAdjust {
                 brightness,
                 contrast,
@@ -468,6 +523,7 @@ mod tests {
             r#"{"type":"gaussian_blur","radius":12,"legacy":true}"#,
             r#"{"type":"high_pass","legacy":true}"#,
             r#"{"type":"motion_blur","angle":45,"distance":32}"#,
+            r#"{"type":"noise","amount":0.1,"seed":4294967295,"monochrome":true}"#,
             r#"{"type":"unsharp_mask","legacy":true}"#,
             r#"{"type":"color_adjust","brightness":0.25,"contrast":1.5,"saturation":0.5}"#,
             r#"{"type":"color_adjust"}"#,
@@ -594,6 +650,39 @@ mod tests {
     }
 
     #[test]
+    fn noise_defaults_parse_and_roundtrip() {
+        let effect: Effect = serde_json::from_str(r#"{"type":"noise"}"#).unwrap();
+        assert_eq!(
+            effect,
+            Effect::Noise {
+                amount: 0.1,
+                seed: 0,
+                monochrome: true,
+                selection: None,
+                extra: Default::default(),
+            }
+        );
+        effect.validate().unwrap();
+        let json = serde_json::to_string(&effect).unwrap();
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), effect);
+    }
+
+    #[test]
+    fn validate_rejects_noise_seed_above_u32() {
+        assert!(serde_json::from_str::<Effect>(r#"{"type":"noise","seed":4294967296}"#).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_bool_monochrome() {
+        for raw in [
+            r#"{"type":"noise","monochrome":0}"#,
+            r#"{"type":"noise","monochrome":"true"}"#,
+        ] {
+            assert!(serde_json::from_str::<Effect>(raw).is_err());
+        }
+    }
+
+    #[test]
     fn validate_rejects_motion_blur_distance_and_angle_outside_range() {
         let validate = |angle, distance| {
             Effect::MotionBlur {
@@ -686,6 +775,13 @@ mod tests {
             selection: None,
             extra: Default::default(),
         };
+        let noise = Effect::Noise {
+            amount: 0.25,
+            seed: u32::MAX,
+            monochrome: false,
+            selection: None,
+            extra: Default::default(),
+        };
         for (effect, adjustment) in [
             (high_pass.clone(), false),
             (high_pass, true),
@@ -693,6 +789,8 @@ mod tests {
             (unsharp, true),
             (motion_blur.clone(), false),
             (motion_blur, true),
+            (noise.clone(), false),
+            (noise, true),
         ] {
             let mut layer = Node::raster("Format eight effect");
             if adjustment {
