@@ -727,6 +727,18 @@ export interface FontAsset {
     readonly warnings: readonly AltoWarning[];
 }
 
+// @public
+export interface FontAxis {
+    // (undocumented)
+    default: number;
+    // (undocumented)
+    max: number;
+    // (undocumented)
+    min: number;
+    // (undocumented)
+    tag: string;
+}
+
 // @public (undocumented)
 export interface FontFeature {
     // (undocumented)
@@ -737,6 +749,7 @@ export interface FontFeature {
 
 // @public (undocumented)
 export interface FontInfo {
+    axes?: FontAxis[];
     // (undocumented)
     embedding: "installable" | "restricted" | "preview_and_print" | "editable";
     // (undocumented)

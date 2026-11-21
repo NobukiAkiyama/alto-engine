@@ -259,6 +259,32 @@ fn font_inspection_reports_names_and_vertical_support() {
 }
 
 #[test]
+fn font_inspection_reports_variable_weight_axis() {
+    let data = include_bytes!("../../../tests/fonts/AltoTestVariable.ttf");
+    let variable = inspect(data, 0).unwrap();
+    assert_eq!(variable.family, "Alto Test Variable");
+    assert_eq!(
+        variable.axes,
+        [alto_text::FontAxis {
+            tag: "wght".into(),
+            min: 100.0,
+            default: 400.0,
+            max: 900.0,
+        }]
+    );
+    let wire = serde_json::to_value(&variable).unwrap();
+    assert_eq!(wire["axes"][0]["default"], 400.0);
+    let plain = serde_json::to_value(inspect(LATIN, 0).unwrap()).unwrap();
+    assert!(plain.get("axes").is_none());
+    assert!(
+        serde_json::from_value::<alto_text::FontInfo>(plain)
+            .unwrap()
+            .axes
+            .is_empty()
+    );
+}
+
+#[test]
 fn restricted_fstype_is_reported() {
     let mut bytes = LATIN.to_vec();
     let tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;

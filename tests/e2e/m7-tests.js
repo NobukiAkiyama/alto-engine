@@ -62,6 +62,19 @@ export async function runM7Tests(engine, log) {
       try { await doc.transact("remove font", (tx) => { tx.ops.push({ type: "set_asset", id: jp.id, record: null }); tx.setText(id, vertical("縦", [jp.id])); }); } catch { refused = true; }
       assert(refused, "font removed while in use");
     });
+    await test("variable font import reports the selected face's axis range", async () => {
+      const response = await fetch("../../tests/fonts/AltoTestVariable.ttf");
+      assert(response.ok, "missing variable font fixture");
+      const font = await engine.assets.importFont(await response.blob());
+      try {
+        const [weight] = font.info.axes ?? [];
+        assert(font.info.axes?.length === 1 && weight.tag === "wght", "unexpected axis list");
+        assert(weight.min === 100 && weight.default === 400 && weight.max === 900, "wrong weight range");
+        assert(latin.info.axes === undefined && jp.info.axes === undefined, "static faces reported axes");
+      } finally {
+        await engine.assets.releaseImport(font);
+      }
+    });
     await test("vertical kuten / touten / brackets / long vowel sit where Japanese typesetting puts them", async () => {
       await setup(512, 900);
       // Column x 50..200 (centre 125), cells of 100 px from y = 50.

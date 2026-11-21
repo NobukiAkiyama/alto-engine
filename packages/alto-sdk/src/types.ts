@@ -137,6 +137,13 @@ export interface TextContent {
   /** Isolated runs of up to this many ASCII digits become tate-chu-yoko (0–4, default 2). */
   auto_tcy?: number;
 }
+/** An OpenType variation axis and its range in the selected font face's design units. */
+export interface FontAxis {
+  tag: string;
+  min: number;
+  default: number;
+  max: number;
+}
 export interface FontInfo {
   family: string;
   subfamily: string;
@@ -149,6 +156,8 @@ export interface FontInfo {
   has_vertical_metrics: boolean;
   has_vertical_alternates: boolean;
   outline: string;
+  /** Present when the face declares variation axes. */
+  axes?: FontAxis[];
 }
 export interface TextInfo {
   lines: { start: number; end: number; block: [number, number]; baseline: number }[];
