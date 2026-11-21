@@ -23,7 +23,7 @@ Alto Engine は、WebGPUが利用できる **Chrome、Edge、Firefox、Safari** 
 - Chromium：基本機能57件と画像バージョン30件が成功。先行実行では全機能433件、Rust 538件、Node SDK 82件、ベクター比較10件、埋め込み例2件が成功。
 - Safari/Firefox：M7/M8と191ケースの描画パリティは先行検証で成功。
 
-この検証は特定のMac・OS・GPU環境での実行結果です。Firefox/Safariを含むブラウザー行列は現在のCIでは自動実行していません。CIのブラウザー検証はChrome for TestingとSwiftShaderを使います。上記の結果は、すべてのGPU・OS・ブラウザー版での一致や、Chromeと同一の全スイート完走を保証するものではありません。未完了の項目や新しい失敗は[Issue #168](https://github.com/NobukiAkiyama/alto-engine/issues/168)で追跡します。
+この検証は特定のMac・OS・GPU環境での実行結果です。PRとmainのCIではChrome for Testing/SwiftShaderに加えて、macOS上のSafariとFirefoxでも通常の機能・画素スイートを実行します。GPUプロセス監視・強制クラッシュなどCDPに依存する試験はChromeだけです。上記の結果は、すべてのGPU・OS・ブラウザー版での一致や、全ブラウザーで同じ診断試験を行うことを保証するものではありません。未完了の項目や新しい失敗は[Issue #168](https://github.com/NobukiAkiyama/alto-engine/issues/168)で追跡します。
 
 ## 手元で確認する
 
@@ -36,4 +36,4 @@ sh scripts/run.sh
 
 `http://localhost:8765/examples/browser-playground/` にアクセスし、「検証と計測」から機能テストとM5〜M8のテストを実行します。ブラウザーの開発者コンソールにWebGPUが利用できない旨が表示される場合は、ブラウザーのWebGPU設定とGPUドライバーを確認してください。
 
-自動ブラウザー検証スクリプト `node scripts/verify-browser.mjs --functional` は、現状Chromeを起動します。Safari/Firefoxの確認は各ブラウザーでPlaygroundを開いて行ってください。
+Chromeの自動検証は `node scripts/verify-browser.mjs --functional`、Safari/FirefoxはWebDriverを起動したうえで `node scripts/verify-browser-webdriver.mjs --browser=safari` または `--browser=firefox` を実行します。後者は機能、画像バージョン、M5〜M8、埋め込み例、パリティの各スイートを実行します。
