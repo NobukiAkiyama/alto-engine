@@ -89,7 +89,8 @@ fn apply(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
 /// The baker's version, recorded in each bake (diagnostic only). Bump it, update
 /// `tests/parity/text-bake.txt` and say why when the same input bakes to other
 /// bytes (a dependency version, a rounding change).
-pub const BAKER_VERSION: u16 = 1;
+/// Version 2 orders sideways RTL runs in vertical text.
+pub const BAKER_VERSION: u16 = 2;
 const SYNTH_RULE: u16 = 0xFF02;
 /// The vector schema's per-path command limit (`placed` in `alto-text`).
 const BAKE_CHUNK: usize = 4000;

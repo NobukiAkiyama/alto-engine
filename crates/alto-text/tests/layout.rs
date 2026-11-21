@@ -583,6 +583,58 @@ fn bidi_runs_are_reordered_visually() {
 }
 
 #[test]
+fn vertical_rtl_reorders_sideways_runs_between_upright_clusters() {
+    let f = fixture();
+    let c = content("吾אב猫גד回", vec![f.latin, f.jp], true);
+    let l = layout(&c, &f.set);
+    let cluster = |offset| l.clusters.iter().find(|c| c.start == offset).unwrap();
+    let visual_order = [0, 2, 1, 3, 5, 4, 6];
+    assert!(
+        visual_order
+            .windows(2)
+            .all(|pair| { cluster(pair[0]).inline[0] < cluster(pair[1]).inline[0] })
+    );
+    for offset in visual_order {
+        assert_eq!(cluster(offset).rtl, [1, 2, 4, 5].contains(&offset));
+    }
+    assert!(!l.lines[0].rtl);
+}
+
+#[test]
+fn vertical_tcy_keeps_its_column_position_between_rtl_runs() {
+    let f = fixture();
+    let c = content("אב12גד", vec![f.latin, f.jp], true);
+    let l = layout(&c, &f.set);
+    let mut visual: Vec<_> = l.clusters.iter().collect();
+    visual.sort_by(|a, b| a.inline[0].total_cmp(&b.inline[0]));
+    assert_eq!(
+        visual
+            .iter()
+            .map(|c| (c.start, c.end, c.rtl))
+            .collect::<Vec<_>>(),
+        [
+            (1, 2, true),
+            (0, 1, true),
+            (2, 4, false),
+            (5, 6, true),
+            (4, 5, true)
+        ]
+    );
+}
+
+#[test]
+fn vertical_rtl_caret_and_hit_test_follow_the_reversed_inline_axis() {
+    let f = fixture();
+    let c = content("אבג", vec![f.latin], true);
+    let l = layout(&c, &f.set);
+    let start = caret(&l, &c.text, 0).unwrap();
+    let end = caret(&l, &c.text, 3).unwrap();
+    assert!(start.a[1] > end.a[1]);
+    assert_eq!(hit_test(&l, &c.text, start.a), 0);
+    assert_eq!(hit_test(&l, &c.text, end.a), 3);
+}
+
+#[test]
 fn selection_hit_test_caret_and_rectangles() {
     let f = fixture();
     let c = content("あいう\nえお", vec![f.jp], false);

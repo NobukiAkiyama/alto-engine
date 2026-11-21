@@ -911,6 +911,11 @@ export async function runParityTests(engine, log) {
             style: { ...style([l, j], 40), italic_skew: -24.75 },
             writing_mode: "vertical_rl",
           }),
+          "text-v3-vertical-rtl": (l, j) => ({
+            text: "吾אבג猫",
+            style: style([l, j], 40),
+            writing_mode: "vertical_rl",
+          }),
         };
         assert(want.size === Object.keys(texts).length, `fixture has ${want.size} rows`);
         const failures = [];
