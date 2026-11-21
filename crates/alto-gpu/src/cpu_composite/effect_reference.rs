@@ -84,6 +84,298 @@ fn motion_blur_q14(
     sum.map(|value| (value + taps / 2) / taps)
 }
 
+fn pcg32(input: u32) -> u32 {
+    let state = input.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    let shift = (state >> 28) + 4;
+    let word = ((state >> shift) ^ state).wrapping_mul(277_803_737);
+    (word >> 22) ^ word
+}
+
+fn noise_delta_q14(hash: u32, amount_q14: i32) -> i32 {
+    let centered = 2 * ((hash >> 16) as i32) - 65_535;
+    (centered * amount_q14 + 32_768).div_euclid(65_536)
+}
+
+fn noise_q14(
+    pixel: [i64; 4],
+    x_doc: i64,
+    y_doc: i64,
+    seed: u32,
+    amount_q14: i32,
+    monochrome: bool,
+) -> [i64; 4] {
+    if amount_q14 == 0 || pixel[3] == 0 {
+        return pixel;
+    }
+    let alpha = pixel[3];
+    let src = straight(pixel);
+    let h = pcg32((x_doc as u32) ^ pcg32((y_doc as u32) ^ seed));
+    let mut output = [0; 4];
+    for channel in 0..3 {
+        let sample = if monochrome {
+            h
+        } else {
+            pcg32(h ^ (channel as u32 + 1))
+        };
+        let value = (src[channel] + i64::from(noise_delta_q14(sample, amount_q14))).clamp(0, Q);
+        output[channel] = (value * alpha + Q / 2) / Q;
+    }
+    output[3] = alpha;
+    output
+}
+
+#[test]
+fn pcg32_matches_known_vectors() {
+    for (input, expected) in [
+        (0, 129_708_002),
+        (1, 2_831_084_092),
+        (u32::MAX, 3_861_530_882),
+        (1_234_567, 3_336_649_100),
+    ] {
+        assert_eq!(pcg32(input), expected, "input {input}");
+    }
+}
+
+#[test]
+fn pcg32_matches_the_shader_known_vectors() {
+    use super::{Gpu, map_readback};
+
+    let gpu = match Gpu::new() {
+        Ok(Some(gpu)) => gpu,
+        Ok(None) if !cfg!(target_os = "macos") => {
+            eprintln!("PCG32 GPU comparison skipped: no adapter");
+            return;
+        }
+        Ok(None) => panic!("PCG32 GPU comparison requires an adapter"),
+        Err(error) => panic!("PCG32 GPU setup failed: {error}"),
+    };
+    let production = include_str!("../../shaders/effects-q14.wgsl");
+    let start = production.find("fn pcg32(v: u32) -> u32").unwrap();
+    let end = start + production[start..].find("fn noise_doc_coord").unwrap();
+    let helper = &production[start..end];
+    let shader = format!(
+        r#"
+{helper}
+@group(0) @binding(0) var<storage, read_write> output: array<u32>;
+@compute @workgroup_size(4)
+fn main(@builtin(global_invocation_id) id: vec3u) {{
+    let inputs = array<u32, 4>(0u, 1u, 0xffffffffu, 1234567u);
+    output[id.x] = pcg32(inputs[id.x]);
+}}
+"#
+    );
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PCG32 known vectors"),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("PCG32 known vectors"),
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let size = (4 * std::mem::size_of::<u32>()) as u64;
+    let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("PCG32 results"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("PCG32 readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("PCG32 results"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output.as_entire_binding(),
+        }],
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("PCG32 comparison"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("PCG32 comparison"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+    gpu.queue.submit(Some(encoder.finish()));
+    map_readback(&gpu.device, &readback).unwrap();
+    let mapped = readback.slice(..).get_mapped_range().unwrap();
+    let actual: &[u32] = bytemuck::cast_slice(&mapped);
+    assert_eq!(
+        actual,
+        &[129_708_002, 2_831_084_092, 3_861_530_882, 3_336_649_100]
+    );
+    drop(mapped);
+    readback.unmap();
+}
+
+#[test]
+fn noise_zero_amount_is_identity() {
+    let pixel = [1024, 4096, 8192, 12_000];
+    assert_eq!(noise_q14(pixel, -17, 32, u32::MAX, 0, false), pixel);
+}
+
+#[test]
+fn noise_keeps_alpha_and_transparent_pixels_zero() {
+    let pixel = [1000, 2000, 3000, 8000];
+    let result = noise_q14(pixel, 3, -9, 11, 4096, false);
+    assert_eq!(result[3], pixel[3]);
+    assert_eq!(noise_q14([0; 4], 3, -9, 11, 4096, false), [0; 4]);
+}
+
+#[test]
+fn noise_monochrome_adds_the_same_value_to_all_channels() {
+    let pixel = [4096, 4096, 4096, Q];
+    let result = noise_q14(pixel, 21, 7, 0xdead_beef, 4096, true);
+    assert_eq!(result[0], result[1]);
+    assert_eq!(result[1], result[2]);
+}
+
+#[test]
+fn noise_is_independent_of_tile_origin_and_repeats_at_zoom_in() {
+    let hash_at = |ox: i64, oy: i64, ix: i64, iy: i64, shift: u32, seed: u32| {
+        let x_doc = (ox + ix).div_euclid(1_i64 << shift);
+        let y_doc = (oy + iy).div_euclid(1_i64 << shift);
+        pcg32(x_doc as u32 ^ pcg32(y_doc as u32 ^ seed))
+    };
+    assert_eq!(
+        hash_at(-256, -256, 300, 280, 0, 123),
+        hash_at(0, 0, 44, 24, 0, 123)
+    );
+    assert_eq!(hash_at(32, 20, 0, 0, 2, 123), hash_at(32, 20, 1, 1, 2, 123));
+    assert_eq!(hash_at(32, 20, 1, 1, 2, 123), hash_at(32, 20, 2, 2, 2, 123));
+    assert_eq!(hash_at(32, 20, 2, 2, 2, 123), hash_at(32, 20, 3, 3, 2, 123));
+}
+
+#[test]
+fn noise_reference_matches_renderer_at_level_zero_and_zoom_in() {
+    use super::{byte_q14, premul_byte_q14, scene, v3_test_render_with};
+    use alto_core::{PixelFormat, TileKey};
+    use alto_scene::{RContent, REffect, REffectKind, RFeatures};
+
+    const W: usize = 256;
+    const SEED: u32 = 0xdead_beef;
+    const AMOUNT_Q14: i32 = 8192;
+    let mut bytes = vec![0u8; W * W * 4];
+    for y in 0..W {
+        for x in 0..W {
+            let offset = (y * W + x) * 4;
+            bytes[offset..offset + 4].copy_from_slice(&[
+                (x & 255) as u8,
+                (y & 255) as u8,
+                ((x * 17 + y * 3) & 255) as u8,
+                if (x + y) % 11 == 0 {
+                    0
+                } else {
+                    ((x + 128) & 255) as u8
+                },
+            ]);
+        }
+    }
+    let source: Vec<[i64; 4]> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let alpha = u32::from(p[3]);
+            [
+                i64::from(premul_byte_q14(u32::from(p[0]), alpha)),
+                i64::from(premul_byte_q14(u32::from(p[1]), alpha)),
+                i64::from(premul_byte_q14(u32::from(p[2]), alpha)),
+                i64::from(byte_q14(alpha)),
+            ]
+        })
+        .collect();
+    let mut store = alto_raster::ObjectStore::default();
+    let hash = store.insert_tile(&alto_raster::TileData::new(PixelFormat::Rgba8, bytes).unwrap());
+    let mut document = scene(
+        RContent::Tiles(vec![crate::RenderTile {
+            key: TileKey { tx: 0, ty: 0 },
+            hash,
+        }]),
+        RFeatures {
+            effects: vec![REffect {
+                kind: REffectKind::Noise {
+                    seed: SEED,
+                    amount_q14: AMOUNT_Q14 as u32,
+                    monochrome: false,
+                },
+                selection: None,
+            }],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+
+    let level = 0i32;
+    let shift = (-level) as u32;
+    let reference: Vec<u8> = (0..W * W)
+        .flat_map(|i| {
+            let x = ((i % W) as i64).div_euclid(1_i64 << shift);
+            let y = ((i / W) as i64).div_euclid(1_i64 << shift);
+            noise_q14(
+                source[y as usize * W + x as usize],
+                x,
+                y,
+                SEED,
+                AMOUNT_Q14,
+                false,
+            )
+            .map(|v| ((v * 255 + Q / 2) / Q) as u8)
+        })
+        .collect();
+    if let Some(gpu) = v3_test_render_with(&document, &store, (level, 0, 0)) {
+        assert_eq!(gpu.len(), reference.len());
+        if let Some(i) = gpu
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.as_chunks::<4>().0)
+            .position(|(actual, expected)| actual != expected)
+        {
+            panic!(
+                "noise pixel at level {level} ({}, {}): GPU {:?}, reference {:?}",
+                i % W,
+                i / W,
+                &gpu[i * 4..i * 4 + 4],
+                &reference[i * 4..i * 4 + 4],
+            );
+        }
+    }
+
+    // At level -2, each 4x4 display block maps to the same document pixel.
+    // Check this through the real renderer; the standalone coordinate vectors
+    // above check the exact floor-divided PCG inputs.
+    if let Some(gpu) = v3_test_render_with(&document, &store, (-2, 0, 0)) {
+        let pixels = gpu.as_chunks::<4>().0;
+        for y in 0..W {
+            for x in 0..W {
+                let first = pixels[(y / 4 * 4) * W + (x / 4 * 4)];
+                assert_eq!(pixels[y * W + x], first, "zoom-in block at ({x}, {y})");
+            }
+        }
+    }
+}
+
 #[test]
 fn hue_sincos_q14_reference_covers_the_full_angle_domain() {
     for angle in (-11_796_480..=11_796_480).step_by(4096) {

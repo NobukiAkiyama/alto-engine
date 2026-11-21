@@ -1204,6 +1204,49 @@ export function renderMotionBlurV3(image, { angle, distance }, tile = [0, 0], ca
   return out;
 }
 
+/** The FX-3 PCG output permutation; JavaScript arithmetic wraps to u32. */
+export function pcg32(value) {
+  const v = value >>> 0;
+  const state = (Math.imul(v, 747796405) + 2891336453) >>> 0;
+  const word = Math.imul(((state >>> ((state >>> 28) + 4)) ^ state) >>> 0, 277803737) >>> 0;
+  return ((word >>> 22) ^ word) >>> 0;
+}
+
+function noiseDeltaQ14(hash, amountQ14) {
+  const centered = 2 * (hash >>> 16) - 65535;
+  return Math.floor((centered * amountQ14 + 32768) / 65536);
+}
+
+/** Independent level-zero / zoom-in reference for FX-3's document-pixel noise. */
+export function renderNoiseV3(image, { amount = 0.1, seed = 0, monochrome = true }, tile = [0, 0], canvas = [image.w, image.h], level = 0, selection, mask) {
+  const amountQ14 = Number(qFromF64Bits(f64Bits(amount), 14));
+  const shift = Math.max(0, -level);
+  const out = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const gx = tile[0] * 256 + x, gy = tile[1] * 256 + y;
+    const dx = Math.floor(gx / (2 ** shift)), dy = Math.floor(gy / (2 ** shift));
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1] || dx >= image.w || dy >= image.h) continue;
+    const sourceOffset = (dy * image.w + dx) * 4;
+    const input = ingressQ14(image.pixels.subarray(sourceOffset, sourceOffset + 4)).map(BigInt);
+    let filtered = input;
+    if (amountQ14 !== 0 && input[3] !== 0n) {
+      const h = pcg32((dx >>> 0) ^ pcg32((dy >>> 0) ^ (seed >>> 0)));
+      const src = cqStraight(input);
+      filtered = [0n, 0n, 0n, input[3]];
+      for (let channel = 0; channel < 3; channel++) {
+        const sample = monochrome ? h : pcg32(h ^ (channel + 1));
+        const value = BigInt(Math.max(0, Math.min(16384, Number(src[channel]) + noiseDeltaQ14(sample, amountQ14))));
+        filtered[channel] = cqMul(value, input[3]);
+      }
+    }
+    const result = selection
+      ? maskSelectQ14(input, filtered, maskCoverage(mask, gx, gy, { origin: [tile[0] * 256, tile[1] * 256], scale: 2 ** level }))
+      : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
 /** Q14 unsharp mask over the Gaussian-smoothed straight channels. The
  * threshold comparison is per channel, including equality. */
 export function renderUnsharpMaskV3(image, { radius, amount, threshold }, tile = [0, 0], canvas = [256, 256], selection) {
@@ -1726,7 +1769,7 @@ export function fnv64(bytes) {
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
 // Every document effect has an integer v3 stage; selections use mode 22.
-const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "motion_blur", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "motion_blur", "noise", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:

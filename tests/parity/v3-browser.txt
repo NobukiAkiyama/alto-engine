@@ -114,3 +114,11 @@ f7e97465f33ab378 effect-motion-blur-tile-seam (1, 1)
 bb2ed6e1a45a84df effect-motion-blur-selected
 3b89588525810dfa effect-motion-blur-adjustment
 426e4e110a8bc6f0 effect-motion-blur-zero
+5d3e8aa4018b1f65 effect-noise
+584c3be4f09de8a9 effect-noise-color
+c8aec754ad5eacbe effect-noise-selected
+2c2a1225da6e62fd effect-noise-adjustment
+9f623f54a1da6791 effect-noise-tile-seam (0, 0)
+e88a0514e1c02a58 effect-noise-tile-seam (1, 0)
+b9302861ea2cb895 effect-noise-tile-seam (0, 1)
+696ee8682fd63553 effect-noise-tile-seam (1, 1)

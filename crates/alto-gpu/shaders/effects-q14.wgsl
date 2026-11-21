@@ -350,6 +350,46 @@ fn motion_blur_q14(ix: vec2i, settings: vec4i) -> vec4i {
  let taps = 2 * radius + 1;
  return (accum + vec4i(taps / 2)) / taps;
 }
+fn pcg32(v: u32) -> u32 {
+ let state = v * 747796405u + 2891336453u;
+ let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+ return (word >> 22u) ^ word;
+}
+// Add a level-grid pixel index to an i64 ROI origin, then arithmetic-shift by
+// the zoom-in factor. The low word is the signed result modulo 2^32, exactly
+// the bit pattern used by the coordinate hash.
+fn noise_doc_coord(origin_lo: u32, origin_hi: u32, index: i32, shift: u32) -> u32 {
+ let add = bitcast<u32>(index);
+ let lo = origin_lo + add;
+ let carry = select(0u, 1u, lo < origin_lo);
+ let hi = origin_hi + select(0xffffffffu, 0u, index < 0) + carry;
+ if shift == 0u { return lo; }
+ return (lo >> shift) | (hi << (32u - shift));
+}
+fn noise_q14(source: vec4i, ix: vec2i, settings: vec4i) -> vec4i {
+ let amount = settings.y;
+ if amount == 0 { return source; }
+ let alpha = source.a;
+ if alpha == 0 { return vec4i(0); }
+ let origin = bitcast<vec4u>(c.grid[6]);
+ let shift = u32(settings.w);
+ let x = noise_doc_coord(origin.x, origin.y, ix.x, shift);
+ let y = noise_doc_coord(origin.z, origin.w, ix.y, shift);
+ let seed = bitcast<u32>(settings.x);
+ let h = pcg32(x ^ pcg32(y ^ seed));
+ let straight = straight_q(source);
+ var output = vec4i(0);
+ for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+  var sample = h;
+  if settings.z == 0 { sample = pcg32(h ^ (channel + 1u)); }
+  let centered = 2 * i32(sample >> 16u) - 65535;
+  let delta = floor_div(centered * amount + 32768, 65536);
+  let value = clamp(straight[channel] + delta, 0, Q14_ONE);
+  output[channel] = mul_q(value, alpha);
+ }
+ output.a = alpha;
+ return output;
+}
 fn resample_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];let m=u32(settings.z);
  let shift=i32(1u<<m);
@@ -397,5 +437,6 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if c.info.x==34u{out=high_pass_q14(texel_a(ix),texel_b(ix));}
  else if c.info.x==35u{out=unsharp_mask_q14(texel_a(ix),texel_b(ix),settings);}
  else if c.info.x==36u{out=motion_blur_q14(ix,settings);}
+ else if c.info.x==37u{out=noise_q14(texel_a(ix),ix,settings);}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

@@ -317,11 +317,11 @@ v3 のレベル 1 以上は子の縮小で作る（`compose_from_children`）の
 
 **Interfaces:** Produces `Effect::Noise { amount, seed, monochrome, selection, extra }`、`REffectKind::Noise { seed, amount_q14, monochrome }`、ノイズのモード、`pcg32`（Rust、WGSL、JS）。
 
-- [ ] 試験 `pcg32_matches_known_vectors`（3実装で同じ既知ベクトル。入力 0、1、0xFFFFFFFF、1234567 の出力を Rust の試験で固定し、JS と WGSL の dispatch で一致を確かめる）。
-- [ ] 試験 `noise_is_independent_of_tile_origin`（同じ文書画素が、異なるタイル分割・異なる ROI の原点で同じ値）。
-- [ ] 試験 `noise_zero_amount_is_identity`、`noise_keeps_alpha`、`noise_monochrome_adds_the_same_value_to_all_channels`、`noise_at_zoom_in_repeats_one_document_pixel`（レベル −2 で 4×4 格子画素が同じ値）。
-- [ ] 試験（`effect.rs`）`validate_rejects_noise_seed_above_u32`、`validate_rejects_non_bool_monochrome`。
-- [ ] parity 症例 `effect-noise`、`effect-noise-color`、`effect-noise-tile-seam`。
+- [x] 試験 `pcg32_matches_known_vectors`（Rust と WGSL の dispatch を固定ベクトルで照合。JS は parity suite で同じベクトルを検査）。
+- [x] 試験 `noise_is_independent_of_tile_origin`（同じ文書画素が、異なるタイル分割・異なる ROI の原点で同じ値）。
+- [x] 試験 `noise_zero_amount_is_identity`、`noise_keeps_alpha`、`noise_monochrome_adds_the_same_value_to_all_channels`、`noise_at_zoom_in_repeats_one_document_pixel`（レベル −2 で 4×4 格子画素が同じ値）。
+- [x] 試験（`effect.rs`）`validate_rejects_noise_seed_above_u32`、`validate_rejects_non_bool_monochrome`。
+- [x] parity 症例 `effect-noise`、`effect-noise-color`、`effect-noise-tile-seam`。
 - [ ] 完了条件・検証コマンドは FX-4 と同じ。
 
 ### 依存

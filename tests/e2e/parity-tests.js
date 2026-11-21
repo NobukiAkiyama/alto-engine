@@ -2,7 +2,7 @@
 // CPU reference. A mismatch names the first pixel and the number of pixels that differ.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderMotionBlurV3, hueSinCosQ14, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderMotionBlurV3, renderNoiseV3, pcg32, hueSinCosQ14, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -1071,6 +1071,11 @@ export async function runParityTests(engine, log) {
       const selection = { kind: "rectangle", x: 40.25, y: 40.75, width: 176.25, height: 175.25, feather };
       const mask = { bytes: featheredRectangle([40.25, 40.75, 216.5, 216], feather) };
       const gradient = colorAdjustGradient();
+      await test("pcg32_matches_known_vectors", async () => {
+        for (const [input, expected] of [[0, 129708002], [1, 2831084092], [0xffffffff, 3861530882], [1234567, 3336649100]]) {
+          assert(pcg32(input) === expected, `pcg32(${input}) = ${pcg32(input)}, expected ${expected}`);
+        }
+      });
       await test("hue_sincos_q14_reference_matches_the_shader_on_all_angles", async () => {
         const bytes = new Uint8Array(5761 * 8);
         const view = new DataView(bytes.buffer);
@@ -1107,14 +1112,21 @@ export async function runParityTests(engine, log) {
         { name: "effect-motion-blur-selected", image: gradient, angle: 90, distance: 8, selection, mask },
         { name: "effect-motion-blur-adjustment", image: gradient, angle: -45, distance: 10, adjustment: true },
         { name: "effect-motion-blur-zero", image: gradient, angle: 0, distance: 0 },
+        { name: "effect-noise", kind: "noise", image: gradient, amount: 0.35, seed: 0x12345678, monochrome: true },
+        { name: "effect-noise-color", kind: "noise", image: gradient, amount: 0.65, seed: 0xdeadbeef, monochrome: false },
+        { name: "effect-noise-selected", kind: "noise", image: gradient, amount: 0.45, seed: 77, monochrome: false, selection, mask },
+        { name: "effect-noise-adjustment", kind: "noise", image: gradient, amount: 0.25, seed: 91, monochrome: true, adjustment: true },
+        { name: "effect-noise-tile-seam", kind: "noise", image: seam, amount: 0.5, seed: 0xffffffff, monochrome: false, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
       ];
-      for (const { name, image, radius, amount, threshold, angle, distance, tiles, selection, mask, adjustment } of cases) {
+      for (const { name, kind, image, radius, amount, threshold, angle, distance, seed, monochrome, tiles, selection, mask, adjustment } of cases) {
         await test(name, async () => {
           const doc = await engine.createDocument({ width: image.w, height: image.h });
           const asset = await imported(engine, image);
-          const unsharp = amount !== undefined;
+          const noise = kind === "noise";
+          const unsharp = amount !== undefined && !noise;
           const motion = angle !== undefined;
-          const effect = motion ? { type: "motion_blur", angle, distance }
+          const effect = noise ? { type: "noise", amount, seed, monochrome }
+            : motion ? { type: "motion_blur", angle, distance }
             : unsharp ? { type: "unsharp_mask", radius, amount, threshold } : { type: "high_pass", radius };
           let layer;
           await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
@@ -1126,7 +1138,9 @@ export async function runParityTests(engine, log) {
           for (const [tx, ty] of tiles ?? [[0, 0]]) {
             const key = tiles ? `${name} (${tx}, ${ty})` : name;
             const canvas = [image.w, image.h];
-            const cpu = unsharp
+            const cpu = noise
+              ? renderNoiseV3(image, effect, [tx, ty], canvas, 0, selection, mask)
+              : unsharp
               ? renderUnsharpMaskV3(image, effect, [tx, ty], canvas, mask)
               : motion ? renderMotionBlurV3(image, effect, [tx, ty], canvas, mask)
                 : renderHighPassV3(image, radius, [tx, ty], canvas, mask);

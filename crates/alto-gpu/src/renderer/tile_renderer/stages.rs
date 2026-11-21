@@ -361,6 +361,60 @@ impl Context<'_> {
                     "motion blur requires an integer motion-blur stage".into(),
                 ));
             }
+            REffectKind::Noise { .. } if !self.resources.exact => {
+                return Err(RenderError::Internal(
+                    "noise requires an integer noise stage".into(),
+                ));
+            }
+            REffectKind::Noise {
+                seed,
+                amount_q14,
+                monochrome,
+            } => {
+                let grid = RoiQ::from_roi(roi)?;
+                if grid.level > 0 {
+                    return Err(RenderError::Internal(
+                        "noise is evaluated on level zero or zoom-in grids".into(),
+                    ));
+                }
+                if grid
+                    .ox
+                    .checked_add(i64::from(grid.w.saturating_sub(1)))
+                    .is_none()
+                    || grid
+                        .oy
+                        .checked_add(i64::from(grid.h.saturating_sub(1)))
+                        .is_none()
+                {
+                    return Err(RenderError::InvalidArgument(
+                        "noise ROI coordinate overflow".into(),
+                    ));
+                }
+                let shift = u32::try_from(-grid.level)
+                    .map_err(|_| RenderError::InvalidArgument("noise zoom level".into()))?;
+                let mut params = Self::q14_params(
+                    37,
+                    roi,
+                    [Some(input.roi), None],
+                    [
+                        i32::from_ne_bytes(seed.to_ne_bytes()),
+                        amount_q14 as i32,
+                        i32::from(monochrome),
+                        shift as i32,
+                    ],
+                    None,
+                )?;
+                let words: &mut [u32] = bytemuck::cast_slice_mut(&mut params.curve);
+                let ox = grid.ox as u64;
+                let oy = grid.oy as u64;
+                words[24] = ox as u32;
+                words[25] = (ox >> 32) as u32;
+                words[26] = oy as u32;
+                words[27] = (oy >> 32) as u32;
+                let out = self.alloc(roi)?;
+                self.dispatch(&out, &input, &input, &input, params, &[])?;
+                out
+            }
             REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. } => {
                 return Err(RenderError::Internal(
                     "effect requires a smoothing stack".into(),

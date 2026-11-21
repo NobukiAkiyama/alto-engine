@@ -1322,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn format_eight_blur_effects_roundtrip_in_packages() {
+    fn format_eight_blur_and_noise_effects_roundtrip_in_packages() {
         let doc = alto_doc::Document::new(alto_doc::DocumentMeta::srgb_u8(8, 8)).unwrap();
         let mut layer = alto_doc::Node::raster("High pass");
         layer.props.effects.push(alto_doc::Effect::HighPass {
@@ -1333,6 +1333,13 @@ mod tests {
         layer.props.effects.push(alto_doc::Effect::MotionBlur {
             angle: 45.0,
             distance: 12.0,
+            selection: None,
+            extra: Default::default(),
+        });
+        layer.props.effects.push(alto_doc::Effect::Noise {
+            amount: 0.3,
+            seed: u32::MAX,
+            monochrome: false,
             selection: None,
             extra: Default::default(),
         });
