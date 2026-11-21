@@ -316,6 +316,9 @@ export class DocumentHandle {
     };
     durable(): Promise<void>;
     readonly effects: {
+        autoLevels: (layer: NodeId, input?: {
+            clip?: number;
+        }) => Promise<LevelsParams>;
         set: (layer: NodeId, effects: Effect[], options?: {
             useSelection?: boolean;
         }) => Promise<void>;
@@ -951,6 +954,11 @@ export interface LayerEditResult {
     // (undocumented)
     node: NodeId;
 }
+
+// @public
+export type LevelsParams = Required<Pick<Extract<Effect, {
+    type: "levels";
+}>, "in_black" | "in_white" | "gamma" | "out_black" | "out_white">>;
 
 // @public
 export function listRecoveryNamespaces(): Promise<{

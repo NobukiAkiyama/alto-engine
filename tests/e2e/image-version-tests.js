@@ -74,6 +74,22 @@ export async function runImageVersionTests(engine, log) {
       await reject(d.canvas.rotate(4), "INVALID_ARGUMENT"); await reject(d.canvas.crop({ x: 0, y: 0, width: 0, height: 1 }), "INVALID_ARGUMENT"); assert(await d.snapshotHash() === hash, "failed canvas edit changed the document");
       void before;
     });
+    await test("automatic levels are read-only until applied", async () => {
+      d = await engine.createDocument({ width: 2, height: 1 });
+      const asset = await testing(engine).request("import", {
+        width: 2, height: 1, pixels: new Uint8Array([64, 64, 64, 255, 192, 192, 192, 255]),
+        encoded: new Uint8Array(), mime: "image/png",
+      });
+      await d.transact("add raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+      const before = d.getSnapshot();
+      const levels = await d.effects.autoLevels(layer);
+      assert(d.getSnapshot() === before, "suggesting levels changed the snapshot");
+      assert(eq(levels, { in_black: 64 / 255, in_white: 192 / 255, gamma: 1, out_black: 0, out_white: 1 }), "levels endpoints");
+      await reject(d.effects.autoLevels(before.root), "INVALID_ARGUMENT");
+      await d.effects.set(layer, [{ type: "levels", ...levels }]);
+      assert(eq((await d.image.pickComposite([0, 0])).bytes, [0, 0, 0, 255]), "black endpoint");
+      assert(eq((await d.image.pickComposite([1, 0])).bytes, [255, 255, 255, 255]), "white endpoint");
+    });
     await test("clone stamp / smudge / histogram / merge down / rasterize through the SDK", async () => {
       d = await engine.createDocument({ width: 600, height: 32 });
       let lower, upper;

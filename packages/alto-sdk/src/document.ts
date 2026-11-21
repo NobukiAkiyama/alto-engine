@@ -20,6 +20,7 @@ import type {
   CommitView,
   Effect,
   FillRule,
+  LevelsParams,
   NodeId,
   PackageSize,
   PathData,
@@ -35,6 +36,21 @@ import type {
   VersionDiff,
   VersionStatus,
 } from "./types.js";
+
+function histogramEnds(bins: readonly number[], transparent: number, clip: number): [number, number] | null {
+  const zero = Math.max(0, bins[0] - transparent);
+  const count = (index: number) => index === 0 ? zero : bins[index];
+  const total = bins.reduce((sum, value) => sum + value, 0) - bins[0] + zero;
+  if (total === 0) return null;
+  const threshold = total * clip;
+  let low = 0;
+  let high = 255;
+  let cumulative = 0;
+  while (low <= high && (cumulative += count(low)) <= threshold) low++;
+  cumulative = 0;
+  while (high >= low && (cumulative += count(high)) <= threshold) high--;
+  return [low, high];
+}
 
 /** `limit` is the engine's `.alto` cap (`MAX_PACKAGE_BYTES`). */
 function packageSizeOf({ bytes, limit }: { bytes: number; limit: number }): PackageSize {
@@ -358,6 +374,31 @@ export class DocumentHandle {
   };
   /** A layer's non-destructive effects. */
   readonly effects = {
+    /**
+     * Suggests shared RGB levels from a raster layer's stored pixels before effects or masks.
+     * Returns parameters without editing the document. A fully transparent layer returns
+     * identity levels. In a mixed-alpha layer, transparent pixels with stored nonzero
+     * RGB can skew the range, including by undercounting opaque black. The default
+     * clip fraction per tail is 0.001.
+     */
+    autoLevels: async (layer: NodeId, { clip = 0.001 }: { clip?: number } = {}): Promise<LevelsParams> => {
+      if (!Number.isFinite(clip) || clip < 0 || clip > 0.1) {
+        throw new AltoError("INVALID_ARGUMENT", "Levels clip must be between 0 and 0.1");
+      }
+      const { r, g, b, a, pixels } = await this.image.histogram(layer);
+      const ends = a[0] === pixels ? [] : [r, g, b]
+        .map((bins) => histogramEnds(bins, a[0], clip))
+        .filter((ends) => ends !== null);
+      const low = Math.min(...ends.map(([low]) => low));
+      const high = Math.max(...ends.map(([, high]) => high));
+      return {
+        in_black: high > low ? low / 255 : 0,
+        in_white: high > low ? high / 255 : 1,
+        gamma: 1,
+        out_black: 0,
+        out_white: 1,
+      };
+    },
     /** Replaces a layer's effects. With `useSelection` (default) each is limited to the selection. */
     set: (layer: NodeId, effects: Effect[], options: { useSelection?: boolean } = {}) =>
       this.command("setEffects", { layer, effects, useSelection: options.useSelection ?? true }),
