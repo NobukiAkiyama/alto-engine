@@ -83,28 +83,60 @@ export interface BranchView {
     protected: boolean;
 }
 
+// @public
+export type BrushCurve = {
+    input: "pressure" | "speed" | "tilt";
+    points: [number, number][];
+};
+
+// @public (undocumented)
+export interface BrushDynamics {
+    angleFromTilt?: boolean;
+    flow?: BrushCurve | null;
+    opacity?: BrushCurve | null;
+    size?: BrushCurve | null;
+}
+
+// @public
+export interface BrushImage {
+    // (undocumented)
+    height: number;
+    // (undocumented)
+    pixels: Uint8Array;
+    // (undocumented)
+    width: number;
+}
+
 // @public (undocumented)
 export interface BrushOptions {
     // (undocumented)
     color?: Color;
+    // (undocumented)
+    dynamics?: BrushDynamics;
     // (undocumented)
     flow?: number;
     // (undocumented)
     layer: NodeId;
     // (undocumented)
     opacity?: number;
-    pressureOpacity?: boolean;
-    pressureSize?: boolean;
     target?: "content" | "mask";
     tip?: {
         size?: number;
         hardness?: number;
         spacing?: number;
+        angle?: number;
+        roundness?: number;
+        image?: BrushImage;
+        texture?: {
+            image: BrushImage;
+            scale?: number;
+            depth?: number;
+        };
     };
 }
 
 // @public
-export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "render.upgrade" | "recovered.edit";
+export type BuiltInIntent = "layer.add" | "layer.remove" | "layer.move" | "layer.props" | "layer.transform" | "layer.fill" | "layer.gradient" | "layer.stamp" | "layer.smudge" | "layer.rasterize" | "layer.merge" | "brush.stroke" | "selection.set" | "mask.set" | "effects.set" | "text.edit" | "text.input" | "text.style" | "text.tate-chu-yoko" | "vector.edit" | "vector.mask" | "vector.clip" | "image.import" | "image.crop" | "image.rotate" | "image.flip" | "image.resize" | "version.restore" | "version.stash_apply" | "render.upgrade" | "recovered.edit";
 
 // @public
 export interface CanvasEditResult {
@@ -150,13 +182,14 @@ export interface CommitView {
 }
 
 // @public
-export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed";
+export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed" | "document-changed";
 
 // @public
 export type ContentDetail = {
     kind: "vector";
     paths: [number, number];
     commands: [number, number];
+    style: boolean;
 } | {
     kind: "text";
     text: [string, string] | null;
@@ -164,6 +197,7 @@ export type ContentDetail = {
     writing_mode: WritingMode | null;
     frame: boolean;
     tate_chu_yoko: boolean;
+    hanging: boolean;
 } | {
     kind: "adjustment";
 } | {
@@ -282,11 +316,15 @@ export class DocumentHandle {
     };
     durable(): Promise<void>;
     readonly effects: {
+        autoLevels: (layer: NodeId, input?: {
+            clip?: number;
+        }) => Promise<LevelsParams>;
         set: (layer: NodeId, effects: Effect[], options?: {
             useSelection?: boolean;
         }) => Promise<void>;
     };
     exportImage(options?: ExportImageOptions): Promise<Blob>;
+    exportImageStream(options?: ExportImageOptions): ReadableStream<Uint8Array<ArrayBuffer>>;
     get folder(): ObjectStorageProvider | null;
     getSnapshot(): DocumentSnapshot;
     readonly image: {
@@ -325,10 +363,14 @@ export class DocumentHandle {
         remove: (layer: NodeId) => Promise<void>;
     };
     nodeTiles(id: NodeId): Promise<TileRef>;
-    packageSize(): Promise<PackageSize>;
+    packageSize(options?: {
+        history?: "all" | "external";
+    }): Promise<PackageSize>;
     redo(): Promise<void>;
     save(target: ArchiveTarget, options?: {
-        history?: "all" | "omit";
+        history?: "all" | "omit" | {
+            folder: ObjectStorageProvider;
+        };
     }): Promise<void>;
     saveFolder(provider: ObjectStorageProvider, options?: {
         overwrite?: boolean;
@@ -350,6 +392,7 @@ export class DocumentHandle {
         set: (id: NodeId, content: TextContent) => Promise<void>;
         replace: (id: NodeId, start: number, end: number, insert: string, intent?: Intent) => Promise<void>;
         style: (id: NodeId, start: number, end: number, patch: StylePatch) => Promise<void>;
+        setHanging: (id: NodeId, on: boolean) => Promise<void>;
         setTateChuYoko: (id: NodeId, start: number, end: number, on?: boolean) => Promise<void>;
         info: (id: NodeId) => Promise<TextInfo>;
         hitTest: (id: NodeId, x: number, y: number) => Promise<number>;
@@ -390,6 +433,15 @@ export class DocumentHandle {
         deleteTag: (name: string) => Promise<void>;
         pin: (hash: string) => Promise<void>;
         unpin: (hash: string) => Promise<void>;
+        stash: (message?: string, options?: {
+            author?: string;
+        }) => Promise<StashEntry>;
+        stashList: () => StashEntry[];
+        stashApply: (commit: string, options?: {
+            drop?: boolean;
+        }) => Promise<MergePlan | null>;
+        stashPop: (commit?: string) => Promise<MergePlan | null>;
+        stashDrop: (commit: string) => Promise<void>;
         prepareMerge: (name: string) => Promise<MergePlan>;
         cancelMerge: () => Promise<void>;
         finishMerge: (token: string, resolutions: MergeResolution[], options?: {
@@ -458,6 +510,23 @@ export type Effect = ({
     type: "gaussian_blur";
     radius?: number;
 } & EffectScope) | ({
+    type: "high_pass";
+    radius?: number;
+} & EffectScope) | ({
+    type: "unsharp_mask";
+    radius?: number;
+    amount?: number;
+    threshold?: number;
+} & EffectScope) | ({
+    type: "motion_blur";
+    angle?: number;
+    distance?: number;
+} & EffectScope) | ({
+    type: "noise";
+    amount?: number;
+    seed?: number;
+    monochrome?: boolean;
+} & EffectScope) | ({
     type: "color_adjust";
     brightness?: number;
     contrast?: number;
@@ -496,6 +565,8 @@ export interface Engine {
     // (undocumented)
     readonly assets: {
         importImage(file: Blob): Promise<ImageAsset>;
+        importBrushTip(file: Blob): Promise<BrushImage>;
+        importBrushTexture(file: Blob): Promise<BrushImage>;
         importFont(file: Blob, options?: {
             faceIndex?: number;
         }): Promise<FontAsset>;
@@ -509,8 +580,11 @@ export interface Engine {
     dispose(): Promise<void>;
     readonly document: DocumentHandle | null;
     readonly element: HTMLCanvasElement;
+    readonly namespace: string;
     on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
-    open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
+    open(source: Blob | ArchiveSource, options?: {
+        history?: ObjectStorageProvider;
+    }): Promise<DocumentHandle>;
     openFolder(provider: ObjectStorageProvider, options?: {
         history?: "all" | "on-demand";
     }): Promise<DocumentHandle>;
@@ -520,6 +594,7 @@ export interface Engine {
     readonly recovery: {
         readonly available: boolean;
         restore(): Promise<DocumentHandle>;
+        setLabel(label: string): Promise<void>;
         discard(): Promise<void>;
         exportEmergency(): Promise<Blob>;
         recoverAfterStorageFailure(): Promise<RecoveryReport>;
@@ -566,7 +641,11 @@ export interface EngineOptions {
     // (undocumented)
     storage?: {
         namespace?: string;
+        literalNamespace?: boolean;
         recovery?: boolean;
+    };
+    undo?: {
+        steps?: number;
     };
 }
 
@@ -590,7 +669,7 @@ export interface ErrorDetails {
     // (undocumented)
     node?: string;
     // (undocumented)
-    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "objects-unavailable";
+    reason?: ConflictReason | "namespace" | "cross-origin-assets" | "scale" | "region" | "quality" | "background" | "compression" | "objects-unavailable" | "undo-steps";
 }
 
 // @public
@@ -601,10 +680,13 @@ export interface ExclusiveObjectStorage extends ObjectStorageProvider {
 
 // @public (undocumented)
 export interface ExportImageOptions {
+    background?: [number, number, number];
+    compression?: "none" | "deflate";
+    quality?: number;
     region?: Rect;
     scale?: number;
     // (undocumented)
-    type?: "image/png" | "image/webp";
+    type?: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
 }
 
 // @public
@@ -646,6 +728,18 @@ export interface FontAsset {
     readonly warnings: readonly AltoWarning[];
 }
 
+// @public
+export interface FontAxis {
+    // (undocumented)
+    default: number;
+    // (undocumented)
+    max: number;
+    // (undocumented)
+    min: number;
+    // (undocumented)
+    tag: string;
+}
+
 // @public (undocumented)
 export interface FontFeature {
     // (undocumented)
@@ -656,6 +750,7 @@ export interface FontFeature {
 
 // @public (undocumented)
 export interface FontInfo {
+    axes?: FontAxis[];
     // (undocumented)
     embedding: "installable" | "restricted" | "preview_and_print" | "editable";
     // (undocumented)
@@ -870,17 +965,20 @@ export interface LayerEditResult {
     // (undocumented)
     bounds: ImageBounds;
     // (undocumented)
+    missing: number;
+    // (undocumented)
     no_op: boolean;
     // (undocumented)
     node: NodeId;
 }
 
 // @public
-export function listRecoveryNamespaces(): Promise<{
-    namespace: string;
-    bytes: number;
-    modified: number;
-}[]>;
+export type LevelsParams = Required<Pick<Extract<Effect, {
+    type: "levels";
+}>, "in_black" | "in_white" | "gamma" | "out_black" | "out_white">>;
+
+// @public
+export function listRecoveryNamespaces(): Promise<RecoveryNamespace[]>;
 
 // @public (undocumented)
 export class MemoryObjectProvider implements ObjectStorageProvider {
@@ -935,7 +1033,7 @@ export interface MergePlan {
     // (undocumented)
     conflicts: MergeConflict[];
     // (undocumented)
-    kind: "no_op" | "fast_forward" | "three_way";
+    kind: "no_op" | "fast_forward" | "three_way" | "stash";
     // (undocumented)
     ours: string;
     // (undocumented)
@@ -961,7 +1059,7 @@ export interface MergeResult {
     // (undocumented)
     head: string;
     // (undocumented)
-    kind: "no_op" | "fast_forward" | "committed";
+    kind: "no_op" | "fast_forward" | "committed" | "stash";
 }
 
 // @public (undocumented)
@@ -1191,6 +1289,22 @@ export interface RasterTilesSummary {
     format: "rgba8" | "r8";
 }
 
+// @public
+export interface RecoveryNamespace {
+    // (undocumented)
+    bytes: number;
+    // (undocumented)
+    height?: number;
+    // (undocumented)
+    label?: string;
+    // (undocumented)
+    modified: number;
+    // (undocumented)
+    namespace: string;
+    // (undocumented)
+    width?: number;
+}
+
 // @public (undocumented)
 export interface RecoveryReport {
     // (undocumented)
@@ -1218,26 +1332,68 @@ export interface Rect {
 export function replaceText(content: TextContent, start: number, end: number, insert: string): TextContent;
 
 // @public (undocumented)
-export interface SelectionSpec {
-    // (undocumented)
-    feather?: number;
-    // (undocumented)
-    height?: number;
-    // (undocumented)
-    kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
-    // (undocumented)
-    mode?: "replace" | "add" | "subtract" | "intersect";
-    points?: [number, number][];
-    // (undocumented)
-    width?: number;
-    // (undocumented)
+type SelectionMode_2 = "replace" | "add" | "subtract" | "intersect";
+export { SelectionMode_2 as SelectionMode }
+
+// @public (undocumented)
+export type SelectionSpec = {
+    kind: "rectangle" | "ellipse";
+    mode?: SelectionMode_2;
     x?: number;
-    // (undocumented)
     y?: number;
-}
+    width?: number;
+    height?: number;
+    feather?: number;
+} | {
+    kind: "lasso";
+    mode?: SelectionMode_2;
+    points: [number, number][];
+    feather?: number;
+} | {
+    kind: "path";
+    path: PathData;
+    fill_rule?: FillRule;
+    feather?: number;
+    mode?: SelectionMode_2;
+} | {
+    kind: "all" | "invert";
+    mode?: SelectionMode_2;
+} | {
+    kind: "clear";
+} | {
+    kind: "modify";
+    operation: "grow" | "shrink" | "border" | "smooth";
+    radius: number;
+} | {
+    kind: "color";
+    layer: NodeId;
+    r: number;
+    g: number;
+    b: number;
+    a?: number;
+    tolerance?: number;
+    mode?: SelectionMode_2;
+} | {
+    kind: "contiguous";
+    layer: NodeId;
+    x: number;
+    y: number;
+    tolerance?: number;
+    mode?: SelectionMode_2;
+};
 
 // @public (undocumented)
 export function sha256Hex(data: Uint8Array): Promise<string>;
+
+// @public
+export interface StashEntry {
+    // (undocumented)
+    commit: string;
+    // (undocumented)
+    created_at: number;
+    // (undocumented)
+    message: string;
+}
 
 // @public (undocumented)
 export interface StyledPath {
@@ -1287,6 +1443,7 @@ export interface TextContent {
         width: number;
         height: number;
     };
+    hanging?: boolean;
     // (undocumented)
     spans?: TextSpan[];
     // (undocumented)
@@ -1359,6 +1516,7 @@ export interface TextStyle {
     // (undocumented)
     features?: FontFeature[];
     fonts: string[];
+    italic_skew?: number;
     // (undocumented)
     language?: string | null;
     letter_spacing?: number;
@@ -1366,6 +1524,8 @@ export interface TextStyle {
     scale?: number;
     // (undocumented)
     size: number;
+    // (undocumented)
+    underline?: Underline;
 }
 
 // @public
@@ -1429,6 +1589,17 @@ export class Transaction {
     setVectorMask(id: NodeId, mask: VectorMask | null): void;
 }
 
+// @public (undocumented)
+export interface Underline {
+    color?: Color;
+    kind: UnderlineKind;
+    position?: number;
+    thickness?: number;
+}
+
+// @public (undocumented)
+export type UnderlineKind = "none" | "solid";
+
 // @public
 export interface UnsupportedNode extends NodeBase {
     // (undocumented)
@@ -1465,6 +1636,10 @@ export interface VectorStroke {
     cap?: "butt" | "round" | "square";
     // (undocumented)
     color: Color;
+    dash?: {
+        pattern: number[];
+        offset?: number;
+    };
     // (undocumented)
     join?: "miter" | "round" | "bevel";
     // (undocumented)
@@ -1496,6 +1671,7 @@ export interface VersionRefs {
     generation: number;
     // (undocumented)
     pinned: string[];
+    stashes?: StashEntry[];
     // (undocumented)
     tags: Record<string, string>;
 }
@@ -1542,7 +1718,7 @@ export class ViewportControl {
 }
 
 // @public (undocumented)
-export type WarningCode = "RECOVERED_OLDER_GENERATION" | "RECOVERED_TRUNCATED" | "RECOVERY_DIVERGED" | "MISSING_TILE" | "PACKAGE_DAMAGED" | "COMMIT_DAMAGED" | "COMMIT_SNAPSHOT_MISSING" | "HISTORY_OBJECT_MISSING" | "FONT_EMBEDDING_RESTRICTED" | "FONT_SUBSETTING_FORBIDDEN" | "FONT_MISSING";
+export type WarningCode = "RECOVERED_OLDER_GENERATION" | "RECOVERED_TRUNCATED" | "RECOVERY_DIVERGED" | "MISSING_TILE" | "PACKAGE_DAMAGED" | "COMMIT_DAMAGED" | "COMMIT_SNAPSHOT_MISSING" | "HISTORY_OBJECT_MISSING" | "HISTORY_STORE_UNAVAILABLE" | "FONT_EMBEDDING_RESTRICTED" | "FONT_SUBSETTING_FORBIDDEN" | "FONT_MISSING";
 
 // @public (undocumented)
 export type WritingMode = "horizontal_tb" | "vertical_rl";

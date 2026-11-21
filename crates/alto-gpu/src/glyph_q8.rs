@@ -335,6 +335,83 @@ pub fn glyph_bitmaps(bake: &[u8], world: FixedAffine, level: i32, roi: [i64; 4])
     out
 }
 
+/// The union of the level-0 glyph boxes as `[x, y, w, h]`, without rasterizing them.
+pub fn text_extent(bake: &[u8], world: FixedAffine) -> Result<Option<[i64; 4]>, RasterError> {
+    let Ok(bake) = alto_core::text_bake::TextBake::decode(bake) else {
+        return Ok(None);
+    };
+    let direct_roi = [-(1 << 24), -(1 << 24), 1 << 25, 1 << 25];
+    let mut extent: Option<[i64; 4]> = None;
+    for glyph in &bake.glyphs {
+        let outline = &bake.outlines[glyph.outline as usize];
+        let Some(c) = glyph_map_q(world, 0, glyph.m, glyph.t) else {
+            continue;
+        };
+        let window = atlas_band(&c, outline.upem)
+            .then(|| place_q(&c, outline))
+            .flatten()
+            .map(|p| {
+                let [x, y] = p.dst();
+                [x, y, i64::from(p.w), i64::from(p.h)]
+            })
+            .or_else(|| direct_window(&c, outline, direct_roi));
+        let Some([x, y, w, h]) = window else {
+            continue;
+        };
+        let right = x.checked_add(w).ok_or(RasterError::Range)?;
+        let bottom = y.checked_add(h).ok_or(RasterError::Range)?;
+        extent = Some(match extent {
+            Some([left, top, x1, y1]) => [x.min(left), y.min(top), right.max(x1), bottom.max(y1)],
+            None => [x, y, right, bottom],
+        });
+    }
+    extent
+        .map(|[x, y, right, bottom]| {
+            Ok([
+                x,
+                y,
+                right.checked_sub(x).ok_or(RasterError::Range)?,
+                bottom.checked_sub(y).ok_or(RasterError::Range)?,
+            ])
+        })
+        .transpose()
+}
+
+/// Premultiplied Q14 text pixels in a level-0 window `[x, y, w, h]`.
+pub fn text_pixels_q14(
+    bake: &[u8],
+    world: FixedAffine,
+    window: [i64; 4],
+) -> Result<Vec<[u16; 4]>, RasterError> {
+    let [x, y, w, h] = window;
+    let width = u32::try_from(w).map_err(|_| RasterError::Range)? as usize;
+    let height = u32::try_from(h).map_err(|_| RasterError::Range)? as usize;
+    x.checked_add(w).ok_or(RasterError::Range)?;
+    y.checked_add(h).ok_or(RasterError::Range)?;
+    let len = width.checked_mul(height).ok_or(RasterError::Range)?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(len)
+        .map_err(|_| RasterError::Range)?;
+    pixels.resize(len, [0; 4]);
+    if len == 0 {
+        return Ok(pixels);
+    }
+    for crop in glyph_bitmaps(bake, world, 0, window) {
+        let [dx, dy] = crop.dst.map(|v| v as usize);
+        for (y, coverage) in crop.bytes.chunks_exact(crop.w as usize).enumerate() {
+            let start = (dy + y) * width + dx;
+            for (pixel, &byte) in pixels[start..start + coverage.len()]
+                .iter_mut()
+                .zip(coverage)
+            {
+                *pixel = crate::raster_q8::source_over_q14(*pixel, crop.color, byte);
+            }
+        }
+    }
+    Ok(pixels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

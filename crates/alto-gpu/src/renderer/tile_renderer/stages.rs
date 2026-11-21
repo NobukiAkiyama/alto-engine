@@ -1,6 +1,126 @@
 //! Layer properties, blending, clipping and effect stages.
 use super::*;
 
+fn unsharp_is_identity(kind: &REffectKind) -> bool {
+    matches!(
+        *kind,
+        REffectKind::UnsharpMask { radius_q8, amount_q8, threshold_q14, .. }
+            if radius_q8 == 0 || amount_q8 == 0 || threshold_q14 >= 16384
+    )
+}
+
+fn smoothing_radius(kind: &REffectKind) -> Option<(f32, u32)> {
+    match *kind {
+        REffectKind::GaussianBlur { radius, radius_q8 }
+        | REffectKind::HighPass { radius, radius_q8 } => Some((radius, radius_q8)),
+        REffectKind::UnsharpMask {
+            radius, radius_q8, ..
+        } if !unsharp_is_identity(kind) => Some((radius, radius_q8)),
+        REffectKind::MotionBlur { distance_q8, .. } if distance_q8 != 0 => {
+            let half_q8 = distance_q8.div_ceil(2);
+            Some((half_q8 as f32 / 256.0, half_q8))
+        }
+        _ => None,
+    }
+}
+
+fn needs_original(effect: &REffect) -> bool {
+    effect.selection.is_some()
+        || matches!(
+            effect.kind,
+            REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. }
+        )
+}
+
+fn motion_blur_settings(kind: &REffectKind, sample: RoiQ) -> Result<[i32; 4]> {
+    let REffectKind::MotionBlur {
+        angle_q16,
+        distance_q8,
+    } = *kind
+    else {
+        unreachable!("motion blur settings requested for another effect")
+    };
+    let half_q8 = distance_q8.div_ceil(2);
+    let (radius, rho8) = sample.taps(half_q8)?;
+    if radius == 0 {
+        return Ok([0, 0, angle_q16, 0]);
+    }
+    let spacing_q8 = (rho8 + radius / 2) / radius;
+    Ok([radius as i32, spacing_q8 as i32, angle_q16, 0])
+}
+
+pub(super) fn needs_backdrop_halo(effect: &REffect, exact: bool) -> bool {
+    smoothing_radius(&effect.kind).is_some_and(
+        |(radius, radius_q8)| {
+            if exact { radius_q8 != 0 } else { radius > 0.0 }
+        },
+    )
+}
+
+fn smoothing_grid(effect: &REffect, desired: RoiQ) -> Result<Option<(RoiQ, RoiQ)>> {
+    let Some((radius, radius_q8)) = smoothing_radius(&effect.kind) else {
+        return Ok(None);
+    };
+    let level =
+        alto_core::blur::blur_coarsen_k(radius).map_or(desired.level, |k| k.max(desired.level));
+    let sample = desired.coarsen(level)?;
+    Ok(Some((sample, sample.grow(radius_q8)?)))
+}
+
+#[derive(Clone, Copy)]
+struct PlaneRequest {
+    grid: RoiQ,
+    uses: usize,
+}
+
+fn request_plane(planes: &mut BTreeMap<i32, PlaneRequest>, grid: RoiQ) -> Result<()> {
+    use std::collections::btree_map::Entry;
+    match planes.entry(grid.level) {
+        Entry::Occupied(mut entry) => {
+            let plane = entry.get_mut();
+            plane.grid = plane.grid.union(grid)?;
+            plane.uses += 1;
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(PlaneRequest { grid, uses: 1 });
+        }
+    }
+    Ok(())
+}
+
+// At each prefix, all same-level requests use one document-aligned ROI. Coarse
+// Gaussian sampling adds its interpolation halo before joining requests.
+// Separate levels stay separate because resampling the original changes pixels.
+fn stack_plan(effects: &[REffect], desired: RoiQ) -> Result<Vec<BTreeMap<i32, PlaneRequest>>> {
+    let mut plan = vec![BTreeMap::new(); effects.len() + 1];
+    request_plane(plan.last_mut().expect("root prefix"), desired)?;
+    for (prefix, effect) in effects.iter().enumerate().rev() {
+        let (before, after) = plan.split_at_mut(prefix + 1);
+        let requests = &mut before[prefix];
+        for plane in after[0].values() {
+            let desired = plane.grid;
+            let input = smoothing_grid(effect, desired)?.map_or(desired, |(_, input)| input);
+            request_plane(requests, input)?;
+            if input.level != desired.level && needs_original(effect) {
+                request_plane(requests, desired)?;
+            }
+        }
+    }
+    Ok(plan)
+}
+
+type Planes = BTreeMap<i32, (Target, usize)>;
+
+fn use_plane(planes: &mut Planes, level: i32) -> Target {
+    let (target, uses) = planes.get_mut(&level).expect("planned input level");
+    *uses -= 1;
+    if *uses == 0 {
+        planes.remove(&level).expect("planned input level").0
+    } else {
+        target.clone()
+    }
+}
+
 impl Context<'_> {
     pub(super) fn apply_props(
         &mut self,
@@ -178,6 +298,49 @@ impl Context<'_> {
         self.dispatch(&out, &base, &source, &base, p, &[])?;
         Ok(out)
     }
+    fn gaussian(
+        &mut self,
+        input: &Target,
+        roi: Roi,
+        world: WorldTransform,
+        radius: f32,
+        radius_q8: u32,
+    ) -> Result<Target> {
+        let filtered = if self.resources.exact {
+            let grid = RoiQ::from_roi(roi)?;
+            let (r, rho8) = grid.taps(radius_q8)?;
+            if r == 0 {
+                input.clone()
+            } else {
+                let weights = super::blur_kernel_q16(r, rho8).ok_or_else(|| {
+                    RenderError::InvalidArgument("v3 blur kernel out of range".into())
+                })?;
+                let middle_roi = grid.expand(0, r)?.to_roi()?;
+                let middle = self.alloc(middle_roi)?;
+                let horizontal = Self::blur_params(middle_roi, input.roi, r, &weights, 0)?;
+                self.dispatch(&middle, input, input, input, horizontal, &[])?;
+                let out = self.alloc(roi)?;
+                let vertical = Self::blur_params(roi, middle_roi, r, &weights, 1)?;
+                self.dispatch(&out, &middle, &middle, &middle, vertical, &[])?;
+                out
+            }
+        } else {
+            let r = (radius / roi.scale).ceil() as u32;
+            if r == 0 {
+                input.clone()
+            } else {
+                let middle = self.alloc(roi.expand(0, r))?;
+                let mut p = Self::params(2, world.legacy()?);
+                p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
+                self.dispatch(&middle, input, input, input, p, &[])?;
+                let out = self.alloc(roi)?;
+                p.info[3] = 1;
+                self.dispatch(&out, &middle, &middle, &middle, p, &[])?;
+                out
+            }
+        };
+        Ok(filtered)
+    }
     pub(super) fn stage(
         &mut self,
         input: Target,
@@ -185,57 +348,77 @@ impl Context<'_> {
         roi: Roi,
         world: WorldTransform,
     ) -> Result<Target> {
-        // A selection on either integer stage is mode 22 below.
-        if self.resources.exact
-            && !matches!(
-                effect.kind,
-                REffectKind::ColorAdjust { .. }
-                    | REffectKind::GaussianBlur { .. }
-                    | REffectKind::Invert
-                    | REffectKind::Curves { .. }
-                    | REffectKind::Levels { .. }
-                    | REffectKind::HueSaturation { .. }
-            )
-        {
-            return Err(RenderError::Internal(
-                "v3 effect without an integer stage reached the M5 renderer".into(),
-            ));
-        }
         let filtered = match effect.kind {
             REffectKind::GaussianBlur { radius, radius_q8 } => {
-                if self.resources.exact {
-                    let grid = RoiQ::from_roi(roi)?;
-                    let (r, rho8) = grid.taps(radius_q8)?;
-                    if r == 0 {
-                        input.clone()
-                    } else {
-                        let weights = super::blur_kernel_q16(r, rho8).ok_or_else(|| {
-                            RenderError::InvalidArgument("v3 blur kernel out of range".into())
-                        })?;
-                        let middle_roi = grid.expand(0, r)?.to_roi()?;
-                        let middle = self.alloc(middle_roi)?;
-                        let horizontal = Self::blur_params(middle_roi, input.roi, r, &weights, 0)?;
-                        self.dispatch(&middle, &input, &input, &input, horizontal, &[])?;
-                        let out = self.alloc(roi)?;
-                        let vertical = Self::blur_params(roi, middle_roi, r, &weights, 1)?;
-                        self.dispatch(&out, &middle, &middle, &middle, vertical, &[])?;
-                        out
-                    }
-                } else {
-                    let r = (radius / roi.scale).ceil() as u32;
-                    if r == 0 {
-                        input.clone()
-                    } else {
-                        let middle = self.alloc(roi.expand(0, r))?;
-                        let mut p = Self::params(2, world.legacy()?);
-                        p.settings = [(radius / roi.scale / 3.0).max(0.333333), 0.0, 0.0, r as f32];
-                        self.dispatch(&middle, &input, &input, &input, p, &[])?;
-                        let out = self.alloc(roi)?;
-                        p.info[3] = 1;
-                        self.dispatch(&out, &middle, &middle, &middle, p, &[])?;
-                        out
-                    }
+                self.gaussian(&input, roi, world, radius, radius_q8)?
+            }
+            REffectKind::UnsharpMask { .. } if unsharp_is_identity(&effect.kind) => {
+                return self.crop(input, roi);
+            }
+            REffectKind::MotionBlur { distance_q8: 0, .. } => return self.crop(input, roi),
+            REffectKind::MotionBlur { .. } => {
+                return Err(RenderError::Internal(
+                    "motion blur requires an integer motion-blur stage".into(),
+                ));
+            }
+            REffectKind::Noise { .. } if !self.resources.exact => {
+                return Err(RenderError::Internal(
+                    "noise requires an integer noise stage".into(),
+                ));
+            }
+            REffectKind::Noise {
+                seed,
+                amount_q14,
+                monochrome,
+            } => {
+                let grid = RoiQ::from_roi(roi)?;
+                if grid.level > 0 {
+                    return Err(RenderError::Internal(
+                        "noise is evaluated on level zero or zoom-in grids".into(),
+                    ));
                 }
+                if grid
+                    .ox
+                    .checked_add(i64::from(grid.w.saturating_sub(1)))
+                    .is_none()
+                    || grid
+                        .oy
+                        .checked_add(i64::from(grid.h.saturating_sub(1)))
+                        .is_none()
+                {
+                    return Err(RenderError::InvalidArgument(
+                        "noise ROI coordinate overflow".into(),
+                    ));
+                }
+                let shift = u32::try_from(-grid.level)
+                    .map_err(|_| RenderError::InvalidArgument("noise zoom level".into()))?;
+                let mut params = Self::q14_params(
+                    37,
+                    roi,
+                    [Some(input.roi), None],
+                    [
+                        i32::from_ne_bytes(seed.to_ne_bytes()),
+                        amount_q14 as i32,
+                        i32::from(monochrome),
+                        shift as i32,
+                    ],
+                    None,
+                )?;
+                let words: &mut [u32] = bytemuck::cast_slice_mut(&mut params.curve);
+                let ox = grid.ox as u64;
+                let oy = grid.oy as u64;
+                words[24] = ox as u32;
+                words[25] = (ox >> 32) as u32;
+                words[26] = oy as u32;
+                words[27] = (oy >> 32) as u32;
+                let out = self.alloc(roi)?;
+                self.dispatch(&out, &input, &input, &input, params, &[])?;
+                out
+            }
+            REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. } => {
+                return Err(RenderError::Internal(
+                    "effect requires a smoothing stack".into(),
+                ));
             }
             REffectKind::ColorAdjust {
                 brightness,
@@ -373,15 +556,25 @@ impl Context<'_> {
                 out
             }
         };
+        self.select_effect(&input, filtered, effect, roi, world)
+    }
+    fn select_effect(
+        &mut self,
+        original: &Target,
+        filtered: Target,
+        effect: &REffect,
+        roi: Roi,
+        world: WorldTransform,
+    ) -> Result<Target> {
         if let Some(mask) = &effect.selection {
             let out = self.alloc(roi)?;
             let (entries, transform) = self.mask_entries(mask, world, roi, None)?;
             let p = if self.resources.exact {
-                Self::mask_params(22, Some(transform), roi, input.roi, filtered.roi, [0; 4])?
+                Self::mask_params(22, Some(transform), roi, original.roi, filtered.roi, [0; 4])?
             } else {
                 Self::params(5, transform.legacy()?)
             };
-            self.dispatch(&out, &input, &filtered, &input, p, &entries)?;
+            self.dispatch(&out, original, &filtered, original, p, &entries)?;
             Ok(out)
         } else {
             Ok(filtered)
@@ -422,90 +615,295 @@ impl Context<'_> {
         desired: Roi,
         world: WorldTransform,
     ) -> Result<Target> {
-        let Some((effect, previous)) = effects.split_last() else {
-            return match input {
-                StackInput::Node {
-                    index,
-                    world,
-                    depth,
-                } => self.raw_node(index, desired, world, depth),
-                StackInput::Siblings {
-                    children,
-                    world,
-                    depth,
-                } => {
-                    let blank = self.zero(desired)?;
-                    self.children(children, blank, world, depth)
-                }
-            };
-        };
-        if let REffectKind::GaussianBlur { radius, .. } = effect.kind {
-            let sample = if self.resources.exact {
-                let grid = RoiQ::from_roi(desired)?;
-                let target = alto_core::blur::blur_coarsen_k(radius)
-                    .map(|k| k.max(grid.level))
-                    .unwrap_or(grid.level);
-                grid.coarsen(target)?.to_roi()?
-            } else {
-                desired.coarsen(radius / 64.0)
-            };
-            let source = self.stack(
-                input,
-                previous,
-                if self.resources.exact {
-                    Self::input_roi_v3(std::slice::from_ref(effect), sample)?
+        if effects.is_empty() {
+            return self.stack_input(input, desired);
+        }
+        if !self.resources.exact {
+            return self.legacy_stack(input, effects, desired, world);
+        }
+
+        let desired = RoiQ::from_roi(desired)?;
+        let plan = stack_plan(effects, desired)?;
+        let mut previous = Planes::new();
+        for plane in plan[0].values() {
+            let grid = plane.grid;
+            previous.insert(
+                grid.level,
+                (self.stack_input(input, grid.to_roi()?)?, plane.uses),
+            );
+        }
+        for (effect, requests) in effects.iter().zip(&plan[1..]) {
+            let mut current = Planes::new();
+            for plane in requests.values() {
+                let grid = plane.grid;
+                let roi = grid.to_roi()?;
+                let filtered = if let Some((sample, _)) = smoothing_grid(effect, grid)? {
+                    let source = use_plane(&mut previous, sample.level);
+                    if matches!(effect.kind, REffectKind::MotionBlur { .. }) {
+                        let sample_roi = sample.to_roi()?;
+                        let output = self.alloc(sample_roi)?;
+                        let params = Self::q14_params(
+                            36,
+                            sample_roi,
+                            [Some(source.roi), None],
+                            motion_blur_settings(&effect.kind, sample)?,
+                            None,
+                        )?;
+                        self.dispatch(&output, &source, &source, &source, params, &[])?;
+                        let filtered = self.crop(output, roi)?;
+                        if needs_original(effect) {
+                            let original = if sample.level == grid.level {
+                                self.crop(source, roi)?
+                            } else {
+                                use_plane(&mut previous, grid.level)
+                            };
+                            self.select_effect(&original, filtered, effect, roi, world)?
+                        } else {
+                            filtered
+                        }
+                    } else {
+                        let (radius, radius_q8) =
+                            smoothing_radius(&effect.kind).expect("smoothing effect");
+                        let blurred =
+                            self.gaussian(&source, sample.to_roi()?, world, radius, radius_q8)?;
+                        let original = (sample.level == grid.level && needs_original(effect))
+                            .then_some(source);
+                        let blurred = self.crop(blurred, roi)?;
+                        if needs_original(effect) {
+                            let original =
+                                original.unwrap_or_else(|| use_plane(&mut previous, grid.level));
+                            let combine = match effect.kind {
+                                REffectKind::HighPass { .. } => Some((34, [0; 4])),
+                                REffectKind::UnsharpMask {
+                                    amount_q8,
+                                    threshold_q14,
+                                    ..
+                                } => Some((35, [amount_q8 as i32, threshold_q14 as i32, 0, 0])),
+                                _ => None,
+                            };
+                            let filtered = if let Some((mode, settings)) = combine {
+                                let output = self.alloc(roi)?;
+                                let params = Self::q14_params(
+                                    mode,
+                                    roi,
+                                    [Some(original.roi), Some(blurred.roi)],
+                                    settings,
+                                    None,
+                                )?;
+                                self.dispatch(
+                                    &output,
+                                    &original,
+                                    &blurred,
+                                    &original,
+                                    params,
+                                    &[],
+                                )?;
+                                output
+                            } else {
+                                blurred
+                            };
+                            self.select_effect(&original, filtered, effect, roi, world)?
+                        } else {
+                            blurred
+                        }
+                    }
                 } else {
-                    Self::input_roi(std::slice::from_ref(effect), sample)
-                },
-                world,
-            )?;
-            let mut plain = effect.clone();
-            plain.selection = None;
-            let filtered = self.stage(source, &plain, sample, world)?;
-            let filtered = self.crop(filtered, desired)?;
-            if let Some(mask) = &effect.selection {
-                let original = self.stack(input, previous, desired, world)?;
-                let out = self.alloc(desired)?;
-                let (entries, transform) = self.mask_entries(mask, world, desired, None)?;
-                let p = if self.resources.exact {
-                    Self::mask_params(
-                        22,
-                        Some(transform),
-                        desired,
-                        original.roi,
-                        filtered.roi,
-                        [0; 4],
-                    )?
-                } else {
-                    Self::params(5, transform.legacy()?)
+                    self.stage(use_plane(&mut previous, grid.level), effect, roi, world)?
                 };
-                self.dispatch(&out, &original, &filtered, &original, p, &entries)?;
-                Ok(out)
-            } else {
-                Ok(filtered)
+                current.insert(grid.level, (filtered, plane.uses));
             }
+            debug_assert!(previous.is_empty());
+            previous = current;
+        }
+        Ok(use_plane(&mut previous, desired.level))
+    }
+
+    fn stack_input(&mut self, input: StackInput<'_>, desired: Roi) -> Result<Target> {
+        match input {
+            StackInput::Node {
+                index,
+                world,
+                depth,
+            } => self.raw_node(index, desired, world, depth),
+            StackInput::Siblings {
+                children,
+                world,
+                depth,
+            } => {
+                let blank = self.zero(desired)?;
+                self.children(children, blank, world, depth)
+            }
+        }
+    }
+
+    fn legacy_stack(
+        &mut self,
+        input: StackInput<'_>,
+        effects: &[REffect],
+        desired: Roi,
+        world: WorldTransform,
+    ) -> Result<Target> {
+        let Some((effect, previous)) = effects.split_last() else {
+            return self.stack_input(input, desired);
+        };
+        if let REffectKind::GaussianBlur { radius, radius_q8 } = effect.kind {
+            let sample = desired.coarsen(radius / 64.0);
+            let halo = (radius / sample.scale).ceil() as u32;
+            let source = self.legacy_stack(input, previous, sample.expand(halo, halo), world)?;
+            let filtered = self.gaussian(&source, sample, world, radius, radius_q8)?;
+            let filtered = self.crop(filtered, desired)?;
+            if effect.selection.is_some() {
+                let original = self.legacy_stack(input, previous, desired, world)?;
+                return self.select_effect(&original, filtered, effect, desired, world);
+            }
+            Ok(filtered)
         } else {
-            let source = self.stack(input, previous, desired, world)?;
+            let source = self.legacy_stack(input, previous, desired, world)?;
             self.stage(source, effect, desired, world)
         }
     }
     pub(super) fn input_roi(effects: &[REffect], mut roi: Roi) -> Roi {
-        for e in effects.iter().rev() {
-            if let REffectKind::GaussianBlur { radius, .. } = e.kind {
-                let r = (radius / roi.scale).ceil() as u32;
-                roi = roi.expand(r, r);
+        for effect in effects.iter().rev() {
+            if let Some((radius, _)) = smoothing_radius(&effect.kind) {
+                let halo = (radius / roi.scale).ceil() as u32;
+                roi = roi.expand(halo, halo);
             }
         }
         roi
     }
+
     pub(super) fn input_roi_v3(effects: &[REffect], roi: Roi) -> Result<Roi> {
         let mut grid = RoiQ::from_roi(roi)?;
         for effect in effects.iter().rev() {
-            if let REffectKind::GaussianBlur { radius_q8, .. } = effect.kind {
-                let (r, _) = grid.taps(radius_q8)?;
-                grid = grid.expand(r, r)?;
+            if let Some((_, radius_q8)) = smoothing_radius(&effect.kind) {
+                grid = grid.grow(radius_q8)?;
             }
         }
         grid.to_roi()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn high_pass_input_roi_matches_blur() {
+        let desired = RoiQ {
+            level: -4,
+            ox: -65,
+            oy: 40,
+            w: 256,
+            h: 256,
+        };
+        let radius = 13.5;
+        let radius_q8 = 3456;
+        let blur = REffect {
+            kind: REffectKind::GaussianBlur { radius, radius_q8 },
+            selection: None,
+        };
+        let high_pass = REffect {
+            kind: REffectKind::HighPass { radius, radius_q8 },
+            selection: None,
+        };
+        assert_eq!(
+            smoothing_grid(&blur, desired).unwrap(),
+            smoothing_grid(&high_pass, desired).unwrap()
+        );
+    }
+
+    #[test]
+    fn motion_blur_roi_expands_by_half_distance() {
+        let effect = REffect {
+            kind: REffectKind::MotionBlur {
+                angle_q16: 45 * 65536,
+                distance_q8: 32 * 256,
+            },
+            selection: None,
+        };
+        let desired = Roi {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            w: 256,
+            h: 256,
+        };
+        let input = Context::input_roi_v3(std::slice::from_ref(&effect), desired).unwrap();
+        assert_eq!(
+            (input.x, input.y, input.w, input.h),
+            (-16.0, -16.0, 288, 288)
+        );
+        let grid = RoiQ::from_roi(desired).unwrap();
+        assert_eq!(
+            motion_blur_settings(&effect.kind, grid).unwrap(),
+            [16, 256, 45 * 65536, 0]
+        );
+    }
+
+    #[test]
+    fn selected_blur_stack_evaluates_each_prefix_once_per_level() {
+        let mask = alto_scene::RMask {
+            tiles: vec![],
+            linked: false,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        };
+        let effects: Vec<_> = [64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5]
+            .into_iter()
+            .cycle()
+            .take(32)
+            .map(|radius| REffect {
+                kind: REffectKind::GaussianBlur {
+                    radius,
+                    radius_q8: alto_core::blur::blur_radius_q8_f32(radius).unwrap(),
+                },
+                selection: Some(mask.clone()),
+            })
+            .collect();
+        for level in -6..=0 {
+            let plan = stack_plan(
+                &effects,
+                RoiQ {
+                    level,
+                    ox: -17,
+                    oy: 31,
+                    w: 256,
+                    h: 256,
+                },
+            )
+            .unwrap();
+            assert_eq!(plan.len(), 33);
+            let plane_count: usize = plan.iter().map(BTreeMap::len).sum();
+            assert!(plane_count <= 33 * (1 - level) as usize);
+            // A shared request must be retained across its earlier consumers.
+            if level < 0 {
+                assert!(plan.iter().flatten().any(|(_, plane)| plane.uses > 1));
+            }
+        }
+    }
+
+    #[test]
+    fn effect_stack_releases_each_lease_at_its_last_consumer() {
+        let mut planes = Planes::new();
+        let lease = Arc::new(());
+        let weak = Arc::downgrade(&lease);
+        let target = Target {
+            index: 1,
+            _lease: lease,
+            roi: RoiQ {
+                level: 0,
+                ox: 0,
+                oy: 0,
+                w: 1,
+                h: 1,
+            }
+            .to_roi()
+            .unwrap(),
+        };
+        planes.insert(0, (target, 2));
+        drop(use_plane(&mut planes, 0));
+        assert_eq!(weak.strong_count(), 1);
+        drop(use_plane(&mut planes, 0));
+        assert_eq!(weak.strong_count(), 0);
+        assert!(planes.is_empty());
     }
 }

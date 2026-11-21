@@ -1,7 +1,7 @@
 // Embedding: engines a host creates in its own containers, with their own storage
 // namespaces, through the public API. Each test starts and disposes its own engines.
-import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
-import { blobTarget } from "../../packages/alto-sdk/dist/browser.js";
+import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, FileSystemDirectoryProvider, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
+import { blobTarget, fileHandleTarget, forgetFile, openRecent, recentFiles, rememberFile } from "../../packages/alto-sdk/dist/browser.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => { if (!v) throw Error(m); };
@@ -24,6 +24,44 @@ async function event(engine, name, action, match, timeoutMs = 15000) {
 const run = Date.now().toString(36);
 let serial = 0;
 const name = (label) => `test-embed/${run}/${label}-${serial++}`;
+
+/** Keep browser tests separate from the host's real recent list. */
+async function withRecentFiles(runTest) {
+  const opfs = await navigator.storage.getDirectory();
+  const fixture = `alto-recent-tests-${crypto.randomUUID()}`;
+  const folder = await opfs.getDirectoryHandle(fixture, { create: true });
+  const originalOpen = indexedDB.open;
+  indexedDB.open = function (database, version) {
+    return originalOpen.call(this, database === "alto-engine-recent" ? fixture : database, version);
+  };
+  try {
+    await runTest(folder);
+  } finally {
+    delete indexedDB.open;
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(fixture);
+      request.onsuccess = resolve;
+      request.onerror = () => reject(request.error);
+    });
+    await opfs.removeEntry(fixture, { recursive: true });
+  }
+}
+
+async function withFilePermissions(queryPermission, requestPermission, test) {
+  const proto = FileSystemHandle.prototype;
+  const query = Object.getOwnPropertyDescriptor(proto, "queryPermission");
+  const request = Object.getOwnPropertyDescriptor(proto, "requestPermission");
+  try {
+    Object.defineProperty(proto, "queryPermission", { configurable: true, value: queryPermission });
+    Object.defineProperty(proto, "requestPermission", { configurable: true, value: requestPermission });
+    return await test();
+  } finally {
+    if (query) Object.defineProperty(proto, "queryPermission", query);
+    else delete proto.queryPermission;
+    if (request) Object.defineProperty(proto, "requestPermission", request);
+    else delete proto.requestPermission;
+  }
+}
 
 function container(width = 320, height = 240) {
   const el = document.createElement("div");
@@ -76,6 +114,19 @@ async function quadrants(engine, doc) {
   }
   const image = await engine.assets.importImage(await c.convertToBlob());
   await doc.transact("image.import", (tx) => tx.addRasterFromAsset(image));
+}
+
+async function pngStreamBlob(stream) {
+  const reader = stream.getReader(), chunks = [];
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) return new Blob(chunks, { type: "image/png" });
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /** Decodes an 8-bit, non-interlaced RGB/RGBA PNG to straight RGBA bytes, without a canvas. */
@@ -172,6 +223,99 @@ export async function runEmbedTests(_playground, log) {
     log("PASS " + label);
   };
   try {
+    await test("recent files keep the newest 32", () => withRecentFiles(async (folder) => {
+      for (let i = 0; i < 34; i++)
+        await rememberFile(await folder.getFileHandle(`${i}.alto`, { create: true }));
+      const entries = await recentFiles();
+      assert(entries.length === 32, "recent file limit");
+      assert(entries.every((entry, i) => entry.name === `${33 - i}.alto`), "newest files in order");
+      await forgetFile(entries[0].id);
+      assert((await recentFiles()).length === 31, "forgotten entry disappeared");
+      assert(await rejectsWith(openRecent(entries[0].id), "NOT_FOUND"), "forgotten entry cannot be reopened");
+      assert((await folder.getFileHandle(entries[0].name)).kind === "file", "forget did not remove the actual file");
+    }));
+    await test("recent files remember the same file once", () => withRecentFiles(async (folder) => {
+      const handle = await folder.getFileHandle("document.alto", { create: true });
+      const anotherFolder = await folder.getDirectoryHandle("other", { create: true });
+      const [a, b] = await Promise.all([rememberFile(handle), rememberFile(await folder.getFileHandle(handle.name))]);
+      assert(a.id === b.id, "simultaneous remembers reused the same ID");
+      const distinct = await rememberFile(await anotherFolder.getFileHandle(handle.name, { create: true }));
+      assert(distinct.id !== a.id, "files with the same name can be distinct");
+      const updated = await rememberFile(handle);
+      const entries = await recentFiles();
+      assert(entries.length === 2 && entries[0].id === a.id && updated.opened > distinct.opened, "remember refreshes recency");
+    }));
+    await test("recent files report revoked permission without removing the entry", () => withRecentFiles(async (folder) => {
+      const { id } = await rememberFile(await folder.getFileHandle("revoked.alto", { create: true }));
+      const checked = [];
+      await withFilePermissions(async ({ mode }) => {
+        checked.push(["query", mode]);
+        return "prompt";
+      }, async ({ mode }) => {
+        checked.push(["request", mode]);
+        return "denied";
+      }, async () => {
+        assert((await recentFiles())[0].id === id && checked.length === 0, "listing does not check access");
+        assert(await rejectsWith(openRecent(id), "STORAGE"), "permission refusal");
+        assert(JSON.stringify(checked) === '[["query","readwrite"],["request","readwrite"]]', "re-requested readwrite permission");
+        assert((await recentFiles())[0].id === id, "denied entry was kept");
+      });
+    }));
+    await test("recent files reopen a thin .alto with its history folder", () => withRecentFiles(async (folder) => {
+      const file = await folder.getFileHandle("thin.alto", { create: true });
+      const history = await folder.getDirectoryHandle("history", { create: true });
+      const engine = await engineIn(container(64, 64));
+      const doc = await engine.createDocument({ width: 32, height: 32 });
+      let layer;
+      await doc.transact("layer", (tx) => { layer = tx.addRaster(); });
+      await doc.image.fill(layer, [0, 0], [1, 0, 0, 1]);
+      const first = await doc.versions.commit("red");
+      await doc.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 });
+      await doc.versions.commit("green");
+      const snapshot = await doc.snapshotHash();
+      await doc.save(fileHandleTarget(file), { history: { folder: new FileSystemDirectoryProvider(history) } });
+      const entry = await rememberFile(file, { history });
+      const stored = await rememberFile(file);
+      assert(await stored.history?.isSameEntry(history), "refresh preserves the history folder");
+      const requested = [];
+      const item = await withFilePermissions(async () => "prompt", async function () {
+        requested.push(this.kind);
+        if (this.kind === "file") {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (!requested.includes("directory")) return "denied";
+        }
+        return "granted";
+      }, () => openRecent(entry.id));
+      assert(item.kind === "file" && item.history, "reopened both handles during one gesture");
+      const reopened = await engine.open(item.source, { history: item.history });
+      assert(await reopened.snapshotHash() === snapshot && reopened.folder, "reopened with its history");
+      await reopened.versions.restore(first.hash);
+      assert((await reopened.image.pickColor(layer, [0, 0])).bytes[0] === 255, "older pixels read from history");
+
+      const project = await openRecent((await rememberFile(history)).id);
+      assert(project.kind === "folder", "folder sources have their own kind");
+      await engine.createDocument({ width: 1, height: 1 });
+      assert(await (await engine.openFolder(project.source)).snapshotHash() === snapshot, "recent project folder opens");
+
+      const unlinked = await rememberFile(file, { history: null });
+      assert(unlinked.id === entry.id && !unlinked.history, "history can be unlinked without changing the ID");
+      const fileOnly = await withFilePermissions(async function () {
+        return this.kind === "file" ? "granted" : "denied";
+      }, async () => "denied", () => openRecent(entry.id));
+      assert(fileOnly.kind === "file" && !fileOnly.history, "unlinked item does not require history permission");
+    }));
+    await test("recent files fall back when IndexedDB is unavailable", async () => {
+      const root = await navigator.storage.getDirectory();
+      const original = Object.getOwnPropertyDescriptor(indexedDB, "open");
+      try {
+        indexedDB.open = () => { throw new DOMException("disabled", "SecurityError"); };
+        assert((await recentFiles()).length === 0, "no recent list without IndexedDB");
+        assert(await rejectsWith(rememberFile(root), "UNSUPPORTED"), "remember needs IndexedDB");
+      } finally {
+        if (original) Object.defineProperty(indexedDB, "open", original);
+        else delete indexedDB.open;
+      }
+    });
     await test("64/128/256 MiB budgets reserve at most half and preserve brush pixels", async () => {
       for (const [budget, fixed] of [[64,32],[128,64],[256,128]]) {
         const engine=await engineIn(container(128,128),{gpu:{memoryBudgetMB:budget}});
@@ -307,6 +451,38 @@ export async function runEmbedTests(_playground, log) {
       assert(f.gpu.displayLayers===42 && f.gpu.budgetUsed<=64*1048576,"display allocation grew");
       for(const frame of frames) if(frame.pending && !frame.gpu.overviewReady) assert(!frame.display.hasPresented,"partial first present");
       const exact=await unstable(engine).readTileLevel(0,0,0);assert(exact.length===262144 && exact.every(x=>x===0),"exact readback degraded");
+    });
+    await test("unsharp mask identity and saved pixels match", async () => {
+      const engine = await engineIn(container(64, 64), { storage: { recovery: false } });
+      const diag = unstable(engine);
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      const canvas = new OffscreenCanvas(64, 64);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgba(72, 104, 120, 0.5)";
+      ctx.fillRect(0, 0, 32, 64);
+      ctx.fillStyle = "rgba(156, 184, 196, 0.5)";
+      ctx.fillRect(32, 0, 32, 64);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      let layer;
+      await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+      const read = () => diag.readTile(0, 0);
+      const equal = (a, b) => a.length === b.length && a.every((byte, i) => byte === b[i]);
+      const original = await read();
+      for (const options of [{ radius: 0 }, { amount: 0 }, { threshold: 255 }]) {
+        await doc.effects.set(layer, [{ type: "unsharp_mask", ...options }]);
+        assert(equal(await read(), original), "identity sharpen changed pixels: " + JSON.stringify(options));
+      }
+      assert(await rejectsWith(doc.effects.set(layer, [{ type: "unsharp_mask", threshold: 0.5 }]), "INVALID_ARGUMENT"),
+        "fractional threshold accepted");
+      await doc.effects.set(layer, [{ type: "unsharp_mask", radius: 5, amount: 2, threshold: 1 }]);
+      const sharpened = await read();
+      assert(!equal(sharpened, original), "sharpening did not change an edge");
+      assert(sharpened.every((byte, i) => i % 4 !== 3 || byte === original[i]), "sharpening changed alpha");
+      const hash = await doc.snapshotHash();
+      let archive;
+      await doc.save({ write: async (stream) => { archive = await new Response(stream).blob(); } });
+      const reopened = await engine.open(archive);
+      assert(await reopened.snapshotHash() === hash && equal(await read(), sharpened), "reopened sharpened document differs");
     });
     await test("the browser is supported", async () => {
       const support = await isSupported();
@@ -606,6 +782,85 @@ export async function runEmbedTests(_playground, log) {
       assert(next.getSnapshot().history.undo === 0 && next.getSnapshot().nodes.size === 1,
         "the old stroke changed the replacement document");
     });
+    await test("GPU tile timestamps are optional and preserve recovered pixels", async () => {
+      const engine = await engineIn(container(256, 256), { storage: { namespace: name("gpu-timestamps") } });
+      const diag = unstable(engine);
+      const doc = await engine.createDocument({ width: 512, height: 512 });
+      let layer;
+      await doc.transact("paint", (tx) => { layer = tx.addRaster(); });
+      await doc.image.fill(layer, [0, 0], [1, 0, 0, 1]);
+      engine.viewport.set({ center: [256, 256], zoom: 0.5 / diag.pixelRatio(), rotation: 0 });
+      await diag.settle();
+      const before = await diag.readTile(0, 0);
+      const capability = await diag.gpuTileTimestamps();
+      assert(capability === null || capability.length === 0, "timestamps collected by default");
+
+      const checkSamples = async () => {
+        const deadline = performance.now() + 5000;
+        let samples = await diag.gpuTileTimestamps();
+        while (samples?.length === 0 && performance.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 16));
+          samples = await diag.gpuTileTimestamps();
+        }
+        if (capability === null) {
+          assert(samples === null, "unsupported adapter reported timestamps");
+        } else {
+          assert(samples?.length > 0, "completed composition produced no timestamps");
+          assert(samples.every(({ x, y, level, ns }) =>
+            [x, y, level].every(Number.isInteger) && level > 0 && Number.isFinite(ns) && ns >= 0
+          ), "invalid GPU tile timestamps: " + JSON.stringify(samples));
+        }
+      };
+      await diag.setGpuTimestampProfiling(true);
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      await checkSamples();
+      await doc.durable();
+      await testing(engine).crash();
+      await diag.settle();
+      await checkSamples();
+      const after = await diag.readTile(0, 0);
+      assert(after.length === before.length && after.every((byte, i) => byte === before[i]), "timestamp profiling changed pixels");
+      await engine.document.transact("levels", (tx) => {
+        tx.addAdjustment({ type: "levels", in_black: 0.05, in_white: 0.95, gamma: 1.1 });
+      });
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      await checkSamples();
+      await diag.setGpuTimestampProfiling(false);
+      await diag.resetRenderCache(true);
+      await diag.settle();
+      const disabled = await diag.gpuTileTimestamps();
+      assert(disabled === null || disabled.length === 0, "disabled profiling returned tile timestamps");
+      log("GPU-TIMESTAMP " + (capability === null ? "unsupported" : "supported"));
+    });
+    await test("recovery reports its stages in order", async () => {
+      const engine = await engineIn(container(), { storage: { namespace: name("recovery-stages") } });
+      const diag = unstable(engine);
+      assert(await diag.recoveryStages() === null, "a fresh engine has recovery timings");
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      await doc.transact("layer.add", (tx) => tx.addRaster({ name: "recovered" }));
+      await doc.durable();
+      const expected = await doc.snapshotHash();
+      const start = performance.now();
+      await testing(engine).crash();
+      // Let the regular frame loop complete the timing on its own.
+      const deadline = performance.now() + 15_000;
+      let stages = await diag.recoveryStages();
+      while (stages?.firstFrame == null && performance.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 16));
+        stages = await diag.recoveryStages();
+      }
+      const elapsed = performance.now() - start;
+      assert(stages?.firstFrame != null, "missing recovery timings after the first frame");
+      const names = ["candidates", "load", "verify", "restore", "register", "replay", "activate", "firstFrame"];
+      assert(Object.keys(stages).join(",") === names.join(","), "incorrect stage order");
+      const values = Object.values(stages);
+      assert(values.every((ms) => Number.isFinite(ms) && ms >= 0), "invalid duration: " + JSON.stringify(stages));
+      // Page and Worker clocks can be rounded independently.
+      assert(values.reduce((sum, ms) => sum + ms, 0) <= elapsed + 1, "recovery stages exceed total elapsed time");
+      assert(await engine.document.snapshotHash() === expected, "recovery changed the document");
+    });
     await test("restore and discard cannot race to delete the restored journal", async () => {
       const el = container();
       const namespace = name("restore-discard");
@@ -635,6 +890,88 @@ export async function runEmbedTests(_playground, log) {
       await deleteRecovery(namespace);
       assert(!(await listRecoveryNamespaces()).some((n) => n.namespace === namespace), "deleted namespace still listed");
     });
+    await test("auto namespaces isolate two journals and list their recovery labels", async () => {
+      const a = await engineIn(container(), { storage: { namespace: "auto" } });
+      let b, reopened;
+      try {
+        b = await engineIn(container(), { storage: { namespace: "auto" } });
+        assert(a.namespace.startsWith("auto/") && b.namespace.startsWith("auto/"), "auto prefix");
+        assert(a.namespace !== b.namespace, "auto namespaces collided");
+        await a.recovery.setLabel("Sketch");
+        const [first, second] = await Promise.all([
+          a.createDocument({ width: 64, height: 80 }),
+          b.createDocument({ width: 96, height: 112 }),
+        ]);
+        await b.recovery.setLabel("Reference");
+        for (const invalid of ["", "a".repeat(257)]) {
+          assert(await rejectsWith(a.recovery.setLabel(invalid), "INVALID_ARGUMENT"), "accepted invalid label");
+        }
+        await Promise.all([
+          first.transact("draw", (tx) => tx.addRaster({ name: "Sketch layer" })),
+          second.transact("draw", (tx) => tx.addRaster({ name: "Reference layer" })),
+        ]);
+        await Promise.all([first.durable(), second.durable()]);
+        const lookup = async (namespace) => (await listRecoveryNamespaces()).find((row) => row.namespace === namespace);
+        const sketch = await lookup(a.namespace);
+        const reference = await lookup(b.namespace);
+        assert(sketch?.label === "Sketch" && sketch.width === 64 && sketch.height === 80, "first recovery label");
+        assert(reference?.label === "Reference" && reference.width === 96 && reference.height === 112, "second recovery label");
+
+        await first.canvas.resize(72, 88);
+        await first.save(blobTarget());
+        const deadline = performance.now() + 5000;
+        let resized;
+        do {
+          resized = await lookup(a.namespace);
+          if (resized?.width === 72 && resized.height === 88) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        } while (performance.now() < deadline);
+        assert(resized?.width === 72 && resized.height === 88, "checkpoint did not refresh dimensions");
+        // Keep an unsaved change so the journal is offered for recovery after a clean exit.
+        await first.transact("draw", (tx) => tx.addRaster({ name: "Unsaved layer" }));
+        const hash = await first.snapshotHash();
+        await a.dispose();
+        reopened = await engineIn(container(), { storage: { namespace: a.namespace } });
+        const restored = await reopened.recovery.restore();
+        assert(await restored.snapshotHash() === hash, "restored the wrong journal");
+        assert((await lookup(a.namespace))?.label === "Sketch", "restoring lost the label");
+
+        await b.dispose();
+        const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+        const hex = Array.from(new TextEncoder().encode(b.namespace), (value) => value.toString(16).padStart(2, "0")).join("");
+        const folder = await root.getDirectoryHandle("ns-" + hex);
+        const file = await (await folder.getFileHandle("label.json")).createWritable();
+        await file.write("{damaged");
+        await file.close();
+        const damaged = await lookup(b.namespace);
+        assert(damaged?.bytes > 0 && damaged.label === undefined && damaged.width === undefined, "bad label hid or polluted the journal");
+      } finally {
+        await reopened?.dispose();
+        await Promise.all([a.dispose(), b?.dispose()]);
+        await deleteRecovery(a.namespace);
+        if (b) await deleteRecovery(b.namespace);
+      }
+    });
+    await test("the literal auto namespace can still be recovered or discarded", async () => {
+      const storage = { namespace: "auto", literalNamespace: true };
+      let engine = await engineIn(container(), { storage });
+      try {
+        assert(engine.namespace === "auto", "literal namespace was replaced");
+        const doc = await engine.createDocument({ width: 64, height: 64 });
+        await engine.recovery.setLabel("Existing namespace");
+        await doc.transact("draw", (tx) => tx.addRaster());
+        await doc.durable();
+        await engine.dispose();
+        engine = await engineIn(container(), { storage });
+        assert(engine.recovery.available, "literal namespace was not recoverable");
+        await engine.recovery.discard();
+        const row = (await listRecoveryNamespaces()).find(({ namespace }) => namespace === "auto");
+        assert(!row?.label && !engine.recovery.available, "discard left the sidecar or journal");
+      } finally {
+        await engine.dispose();
+        await deleteRecovery("auto");
+      }
+    });
     await test("an engine without a journal writes nothing and shares no lock", async () => {
       const namespace = name("none");
       const a = await engineIn(container(), { storage: { namespace, recovery: false } });
@@ -643,6 +980,7 @@ export async function runEmbedTests(_playground, log) {
       await doc.transact("layer.add", (tx) => tx.addRaster());
       await doc.durable();
       await b.createDocument({ width: 64, height: 64 });
+      assert(await rejectsWith(a.recovery.setLabel("No journal"), "NOT_FOUND"), "label accepted without a journal");
       assert(!(await listRecoveryNamespaces()).some((n) => n.namespace === namespace), "a journal-free engine wrote a journal");
       assert(await rejectsWith(a.recovery.restore(), "NOT_FOUND"), "restore without a journal did not report NOT_FOUND");
     });
@@ -725,6 +1063,93 @@ export async function runEmbedTests(_playground, log) {
         }
       }
     });
+    await test("exportImage PNG preserves display pixels across the encoder's band boundary", async () => {
+      const width = 18, height = 273;
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width, height });
+      let layer;
+      await doc.transact("raster", (tx) => {
+        layer = tx.addRaster({ bounds: { x: 0, y: 0, width, height } });
+      });
+      await doc.image.gradient(layer, {
+        kind: "linear", start: [0, 0], end: [width, height],
+        stops: [{ offset: 0, color: [0, 0.5, 1, 0.2] }, { offset: 1, color: [1, 0, 0.1, 0.7] }],
+      });
+      const png = await decodePng(await doc.exportImage());
+      const want = await displayStraight(engine, width, height);
+      const diff = pixelDiff(png.pixels, want, width);
+      assert(png.width === width && png.height === height && diff.count === 0, "band boundary: " + diff.first.join(" | "));
+    });
+    await test("PNG stream matches Blob export and releases the worker on cancel and edit", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 54, height: 567 });
+      let layer;
+      await doc.transact("add raster", (tx) => {
+        layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 54, height: 567 } });
+      });
+      await doc.image.gradient(layer, {
+        kind: "linear", start: [0, 0], end: [54, 567],
+        stops: [{ offset: 0, color: [0, 0.5, 1, 0.2] }, { offset: 1, color: [1, 0, 0.1, 0.8] }],
+      });
+      for (const options of [{ region: { x0: 3, y0: 13, x1: 49, y1: 550 } }, { scale: 0.5 }]) {
+        const want = await decodePng(await doc.exportImage(options));
+        const got = await decodePng(await pngStreamBlob(doc.exportImageStream(options)));
+        const diff = pixelDiff(got.pixels, want.pixels, want.width);
+        assert(got.width === want.width && got.height === want.height && diff.count === 0, "stream pixels: " + diff.first.join(" | "));
+      }
+      const reader = doc.exportImageStream().getReader();
+      assert(!(await reader.read()).done, "missing header");
+      assert(await rejectsWith(doc.exportImageStream().getReader().read(), "BUSY"), "second stream was accepted");
+      engine.viewport.panBy(10, 15);
+      await unstable(engine).settle();
+      assert(!(await reader.read()).done, "panning broke the stream");
+      await reader.cancel();
+      assert((await doc.exportImage()).size > 0, "cancel blocked Blob export");
+
+      const edited = doc.exportImageStream().getReader();
+      await edited.read();
+      await doc.transact("edit", (tx) => tx.setProps(layer, { opacity: 0.5 }));
+      assert(await rejectsWith(edited.read(), "CONFLICT", "document-changed"), "stream survived an edit");
+      assert(await rejectsWith(doc.exportImageStream({ scale: 0.7 }).getReader().read(), "UNSUPPORTED"), "inexact export accepted");
+      assert(await rejectsWith(doc.exportImageStream({ type: "image/jpeg" }).getReader().read(), "UNSUPPORTED"), "non-PNG stream accepted");
+
+      const restarted = doc.exportImageStream().getReader();
+      await restarted.read();
+      await doc.durable();
+      await testing(engine).crash();
+      assert(await rejectsWith(restarted.read(), "CONFLICT", "document-changed"), "stream survived a Worker restart");
+
+      const replaced = doc.exportImageStream().getReader();
+      await replaced.read();
+      const next = await engine.createDocument({ width: 8, height: 8 });
+      assert(await rejectsWith(replaced.read(), "CONFLICT", "document-changed"), "stream survived document replacement");
+      assert((await pngStreamBlob(next.exportImageStream())).size > 0, "replacement could not stream");
+    });
+
+    await test("PNG stream can export a document larger than 64 million pixels", async () => {
+      const width = 1024, height = 62501;
+      const engine = await engineIn(container(60, 60));
+      const doc = await engine.createDocument({ width, height });
+      assert(await rejectsWith(doc.exportImage(), "INVALID_ARGUMENT"), "Blob export cap was not enforced");
+      const reader = doc.exportImageStream().getReader();
+      const header = (await reader.read()).value;
+      const size = new DataView(header.buffer, header.byteOffset);
+      assert(size.getUint32(16) === width && size.getUint32(20) === height, "wrong streamed dimensions");
+      const first = (await reader.read()).value;
+      assert(String.fromCharCode(...first.subarray(4, 8)) === "IDAT", "missing large image data");
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter?.info.architecture.includes("swiftshader")) {
+        await reader.cancel();
+      } else {
+        let last;
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          last = next.value;
+        }
+        assert(last && String.fromCharCode(...last.subarray(4, 8)) === "IEND", "large PNG was truncated");
+      }
+    });
     await test("a frame that takes seconds on the GPU is not reported as a lost GPU", async () => {
       // The 600×300 scene the exactness test used before it was shrunk: one frame of it
       // takes 3–5 s on SwiftShader. A healthy device that is still working is not lost.
@@ -775,6 +1200,94 @@ export async function runEmbedTests(_playground, log) {
       const all = await decodePng(await doc.exportImage({ region: { x0: -Infinity, y0: -Infinity, x1: Infinity, y1: Infinity } }));
       assert(all.width === 64 && all.height === 32, `infinite region gave ${all.width}×${all.height}`);
       assert(all.pixels.every((v) => v === 0), "an empty document exported non-transparent pixels");
+    });
+    await test("JPEG export composites alpha over the background", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 128, height: 64 });
+      const canvas = new OffscreenCanvas(128, 64);
+      const source = canvas.getContext("2d");
+      source.fillStyle = "rgba(255,0,0,0.5)";
+      source.fillRect(0, 0, 64, 64);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      await doc.transact("image.import", (tx) => tx.addRasterFromAsset(asset));
+      for (const [options, red, blank] of [
+        [{}, [255, 127, 127, 255], [255, 255, 255, 255]],
+        [{ background: [0, 0, 0], quality: 1, scale: 0.75 }, [128, 0, 0, 255], [0, 0, 0, 255]],
+      ]) {
+        const jpeg = await doc.exportImage({ type: "image/jpeg", ...options });
+        assert(jpeg.type === "image/jpeg", "JPEG MIME type");
+        const bitmap = await createImageBitmap(jpeg);
+        try {
+          const scale = options.scale ?? 1;
+          assert(bitmap.width === 128 * scale && bitmap.height === 64 * scale, "JPEG dimensions");
+          const probe = new OffscreenCanvas(bitmap.width, bitmap.height).getContext("2d");
+          probe.drawImage(bitmap, 0, 0);
+          for (const [x, expected] of [[32, red], [96, blank]]) {
+            const pixel = probe.getImageData(x * scale, 32 * scale, 1, 1).data;
+            assert(pixel.every((v, i) => near(v, expected[i], 3)), `JPEG pixel at ${x}: ${pixel} vs ${expected}`);
+          }
+        } finally {
+          bitmap.close();
+        }
+      }
+      for (const quality of [NaN, -1, 1.01, Infinity]) {
+        assert(await rejectsWith(doc.exportImage({ type: "image/jpeg", quality }), "INVALID_ARGUMENT", "quality"), "invalid JPEG quality");
+      }
+      assert(await rejectsWith(doc.exportImage({ type: "image/unsupported" }), "UNSUPPORTED"), "unknown export format");
+      assert(await rejectsWith(doc.exportImage({ quality: 0.5 }), "INVALID_ARGUMENT", "quality"), "quality on PNG");
+      assert(await rejectsWith(doc.exportImage({ type: "image/jpeg", background: [1, NaN, 0] }), "INVALID_ARGUMENT", "background"), "invalid JPEG background");
+      assert(await rejectsWith(doc.exportImage({ type: "image/webp", background: [1, 1, 1] }), "INVALID_ARGUMENT", "background"), "background on WebP");
+      assert(await rejectsWith(doc.exportImage({ compression: "deflate" }), "INVALID_ARGUMENT", "compression"), "compression on PNG");
+      assert(await rejectsWith(doc.exportImage({ type: "image/tiff", compression: "lzw" }), "INVALID_ARGUMENT", "compression"), "invalid TIFF compression");
+    });
+    await test("TIFF export holds the display pixels in uncompressed and Deflate strips", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 32, height: 270 });
+      const canvas = new OffscreenCanvas(32, 270);
+      const source = canvas.getContext("2d");
+      source.fillStyle = "rgba(137,23,221,0.45)";
+      source.fillRect(0, 0, 30, 256);
+      source.fillStyle = "rgba(3,199,81,0.7)";
+      source.fillRect(0, 256, 20, 13);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      await doc.transact("image.import", (tx) => tx.addRasterFromAsset(asset));
+      for (const [options, compression, expectedStrips] of [
+        [{}, undefined, 2],
+        [{}, "deflate", 2],
+        [{ scale: 0.75, region: { x0: 2, y0: 1, x1: 30, y1: 269 } }, "deflate", 1],
+      ]) {
+        const { pixels, width, height } = await decodePng(await doc.exportImage(options));
+        const tiff = await doc.exportImage({ ...options, type: "image/tiff", compression });
+        const raw = await tiff.arrayBuffer();
+        const view = new DataView(raw);
+        assert(tiff.type === "image/tiff" && view.getUint16(0, true) === 0x4949 && view.getUint16(2, true) === 42, "TIFF signature");
+        const ifd = view.getUint32(4, true);
+        const tags = new Map();
+        for (let n = 0; n < view.getUint16(ifd, true); n++) {
+          const at = ifd + 2 + n * 12;
+          const tag = view.getUint16(at, true), kind = view.getUint16(at + 2, true);
+          const count = view.getUint32(at + 4, true), size = kind === 3 ? 2 : 4;
+          const start = count * size <= 4 ? at + 8 : view.getUint32(at + 8, true);
+          tags.set(tag, Array.from({ length: count }, (_, i) => kind === 3 ? view.getUint16(start + i * size, true) : view.getUint32(start + i * size, true)));
+        }
+        assert(tags.get(256)[0] === width && tags.get(257)[0] === height, "TIFF dimensions");
+        assert(tags.get(338)[0] === 2 && tags.get(278)[0] === 256, "TIFF alpha or rows per strip");
+        assert(tags.get(339)?.length === 4 && tags.get(339).every((v) => v === 1), "TIFF sample format");
+        assert(tags.get(259)[0] === (compression === "deflate" ? 8 : 1), "TIFF compression tag");
+        const offsets = tags.get(273), counts = tags.get(279);
+        assert(offsets.length === expectedStrips && counts.length === expectedStrips, "TIFF strip count");
+        let cursor = 0;
+        for (const [i, offset] of offsets.entries()) {
+          const bytes = raw.slice(offset, offset + counts[i]);
+          const decoded = compression === "deflate" ? await new Response(
+            new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")),
+          ).arrayBuffer() : bytes;
+          const tolerance = options.scale === undefined ? 0 : 1;
+          assert(new Uint8Array(decoded).every((v, j) => near(v, pixels[cursor + j], tolerance)), `TIFF ${compression} strip ${i} differs from PNG`);
+          cursor += decoded.byteLength;
+        }
+        assert(cursor === pixels.length, "TIFF payload size differs from PNG");
+      }
     });
     await test("exportImage writes the displayed pixels, scaled and cropped", async () => {
       const engine = await engineIn(container(400, 300));

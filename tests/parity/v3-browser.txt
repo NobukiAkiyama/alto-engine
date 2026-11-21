@@ -85,3 +85,40 @@ fad6d8190c961ac2 v3-mask-selection-color-adjust
 2bb3c7577b35b59a v3-adjustment-screen-unmasked
 03e5a9697e0db970 v3-mask-rotated
 fd373e2810ae1435 v3-mask-group
+5f83a5f30a722325 effect-high-pass-flat
+f79a2348a412695a effect-high-pass
+2ec24575f91f1b1c effect-high-pass-seam (0, 0)
+416e3fe9031c88d6 effect-high-pass-seam (1, 0)
+af8612917c753e69 effect-high-pass-seam (0, 1)
+6dd0542f592496e9 effect-high-pass-seam (1, 1)
+8ea3ac6b9c0c1719 effect-high-pass-selected
+f79a2348a412695a effect-high-pass-adjustment
+837d73328a9c1071 effect-unsharp
+86153ffcb571b7b5 effect-unsharp-threshold
+9cb183a14efe7629 effect-unsharp-tile-seam (0, 0)
+d31068a45b90248d effect-unsharp-tile-seam (1, 0)
+87fd5809e8ce66b9 effect-unsharp-tile-seam (0, 1)
+cc8be4e6a78e654c effect-unsharp-tile-seam (1, 1)
+7413ae943cc54ab5 effect-unsharp-selected
+7ac53844709f1eca effect-unsharp-adjustment
+426e4e110a8bc6f0 effect-unsharp-zero-amount
+426e4e110a8bc6f0 effect-unsharp-zero-radius
+6eca46b897d88bd7 effect-motion-blur
+aabce0061132e290 effect-motion-blur-45
+967fa91f29c47060 effect-motion-blur-90
+aabce0061132e290 effect-motion-blur-neg135
+612dd10983b51deb effect-motion-blur-tile-seam (0, 0)
+2b3961ff808a19b5 effect-motion-blur-tile-seam (1, 0)
+e9de86db85c6d3e3 effect-motion-blur-tile-seam (0, 1)
+f7e97465f33ab378 effect-motion-blur-tile-seam (1, 1)
+bb2ed6e1a45a84df effect-motion-blur-selected
+3b89588525810dfa effect-motion-blur-adjustment
+426e4e110a8bc6f0 effect-motion-blur-zero
+5d3e8aa4018b1f65 effect-noise
+584c3be4f09de8a9 effect-noise-color
+c8aec754ad5eacbe effect-noise-selected
+2c2a1225da6e62fd effect-noise-adjustment
+9f623f54a1da6791 effect-noise-tile-seam (0, 0)
+e88a0514e1c02a58 effect-noise-tile-seam (1, 0)
+b9302861ea2cb895 effect-noise-tile-seam (0, 1)
+696ee8682fd63553 effect-noise-tile-seam (1, 1)

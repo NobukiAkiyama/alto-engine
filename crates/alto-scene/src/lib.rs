@@ -82,6 +82,25 @@ pub enum REffectKind {
         radius: f32,
         radius_q8: u32,
     },
+    HighPass {
+        radius: f32,
+        radius_q8: u32,
+    },
+    UnsharpMask {
+        radius: f32,
+        radius_q8: u32,
+        amount_q8: u32,
+        threshold_q14: u32,
+    },
+    MotionBlur {
+        angle_q16: i32,
+        distance_q8: u32,
+    },
+    Noise {
+        seed: u32,
+        amount_q14: u32,
+        monochrome: bool,
+    },
     ColorAdjust {
         brightness: f32,
         contrast: f32,

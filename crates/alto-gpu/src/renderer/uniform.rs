@@ -331,6 +331,7 @@ mod tests {
             cap: Default::default(),
             join: Default::default(),
             miter_limit: 4.0,
+            dash: None,
         });
         let mut blurred = shape(128.0, vec![fill.clone()]);
         blurred.nodes[0].features.effects.push(alto_scene::REffect {

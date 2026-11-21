@@ -14,6 +14,8 @@ case "$phase" in
     exit 1
     ;;
 esac
+# Version claims in the prose and build.json must match the source constants.
+node scripts/check-versions.mjs
 # Native artifacts, including the wasm-bindgen-cli install below.
 export CARGO_TARGET_DIR="${ALTO_TARGET_DIR:-target}"
 wasm_target="${ALTO_WASM_TARGET_DIR:-$CARGO_TARGET_DIR}"

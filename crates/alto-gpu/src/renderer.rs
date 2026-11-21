@@ -1,7 +1,7 @@
 //! Worker and native renderer. The document remains CPU-owned; all textures are caches.
 use crate::{RContent, RenderBlend, RenderScene};
 use alto_core::{ContentHash, MAX_ISOLATED_GROUPS, NodeId, Rect, TILE, TileKey};
-use alto_raster::{Dab, TileData, TileStore};
+use alto_raster::{BrushImage, BrushPattern, Dab, TileData, TileStore};
 use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -36,6 +36,7 @@ use pyramid::pyramid_children;
 mod scene;
 mod stroke;
 mod tile_read;
+mod timestamps;
 mod upload;
 
 pub use crate::RenderError;
@@ -341,6 +342,10 @@ pub struct StrokeTile {
 }
 
 pub struct GpuStroke {
+    tip: Option<BrushImage>,
+    tip_texture: Option<wgpu::Texture>,
+    pattern: Option<BrushPattern>,
+    pattern_texture: Option<wgpu::Texture>,
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
     pub color: [f32; 4],
@@ -438,6 +443,10 @@ pub struct Renderer {
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
+    /// The adapter exposes timestamp queries; only then are they requested.
+    gpu_timestamp_period: Option<f32>,
+    /// Present once diagnostics first enable timestamps.
+    gpu_timestamps: Option<timestamps::GpuTimestamps>,
     /// Build v3 subtrees away from every edge from one leaf (`uniform`).
     uniform_pyramid: bool,
     uniform: Option<uniform::Memo>,

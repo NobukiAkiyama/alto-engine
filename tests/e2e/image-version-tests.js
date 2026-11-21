@@ -74,6 +74,22 @@ export async function runImageVersionTests(engine, log) {
       await reject(d.canvas.rotate(4), "INVALID_ARGUMENT"); await reject(d.canvas.crop({ x: 0, y: 0, width: 0, height: 1 }), "INVALID_ARGUMENT"); assert(await d.snapshotHash() === hash, "failed canvas edit changed the document");
       void before;
     });
+    await test("automatic levels are read-only until applied", async () => {
+      d = await engine.createDocument({ width: 2, height: 1 });
+      const asset = await testing(engine).request("import", {
+        width: 2, height: 1, pixels: new Uint8Array([64, 64, 64, 255, 192, 192, 192, 255]),
+        encoded: new Uint8Array(), mime: "image/png",
+      });
+      await d.transact("add raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+      const before = d.getSnapshot();
+      const levels = await d.effects.autoLevels(layer);
+      assert(d.getSnapshot() === before, "suggesting levels changed the snapshot");
+      assert(eq(levels, { in_black: 64 / 255, in_white: 192 / 255, gamma: 1, out_black: 0, out_white: 1 }), "levels endpoints");
+      await reject(d.effects.autoLevels(before.root), "INVALID_ARGUMENT");
+      await d.effects.set(layer, [{ type: "levels", ...levels }]);
+      assert(eq((await d.image.pickComposite([0, 0])).bytes, [0, 0, 0, 255]), "black endpoint");
+      assert(eq((await d.image.pickComposite([1, 0])).bytes, [255, 255, 255, 255]), "white endpoint");
+    });
     await test("clone stamp / smudge / histogram / merge down / rasterize through the SDK", async () => {
       d = await engine.createDocument({ width: 600, height: 32 });
       let lower, upper;
@@ -112,11 +128,120 @@ export async function runImageVersionTests(engine, log) {
       for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - after[i].bytes[c]) <= 1), `vector picture changed at ${p}: ${before[i].bytes} ${after[i].bytes}`);
       assert(eq((await d.image.pickComposite([255, 15])).bytes, [255, 0, 0, 255]), "opaque interior is exact");
       await d.undo(); assert(await d.snapshotHash() === hash, "vector bake Undo");
-      await d.transact("layer.props", (tx) => tx.setProps(vector, { transform: [2, 0, 0, 2, 0, 0] })); const scaled = await d.snapshotHash();
-      await reject(d.image.rasterize(vector), "UNSUPPORTED"); assert(await d.snapshotHash() === scaled, "refused bake changed the document"); await d.undo();
+      await d.transact("scale vector", (tx) => tx.setTransform(vector, [2, 0, 0, 2, -450, 0]));
+      const scaled = await d.snapshotHash();
+      const scaledSamples = [[55, 25], [65, 48], [75, 56], [20, 20]];
+      const scaledPixels = await Promise.all(scaledSamples.map((point) => d.image.pickComposite(point)));
+      await d.image.rasterize(vector);
+      assert(eq(d.getSnapshot().nodes.get(vector).props.transform, [1, 0, 0, 1, 0, 0]), "expected an identity transform after baking the scale");
+      for (const [i, point] of scaledSamples.entries()) {
+        const bakedPixel = (await d.image.pickComposite(point)).bytes;
+        assert(scaledPixels[i].bytes.every((value, channel) => Math.abs(value - bakedPixel[channel]) <= 1), "scaled vector changed at " + point);
+      }
+      assert(eq((await d.image.pickComposite([55, 25])).bytes, [255, 0, 0, 255]), "scaled opaque interior");
+      await d.undo();
+      assert(await d.snapshotHash() === scaled, "scaled rasterize Undo");
+      await d.undo();
       if (group) { const merged = await d.image.rasterize(group); assert(merged.node === group && d.getSnapshot().nodes.get(group).type === "raster" && !d.getSnapshot().nodes.has(vector), "group bake");
         const flat = await Promise.all(samples.map((p) => d.image.pickComposite(p))); for (const [i, p] of samples.entries()) assert(before[i].bytes.every((v, c) => Math.abs(v - flat[i].bytes[c]) <= 1), `group picture changed at ${p}`); }
       const saved = blobTarget(), done = await d.snapshotHash(); await d.save(saved); d = await engine.open(saved.blob); assert(await d.snapshotHash() === done, "bake reopen");
+    });
+    await test("a rotated vector bakes on the parent grid and keeps its masks", async () => {
+      d = await engine.createDocument({ width: 128, height: 128 });
+      let group, vector;
+      const square = await engine.vectors.parseSvg("M0 0 H40 V40 H0 Z");
+      const half = await engine.vectors.parseSvg("M0 0 H20 V40 H0 Z");
+      const clip = await engine.vectors.parseSvg("M0 0 H40 V20 H0 Z");
+      const t = Math.SQRT1_2;
+      await d.transact("transformed vector", (tx) => {
+        group = tx.addGroup();
+        tx.setTransform(group, [1, 0, 0, 1, 11, 7]);
+        vector = tx.addVector([{ data: square, fill: [1, 0, 0, 1], stroke: null }], { parent: group });
+        tx.setTransform(vector, [t, t, -t, t, 40.25, 20.5]);
+      });
+      await d.selection.apply({ kind: "rectangle", x: 38, y: 33, width: 23, height: 24 });
+      await d.effects.set(vector, [{ type: "invert" }]);
+      const limited = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "UNSUPPORTED");
+      assert(await d.snapshotHash() === limited, "limited-effect failure changed the document");
+      await d.undo();
+      await d.transact("fractional ancestor", (tx) => tx.setTransform(group, [1, 0, 0, 1, 11.5, 7]));
+      const fractional = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "UNSUPPORTED");
+      assert(await d.snapshotHash() === fractional, "ancestor failure changed the document");
+      await d.undo();
+      await d.transact("out of range", (tx) => tx.setTransform(vector, [20000, 0, 0, 2, 0, 0]));
+      const outOfRange = await d.snapshotHash();
+      await reject(d.image.rasterize(vector), "INVALID_ARGUMENT");
+      assert(await d.snapshotHash() === outOfRange, "out-of-range failure changed the document");
+      await d.undo();
+      await d.masks.fromSelection(vector);
+      await d.selection.clear();
+      await d.vectors.setMask(vector, { path: half });
+      await d.vectors.setClipPath(vector, { path: clip });
+      const locations = [[50, 40], [56, 46], [45, 46], [51, 28], [61, 41], [43, 56], [63, 51]];
+      const before = await Promise.all(locations.map((point) => d.image.pickComposite(point)));
+      assert(before.some(({ bytes }) => bytes[3] === 255) && before.some(({ bytes }) => bytes[3] === 0), "mask samples do not exercise inside and outside");
+      const start = await d.snapshotHash();
+      const baked = await d.image.rasterize(vector);
+      const node = d.getSnapshot().nodes.get(vector);
+      assert(node.type === "raster" && node.parent === group, "lost layer or parent");
+      assert(baked.bounds.x < 25 && baked.bounds.x + baked.bounds.width > 65, "bounds lost the rotated shape");
+      for (const [i, point] of locations.entries()) {
+        const after = (await d.image.pickComposite(point)).bytes;
+        assert(before[i].bytes.every((value, channel) => Math.abs(value - after[channel]) <= 1), `rotated mask sample ${point}: ${before[i].bytes} vs ${after}`);
+      }
+      const bakedHash = await d.snapshotHash();
+      const target = blobTarget();
+      await d.save(target);
+      await d.undo();
+      assert(await d.snapshotHash() === start, "rotated rasterize Undo");
+      d = await engine.open(target.blob);
+      assert(await d.snapshotHash() === bakedHash, "rotated raster survives reopening");
+    });
+    const addBakedText = async (value = "A", spans = []) => {
+      d = await engine.createDocument({ width: 320, height: 64 });
+      assert(d.getSnapshot().meta.render_version === 3, "expected the v3 renderer");
+      const font = await engine.assets.importFont(await (await fetch("../../tests/fonts/AltoTestLatin.ttf")).blob());
+      let text;
+      await d.transact("text", (tx) => {
+        text = tx.addText({ text: value, spans, style: { fonts: [tx.addFont(font)], size: 32, color: [1, 0, 0, 1] } });
+        tx.setTransform(text, [1, 0, 0, 1, 247, 8]);
+      });
+      return text;
+    };
+    await test("text_rasterize_matches_the_canvas_pixels", async () => {
+      const text = await addBakedText("A😀", [{ start: 1, end: 3, style: { fonts: [] } }]);
+      const samples = Array.from({ length: 32 * 20 }, (_, i) => [246 + 2 * (i % 32), 7 + 2 * Math.floor(i / 32)]);
+      const pixels = async () => {
+        const colors = [];
+        for (const point of samples) colors.push((await d.image.pickComposite(point)).bytes);
+        return colors;
+      };
+      const before = await pixels();
+      assert(before.some((p) => p[3] === 255) && before.some((p) => p[3] > 0 && p[3] < 255), "expected opaque and antialiased text");
+      assert(before.some((p, i) => samples[i][0] >= 272 && p[3] === 255), "expected the placeholder box");
+      const result = await d.image.rasterize(text);
+      assert(result.missing === 1 && d.getSnapshot().nodes.get(text).type === "raster", "text rasterize result");
+      const after = await pixels();
+      for (const [i, p] of before.entries()) {
+        assert(p.every((v, c) => Math.abs(v - after[i][c]) <= (p[3] === 255 ? 0 : 1)),
+          `text changed at ${samples[i]}: ${p} vs ${after[i]}`);
+      }
+    });
+    await test("rasterize_is_one_undo_and_survives_save", async () => {
+      const text = await addBakedText();
+      const before = await d.snapshotHash();
+      assert((await d.image.rasterize(text)).missing === 0, "expected an explicit zero missing count");
+      const after = await d.snapshotHash();
+      await d.undo();
+      assert(await d.snapshotHash() === before && d.getSnapshot().nodes.get(text).type === "text", "text rasterize Undo");
+      await d.redo();
+      assert(await d.snapshotHash() === after, "text rasterize Redo");
+      const saved = blobTarget();
+      await d.save(saved);
+      d = await engine.open(saved.blob);
+      assert(await d.snapshotHash() === after && d.getSnapshot().nodes.get(text).type === "raster", "text rasterize reopen");
     });
     await test("branches / dirty refusal / conflict resolution / two-parent roundtrip", async () => {
       d = await engine.createDocument({ width: 8, height: 8 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster(); });
@@ -274,6 +399,230 @@ export async function runImageVersionTests(engine, log) {
       d = await engine.open(full.blob); assert(await d.snapshotHash() === hash && (await d.versions.log({ mode: "dag" })).length === count, "full archive");
       d = await engine.open(working.blob); assert((await d.versions.log()).length === 0, "working-only archive has no history");
     });
+    const sixVersions = async () => {
+      d = await engine.createDocument({ width: 512, height: 512 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 512, height: 512 } }); });
+      for (let i = 0; i < 6; i++) { await d.image.fill(layer, [0, 0], [i / 8, 0.5, 1 - i / 8, 1], { tolerance: 255 }); await d.versions.commit("v" + i); }
+    };
+    // A store whose holds can be counted: an open document that keeps versions there holds it.
+    const heldStore = () => {
+      const store = new MemoryObjectProvider(); let holds = 0;
+      store.holdObjects = async () => { holds++; let released = false; return async () => { if (!released) { released = true; holds--; } }; };
+      return { store, holds: () => holds };
+    };
+    await test("thin .alto: versions in a folder store", async () => {
+      await sixVersions();
+      const all = await d.packageSize(), external = await d.packageSize({ history: "external" });
+      assert(external.bytes < all.bytes, `external ${external.bytes} < all ${all.bytes}`);
+      const states = [], sizes = [], offState = engine.on("saveState", (s) => states.push(s)), offSize = engine.on("packageSize", (s) => sizes.push(s.bytes));
+      const { store, holds } = heldStore(), thin = blobTarget();
+      try { await d.save(thin, { history: { folder: store } }); } finally { offState(); offSize(); }
+      assert(holds() === 1, `a new document holds its store after a thin save: ${holds()}`);
+      await d.save(blobTarget(), { history: { folder: store } }); assert(holds() === 1, `one hold after a second thin save: ${holds()}`);
+      assert(eq(states, ["saving", "saved"]), "saveState " + states.join());
+      assert(sizes.at(-1) === external.bytes, `packageSize event ${sizes.at(-1)} is the thin size ${external.bytes}`);
+      assert(!d.getSnapshot().dirty && d.folder === store, "saved and attached");
+      const full = blobTarget(); await d.save(full);
+      assert(external.bytes <= thin.blob.size && thin.blob.size < full.blob.size, `thin ${thin.blob.size} (payload ${external.bytes}) < full ${full.blob.size}`);
+      log(`thin .alto: ${thin.blob.size} bytes, full ${full.blob.size}`);
+      const history = await d.versions.log({ mode: "dag" }), hash = await d.snapshotHash();
+      d = await engine.openFolder(store);
+      assert(eq(await d.versions.log({ mode: "dag" }), history) && await d.snapshotHash() === hash, "the store opens alone with the same history");
+    });
+    await test("thin .alto: after a thin save the versions' objects live in the store alone", async () => {
+      await sixVersions();
+      // Past the Undo limit, only the versions reference their pixels.
+      for (let i = 0; i < 101; i++) await d.transact("layer.props", (tx) => tx.setProps(layer, { opacity: i % 2 ? 1 : 0.9 }));
+      const full = blobTarget(); await d.save(full);
+      const { store } = heldStore(), seen = { put: [], read: 0 }, exclusive = store.exclusive.bind(store);
+      store.exclusive = (run) => exclusive((view) => run({ ...view,
+        putObjects: (entries) => { seen.put.push(...entries.map((e) => e.path).filter((p) => p.startsWith("objects/"))); return view.putObjects(entries); },
+        getObject: async (path) => { if (path.startsWith("objects/")) seen.read++; return view.getObject(path); } }));
+      await d.save(blobTarget(), { history: { folder: store } });
+      const stored = (await store.list("objects/")).length, external = await d.versions.externalObjects();
+      assert(external > 0, `a created document keeps its versions' objects in memory after a thin save: ${external}`);
+      seen.put = []; await d.save(blobTarget(), { history: { folder: store } });
+      assert(seen.put.length === stored - external, `the second thin save sent ${seen.put.length} objects, the working document has ${stored - external}`);
+      const v0 = (await d.versions.log()).find((c) => c.message === "v0").hash;
+      seen.read = 0; await d.versions.restore(v0); assert(seen.read > 0, "the old version was not read from the store");
+      const color = async () => (await d.image.pickColor(layer, [0, 0])).bytes, restored = await color();
+      d = await engine.open(full.blob); await d.versions.restore(v0);
+      assert(eq(restored, await color()), "restored from the store as from the full .alto");
+    });
+    await test("thin .alto: versions committed during a slow .alto write reach the store", async () => {
+      await sixVersions(); const store = new MemoryObjectProvider(); await d.saveFolder(store);
+      d = await engine.openFolder(store, { history: "on-demand" });
+      await reject(d.save(blobTarget(), { history: {} }), "INVALID_ARGUMENT");
+      let release, started; const gate = new Promise((resolve) => { release = resolve; }), writing = new Promise((resolve) => { started = resolve; });
+      const saving = d.save({ write: async (stream) => { started(); await gate; await new Response(stream).blob(); } }, { history: { folder: store } });
+      // The store is written; these edits happen while the .alto write waits.
+      await writing;
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1], { tolerance: 255 }); const during = await d.versions.commit("during");
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1], { tolerance: 255 });
+      // Past the Undo limit, only that version references its pixels.
+      for (let i = 0; i < 101; i++) await d.transact("layer.props", (tx) => tx.setProps(layer, { opacity: i % 2 ? 1 : 0.9 }));
+      release(); await saving;
+      await d.save(blobTarget(), { history: { folder: store } });
+      d = await engine.openFolder(store); await d.versions.restore(during.hash);
+      assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 0, 255]), "the version committed during the write");
+    });
+    await test("thin .alto: a failed .alto write leaves the store attached and the document dirty", async () => {
+      await sixVersions();
+      const { store, holds } = heldStore(), states = [], off = engine.on("saveState", (s) => states.push(s));
+      const broken = { write: async (stream) => { await stream.cancel(); throw Error("disk full"); } };
+      let failed = false;
+      try { await d.save(broken, { history: { folder: store } }); } catch (e) { failed = e.message === "disk full"; } finally { off(); }
+      assert(failed, "save rejected with the write error");
+      assert(states.at(-1) === "error" && d.getSnapshot().dirty, "error and dirty");
+      assert(d.folder === store && await store.readRef("manifest.json"), "store committed and attached");
+      assert(holds() === 1, `the attached store is held after a failed .alto write: ${holds()}`);
+      const good = blobTarget(); await d.save(good, { history: { folder: store } });
+      assert(!d.getSnapshot().dirty && good.blob.size > 0 && holds() === 1, "second save");
+      const other = heldStore(); await d.save(blobTarget(), { history: { folder: other.store } });
+      assert(d.folder === other.store && other.holds() === 1 && holds() === 0, `the hold moves to the new store: ${other.holds()}, ${holds()}`);
+    });
+    // Six versions saved thin to a held store, and the same document as a full .alto.
+    const thinWithStore = async () => {
+      await sixVersions(); const { store, holds } = heldStore(), thin = blobTarget(), full = blobTarget();
+      await d.save(thin, { history: { folder: store } }); await d.save(full);
+      const history = await d.versions.log({ mode: "dag" });
+      return { store, holds, thin: thin.blob, full: full.blob, v0: history.find((c) => c.message === "v0").hash };
+    };
+    const storeWarnings = () => d.getSnapshot().warnings.filter((w) => w.code === "HISTORY_STORE_UNAVAILABLE");
+    const pixel = async () => (await d.image.pickColor(layer, [0, 0])).bytes;
+    await test("thin .alto: open with and without the store", async () => {
+      const other = await thinWithStore(), t = await thinWithStore();
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      d = await engine.open(t.thin, { history: t.store });
+      assert(storeWarnings().length === 0 && d.folder === t.store && t.holds() === 1, `attached and held: ${JSON.stringify(storeWarnings())} ${t.holds()}`);
+      const history = await d.versions.log({ mode: "dag" }), status = d.versions.status(), diff = await d.versions.diff(t.v0);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the store as from the full .alto");
+      d = await engine.open(t.thin);
+      assert(storeWarnings().length === 0 && d.folder === null && t.holds() === 0, `no store: no warning, nothing held: ${t.holds()}`);
+      assert(eq(await d.versions.log({ mode: "dag" }), history) && eq(d.versions.status(), status) && eq(await d.versions.diff(t.v0), diff), "log, status and diff without the store");
+      let error; try { await d.versions.restore(t.v0); } catch (e) { error = e; }
+      assert(error?.code === "STORAGE" && error.details?.reason === "objects-unavailable", `restore without the store: ${error?.code} ${error?.details?.reason}`);
+      await d.versions.attachFolder(t.store); assert(d.folder === t.store && t.holds() === 1, "attached later");
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored after attachFolder");
+      d = await engine.open(t.thin, { history: other.store });
+      assert(eq(storeWarnings().map((w) => w.details.reason), ["other-document"]) && d.folder === null && other.holds() === 0, `other document: ${JSON.stringify(storeWarnings())} ${other.holds()}`);
+      error = undefined; try { await d.versions.attachFolder(other.store); } catch (e) { error = e; }
+      assert(error?.code === "CONFLICT" && error.details?.reason === "folder-occupied" && d.folder === null && other.holds() === 0, `attachFolder(other store): ${error?.code} ${error?.details?.reason}`);
+      // Objects only the versions use, removed from the store.
+      d = await engine.open(t.thin); const working = new MemoryObjectProvider(), workingOnly = blobTarget();
+      await d.save(workingOnly, { history: "omit" }); d = await engine.open(workingOnly.blob); await d.saveFolder(working);
+      const keep = new Set(await working.list("objects/"));
+      await t.store.exclusive(async (s) => s.deleteObjects((await s.list("objects/")).filter((p) => !keep.has(p))));
+      d = await engine.open(t.thin, { history: t.store });
+      assert(eq(storeWarnings().map((w) => w.details.reason), ["missing"]) && d.folder === null && t.holds() === 0, `missing objects: ${JSON.stringify(storeWarnings())} ${t.holds()}`);
+    });
+    await test("thin .alto: a store attaches without external objects; a normal .alto ignores history", async () => {
+      d = await engine.createDocument({ width: 64, height: 64 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 64, height: 64 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1], { tolerance: 255 }); await d.versions.commit("only");
+      const { store, holds } = heldStore(), thin = blobTarget(), full = blobTarget();
+      await d.save(thin, { history: { folder: store } }); await d.save(full);
+      d = await engine.open(thin.blob, { history: store });
+      assert(await d.versions.externalObjects() === 0 && d.folder === store && holds() === 1 && storeWarnings().length === 0, `attached with nothing outside: ${holds()}`);
+      await d.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 }); await d.versions.commit("next");
+      await d.save(blobTarget(), { history: { folder: store } });
+      d = await engine.open(full.blob, { history: store });
+      assert(d.folder === null && holds() === 0 && storeWarnings().length === 0, "a normal .alto reads nothing from the store");
+    });
+    await test("thin .alto: review focus", async () => {
+      const t = await thinWithStore();
+      // (1) Not attached: the store is another document's until attachFolder.
+      d = await engine.open(t.thin);
+      let error; try { await d.save(blobTarget(), { history: { folder: t.store } }); } catch (e) { error = e; }
+      assert(error?.code === "CONFLICT" && error.details?.reason === "folder-occupied", `thin save to the store unattached: ${error?.code} ${error?.details?.reason}`);
+      await d.versions.attachFolder(t.store); await d.save(blobTarget(), { history: { folder: t.store } });
+      assert(!d.getSnapshot().dirty && t.holds() === 1, "thin save after attachFolder");
+      // (2) An older thin .alto opens with the store after a later thin save to it.
+      await d.image.fill(layer, [0, 0], [1, 1, 0, 1], { tolerance: 255 }); await d.versions.commit("later");
+      await d.save(blobTarget(), { history: { folder: t.store } });
+      d = await engine.open(t.thin, { history: t.store });
+      assert(d.folder === t.store && storeWarnings().length === 0, `older thin .alto attaches: ${JSON.stringify(storeWarnings())}`);
+      // (5) With the store, the default save writes the whole .alto.
+      const whole = blobTarget(); await d.save(whole);
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      d = await engine.open(whole.blob);
+      assert(await d.versions.externalObjects() === 0 && d.folder === null, "a whole .alto");
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored without a store");
+      d = await engine.open(t.thin); let wrote = false;
+      error = undefined; try { await d.save({ write: async (stream) => { wrote = true; await stream.cancel(); } }); } catch (e) { error = e; }
+      assert(error?.code === "STORAGE" && error.details?.reason === "objects-unavailable" && !wrote, `default save without the store: ${error?.code} ${error?.details?.reason} wrote=${wrote}`);
+    });
+    await test("thin .alto: an older thin .alto never rolls its store back", async () => {
+      const t = await thinWithStore();
+      await d.image.fill(layer, [0, 0], [1, 1, 0, 1], { tolerance: 255 }); await d.versions.commit("later");
+      const newer = blobTarget(); await d.save(newer, { history: { folder: t.store } });
+      const manifest = async () => [...(await t.store.readRef("manifest.json"))].join(), ahead = await manifest();
+      const refused = async (run, what) => {
+        let error; try { await run(); } catch (e) { error = e; }
+        assert(error?.code === "CONFLICT" && error.details?.reason === "folder-changed", `${what}: ${error?.code} ${error?.details?.reason}`);
+        assert(await manifest() === ahead, `${what} changed the store's manifest`);
+      };
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      // Opened with the store, the older .alto reads its versions there and saves nothing to it.
+      d = await engine.open(t.thin, { history: t.store });
+      assert(d.folder === t.store && storeWarnings().length === 0, `older thin .alto attaches: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the store");
+      await refused(() => d.save(blobTarget(), { history: { folder: t.store } }), "thin save");
+      await refused(() => d.saveFolder(t.store), "saveFolder");
+      await refused(() => d.versions.gc(), "GC preview");
+      // The same through attachFolder.
+      d = await engine.open(t.thin); await d.versions.attachFolder(t.store); assert(d.folder === t.store, "attached later");
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored after attachFolder");
+      await refused(() => d.save(blobTarget(), { history: { folder: t.store } }), "thin save after attachFolder");
+      // The newer .alto is the store's own and still saves there.
+      d = await engine.open(newer.blob, { history: t.store });
+      assert(d.folder === t.store && storeWarnings().length === 0, `newer thin .alto attaches: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "the newer .alto restores from the store");
+      await d.save(blobTarget(), { history: { folder: t.store } }); assert(!d.getSnapshot().dirty, "the newer .alto saves to its store");
+    });
+    await test("thin .alto: attachFolder through a store without a manifest clears the warning", async () => {
+      const t = await thinWithStore(), bare = new MemoryObjectProvider();
+      await bare.putObjects(await Promise.all((await t.store.list("objects/")).map(async (path) => ({ path, data: await t.store.getObject(path) }))));
+      d = await engine.open(t.thin, { history: bare });
+      assert(eq(storeWarnings().map((w) => w.details.reason), ["missing"]) && d.folder === null, `no manifest: ${JSON.stringify(storeWarnings())}`);
+      await d.versions.attachFolder(bare);
+      assert(d.folder === bare && storeWarnings().length === 0, `attached, warning cleared: ${JSON.stringify(storeWarnings())}`);
+      d = await engine.open(t.full); await d.versions.restore(t.v0); const expected = await pixel();
+      d = await engine.open(t.thin, { history: bare }); await d.versions.attachFolder(bare);
+      await d.versions.restore(t.v0); assert(eq(await pixel(), expected), "restored from the attached store");
+    });
+    await test("thin .alto: a document closed during a save keeps no hold", async () => {
+      await sixVersions();
+      const { store, holds } = heldStore(), hold = store.holdObjects; let entered, release;
+      const holding = new Promise((resolve) => { entered = resolve; }), gate = new Promise((resolve) => { release = resolve; });
+      store.holdObjects = async () => { entered(); await gate; return hold(); };
+      const closed = d, saving = closed.save(blobTarget(), { history: { folder: store } }).catch((e) => e);
+      // The engine gives the document up while the save waits for its hold.
+      await holding; closed.close(); release(); await saving;
+      assert(holds() === 0, `a hold taken after close is kept: ${holds()}`);
+      const late = heldStore(); closed.setFolder(late.store, "", await late.store.holdObjects());
+      assert(late.holds() === 0 && closed.folder !== late.store, `setFolder after close kept the hold: ${late.holds()}`);
+    });
+    await test("on-demand history: a commit during a same-folder save is not marked saved", async () => {
+      d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1]); const first = await d.versions.commit("first");
+      const store = new MemoryObjectProvider(); let entered, release, stall = false;
+      const folder = new Proxy(store, { get(target, key) {
+        const slow = (view) => ({ ...view, putObjects: async (objects) => { if (stall) { stall = false; entered(); await new Promise((r) => (release = r)); } return view.putObjects(objects); } });
+        if (key === "exclusive") return (run) => target.exclusive((view) => run(slow(view)));
+        const value = target[key]; return typeof value === "function" ? value.bind(target) : value;
+      } });
+      await d.saveFolder(folder); d = await engine.openFolder(folder, { history: "on-demand" });
+      // The save stops while writing; an edit and a commit are sent meanwhile.
+      stall = true; const writing = new Promise((r) => (entered = r)); const saving = d.saveFolder(folder); await writing;
+      const editing = d.image.fill(layer, [0, 0], [0, 1, 0, 1], { tolerance: 255 }); const committing = d.versions.commit("during");
+      await new Promise((r) => setTimeout(r, 100)); release(); await saving; await editing; const during = await committing;
+      // Leave that version (its pixels may then leave memory), save again, and open the folder
+      // alone: the commit's pixels must be in it.
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1], { tolerance: 255 }); await d.versions.commit("after");
+      await d.versions.detach(first.hash); await d.saveFolder(folder);
+      d = await engine.openFolder(folder);
+      await d.versions.detach(during.hash); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [0, 255, 0, 255]), "the commit made during the save");
+      await d.versions.detach(first.hash); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 0, 255]), "first");
+    });
     await test("OPFS on-demand: other documents cannot collect what an open document needs", async () => {
       const name = "gc-hold-" + crypto.randomUUID(), root = await navigator.storage.getDirectory(), folder = await opfsFolder(name);
       d = await engine.createDocument({ width: 256, height: 256 }); await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 256, height: 256 } }); });
@@ -299,6 +648,66 @@ export async function runImageVersionTests(engine, log) {
       const restored = new Promise((resolve, reject) => { const timeout = setTimeout(() => { off(); reject(Error("GPU recovery timeout")); }, 30000); const off = unstable(engine).onGpu((state) => { if (state === "restored") { clearTimeout(timeout); off(); resolve(); } }); });
       await testing(engine).destroyGpu(); await restored;
       assert(d.versions.status().head === commit.hash, "GPU recovery lost head"); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 255, 255]), "GPU recovery lost pixels");
+    });
+    await test("stash is private, durable, and undoable after opening a thin archive", async () => {
+      d = await engine.createDocument({ width: 8, height: 8 });
+      await reject(d.versions.stash(), "NO_COMMIT");
+      await d.transact("layer.add", (tx) => { layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 1, height: 1 } }); });
+      await d.image.fill(layer, [0, 0], [1, 0, 0, 1]);
+      const base = await d.versions.commit("stash base");
+      await reject(d.versions.stash(), "INVALID_ARGUMENT");
+      const read = async () => (await d.image.pickColor(layer, [0, 0])).bytes;
+      await d.image.fill(layer, [0, 0], [0, 0, 1, 1]);
+      const first = await d.versions.stash("first");
+      assert(d.versions.status().head === base.hash && !d.versions.status().changed, "stash changed HEAD or working state");
+      assert(eq(await read(), [255, 0, 0, 255]) && !d.getSnapshot().history.undo, "stash did not restore HEAD and clear undo");
+      await d.image.fill(layer, [0, 0], [0, 1, 0, 1]);
+      await reject(d.versions.stashPop(first.commit), "CONFLICT");
+      const second = await d.versions.stash("second");
+      assert(eq(d.versions.stashList().map((s) => s.commit), [second.commit, first.commit]), "stash order");
+      assert((await d.versions.log({ mode: "dag", allBranches: true })).every((c) => c.hash !== first.commit && c.hash !== second.commit), "stash in public log");
+      await d.durable(); await testing(engine).crash(); d = engine.document;
+      assert(eq(d.versions.stashList().map((s) => s.commit), [second.commit, first.commit]), "journal stash recovery");
+
+      const store = new MemoryObjectProvider(), thin = blobTarget();
+      await d.save(thin, { history: { folder: store } });
+      const manifest = JSON.parse(new TextDecoder().decode(await store.readRef("manifest.json")));
+      assert(manifest.format === 4 && manifest.stashes.length === 2, "folder manifest stash format");
+      d = await engine.open(thin.blob);
+      await reject(d.versions.stashPop(), "STORAGE");
+      assert(d.versions.stashList()[0].commit === second.commit, "failed pop removed stash");
+      d = await engine.open(thin.blob, { history: store });
+      assert(await d.versions.stashPop() === null && eq(await read(), [0, 255, 0, 255]), "thin pop");
+      assert(d.versions.stashList()[0].commit === first.commit, "wrong stash removed");
+      await d.undo();
+      assert(eq(await read(), [255, 0, 0, 255]) && !d.versions.status().changed, "one Undo restores HEAD working state");
+      assert(await d.versions.stashApply(first.commit) === null && eq(await read(), [0, 0, 255, 255]), "thin apply");
+      assert(d.versions.stashList()[0]?.commit === first.commit, "apply removed the stash");
+      await d.versions.stashDrop(first.commit);
+      assert(d.versions.stashList().length === 0, "stash drop");
+    });
+    await test("detached stash pop resolves a conflict without moving HEAD", async () => {
+      d = await engine.createDocument({ width: 8, height: 8 });
+      await d.transact("layer.add", (tx) => { layer = tx.addRaster({ name: "base" }); });
+      const base = await d.versions.commit("stash base");
+      await d.versions.detach(base.hash);
+      await d.transact("layer.props", (tx) => tx.setProps(layer, { name: "stashed" }));
+      const stash = await d.versions.stash("detached edit");
+      assert(d.versions.status().refs.current_branch === null, "stash attached HEAD");
+      await d.versions.checkout("main");
+      await d.transact("layer.props", (tx) => tx.setProps(layer, { name: "other" }));
+      const head = await d.versions.commit("other");
+      await d.versions.detach(head.hash);
+      const plan = await d.versions.stashPop(stash.commit);
+      assert(plan?.kind === "stash" && plan.conflicts.length === 1, "stash conflict plan");
+      assert(d.versions.stashList()[0]?.commit === stash.commit && d.getSnapshot().nodes.get(layer).name === "other", "pending pop mutated state");
+      const resolved = await d.versions.finishMerge(plan.token, plan.conflicts.map((c) => ({ conflict_id: c.id, choice: "theirs" })));
+      assert(resolved.kind === "stash" && resolved.head === head.hash, "unexpected stash merge result");
+      const status = d.versions.status();
+      assert(status.head === head.hash && status.refs.branches.main.head === head.hash && status.refs.current_branch === null, "stash conflict moved a ref");
+      assert(d.versions.stashList().length === 0 && d.getSnapshot().nodes.get(layer).name === "stashed", "stash resolution did not apply");
+      await d.undo();
+      assert(d.getSnapshot().nodes.get(layer).name === "other", "stash conflict was not one undoable edit");
     });
     await test("Playground image and branch controls apply through the visible UI", async () => {
       d = await engine.createDocument({ width: 8, height: 8 });

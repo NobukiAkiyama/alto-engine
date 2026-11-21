@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 pub use version::{Commit, DiffItem, IntentSummary, diff, restore_ops};
 
+/// Latest document format this reader supports.
+pub const FORMAT_VERSION: u32 = 8;
+pub const SUPPORTED_FORMATS: [u32; 4] = [BASE_FORMAT, TEXT_FORMAT, DASH_FORMAT, FORMAT_VERSION];
+pub const BASE_FORMAT: u32 = 5;
+const TEXT_FORMAT: u32 = 6;
+const DASH_FORMAT: u32 = 7;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentMeta {
@@ -21,8 +28,7 @@ pub struct DocumentMeta {
     pub height: u32,
     pub color: ColorSpace,
     pub depth: BitDepth,
-    /// File format 5. Earlier formats held render versions 1 and 2, which are
-    /// not supported.
+    /// File format required by the document content.
     pub format_version: u32,
     /// Which compositor samples this document: always
     /// [`alto_core::RENDER_VERSION_EXACT`]. Kept so a later version can be told apart.
@@ -38,7 +44,7 @@ impl DocumentMeta {
             depth: BitDepth::U8,
             // The live value matches the snapshot so a journal digest survives
             // save and replay.
-            format_version: 5,
+            format_version: BASE_FORMAT,
             render_version: alto_core::RENDER_VERSION_EXACT,
         }
     }
@@ -48,7 +54,7 @@ impl DocumentMeta {
                 "Canvas dimensions must be positive".into(),
             ));
         }
-        if self.format_version != 5 {
+        if !SUPPORTED_FORMATS.contains(&self.format_version) {
             return Err(DocError::Unsupported("Unsupported document format".into()));
         }
         if self.render_version != alto_core::RENDER_VERSION_EXACT {

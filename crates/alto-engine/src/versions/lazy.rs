@@ -11,16 +11,46 @@ pub(crate) struct LazyObjects {
     pub(crate) known: BTreeSet<ContentHash>,
     /// Kept in memory for the operation in progress.
     pub(crate) pinned: BTreeSet<ContentHash>,
+    /// Opened from a thin .alto: its versions' objects belong in a history store.
+    pub(crate) external_history: bool,
+}
+
+/// Why a history store cannot serve the document it was found for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreMismatch {
+    /// The store lacks objects the versions need, or cannot be read.
+    Missing,
+    /// The store belongs to a different document.
+    OtherDocument,
+}
+
+impl StoreMismatch {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            StoreMismatch::Missing => "missing",
+            StoreMismatch::OtherDocument => "other-document",
+        }
+    }
 }
 
 /// What an operation is about to read.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObjectTarget {
-    Commit { hash: ContentHash },
-    Branch { name: String },
-    Merge { name: String },
+    Commit {
+        hash: ContentHash,
+    },
+    Branch {
+        name: String,
+    },
+    Merge {
+        name: String,
+    },
     MergePlan,
+    /// A stash, the head it was taken from, and the head it returns to.
+    Stash {
+        commit: ContentHash,
+    },
     All,
 }
 
@@ -61,6 +91,13 @@ impl Engine {
                 if let Some(plan) = &s.merge {
                     commits.extend(plan.roots());
                 }
+            }
+            ObjectTarget::Stash { commit } => {
+                commits.insert(*commit);
+                if let Some(stash) = s.commits.get(commit) {
+                    commits.extend(stash.parents.iter().copied());
+                }
+                commits.extend(s.head);
             }
             ObjectTarget::All => {
                 let mut docs = vec![];
@@ -185,6 +222,17 @@ impl Engine {
         self.maintain();
         Ok(())
     }
+    /// After a thin save: the history store just written holds everything the document and
+    /// its versions reference, so the versions' objects need not stay in memory.
+    /// A document that held everything until now starts reading them from the store.
+    pub fn mark_store_saved(&mut self, h: DocHandle) -> Result<(), EngineError> {
+        self.document(h)?;
+        self.lazy.entry(h).or_insert_with(|| LazyObjects {
+            external_history: true,
+            ..Default::default()
+        });
+        self.mark_folder_saved(h)
+    }
     /// Objects the document references that are only in its folder.
     pub fn external_objects(&self, h: DocHandle) -> Result<BTreeSet<ContentHash>, EngineError> {
         let Some(lazy) = self.lazy.get(&h) else {
@@ -194,6 +242,10 @@ impl Engine {
         hashes.extend(self.versions(h)?.retained.iter().copied());
         hashes.retain(|hash| !self.present(hash) && lazy.known.contains(hash));
         Ok(hashes)
+    }
+    /// Whether the document was opened from a thin .alto, even one with nothing outside.
+    pub fn history_is_external(&self, h: DocHandle) -> bool {
+        self.lazy.get(&h).is_some_and(|lazy| lazy.external_history)
     }
     /// Folder entries for the folder the document came from: objects still there are not read.
     pub fn folder_entries_keeping_external(
@@ -218,7 +270,7 @@ impl Engine {
     pub fn folder_plan_on_demand(
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<Vec<String>, EngineError> {
-        let p = alto_store::decode_entries(entries)?;
+        let p = decode_folder(entries)?;
         let hashes = doc_hashes(&Document::from_snapshot_bytes(&p.snapshot)?);
         Ok(hashes.iter().map(alto_store::object_path).collect())
     }
@@ -229,8 +281,93 @@ impl Engine {
         entries: BTreeMap<String, Vec<u8>>,
         known: BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false, None, Some(known))
+        let p = decode_folder(entries)?;
+        let mut timer = RecoveryTimer::new(None);
+        self.open_decoded_package(p, false, None, Some(known), &mut timer)
+    }
+    /// Objects only versions reference: what a thin .alto leaves outside.
+    pub fn version_only_objects(&self, h: DocHandle) -> Result<BTreeSet<ContentHash>, EngineError> {
+        let working = doc_hashes(self.document(h)?);
+        Ok(self
+            .versions(h)?
+            .retained
+            .iter()
+            .filter(|hash| !working.contains(hash))
+            .copied()
+            .collect())
+    }
+    /// Whether a history store can serve the document. `manifest_and_snapshot` holds the
+    /// store's `manifest.json` and the snapshot it names; `present` lists the objects
+    /// the store has. An unreadable store is `Missing`, not an error, so opening succeeds.
+    pub fn check_history_store(
+        &self,
+        h: DocHandle,
+        manifest_and_snapshot: BTreeMap<String, Vec<u8>>,
+        present: &BTreeSet<ContentHash>,
+    ) -> Result<Option<StoreMismatch>, EngineError> {
+        let root = self.document(h)?.root;
+        let store_root = manifest_and_snapshot
+            .get("manifest.json")
+            .and_then(|b| serde_json::from_slice::<alto_store::Manifest>(b).ok())
+            .and_then(|m| manifest_and_snapshot.get(&alto_store::snapshot_path(&m.snapshot)))
+            .and_then(|b| Document::from_snapshot_bytes(b).ok())
+            .map(|d| d.root);
+        match store_root {
+            None => return Ok(Some(StoreMismatch::Missing)),
+            Some(r) if r != root => return Ok(Some(StoreMismatch::OtherDocument)),
+            Some(_) => {}
+        }
+        if self
+            .external_objects(h)?
+            .iter()
+            .all(|o| present.contains(o))
+        {
+            Ok(None)
+        } else {
+            Ok(Some(StoreMismatch::Missing))
+        }
+    }
+    /// Whether every root of a store's `manifest.json` (head, branch heads, tags, pins,
+    /// stashes) is a version this document has. If not, the store moved on past this
+    /// document: saving its refs there would drop versions. A manifest that cannot be
+    /// read is not contained.
+    pub fn store_roots_contained(
+        &self,
+        h: DocHandle,
+        manifest: &[u8],
+    ) -> Result<bool, EngineError> {
+        let commits = &self.versions(h)?.commits;
+        let Ok(m) = serde_json::from_slice::<alto_store::Manifest>(manifest) else {
+            return Ok(false);
+        };
+        Ok(m.head
+            .into_iter()
+            .chain(m.refs.all_roots())
+            .all(|root| commits.contains_key(&root)))
+    }
+    /// A thin package's parts, without object bytes, and the objects it holds: the
+    /// working document's alone.
+    pub(crate) fn thin_package_parts(
+        &self,
+        h: DocHandle,
+    ) -> Result<(alto_store::PackageParts, BTreeSet<ContentHash>), EngineError> {
+        let doc = self.document(h)?;
+        let (mut parts, _) =
+            self.package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), false)?;
+        parts.external = Some(alto_store::ExternalObjects {
+            document: doc.root,
+            objects: self.version_only_objects(h)?,
+        });
+        Ok((parts, doc_hashes(doc)))
+    }
+    /// A .alto with every version but only the working document's objects. The
+    /// versions' objects are listed in `external-objects.json` and kept elsewhere.
+    pub fn save_thin_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
+        let (parts, hashes) = self.thin_package_parts(h)?;
+        let bytes = self.encode_fetching(parts, &hashes)?;
+        self.backed = true;
+        self.maintain();
+        Ok(bytes)
     }
 }
 
@@ -567,6 +704,307 @@ mod tests {
         );
     }
 
+    /// The fixture opened with every object in memory.
+    fn whole(f: &Fixture) -> (Engine, DocHandle) {
+        let mut e = Engine::new();
+        let (d, warnings) = e.open_entries(f.entries.clone()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        (e, d)
+    }
+    fn thin(f: &Fixture) -> Vec<u8> {
+        let (mut e, d) = whole(f);
+        e.save_thin_package(d).unwrap()
+    }
+    fn code(error: EngineError) -> String {
+        error.to_string().split(':').next().unwrap().to_string()
+    }
+    /// A thin package of the fixture whose external list is `objects`.
+    fn thin_listing(f: &Fixture, document: NodeId, objects: BTreeSet<ContentHash>) -> Vec<u8> {
+        let (e, d) = whole(f);
+        let mut parts = e.package_parts(d).unwrap();
+        parts.objects.retain(|hash, _| *hash == f.head_tile);
+        parts.external = Some(alto_store::ExternalObjects { document, objects });
+        alto_store::write_entries(&alto_store::package_entries(&parts).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn thin_package_holds_only_the_working_objects() {
+        let f = fixture();
+        let (mut e, d) = whole(&f);
+        assert_eq!(
+            e.version_only_objects(d).unwrap(),
+            BTreeSet::from([f.old_tile])
+        );
+        let estimate = e.thin_package_bytes(d).unwrap();
+        let bytes = e.save_thin_package(d).unwrap();
+        let entries = alto_store::read_entries(&bytes).unwrap();
+        let objects: Vec<_> = entries
+            .keys()
+            .filter(|n| n.starts_with("objects/"))
+            .cloned()
+            .collect();
+        assert_eq!(objects, vec![alto_store::object_path(&f.head_tile)]);
+        assert_eq!(
+            entries.keys().filter(|n| n.starts_with("commits/")).count(),
+            2
+        );
+        let p = alto_store::decode_entries(entries.clone()).unwrap();
+        let external = p
+            .external
+            .expect("a thin package lists its external objects");
+        assert_eq!(external.objects, BTreeSet::from([f.old_tile]));
+        assert_eq!(external.document, e.document(d).unwrap().root);
+        // Counted like package_bytes: the entries' data, not the ZIP.
+        let payload: u64 = entries.values().map(|b| b.len() as u64).sum();
+        assert_eq!(estimate, payload);
+        assert!(estimate < bytes.len() as u64);
+        assert!(estimate < e.package_bytes(d).unwrap().unwrap());
+    }
+
+    #[test]
+    fn a_thin_save_lets_the_versions_objects_leave_memory() {
+        let f = fixture();
+        let (mut e, d) = whole(&f);
+        assert!(e.tiles.reachable(&f.old_tile));
+        e.mark_store_saved(d).unwrap();
+        assert_eq!(e.external_objects(d).unwrap(), BTreeSet::from([f.old_tile]));
+        assert!(!e.tiles.reachable(&f.old_tile), "the version's tile stayed");
+        assert!(e.tiles.reachable(&f.head_tile));
+        assert!(e.history_is_external(d));
+        // The next save to the same store reads nothing back.
+        let entries = e.folder_entries_keeping_external(d).unwrap();
+        assert!(!entries.contains_key(&alto_store::object_path(&f.old_tile)));
+        // A save to a format-2 folder still needs every object.
+        assert!(e.folder_entries(d).is_err());
+    }
+
+    #[test]
+    fn thin_package_opens_without_the_store() {
+        let f = fixture();
+        let bytes = thin(&f);
+        let mut e = Engine::new();
+        let (d, warnings) = e.open_package(&bytes).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(e.log(d).unwrap().len(), 2);
+        assert!(!e.version_status(d).unwrap().changed);
+        assert!(
+            !e.diff_versions(d, VersionRef::Working, VersionRef::Commit(f.old))
+                .unwrap()
+                .is_empty()
+        );
+        let target = ObjectTarget::Commit { hash: f.old };
+        assert_eq!(
+            e.missing_objects(d, &target).unwrap(),
+            vec![alto_store::object_path(&f.old_tile)]
+        );
+        let before = e.snapshot(d).unwrap();
+        let error = e.restore_version(d, f.old).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .starts_with("STORAGE: objects-unavailable"),
+            "{error}"
+        );
+        assert_eq!(e.snapshot(d).unwrap(), before);
+        assert_eq!(e.external_objects(d).unwrap(), BTreeSet::from([f.old_tile]));
+        assert_eq!(e.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes, [20; 4]);
+    }
+
+    #[test]
+    fn history_store_check() {
+        let f = fixture();
+        let bytes = thin(&f);
+        let mut e = Engine::new();
+        let (d, _) = e.open_package(&bytes).unwrap();
+        let store = |entries: &BTreeMap<String, Vec<u8>>| {
+            let manifest = entries["manifest.json"].clone();
+            let m: alto_store::Manifest = serde_json::from_slice(&manifest).unwrap();
+            let path = alto_store::snapshot_path(&m.snapshot);
+            BTreeMap::from([
+                ("manifest.json".to_string(), manifest),
+                (path.clone(), entries[&path].clone()),
+            ])
+        };
+        let present = known(&f.entries);
+        let ours = store(&f.entries);
+        assert_eq!(
+            e.check_history_store(d, ours.clone(), &present).unwrap(),
+            None
+        );
+        let mut without = present.clone();
+        without.remove(&f.old_tile);
+        assert_eq!(
+            e.check_history_store(d, ours.clone(), &without).unwrap(),
+            Some(StoreMismatch::Missing)
+        );
+        let other = store(&fixture().entries);
+        assert_eq!(
+            e.check_history_store(d, other, &present).unwrap(),
+            Some(StoreMismatch::OtherDocument)
+        );
+        let mut no_manifest = ours.clone();
+        no_manifest.remove("manifest.json");
+        let mut broken = ours.clone();
+        broken.insert("manifest.json".into(), b"{".to_vec());
+        let mut no_snapshot = ours.clone();
+        no_snapshot.retain(|n, _| n == "manifest.json");
+        let mut bad_snapshot = ours.clone();
+        for (n, b) in bad_snapshot.iter_mut() {
+            if n.starts_with("snapshots/") {
+                *b = b"not json".to_vec();
+            }
+        }
+        for damaged in [no_manifest, broken, no_snapshot, bad_snapshot] {
+            assert_eq!(
+                e.check_history_store(d, damaged, &present).unwrap(),
+                Some(StoreMismatch::Missing)
+            );
+        }
+        assert_eq!(StoreMismatch::Missing.reason(), "missing");
+        assert_eq!(StoreMismatch::OtherDocument.reason(), "other-document");
+    }
+
+    #[test]
+    fn a_store_that_moved_on_is_not_contained() {
+        let f = fixture();
+        let mut e = Engine::new();
+        let (d, _) = e.open_package(&thin(&f)).unwrap();
+        assert!(
+            e.store_roots_contained(d, &f.entries["manifest.json"])
+                .unwrap()
+        );
+        // The same document, saved again after one more version.
+        let (mut later, l) = whole(&f);
+        paint(&mut later, l, f.layer, 30);
+        later.commit(l, "later", 3, None, false).unwrap();
+        let ahead = later.folder_entries(l).unwrap();
+        assert!(!e.store_roots_contained(d, &ahead["manifest.json"]).unwrap());
+        // A tag or a pin on a version this document lacks counts too.
+        let mut tagged: alto_store::Manifest =
+            serde_json::from_slice(&f.entries["manifest.json"]).unwrap();
+        let unknown = ContentHash::of(b"elsewhere");
+        tagged.refs.tags.insert("t".into(), unknown);
+        let bytes = serde_json::to_vec(&tagged).unwrap();
+        assert!(!e.store_roots_contained(d, &bytes).unwrap());
+        tagged.refs.tags.clear();
+        tagged.refs.pinned.insert(unknown);
+        let bytes = serde_json::to_vec(&tagged).unwrap();
+        assert!(!e.store_roots_contained(d, &bytes).unwrap());
+        assert!(!e.store_roots_contained(d, b"{").unwrap());
+    }
+
+    #[test]
+    fn thin_package_external_list_must_match_versions() {
+        let f = fixture();
+        let (e, d) = whole(&f);
+        let document = e.document(d).unwrap().root;
+        // Listed correctly, the package opens.
+        let right = thin_listing(&f, document, BTreeSet::from([f.old_tile]));
+        Engine::new().open_package(&right).unwrap();
+
+        let unrelated = ContentHash::of(b"no version uses this");
+        let extra = thin_listing(&f, document, BTreeSet::from([f.old_tile, unrelated]));
+        let mut opener = Engine::new();
+        let error = opener.open_package(&extra).err().unwrap();
+        assert_eq!(code(error), "CORRUPT_DATA");
+        assert!(opener.versions.is_empty() && opener.documents.is_empty());
+
+        let short = thin_listing(&f, document, BTreeSet::new());
+        let error = Engine::new().open_package(&short).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .starts_with("CORRUPT_DATA: history object missing"),
+            "{error}"
+        );
+
+        let other = Node::raster("another document").id;
+        let elsewhere = thin_listing(&f, other, BTreeSet::from([f.old_tile]));
+        let error = Engine::new().open_package(&elsewhere).err().unwrap();
+        assert_eq!(code(error), "CORRUPT_DATA");
+    }
+
+    #[test]
+    fn thin_package_of_a_document_without_versions() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+        let node = Node::raster("layer");
+        let layer = node.id;
+        let parent = e.document(d).unwrap().root;
+        e.transact(
+            d,
+            "add",
+            vec![Op::InsertNode {
+                node,
+                parent,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        let tile = paint(&mut e, d, layer, 7);
+        assert!(e.version_only_objects(d).unwrap().is_empty());
+        let bytes = e.save_thin_package(d).unwrap();
+        let entries = alto_store::read_entries(&bytes).unwrap();
+        assert!(entries.contains_key(&alto_store::object_path(&tile)));
+        let p = alto_store::decode_entries(entries).unwrap();
+        assert!(p.external.unwrap().objects.is_empty());
+        let mut fresh = Engine::new();
+        let (r, warnings) = fresh.open_package(&bytes).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(fresh.external_objects(r).unwrap().is_empty());
+        assert!(
+            fresh.history_is_external(r),
+            "thin even with nothing outside"
+        );
+        let (n, _) = fresh.open_package(&e.save_package(d).unwrap()).unwrap();
+        assert!(!fresh.history_is_external(n));
+        assert!(!e.history_is_external(d));
+        assert_eq!(
+            fresh.pick_color(r, layer, [0.0, 0.0]).unwrap().bytes,
+            [7; 4]
+        );
+    }
+
+    #[test]
+    fn thin_package_restores_after_objects_are_provided() {
+        let f = fixture();
+        let bytes = thin(&f);
+        let mut e = Engine::new();
+        let (d, _) = e.open_package(&bytes).unwrap();
+        let target = ObjectTarget::Commit { hash: f.old };
+        provide(&mut e, d, &f, &target);
+        e.restore_version(d, f.old).unwrap();
+        e.release_objects(d);
+
+        let (mut source, s) = whole(&f);
+        let mut normal = Engine::new();
+        let (n, _) = normal
+            .open_package(&source.save_package(s).unwrap())
+            .unwrap();
+        normal.restore_version(n, f.old).unwrap();
+        assert_eq!(e.state_digest(d).unwrap(), normal.state_digest(n).unwrap());
+        assert_eq!(e.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes, [10; 4]);
+    }
+
+    #[test]
+    fn a_folder_never_lists_external_objects() {
+        let f = fixture();
+        let entries = alto_store::read_entries(&thin(&f)).unwrap();
+        let refused = |result: Result<(), EngineError>| {
+            let error = result.expect_err("a folder holds every object");
+            assert!(error.to_string().starts_with("UNSUPPORTED"), "{error}");
+        };
+        refused(Engine::new().open_entries(entries.clone()).map(|_| ()));
+        refused(
+            Engine::new()
+                .open_entries_on_demand(entries.clone(), known(&f.entries))
+                .map(|_| ()),
+        );
+        refused(Engine::folder_plan(entries.clone()).map(|_| ()));
+        refused(Engine::folder_plan_on_demand(entries).map(|_| ()));
+    }
+
     #[test]
     fn merge_targets_cover_both_heads_and_the_base() {
         let mut e = Engine::new();
@@ -641,5 +1079,55 @@ mod tests {
             .unwrap();
         lazy.release_objects(h);
         assert_eq!(lazy.pick_color(h, layer, [0.0, 0.0]).unwrap().bytes, [2; 4]);
+    }
+
+    #[test]
+    fn stash_survives_a_thin_save_and_reopen_with_the_store() {
+        let f = fixture();
+        let (mut e, d) = whole(&f);
+        let stashed = paint(&mut e, d, f.layer, 30);
+        let entry = e.stash(d, "wip", 3, None).unwrap();
+        // A full folder of the same document is the history store.
+        let store = e.folder_entries(d).unwrap();
+        let thin = e.save_thin_package(d).unwrap();
+
+        let mut reopened = Engine::new();
+        let (d, warnings) = reopened.open_package(&thin).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            reopened.version_refs(d).unwrap().stashes,
+            vec![entry.clone()]
+        );
+        let target = ObjectTarget::Stash {
+            commit: entry.commit,
+        };
+        let missing = reopened.missing_objects(d, &target).unwrap();
+        assert_eq!(missing, vec![alto_store::object_path(&stashed)]);
+        let error = reopened.stash_apply(d, entry.commit, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("STORAGE: objects-unavailable"),
+            "{error}"
+        );
+        let provided: BTreeMap<_, _> = missing
+            .into_iter()
+            .map(|path| {
+                let bytes = store[&path].clone();
+                (path, bytes)
+            })
+            .collect();
+        reopened.provide_objects(d, provided, &target).unwrap();
+        assert!(
+            reopened
+                .stash_apply(d, entry.commit, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reopened.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes,
+            [30; 4]
+        );
+        assert!(reopened.version_refs(d).unwrap().stashes.is_empty());
     }
 }

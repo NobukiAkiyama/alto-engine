@@ -54,6 +54,8 @@ export interface VectorStroke {
   cap?: "butt" | "round" | "square";
   join?: "miter" | "round" | "bevel";
   miter_limit?: number;
+  /** Alternating dash and gap lengths in node coordinates. A positive offset advances into the pattern. */
+  dash?: { pattern: number[]; offset?: number };
 }
 export interface StyledPath {
   data: PathData;
@@ -82,6 +84,17 @@ export interface FontFeature {
   tag: string;
   value: number;
 }
+export type UnderlineKind = "none" | "solid";
+export interface Underline {
+  /** Underline rendering. `none` clears an inherited underline. */
+  kind: UnderlineKind;
+  /** Underline colour; defaults to the text colour. */
+  color?: Color;
+  /** Offset in em, positive down. Defaults to the selected font metric. */
+  position?: number;
+  /** Thickness in em. Defaults to the selected font metric. */
+  thickness?: number;
+}
 export interface TextStyle {
   /** Fallback order: the first font that has every character of a grapheme is used. */
   fonts: string[];
@@ -95,6 +108,9 @@ export interface TextStyle {
   scale?: number;
   features?: FontFeature[];
   language?: string | null;
+  underline?: Underline;
+  /** Synthetic italic angle in degrees, from -30 to 30. Zero clears an inherited skew. */
+  italic_skew?: number;
 }
 export type StylePatch = Partial<Omit<TextStyle, "line_height">>;
 /** Offsets are UTF-16 code units, the same as JavaScript string indices. */
@@ -114,10 +130,19 @@ export interface TextContent {
   frame?: { kind: "point" } | { kind: "area"; width: number; height: number };
   writing_mode?: WritingMode;
   align?: "start" | "center" | "end" | "justify";
+  /** Allow one overflowing Japanese punctuation character per area text line. Defaults to false. */
+  hanging?: boolean;
   /** Explicit tate-chu-yoko ranges (vertical text). */
   tcy?: TextRange[];
   /** Isolated runs of up to this many ASCII digits become tate-chu-yoko (0–4, default 2). */
   auto_tcy?: number;
+}
+/** An OpenType variation axis and its range in the selected font face's design units. */
+export interface FontAxis {
+  tag: string;
+  min: number;
+  default: number;
+  max: number;
 }
 export interface FontInfo {
   family: string;
@@ -131,6 +156,8 @@ export interface FontInfo {
   has_vertical_metrics: boolean;
   has_vertical_alternates: boolean;
   outline: string;
+  /** Present when the face declares variation axes. */
+  axes?: FontAxis[];
 }
 export interface TextInfo {
   lines: { start: number; end: number; block: [number, number]; baseline: number }[];
@@ -168,6 +195,10 @@ export interface EffectScope {
 }
 export type Effect =
   | ({ type: "gaussian_blur"; radius?: number } & EffectScope)
+  | ({ type: "high_pass"; radius?: number } & EffectScope)
+  | ({ type: "unsharp_mask"; radius?: number; amount?: number; threshold?: number } & EffectScope)
+  | ({ type: "motion_blur"; angle?: number; distance?: number } & EffectScope)
+  | ({ type: "noise"; amount?: number; seed?: number; monochrome?: boolean } & EffectScope)
   | ({ type: "color_adjust"; brightness?: number; contrast?: number; saturation?: number } & EffectScope)
   | ({
       type: "levels";
@@ -184,6 +215,11 @@ export type Effect =
       channel?: "master" | "red" | "green" | "blue";
       points: { x: number; y: number }[];
     } & EffectScope);
+
+/** Complete parameter set for the levels effect. */
+export type LevelsParams = Required<Pick<Extract<Effect, { type: "levels" }>,
+  "in_black" | "in_white" | "gamma" | "out_black" | "out_white"
+>>;
 
 // ── Nodes ──────────────────────────────────────────────────────────────────
 
@@ -331,7 +367,7 @@ export interface CommitView {
 }
 /** What changed inside a node, for the host to word. */
 export type ContentDetail =
-  | { kind: "vector"; paths: [number, number]; commands: [number, number] }
+  | { kind: "vector"; paths: [number, number]; commands: [number, number]; style: boolean }
   | {
       kind: "text";
       /** Excerpts before and after, when the text changed. */
@@ -340,6 +376,7 @@ export type ContentDetail =
       writing_mode: WritingMode | null;
       frame: boolean;
       tate_chu_yoko: boolean;
+      hanging: boolean;
     }
   | { kind: "adjustment" }
   | { kind: "unsupported" }
@@ -400,6 +437,7 @@ export type WarningCode =
   | "COMMIT_DAMAGED"
   | "COMMIT_SNAPSHOT_MISSING"
   | "HISTORY_OBJECT_MISSING"
+  | "HISTORY_STORE_UNAVAILABLE"
   | "FONT_EMBEDDING_RESTRICTED"
   | "FONT_SUBSETTING_FORBIDDEN"
   | "FONT_MISSING";

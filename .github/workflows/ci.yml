@@ -156,6 +156,8 @@ jobs:
           # Optimized test builds keep debug assertions and overflow checks.
           CARGO_PROFILE_TEST_OPT_LEVEL: "2"
         run: sh scripts/check.sh native
+      - name: Compile fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
       - name: Record Metal semi-transparent parity
         if: always()
         run: |
@@ -669,11 +671,23 @@ jobs:
           path: ${{ runner.temp }}/lifecycle
           if-no-files-found: error
 
+  # Prose and build.json must state the versions the source actually ships.
+  # This runs for prose-only pull requests too, which skip every build job.
+  versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: node scripts/check-versions.mjs
+
   # The one check to require in branch protection: it fails when any job failed
   # or was cancelled, and passes when jobs were skipped on purpose.
   ci-ok:
     if: ${{ always() }}
-    needs: [changes, native, wasm, wasm-build, wasm-browser, wasm-release-hashes, gpu-parity, gpu-lifecycle]
+    needs: [changes, versions, native, wasm, wasm-build, wasm-browser, wasm-release-hashes, gpu-parity, gpu-lifecycle]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

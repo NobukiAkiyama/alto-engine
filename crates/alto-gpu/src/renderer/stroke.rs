@@ -13,12 +13,18 @@ impl Renderer {
         mask: bool,
         world: [f64; 6],
         fixed_world: Option<alto_core::FixedAffine>,
+        tip: Option<BrushImage>,
+        pattern: Option<BrushPattern>,
     ) -> Result<()> {
         if self.stroke.is_some() {
             return Err(RenderError::Conflict("stroke already active".into()));
         }
         self.governor.reset_peak();
         self.stroke = Some(GpuStroke {
+            tip,
+            tip_texture: None,
+            pattern: pattern.filter(|pattern| pattern.depth() > 0.0),
+            pattern_texture: None,
             layer,
             tiles: BTreeMap::new(),
             color,
@@ -55,7 +61,18 @@ impl Renderer {
             y1: f64::NEG_INFINITY,
         };
         for d in dabs {
-            let r = d.radius;
+            // Bilinear filtering has a half-texel margin outside the image.
+            let r = if let Some(tip) = &stroke.tip {
+                let [width, height] = tip.dimensions();
+                d.radius.max(0.01) * 1.4143 * (1.0 + 1.0 / width.max(height) as f32)
+            } else {
+                d.radius
+            };
+            let (sin, cos) = if stroke.tip.is_some() || d.roundness < 1.0 {
+                d.angle.sin_cos()
+            } else {
+                (0.0, 1.0)
+            };
             bounds.x0 = bounds.x0.min((d.center[0] - r) as f64);
             bounds.y0 = bounds.y0.min((d.center[1] - r) as f64);
             bounds.x1 = bounds.x1.max((d.center[0] + r) as f64);
@@ -70,8 +87,8 @@ impl Renderer {
                         .entry(TileKey { tx: x, ty: y })
                         .or_default()
                         .push(GpuDab {
-                            center_radius: [d.center[0], d.center[1], r, d.opacity],
-                            extra: [0.0; 4],
+                            center_radius: [d.center[0], d.center[1], d.radius, d.opacity],
+                            extra: [cos, sin, d.roundness, 0.0],
                         });
                 }
             }
@@ -88,7 +105,17 @@ impl Renderer {
                     as u64
             })
             .sum::<u64>();
-        let new_bytes = new_tiles as u64 * tile_bytes + command_bytes;
+        let pending_tip = stroke.tip.as_ref().filter(|_| stroke.tip_texture.is_none());
+        let pending_pattern = stroke
+            .pattern
+            .as_ref()
+            .filter(|_| stroke.pattern_texture.is_none());
+        let image_bytes = pending_tip
+            .into_iter()
+            .chain(pending_pattern.map(BrushPattern::image))
+            .map(|image| image.pixels().len() as u64 * 4)
+            .sum::<u64>();
+        let new_bytes = new_tiles as u64 * tile_bytes + command_bytes + image_bytes;
         let cpu_finish = (stroke.tiles.len() + new_tiles) as u64
             * (TILE_RGBA_BYTES + TILE_RGBA_BYTES / 255 + 256)
             * 4
@@ -104,7 +131,30 @@ impl Renderer {
         }
         let checkpoint = self.governor.checkpoint();
         let old_keys: HashSet<_> = stroke.tiles.keys().copied().collect();
+        let mut new_tip_texture = None;
+        let mut new_pattern_texture = None;
         let result = (|| -> Result<()> {
+            if let Some(tip) = pending_tip {
+                new_tip_texture = Some(self.upload_brush_image(tip, "brush tip")?);
+            }
+            if let Some(pattern) = pending_pattern {
+                new_pattern_texture =
+                    Some(self.upload_brush_image(pattern.image(), "brush texture")?);
+            }
+            let pattern_view = stroke
+                .pattern_texture
+                .as_ref()
+                .or(new_pattern_texture.as_ref())
+                .map(|texture| texture.create_view(&Default::default()));
+            let (scale, depth) = stroke
+                .pattern
+                .as_ref()
+                .map_or((0.0, 0.0), |pattern| (pattern.scale(), pattern.depth()));
+            let tip_view = stroke
+                .tip_texture
+                .as_ref()
+                .or(new_tip_texture.as_ref())
+                .map(|texture| texture.create_view(&Default::default()));
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -264,13 +314,14 @@ impl Renderer {
                     "brush config",
                     &[BrushUniform {
                         color: stroke.color,
-                        params: [stroke.hardness, stroke.opacity, 0.0, 0.0],
+                        params: [stroke.hardness, stroke.opacity, scale, depth],
                         origin: [key.tx as f32 * 256.0, key.ty as f32 * 256.0, 0.0, 0.0],
                         info: [
                             dabs.len() as u32,
                             u32::from(stroke.erase),
                             u32::from(tile.selection.is_some()),
-                            0,
+                            u32::from(tip_view.is_some())
+                                | (u32::from(pattern_view.is_some()) << 1),
                         ],
                     }],
                     wgpu::BufferUsages::UNIFORM,
@@ -311,6 +362,18 @@ impl Renderer {
                             binding: 5,
                             resource: wgpu::BindingResource::TextureView(&selected),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(
+                                tip_view.as_ref().unwrap_or(&base),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(
+                                pattern_view.as_ref().unwrap_or(&base),
+                            ),
+                        },
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -328,6 +391,12 @@ impl Renderer {
             self.release_retired();
             self.stroke = Some(stroke);
             return Err(e);
+        }
+        if let Some(texture) = new_tip_texture {
+            stroke.tip_texture = Some(texture);
+        }
+        if let Some(texture) = new_pattern_texture {
+            stroke.pattern_texture = Some(texture);
         }
         stroke.epoch += 1;
         let damage = crate::damage::layer_rect_damage(stroke.world, bounds);
@@ -350,11 +419,64 @@ impl Renderer {
         }
         Ok(Some(damage))
     }
+    fn upload_brush_image(&self, image: &BrushImage, label: &str) -> Result<wgpu::Texture> {
+        let [width, height] = image.dimensions();
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = memory::create_texture(
+            &self.governor,
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            Class::Stroke,
+        )?;
+        let rgba: Vec<_> = image
+            .pixels()
+            .iter()
+            .flat_map(|&v| [v, 255, 255, 255])
+            .collect();
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+        Ok(texture)
+    }
+
+    pub(super) fn retire_brush_images(
+        &mut self,
+        tip: Option<wgpu::Texture>,
+        pattern: Option<wgpu::Texture>,
+    ) {
+        self.retired.textures.extend(
+            tip.into_iter()
+                .chain(pattern)
+                .map(|texture| (texture, MemoryClass::Stroke)),
+        );
+    }
+
     pub fn cancel_stroke(&mut self) {
         let Some(stroke) = self.stroke.take() else {
             return;
         };
         let reach = stroke_reach(&stroke);
+        self.retire_brush_images(stroke.tip_texture, stroke.pattern_texture);
         for tile in stroke.tiles.into_values() {
             self.retired
                 .textures
@@ -405,5 +527,178 @@ impl Renderer {
             }
             Damage::All => self.invalidate(None),
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_stamp_retires_both_images_and_can_be_retried() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(mut renderer) = pollster::block_on(Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        let mut store = alto_raster::ObjectStore::default();
+        let corrupt = ContentHash::of(b"invalid tile");
+        store.insert_deferred(corrupt, alto_core::PixelFormat::Rgba8, vec![0; 4], false);
+        let tiles = BTreeMap::from([(TileKey { tx: 0, ty: 0 }, corrupt)]);
+        let dab = Dab {
+            center: [128.0; 2],
+            radius: 10.0,
+            opacity: 1.0,
+            angle: 0.0,
+            roundness: 1.0,
+        };
+        let tip = BrushImage::new(17, 19, &[255; 17 * 19]).unwrap();
+        let pattern =
+            BrushPattern::new(BrushImage::new(19, 17, &[191; 17 * 19]).unwrap(), 1.0, 1.0).unwrap();
+        let before = renderer.gpu_bytes().stroke;
+        renderer
+            .begin_stroke(
+                NodeId::new(),
+                [0.0, 0.0, 0.0, 1.0],
+                0.8,
+                1.0,
+                false,
+                false,
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                None,
+                Some(tip),
+                Some(pattern),
+            )
+            .unwrap();
+
+        // The tile fails to decode after the tip upload and before the first submit.
+        assert!(matches!(
+            renderer.stamp(&[dab], &tiles, &store, None),
+            Err(RenderError::CorruptData(_))
+        ));
+        let stroke = renderer.stroke.as_ref().unwrap();
+        assert!(
+            stroke.tip_texture.is_none()
+                && stroke.pattern_texture.is_none()
+                && stroke.tiles.is_empty()
+        );
+        renderer
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        assert_eq!(renderer.gpu_bytes().stroke, before);
+
+        let tiles = BTreeMap::new();
+        renderer.stamp(&[dab], &tiles, &store, None).unwrap();
+        let texture = renderer
+            .stroke
+            .as_ref()
+            .unwrap()
+            .tip_texture
+            .clone()
+            .unwrap();
+        let grain = renderer
+            .stroke
+            .as_ref()
+            .unwrap()
+            .pattern_texture
+            .clone()
+            .unwrap();
+        renderer.stamp(&[dab], &tiles, &store, None).unwrap();
+        assert_eq!(
+            renderer.stroke.as_ref().unwrap().pattern_texture.as_ref(),
+            Some(&grain)
+        );
+        assert_eq!(
+            renderer.stroke.as_ref().unwrap().tip_texture.as_ref(),
+            Some(&texture)
+        );
+        renderer.cancel_stroke();
+        renderer
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        assert_eq!(renderer.gpu_bytes().stroke, before);
+        assert!(!renderer.is_lost());
+    }
+
+    #[test]
+    fn brush_image_budget_is_checked_before_the_first_stamp() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(mut renderer) = pollster::block_on(Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        let store = alto_raster::ObjectStore::default();
+        let tiles = BTreeMap::new();
+        let dab = Dab {
+            center: [128.0; 2],
+            radius: 10.0,
+            opacity: 1.0,
+            angle: 0.0,
+            roundness: 1.0,
+        };
+        let pixels = vec![255; 1024 * 1024];
+        let tip = BrushImage::new(1024, 1024, &pixels).unwrap();
+        let pattern =
+            BrushPattern::new(BrushImage::new(1024, 1024, &pixels).unwrap(), 1.0, 1.0).unwrap();
+        let before = renderer.gpu_bytes();
+        renderer.budget_bytes = before.budget_used + 6 * 1048576;
+        let layer = NodeId::new();
+        let world = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+        renderer
+            .begin_stroke(
+                layer,
+                [0.0, 0.0, 0.0, 1.0],
+                0.8,
+                1.0,
+                false,
+                false,
+                world,
+                None,
+                Some(tip),
+                Some(pattern),
+            )
+            .unwrap();
+        assert_eq!(renderer.gpu_bytes().stroke, before.stroke);
+        assert!(matches!(
+            renderer.stamp(&[dab], &tiles, &store, None),
+            Err(RenderError::Budget(_))
+        ));
+        let stroke = renderer.stroke.as_ref().unwrap();
+        assert!(
+            stroke.tip_texture.is_none()
+                && stroke.pattern_texture.is_none()
+                && stroke.tiles.is_empty()
+        );
+        assert_eq!(renderer.gpu_bytes().stroke, before.stroke);
+        renderer.cancel_stroke();
+
+        renderer
+            .begin_stroke(
+                layer,
+                [0.0, 0.0, 0.0, 1.0],
+                0.8,
+                1.0,
+                false,
+                false,
+                world,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            renderer
+                .stamp(&[dab], &tiles, &store, None)
+                .unwrap()
+                .is_some()
+        );
+        renderer.cancel_stroke();
     }
 }

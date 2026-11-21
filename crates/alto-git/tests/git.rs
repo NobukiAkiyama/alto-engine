@@ -982,3 +982,91 @@ fn a_checked_out_branch_is_not_deleted_and_a_pruned_commit_is_imported_again() {
     git(&dir, &["fsck", "--strict", "--no-progress"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_thin_alto_is_not_exported_as_a_folder() {
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+    let node = Node::raster("layer");
+    let layer = node.id;
+    let parent = e.document(d).unwrap().root;
+    let revision = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "add",
+        vec![Op::InsertNode {
+            node,
+            parent,
+            index: 0,
+        }],
+        revision,
+    )
+    .unwrap();
+    let key = TileKey { tx: 0, ty: 0 };
+    paint(&mut e, d, layer, key, 10);
+    e.commit(d, "old", 1, None, false).unwrap();
+    paint(&mut e, d, layer, key, 20);
+    e.commit(d, "new", 2, None, false).unwrap();
+    let dir = std::env::temp_dir().join(format!("alto-git-thin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("thin.alto");
+    std::fs::write(&file, e.save_thin_package(d).unwrap()).unwrap();
+    let out = dir.join("thin.altoproj");
+    let error = alto_git::export(&file, &out).unwrap_err();
+    assert!(error.contains("thin"), "{error}");
+    assert!(!out.join("manifest.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stashes_are_not_mirrored_to_git() {
+    let _serial = serial();
+    let Some(root) = repo("stash") else { return };
+    let folder = root.join("art.altoproj");
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(256, 256)).unwrap();
+    let node = Node::raster("layer");
+    let layer = node.id;
+    let r = e.document(d).unwrap().root;
+    e.transact(
+        d,
+        "add",
+        vec![Op::InsertNode {
+            node,
+            parent: r,
+            index: 0,
+        }],
+        e.document(d).unwrap().revision,
+    )
+    .unwrap();
+    let key = TileKey { tx: 0, ty: 0 };
+    paint(&mut e, d, layer, key, 10);
+    e.commit(d, "commit 1", 1, None, false).unwrap();
+    save(&e, d, &folder);
+
+    paint(&mut e, d, layer, key, 20);
+    let stash = e.stash(d, "wip stash", 100, None).unwrap();
+    save(&e, d, &folder);
+    let entries = alto_store::folder::read(&folder).unwrap();
+    let manifest: alto_store::Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+    assert_eq!(manifest.format, 4);
+    assert_eq!(manifest.refs.stashes, [stash]);
+
+    // Now sync into Git.
+    let report = alto_git::sync(&folder, None).unwrap();
+    assert_eq!(report.created.len(), 1);
+
+    // Check that manifest in the git mirror has format 2 and NO stashes.
+    let git_manifest_bytes = git(&root, &["show", "HEAD:art.altoproj/manifest.json"]);
+    let git_manifest: alto_store::Manifest = serde_json::from_str(&git_manifest_bytes).unwrap();
+    assert_eq!(git_manifest.format, 2);
+    assert!(git_manifest.refs.stashes.is_empty());
+    assert!(!git_manifest_bytes.contains("stashes"));
+
+    // Check that the tree can be imported from git as an Opened package.
+    let opened = alto_git::Opened::from_git(&folder, "HEAD").unwrap();
+    assert!(opened.package.refs.stashes.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}

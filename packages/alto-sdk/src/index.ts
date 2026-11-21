@@ -1,6 +1,6 @@
 export { createEngine } from "./engine.js";
 export { isSupported } from "./browser.js";
-export { deleteRecovery, listRecoveryNamespaces } from "./recovery-store.js";
+export { deleteRecovery, listRecoveryNamespaces, type RecoveryNamespace } from "./recovery-store.js";
 export type {
   Engine,
   EngineEvents,
@@ -11,7 +11,7 @@ export type {
   RecoveryReport,
 } from "./engine.js";
 export { DocumentHandle } from "./document.js";
-export type { ExportImageOptions, SelectionSpec } from "./document.js";
+export type { ExportImageOptions, SelectionMode, SelectionSpec } from "./document.js";
 export { AltoError } from "./errors.js";
 export type { ConflictReason, ErrorCode, ErrorDetails } from "./errors.js";
 export type { BuiltInIntent, Intent, IntentId } from "./intents.js";
@@ -20,7 +20,8 @@ export { FileSystemDirectoryProvider, MemoryObjectProvider, OpfsFolderProvider, 
 export type { ArchiveSource, ArchiveTarget, ObjectStorageProvider, ExclusiveObjectStorage } from "./storage.js";
 export { applyTextStyle, replaceText } from "./text-edit.js";
 export { ToolSession } from "./tools.js";
-export type { BrushOptions, InputSample } from "./tools.js";
+export type { BrushCurve } from "./protocol.js";
+export type { BrushDynamics, BrushImage, BrushOptions, InputSample } from "./tools.js";
 export { Transaction } from "./transaction.js";
 export type { InsertOptions } from "./transaction.js";
 export { ViewportControl } from "./viewport.js";

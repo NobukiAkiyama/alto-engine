@@ -1,13 +1,39 @@
 import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
-import { PROTOCOL, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
+import { readRecoveryLabel, validRecoveryLabel, writeRecoveryLabel } from "./recovery-store.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
-import type { ToolHost, ToolSession } from "./tools.js";
+import type { BrushImage, ToolHost, ToolSession } from "./tools.js";
 import type { ImportedImage } from "./transaction.js";
 import type { FontAsset, ImageAsset, PackageSize, PathData } from "./types.js";
 import { ViewportControl, type Viewport } from "./viewport.js";
+
+async function importBrushImage(file: Blob): Promise<BrushImage> {
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new AltoError("INVALID_ARGUMENT", "brush image could not be decoded");
+  });
+  try {
+    const { width, height } = bitmap;
+    if (!validBrushImageSize(width, height)) {
+      throw new AltoError("INVALID_ARGUMENT", "brush image dimensions must be 16–1024 pixels");
+    }
+    const ctx = new OffscreenCanvas(width, height).getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new AltoError("INTERNAL", "no 2D context to decode the brush image");
+    ctx.drawImage(bitmap, 0, 0);
+    const rgba = ctx.getImageData(0, 0, width, height).data;
+    const pixels = new Uint8Array(width * height);
+    for (let i = 0; i < pixels.length; i++) {
+      const s = i * 4;
+      const luma = (54 * rgba[s] + 183 * rgba[s + 1] + 19 * rgba[s + 2] + 128) >> 8;
+      pixels[i] = Math.floor((luma * rgba[s + 3] + 127) / 255);
+    }
+    return { width, height, pixels };
+  } finally {
+    bitmap.close();
+  }
+}
 
 const SDK_VERSION = "0.5.0";
 
@@ -18,11 +44,17 @@ export interface EngineOptions {
     /**
      * Separates recovery journals: one engine per name runs at a time, across tabs.
      * 1–128 characters of `A-Z a-z 0-9 . _ - /`; default `default`.
+     * Use `"auto"` for a new namespace each time. To reopen one after a reload,
+     * select it from `listRecoveryNamespaces()` and pass its full name.
      */
     namespace?: string;
+    /** Opens the pre-existing literal namespace `"auto"`, rather than generating one. */
+    literalNamespace?: boolean;
     /** Set false to keep no recovery journal; unsaved edits are then lost in a crash. */
     recovery?: boolean;
   };
+  /** Maximum number of undoable operations, from 1 to 1000 (default 100). */
+  undo?: { steps?: number };
   gpu?: { powerPreference?: "low-power" | "high-performance"; memoryBudgetMB?: number };
   /** Where `worker.js` and the WASM files are served. Must be the page's origin. */
   assets?: { baseURL?: string | URL };
@@ -99,6 +131,8 @@ export interface Engine {
   readonly status: EngineStatus;
   /** The open document. The same handle stays valid across Worker restarts. */
   readonly document: DocumentHandle | null;
+  /** This engine's resolved recovery namespace, including any generated suffix. */
+  readonly namespace: string;
   /** Where the canvas looks; zoom is in CSS pixels. */
   readonly viewport: ViewportControl;
   readonly presentation: PresentationSnapshot;
@@ -106,6 +140,11 @@ export interface Engine {
     /** A journal from an earlier session is waiting. */
     readonly available: boolean;
     restore(): Promise<DocumentHandle>;
+    /**
+     * Sets the recovery-list label (1–256 Unicode code points). Before a document
+     * opens, the engine holds it in memory. Writing the optional label is best effort.
+     */
+    setLabel(label: string): Promise<void>;
     /** Deletes the waiting journal, so a new document can start. Refused when a document is open. */
     discard(): Promise<void>;
     /** The live document as a `.alto` archive, for use when storage has failed. */
@@ -115,6 +154,10 @@ export interface Engine {
   };
   readonly assets: {
     importImage(file: Blob): Promise<ImageAsset>;
+    /** Decodes a 16–1024 px image as reusable brush coverage. */
+    importBrushTip(file: Blob): Promise<BrushImage>;
+    /** Decodes a repeating brush texture as reusable coverage. */
+    importBrushTexture(file: Blob): Promise<BrushImage>;
     /** An OpenType/TrueType font (.otf/.ttf/.ttc). Add it with `Transaction.addFont`. */
     importFont(file: Blob, options?: { faceIndex?: number }): Promise<FontAsset>;
     /** Drops an imported image or font that no edit used. */
@@ -126,8 +169,14 @@ export interface Engine {
   };
   /** A new empty document. It uses render version 3, the only version. */
   createDocument(meta: { width: number; height: number; renderVersion?: 3 }): Promise<DocumentHandle>;
-  /** Opens a `.alto` archive. Refused while a recovery journal waits. */
-  open(source: Blob | ArchiveSource): Promise<DocumentHandle>;
+  /**
+   * Opens a `.alto` archive. Refused while a recovery journal waits. For a thin `.alto`,
+   * `history` is the folder its versions were saved to: when it holds them for this document
+   * it is attached and held, as after `versions.attachFolder`; when not, the document still
+   * opens, without it, with a `HISTORY_STORE_UNAVAILABLE` warning (`details.reason`
+   * `"missing"` or `"other-document"`). A normal `.alto` reads nothing from `history`.
+   */
+  open(source: Blob | ArchiveSource, options?: { history?: ObjectStorageProvider }): Promise<DocumentHandle>;
   /** Opens the folder form, reading only objects reachable from the document and its history. */
   /**
    * Opens a folder. With `history: "on-demand"`, only the working document's pixels are read;
@@ -146,9 +195,10 @@ const readableAfterStorageFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage", "exportStreamOpen", "exportStreamPull", "exportStreamClose",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
-  "packageBytes",
+  "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
+  "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
 ]);
 const NAMESPACE = /^[A-Za-z0-9._/-]{1,128}$/;
 
@@ -161,8 +211,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   readonly viewport: ViewportControl;
   /** @internal */
   readonly diagnostics = new Emitter<DiagnosticEvents>();
-  /** @internal */
   readonly namespace: string;
+  private recoveryLabel?: string;
+  private recoveryLabelWrite: Promise<void> | undefined;
+  private pendingRecoveryLabel?: [string, number, number];
+  private storedRecoveryLabel?: string;
   private worker: Worker | null = null;
   private sequence = 1;
   private pending = new Map<number, Pending>();
@@ -234,10 +287,13 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     });
   }
   private raf = 0;
+  private gpuTimestamps = false;
   private disposed = false;
   private pixelRatio: number;
   private state: EngineStatus = { state: "starting", error: null };
   private workerGeneration = 0;
+  /** @internal Identifies the Worker owning a pull-based export. */
+  get workerEpoch(): number { return this.workerGeneration; }
   private restartPromise: Promise<void> | null = null;
   private releaseLease?: () => void;
   /** Settles once the namespace lock is released, after `releaseLease`. */
@@ -265,9 +321,13 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
   workerURL: URL | string | null;
 
+  private readonly undoSteps: number;
+
   private constructor(private readonly options: EngineOptions) {
     super();
-    this.namespace = options.storage?.namespace ?? "default";
+    this.undoSteps = options.undo?.steps ?? DEFAULT_UNDO_STEPS;
+    const namespace = options.storage?.namespace ?? "default";
+    this.namespace = namespace === "auto" && !options.storage?.literalNamespace ? `auto/${crypto.randomUUID()}` : namespace;
     this.pixelRatio = this.currentRatio();
     this.workerURL = options.assets?.baseURL
       ? new URL("worker.js", new URL(options.assets.baseURL, location.href))
@@ -303,6 +363,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   static async create(options: EngineOptions): Promise<EngineCore> {
     if (!(options.container instanceof HTMLElement))
       throw new AltoError("INVALID_ARGUMENT", "options.container must be an HTMLElement");
+    const undoSteps = options.undo?.steps ?? DEFAULT_UNDO_STEPS;
+    if (!Number.isInteger(undoSteps) || undoSteps < 1 || undoSteps > MAX_UNDO_STEPS)
+      throw new AltoError("INVALID_ARGUMENT", "undo.steps must be an integer from 1 to 1000", { reason: "undo-steps" });
     const namespace = options.storage?.namespace ?? "default";
     if (!NAMESPACE.test(namespace) || namespace.split("/").some((part) => part === "." || part === ".."))
       throw new AltoError("INVALID_ARGUMENT", "storage.namespace must be 1–128 of A-Z a-z 0-9 . _ - /", {
@@ -390,6 +453,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
             return;
           }
           this.releaseLease = release;
+          this.storedRecoveryLabel = undefined;
           resolve();
           await hold;
         })
@@ -440,8 +504,10 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         sdk: SDK_VERSION,
         canvas: offscreen,
         budget: this.options.gpu?.memoryBudgetMB ?? 512,
+        undoSteps: this.undoSteps,
         namespace: this.namespace,
         journal: this.journaled,
+        gpuTimestamps: this.gpuTimestamps,
       },
       [offscreen],
       true,
@@ -469,6 +535,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if(this.document && this.document.getSnapshot().revision!==data.value.revision)
         this.publishDisplay({...this.displayState,phase:this.displayState.presentedViewport ? "holding" : "preparing",interactionReady:false});
       this.document?.apply(data.value);
+    } else if (data.t === "checkpointStored") {
+      void this.refreshRecoveryLabel();
     } else if (data.t === "storageFailure") {
       if (this.state.state !== "storage-failed") {
         const error = new AltoError("STORAGE", data.value.message);
@@ -518,6 +586,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     const [args, transfer = []] = rest;
     return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false) as Promise<Result<K>>;
   }
+  /** @internal Keeps the diagnostic enabled across Worker restarts. */
+  async setGpuTimestampProfiling(enabled: boolean): Promise<void> {
+    await this.request("setGpuTimestampProfiling", { enabled });
+    this.gpuTimestamps = enabled;
+  }
   /** @internal Any request by name, for the testing entry point. */
   requestRaw(t: string, payload: Record<string, unknown> = {}): Promise<unknown> {
     return this.requestCore(t as RequestName, payload as never, [], false);
@@ -534,7 +607,13 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     if (doc !== this.document || epoch === undefined)
       return Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     const [args, transfer = []] = rest;
-    return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false, 0, { documentEpoch: epoch }) as Promise<Result<K>>;
+    const result = this.requestCore(t, (args ?? {}) as Args<K>, transfer, false, 0, { documentEpoch: epoch }) as Promise<Result<K>>;
+    if (t !== "durable") return result;
+    return result.then((value) => {
+      // Also refresh when paired with an older Worker that sends no checkpoint notice.
+      if (doc === this.document) void this.refreshRecoveryLabel();
+      return value;
+    });
   }
   private requestCore<K extends RequestName>(
     t: K,
@@ -657,6 +736,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.document = new DocumentHandle(this, state as WireState);
     this.documentEpoch = epoch;
     this.documentEpochs.set(this.document, epoch);
+    this.storedRecoveryLabel = undefined;
+    void this.refreshRecoveryLabel();
     this.deferredView=null;
     this.resetDisplay();
     this.emit("document", this.document);
@@ -695,12 +776,17 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   async createDocument(meta: { width: number; height: number; renderVersion?: 3 }): Promise<DocumentHandle> {
     return this.replaceDocument((epoch) => this.requestReplacement("createDocument", meta, epoch));
   }
-  async open(source: Blob | ArchiveSource): Promise<DocumentHandle> {
-    return this.replaceDocument(async (epoch) => {
+  async open(source: Blob | ArchiveSource, options: { history?: ObjectStorageProvider } = {}): Promise<DocumentHandle> {
+    const store = options.history;
+    if (store !== undefined && (!store || typeof store !== "object"))
+      throw new AltoError("INVALID_ARGUMENT", "history must be an object storage provider");
+    const doc = await this.replaceDocument(async (epoch) => {
       const blob = source instanceof Blob ? source : await source.read();
       const bytes = await blob.arrayBuffer();
       return this.requestReplacement("open", { bytes }, epoch, [bytes]);
     });
+    if (store) await doc.attachHistoryStore(store);
+    return doc;
   }
   async openFolder(provider: ObjectStorageProvider, options: { history?: "all" | "on-demand" } = {}): Promise<DocumentHandle> {
     const onDemand = options.history === "on-demand";
@@ -730,6 +816,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         };
         return provider.exclusive ? provider.exclusive(load) : load(provider);
       });
+      // Releases the hold instead if another open already closed the document.
       doc.setFolder(provider, manifestHash, releaseHold);
       return doc;
     } catch (e) {
@@ -746,14 +833,60 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         return self.recoveryWaiting;
       },
       restore: () => self.restoreRecovery(),
+      setLabel: (label: string) => self.setRecoveryLabel(label),
       discard: () => self.discardRecovery(),
       exportEmergency: () => self.exportEmergency(),
       recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
     };
   }
+  private async setRecoveryLabel(label: string): Promise<void> {
+    if (!validRecoveryLabel(label))
+      throw new AltoError("INVALID_ARGUMENT", "the recovery label must contain 1–256 characters");
+    if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
+    if (!this.journaled) throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
+    this.recoveryLabel = label;
+    this.storedRecoveryLabel = undefined;
+    await this.refreshRecoveryLabel();
+  }
+
+  private async refreshRecoveryLabel(): Promise<void> {
+    const label = this.recoveryLabel;
+    const meta = this.document?.getSnapshot().meta;
+    if (!this.releaseLease || !meta || label === undefined) return;
+    this.pendingRecoveryLabel = [label, meta.width, meta.height];
+    this.recoveryLabelWrite ??= Promise.resolve().then(() => this.flushRecoveryLabels());
+    await this.recoveryLabelWrite;
+  }
+
+  private async flushRecoveryLabels(): Promise<void> {
+    try {
+      while (this.pendingRecoveryLabel) {
+        const entry = this.pendingRecoveryLabel;
+        this.pendingRecoveryLabel = undefined;
+        const key = JSON.stringify(entry);
+        if (this.storedRecoveryLabel !== key && await writeRecoveryLabel(this.namespace, ...entry)) {
+          this.storedRecoveryLabel = key;
+        }
+      }
+    } finally {
+      this.recoveryLabelWrite = undefined;
+    }
+  }
+
+  private releaseRecoveryLease() {
+    const release = this.releaseLease;
+    this.releaseLease = undefined;
+    if (this.recoveryLabelWrite) void this.recoveryLabelWrite.then(release);
+    else release?.();
+  }
+
   private restoreRecovery = (): Promise<DocumentHandle> => this.serialize(async () => {
     if (!this.journaled) throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
     this.requireWaitingRecovery();
+    if (this.recoveryLabel === undefined) {
+      const storedLabel = await readRecoveryLabel(this.namespace);
+      this.recoveryLabel ??= storedLabel;
+    }
     const epoch = ++this.nextDocumentEpoch;
     const state = await this.requestReplacement("recover", {}, epoch);
     this.recoveryWaiting = false;
@@ -761,7 +894,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   });
   private discardRecovery = (): Promise<void> => this.serialize(async () => {
     this.requireWaitingRecovery();
+    await this.recoveryLabelWrite;
     await this.request("discardRecovery");
+    this.storedRecoveryLabel = undefined;
     this.recoveryWaiting = false;
   });
   private requireWaitingRecovery() {
@@ -805,6 +940,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       );
       return { ...asset, id: asset.record.id } as unknown as ImageAsset;
     },
+    importBrushTip: importBrushImage,
+    importBrushTexture: importBrushImage,
     importFont: async (file: Blob, options: { faceIndex?: number } = {}): Promise<FontAsset> => {
       const bytes = await file.arrayBuffer();
       const font = await this.request("importFont", { bytes, faceIndex: options.faceIndex ?? 0 }, [bytes]);
@@ -866,13 +1003,16 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.recoveryWaiting = false;
         // Document listeners run inside apply/adopt and may call the engine, so requests
         // are accepted from here on; the status event still follows the recovered state.
-        this.state = Object.freeze({ state: "ready", error: null });
+        const storageFailure = this.storageError();
+        if (!storageFailure) this.state = Object.freeze({ state: "ready", error: null });
         // The same handle carries on; the host's references stay valid.
         if (this.document) {
           this.document.apply(state);
+          this.storedRecoveryLabel = undefined;
+          void this.refreshRecoveryLabel();
           this.viewport.publish();
         } else this.adopt(state, true, epoch);
-        this.emit("status", this.state);
+        if (!storageFailure) this.emit("status", this.state);
       } else this.setStatus("ready", null);
       this.startLoop();
     } catch (cause) {
@@ -909,8 +1049,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     const paused = new AltoError("WORKER_UNAVAILABLE", "the page was put in the back/forward cache");
     this.document?.abortTool(paused);
     this.rejectPending(paused);
-    this.releaseLease?.();
-    this.releaseLease = undefined;
+    this.releaseRecoveryLease();
     this.setStatus("restarting", null);
   }
   /** The page came back from the back/forward cache: take the namespace again and restart. */
@@ -932,8 +1071,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     cancelAnimationFrame(this.raf);
     this.worker?.terminate();
     this.worker = null;
-    this.releaseLease?.();
-    this.releaseLease = undefined;
+    this.releaseRecoveryLease();
     this.resizeObserver.disconnect();
     if (this.resizeTimer !== null) clearTimeout(this.resizeTimer);
     this.ratioQuery?.removeEventListener("change", this.onRatioChange);

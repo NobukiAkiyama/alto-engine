@@ -1,4 +1,4 @@
-# Alto Engine — render v3 / format 5（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 8）
+# Alto Engine — render v3 / format 8（Engine 0.4.0 / TypeScript SDK 0.5.0 / Protocol 18）
 
 未リリースの開発版です。旧ファイル・旧通信との互換性はありません。
 
@@ -12,7 +12,7 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 ## まず起動する
 
-この開発版は Protocol 8 / format 5 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
+この開発版は Protocol 18 / format 8 を使います。WASM パッケージ（`.wasm` と wasm-bindgen の JS グルー）と SDK の `packages/alto-sdk/dist/` はビルド生成物で、Git に入れていません。クリーンなチェックアウトから、現在のソースでビルドしてください。必要なツールは「[ソースから再ビルド](#ソースから再ビルド)」を参照してください。公開済みバイナリを取得する `fetch-wasm.sh` は `.wasm` だけを置くもので、このビルドを代替しません。
 
 ```sh
 sh scripts/build.sh                     # WASM パッケージと SDK をビルド
@@ -39,7 +39,7 @@ ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/bro
 
 Playground の「レイヤーの画像編集」で切り抜き・拡縮・90度回転・反転・グラデーション・連結塗りつぶし・スポイトを使えます。画像範囲と引数はレイヤー内の画素です。透明な画像にも幅・高さが残り、各確定操作は1回のUndoで戻せます。「SVGファイル」から、対応する図形だけを含むSVGを編集可能なvector/groupとして取り込めます。
 
-「ブランチと統合」で分岐・切替・保護・削除と、競合を選択してから確定する3-wayマージを扱います。未コミットの切替は拒否します。保存・版の記録・過去版の内容復元は別操作です。履歴表示は第一親・統合元を含むDAG・全ブランチを切り替えられます。
+「ブランチと統合」で分岐・切替・保護・削除と、競合を選択してから確定する3-wayマージを扱います。未コミットの切替は拒否します。SDK の `doc.versions.stash("作業の途中")` でいったん退避でき、`stashPop()` で最新の退避を作業文書に戻せます。競合がある場合は返されたプランを `finishMerge` で解決します。保存・版の記録・過去版の内容復元は別操作です。履歴表示は第一親・統合元を含むDAG・全ブランチを切り替えられます。
 
 GCは確認（dry-run）が既定です。SDKのメモリ保存先、OPFSフォルダ、ネイティブのフォルダ/ZIPは実削除に対応します。File System Accessで選んだフォルダは他のオリジンやネイティブのアプリを排他できないため確認のみです。SDKの単一ファイル整理は、新しいZIPの出力で行います。`alto-git sync` はブランチ・タグ・二親マージをGitのrefとparentsへ写します。
 
@@ -47,7 +47,7 @@ GCは確認（dry-run）が既定です。SDKのメモリ保存先、OPFSフォ�
 
 ## M7の使い方（テキスト・縦組み）
 
-「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 5に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜4 / render v1・v2の文書は現行エンジンでは開けません。
+「検証と計測」の「M7/M8サンプルを開く」で、現行のrender v3 / format 8に対応した、縦組みの本文・横組みの見出し・縦中横の注記と3つの版を含む文書を開けます。上部の「テキスト設定」で設定欄へ移動します。format 1〜4 / render v1・v2の文書は現行エンジンでは開けません。
 
 ### フォント
 
@@ -143,7 +143,15 @@ await doc.saveFolder(folder);
 const reopened = await engine.openFolder(folder);
 ```
 
-独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **8** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
+独自の保存先は `ObjectStorageProvider`（`getObject` / `putObjects` / `list` / `readRef` / `writeRef`）を実装して使えます。TypeScript SDK **0.5.0** と Engine/WASM **0.4.0** は別々のSemVer系列です。プロトコルは **18** です。リリース時の対応関係と更新手順は[リリース手順](RELEASING.md)を参照してください。
+
+### 最近使ったファイル
+
+ホストアプリは `@alto/engine/browser` の `rememberFile(handle)` で、選択済みのファイルやプロジェクトフォルダを記録できます。薄い `.alto` は `rememberFile(fileHandle, { history: historyFolderHandle })` で版履歴の保存先も記録します。完全なアーカイブに保存し直した場合は `{ history: null }` で保存先との関連を外せます。一覧は `recentFiles()` で新しい順に最大32件取得でき、`forgetFile(id)` で一覧から外せます。
+
+`openRecent(id)` はクリックなどのユーザー操作から呼び出してください。ファイルの場合は返った `source` と `history` を `engine.open(source, { history })` に、フォルダの場合は `source` を `engine.openFolder(source)` に渡します。ブラウザがアクセスを拒否すると `STORAGE` が返り、一覧には項目が残ります。
+
+Undo の保持件数は `createEngine({ container, undo: { steps: 100 } })` で 1〜1000 に設定できます（既定値 100）。Worker が再起動しても設定は維持されます。
 
 ## M6の使い方
 
@@ -235,7 +243,7 @@ await doc.undo();
 | `crates/alto-engine` | 文書・履歴・タイル・アセット・保存の統合（GPU に依存しない） |
 | `crates/alto-wasm` | Engine Worker内のWASMランタイム |
 | `crates/alto-git` | Git Adapter（エンジン外のCLI）：Altoコミット→gitコミット、レイヤー単位の差分 |
-| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル8）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
+| `packages/alto-sdk` | TypeScript SDK 0.5.0（プロトコル18）、Engine Worker、OPFS Storage Worker、フォルダ保存先 |
 | `examples/browser-playground` | 編集UIとビルド済みWASM |
 | `tests/e2e` | 実ブラウザで実行する画素検証・性能測定 |
 | `tests/fonts` | テスト・デモ用フォント（Noto Sans JP / Noto Sans のサブセット、SIL OFL 1.1） |
@@ -257,7 +265,7 @@ const doc = await engine.createDocument({ width: 1920, height: 1080 });
 const layer = await doc.transact('layer.add', tx => tx.addRaster({ name: 'ペイント' }));
 const stroke = doc.tools.begin('brush', {
   layer,
-  tip: { size: 40, hardness: 0.8 },
+  tip: { size: 40, hardness: 0.8, angle: 30, roundness: 0.5 },
   color: [0.2, 0.4, 0.8, 1],
 });
 stroke.input({ x: 100, y: 100, pressure: 1 });
@@ -267,6 +275,12 @@ await doc.undo();
 await doc.redo();
 await doc.save(downloadTarget('work.alto'));
 ```
+
+ブラシの `dynamics` では、筆圧・速度（レイヤー上の移動速度）・ペンの傾きに応じて直径、ダブごとの不透明度、流量をカーブで設定できます。たとえば `dynamics: { opacity: { input: "pressure", points: [[0, 0], [1, 1]] } }` は筆圧をダブの不透明度に反映します。`size: null` は直径を固定し、`angleFromTilt: true` はペンの傾きの方向を先端の角度に加えます。
+
+画像を先端にするには、`const image = await engine.assets.importBrushTip(file)` で取り込み、ブラシ開始時に `tip: { image, size: 40, angle: 30 }` を渡します。画像の長辺がブラシの直径に対応し、明るい不透明部分ほど強く描画します。同じ画像を繰り返し使えます。文書には描いた画素が保存されます。
+
+紙目を付けるには `const grain = await engine.assets.importBrushTexture(file)` で取り込み、`tip: { texture: { image: grain, scale: 1, depth: 0.8 } }` を渡します。模様はレイヤー上で繰り返し、ストロークを重ねても同じ位置に出ます。画像先端と紙目は同時に指定できます。
 
 Transactionコールバックは同期で記述し、更新完了はPromiseで待ちます。Promiseはメモリ上の文書に適用された時点で解決し、復旧用ジャーナルへの書き込みは描画と別に進みます。書き込みの完了は `await doc.durable()` で待てます（書き込みに失敗すると `STORAGE` で失敗します）。文書は `doc.getSnapshot()`（凍結済みの値）と `doc.subscribe(listener)` で読みます。ラスターレイヤーの `tiles` はタイル数と範囲（`{format, count, bounds}`）だけで、タイル一覧は `await doc.nodeTiles(id)` で取得します。保存されるスナップショットのハッシュは `await doc.snapshotHash()` で取得します。公開APIの一覧は [packages/alto-sdk/api](packages/alto-sdk/api) にあります。`@alto/engine/unstable` と `@alto/engine/testing` は検証用です。
 
@@ -310,7 +324,7 @@ DPRの性能比較は同じCSS表示サイズで、`ALTO_BROWSER_DPR=1` と `=2`
 
 ## 現在の範囲
 
-sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、丸ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージを持つ版管理（文書format 5 / manifest 2 / commit 2 / プロトコル8）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
+sRGB / RGBA8、R8マスク、ベクターパスの塗り/線、ベクターマスク、クリッピングパス、ブラシ・消しゴム、17種の合成モード（Playgroundの選択肢はNormal/Multiply/Screen）、明るさ・コントラスト・彩度、レベル補正、トーンカーブ、色相・彩度、反転、Gaussianぼかし、ハイパス、横組み・縦組みのテキスト（埋め込みフォント）、ブランチ・タグ・二親マージ・stash を持つ版管理（文書format 8 / manifest 2〜4 / commit 2 / プロトコル18）、参照を保護するGC、レイヤー単位の確定画像編集、フォルダ形式が対象です。ルビ・圏点、ブラウザ内のgit操作などの継続課題と各機能の上限は [MILESTONES.md](doc/MILESTONES.md) に、版管理と画像編集の現行仕様は [VERSIONING-AND-IMAGE-EDITING.md](doc/design/VERSIONING-AND-IMAGE-EDITING.md) に記載しています。
 
 ## ライセンス
 

@@ -12,6 +12,7 @@ use alto_raster::{DecodeCache, ObjectStore, TileData, TileStore};
 use alto_scene::{RContent, RNode, RenderBlend, RenderScene, RenderTile};
 use std::collections::{BTreeMap, BTreeSet};
 pub use text::{CaretInfo, ImportedFont, TextInfo};
+use versions::RecoveryTimer;
 
 fn render_blend(mode: BlendMode) -> RenderBlend {
     match mode {
@@ -36,8 +37,9 @@ fn render_blend(mode: BlendMode) -> RenderBlend {
 }
 /// The `.alto` cap a save checks, as `package_bytes` counts it.
 pub use alto_store::{MAX_PACKAGE_BYTES, object_path};
-pub use versions::{CommitView, RecoveryCheckpoint, VersionRef, VersionStatus};
-pub use warning::Warning;
+pub use versions::StoreMismatch;
+pub use versions::{CommitView, RecoveryCheckpoint, RecoveryStages, VersionRef, VersionStatus};
+pub use warning::{HISTORY_STORE_UNAVAILABLE, Warning};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocHandle(pub u64);
@@ -63,6 +65,7 @@ pub enum EngineError {
 
 pub struct Engine {
     documents: BTreeMap<DocHandle, Editor>,
+    max_undo: usize,
     next_handle: u64,
     tiles: ObjectStore,
     /// Decoded tiles for CPU edits, which read pixel by pixel. The renderer keeps
@@ -96,6 +99,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             documents: BTreeMap::new(),
+            max_undo: 100,
             next_handle: 1,
             tiles: ObjectStore::default(),
             decoded: std::cell::RefCell::new(DecodeCache::new(128 * 1024 * 1024)),
@@ -116,13 +120,37 @@ impl Engine {
         self.add_document(Document::new(meta)?)
     }
 
+    pub fn max_undo(&self) -> usize {
+        self.max_undo
+    }
+
+    pub fn set_max_undo(&mut self, steps: usize) -> Result<(), EngineError> {
+        if !(1..=1000).contains(&steps) {
+            return Err(EngineError::Operation {
+                code: "INVALID_ARGUMENT",
+                message: "undo steps must be 1 to 1000".into(),
+            });
+        }
+        self.max_undo = steps;
+        for editor in self.documents.values_mut() {
+            editor.set_max_undo(steps);
+        }
+        self.maintain();
+        Ok(())
+    }
+
+    fn install_editor(&mut self, handle: DocHandle, mut editor: Editor) {
+        editor.set_max_undo(self.max_undo);
+        self.documents.insert(handle, editor);
+    }
+
     fn add_document(&mut self, doc: Document) -> Result<DocHandle, EngineError> {
         let handle = DocHandle(self.next_handle);
         self.next_handle = self
             .next_handle
             .checked_add(1)
             .ok_or_else(|| DocError::Invalid("Document handle overflow".into()))?;
-        self.documents.insert(handle, Editor::new(doc));
+        self.install_editor(handle, Editor::new(doc));
         Ok(handle)
     }
 
@@ -777,6 +805,13 @@ impl Engine {
         let tiles = self.fetch_plan(&mut parts, &hashes)?;
         Ok(Some(alto_store::package_payload(&parts, &tiles)?))
     }
+    /// [`Self::package_bytes`] for a thin package. Known even while versions' objects
+    /// are unread: a thin package holds only the working document's, always in memory.
+    pub fn thin_package_bytes(&self, h: DocHandle) -> Result<u64, EngineError> {
+        let (mut parts, hashes) = self.thin_package_parts(h)?;
+        let tiles = self.fetch_plan(&mut parts, &hashes)?;
+        Ok(alto_store::package_payload(&parts, &tiles)?)
+    }
     pub fn save_package(&mut self, h: DocHandle) -> Result<Vec<u8>, EngineError> {
         let (parts, hashes) =
             self.package_parts_except(h, &BTreeSet::new(), BTreeSet::new(), false)?;
@@ -819,7 +854,7 @@ impl Engine {
         Ok(())
     }
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        self.open_entries(alto_store::read_entries(bytes)?)
+        self.open_package_entries(alto_store::read_entries(bytes)?)
     }
     pub(crate) fn install_package(
         &mut self,
@@ -828,6 +863,7 @@ impl Engine {
         snapshot: &[u8],
         mut warnings: Vec<Warning>,
         deferred_verify: bool,
+        timer: &mut RecoveryTimer<'_>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
@@ -851,6 +887,7 @@ impl Engine {
                 self.install_object(h, &b)?;
             }
         }
+        timer.split_register();
         let handle = self.open_snapshot(snapshot)?;
         let doc = self.document(handle)?;
         let mut hashes = std::collections::BTreeSet::new();
@@ -866,6 +903,7 @@ impl Engine {
                 warnings.push(Warning::new("MISSING_TILE").with("hash", h));
             }
         }
+        timer.split_restore();
         Ok((handle, warnings))
     }
     /// A journal record for the step just applied to `h`. `ops` are what the step
@@ -1571,6 +1609,27 @@ mod package_tests {
         let mut fresh = Engine::new();
         let (r, warnings) = fresh.open_recovery_entries(entries, &opaque).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
+    }
+
+    #[test]
+    fn recovery_stages_are_zero_without_a_clock() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let checkpoint = e
+            .recovery_checkpoint(d, &std::collections::BTreeSet::new())
+            .unwrap();
+        let mut entries = checkpoint.entries;
+        let meta: serde_json::Value =
+            serde_json::from_slice(&entries.remove("checkpoint.json").unwrap()).unwrap();
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_value(meta["opaque"].clone()).unwrap();
+        let mut fresh = Engine::new();
+        let (r, warnings, stages) = fresh
+            .open_recovery_entries_with_clock(entries, &opaque, None)
+            .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(stages, RecoveryStages::default());
         assert_eq!(fresh.snapshot(r).unwrap(), e.snapshot(d).unwrap());
     }
 

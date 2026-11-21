@@ -13,6 +13,7 @@
 // Whether memory and p95s stay flat is judged from the report (`verdict`), which keeps
 // every sample so the judgement can be redone.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
+import { OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
 
 const assert = (ok, m) => {
   if (!ok) throw Error(m);
@@ -228,6 +229,23 @@ export async function runSoak(engine, log, options = {}) {
   };
   const journalBytes = async () => (await storage()).activeJournal;
 
+  // ALTO_SOAK_THIN: each save writes a thin `.alto` and keeps the versions in an OPFS folder
+  // of its own (outside "alto-engine", so the journal accounting above is not touched).
+  // Emptied at the start so a run can be repeated. Both sizes are recorded, apart.
+  const THIN_DIR = "alto-soak-thin";
+  let store = null;
+  let storeHandle = null;
+  if (options.thin) {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry(THIN_DIR, { recursive: true }).catch((e) => {
+      if (e?.name !== "NotFoundError") throw e;
+    });
+    storeHandle = await root.getDirectoryHandle(THIN_DIR, { create: true });
+    store = await OpfsFolderProvider.open(storeHandle);
+    report.thin = { directory: THIN_DIR };
+  }
+  const storeBytes = () => sizeOf(storeHandle);
+
   const { doc, ids, W, H } = await build(engine);
   await doc.durable();
   const fit = Math.min(engine.element.width / W, engine.element.height / H) / ratio;
@@ -302,15 +320,21 @@ export async function runSoak(engine, log, options = {}) {
     let bytes = 0;
     let blob = null;
     const wasmBefore = options.inspect ? (await settle()).wasmBytes : null;
-    await doc.save({
+    const target = {
       write: async (stream) => {
         blob = await new Response(stream).blob();
         bytes = blob.size;
       },
-    });
+    };
+    if (store) await doc.save(target, { history: { folder: store } });
+    else await doc.save(target);
     await doc.durable();
     const after = await journalBytes();
     const entry = { t: performance.now(), ms: performance.now() - started, archiveBytes: bytes, journalBefore: before, journalAfter: after };
+    if (store) {
+      entry.storeBytes = await storeBytes();
+      log(`SOAK thin save alto=${(bytes / 1024).toFixed(0)}KiB store=${(entry.storeBytes / 1024).toFixed(0)}KiB versions=${report.ops.commit ?? 0}`);
+    }
     if (options.inspect) {
       entry.wasmBefore = wasmBefore;
       entry.wasmAfter = (await settle()).wasmBytes;
@@ -374,6 +398,7 @@ export async function runSoak(engine, log, options = {}) {
       history: snap.history,
       versions: (await doc.versions.log()).length ?? null,
       archive: report.saves.at(-1)?.archiveBytes ?? null,
+      ...(store ? { store: await storeBytes() } : {}),
       b1P95: b1,
       b3P95: b3,
       ops: { ...report.ops },
@@ -383,7 +408,8 @@ export async function runSoak(engine, log, options = {}) {
     report.samples.push(s);
     flush();
     log(
-      `SOAK m${s.minute} wasm=${(s.wasmBytes / MIB).toFixed(1)}MiB gpu=${(s.gpuAccountedBytes / MIB).toFixed(1)}MiB journal=${(s.journalBytes / 1024).toFixed(0)}KiB undo=${s.history.undo} b1=${b1.toFixed(1)} b3=${b3.toFixed(1)} ops=${Object.values(report.ops).reduce((a, b) => a + b, 0)}`,
+      `SOAK m${s.minute} wasm=${(s.wasmBytes / MIB).toFixed(1)}MiB gpu=${(s.gpuAccountedBytes / MIB).toFixed(1)}MiB journal=${(s.journalBytes / 1024).toFixed(0)}KiB undo=${s.history.undo} b1=${b1.toFixed(1)} b3=${b3.toFixed(1)} ops=${Object.values(report.ops).reduce((a, b) => a + b, 0)}` +
+        (store ? ` alto=${((s.archive ?? 0) / 1024).toFixed(0)}KiB store=${(s.store / 1024).toFixed(0)}KiB` : ""),
     );
   };
 
@@ -434,8 +460,10 @@ export async function runSoak(engine, log, options = {}) {
       versions: JSON.stringify(await doc.versions.log({ mode: "dag", allBranches: true })),
     };
     let archive;
-    await doc.save({ write: async (stream) => (archive = await new Response(stream).blob()) });
-    const reopened = await engine.open(archive);
+    const finalTarget = { write: async (stream) => (archive = await new Response(stream).blob()) };
+    if (store) await doc.save(finalTarget, { history: { folder: store } });
+    else await doc.save(finalTarget);
+    const reopened = await (store ? engine.open(archive, { history: store }) : engine.open(archive));
     await settle();
     const after = {
       hash: await reopened.snapshotHash(),
@@ -446,6 +474,7 @@ export async function runSoak(engine, log, options = {}) {
     const tilesSame = ids.raster.every((id) => before.tiles[id] === after.tiles[id]);
     report.reopen = {
       archiveBytes: archive.size,
+      ...(store ? { storeBytes: await storeBytes() } : {}),
       hash: [before.hash, after.hash],
       hashSame: before.hash === after.hash,
       tilesSame,

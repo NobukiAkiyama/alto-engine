@@ -75,6 +75,7 @@ pub struct LayerEditResult {
     pub node: NodeId,
     pub bounds: ImageBounds,
     pub no_op: bool,
+    pub missing: usize,
 }
 /// Output hashes stay rooted by `stage` until the ops are applied or dropped.
 pub struct PreparedOps<R> {
@@ -144,19 +145,35 @@ fn plain_raster(node: &Node) -> Result<(ImageBounds, TileMap), EngineError> {
 pub type VectorRasterizer<'a> =
     &'a dyn Fn(&[StyledPath], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>;
 
+pub type TextExtent<'a> = &'a dyn Fn(&[u8], FixedAffine) -> Result<Option<[i64; 4]>, String>;
+
+pub type TextRasterizer<'a> =
+    &'a dyn Fn(&[u8], FixedAffine, [i64; 4]) -> Result<Vec<[u16; 4]>, String>;
+
+pub struct Rasterizers<'a> {
+    pub vector: VectorRasterizer<'a>,
+    pub text_extent: TextExtent<'a>,
+    pub text: TextRasterizer<'a>,
+}
+
 /// The pixels a vector can touch, in node-local coordinates. Generous by design: the
 /// result's image range only has to contain them.
-fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
+fn vector_extent(paths: &[StyledPath], transform: Affine2) -> Result<ImageBounds, EngineError> {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for path in paths {
         let margin = path.stroke.as_ref().map_or(1.0, |s| {
             f64::from(s.width) * 0.5 * f64::from(s.miter_limit).max(1.5) + 1.0
         });
+        let [a, b, c, d, _, _] = transform.0;
+        // Transform the stroke margin's enclosing square as well as its path.
+        let mx = margin * (a.abs() + c.abs());
+        let my = margin * (b.abs() + d.abs());
         let mut add = |x: f64, y: f64| {
-            x0 = x0.min(x - margin);
-            y0 = y0.min(y - margin);
-            x1 = x1.max(x + margin);
-            y1 = y1.max(y + margin);
+            let [x, y] = transform.apply([x, y]);
+            x0 = x0.min(x - mx);
+            y0 = y0.min(y - my);
+            x1 = x1.max(x + mx);
+            y1 = y1.max(y + my);
         };
         for command in &path.data.commands {
             match *command {
@@ -185,16 +202,87 @@ fn vector_extent(paths: &[StyledPath]) -> Result<ImageBounds, EngineError> {
         return Err(err("INVALID_ARGUMENT", "the vector layer is empty"));
     }
     let (left, top) = (x0.floor(), y0.floor());
+    if [left, top]
+        .into_iter()
+        .any(|origin| !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&origin))
+    {
+        return Err(err(
+            "RESOURCE_LIMIT",
+            "vector bounds exceed the image range",
+        ));
+    }
+    let width = x1.ceil() - left;
+    let height = y1.ceil() - top;
+    if ![width, height]
+        .into_iter()
+        .all(|size| (1.0..=65536.0).contains(&size))
+    {
+        return Err(err(
+            "RESOURCE_LIMIT",
+            "vector bounds exceed the image range",
+        ));
+    }
     let bounds = ImageBounds {
         x: left as i32,
         y: top as i32,
-        width: (x1.ceil() - left) as u32,
-        height: (y1.ceil() - top) as u32,
+        width: width as u32,
+        height: height as u32,
     };
     bounds
         .validate()
         .map_err(|e| err("RESOURCE_LIMIT", &e.to_string()))?;
     Ok(bounds)
+}
+
+fn fixed_translation(matrix: FixedAffine) -> Option<(i32, i32)> {
+    const SCALE: i64 = 1 << 16;
+    let [x, y] = matrix.t;
+    if matrix.m != FixedAffine::IDENTITY.m || x % SCALE != 0 || y % SCALE != 0 {
+        return None;
+    }
+    Some((
+        i32::try_from(x / SCALE).ok()?,
+        i32::try_from(y / SCALE).ok()?,
+    ))
+}
+
+fn affine_from_fixed(fixed: FixedAffine) -> Affine2 {
+    let [a, b, c, d] = fixed.m.map(|value| value as f64 / (1u64 << 32) as f64);
+    let [x, y] = fixed.t.map(|value| value as f64 / f64::from(1u32 << 16));
+    Affine2([a, b, c, d, x, y])
+}
+
+/// Move local masks onto the parent pixel grid, preserving the renderer's
+/// fixed-point composition. Unlinked pixel masks already use document coordinates.
+fn bake_relocate(node: &mut Node, local: FixedAffine) -> Result<(), EngineError> {
+    let props = &mut node.props;
+    if props
+        .effects
+        .iter()
+        .any(|effect| effect.selection().is_some())
+    {
+        return Err(unsupported(
+            "a layer with a limited effect cannot be rasterized under a transform",
+        ));
+    }
+    let relocate = |transform: &mut Affine2| -> Result<(), EngineError> {
+        let fixed = FixedAffine::from_affine(*transform)
+            .and_then(|mask| local.concat(mask))
+            .ok_or_else(|| unsupported("a relocated mask transform would be out of range"))?;
+        *transform = affine_from_fixed(fixed);
+        Ok(())
+    };
+    if props.mask_linked && props.mask.is_some() {
+        relocate(&mut props.mask_transform)?;
+    }
+    if let Some(mask) = &mut props.vector_mask {
+        relocate(&mut mask.transform)?;
+    }
+    if let Some(path) = &mut props.clip_path {
+        relocate(&mut path.transform)?;
+    }
+    props.transform = Affine2::default();
+    Ok(())
 }
 
 /// Straight RGBA8 tiles of a vector, on the node's local pixel grid.
@@ -204,6 +292,16 @@ fn vector_tiles(
     matrix: FixedAffine,
     offset: (i32, i32),
     rasterizer: VectorRasterizer,
+) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
+    tiles_from_q14(bounds, offset, |window| {
+        rasterizer(paths, matrix, window).map_err(|e| unsupported(&e))
+    })
+}
+
+fn tiles_from_q14(
+    bounds: ImageBounds,
+    offset: (i32, i32),
+    rasterize: impl Fn([i64; 4]) -> Result<Vec<[u16; 4]>, EngineError>,
 ) -> Result<BTreeMap<TileKey, Vec<u8>>, EngineError> {
     let (tx0, ty0) = (bounds.x.div_euclid(T), bounds.y.div_euclid(T));
     let (tx1, ty1) = (
@@ -220,7 +318,7 @@ fn vector_tiles(
                 i64::from(T),
                 i64::from(T),
             ];
-            let pixels = rasterizer(paths, matrix, window).map_err(|e| unsupported(&e))?;
+            let pixels = rasterize(window)?;
             if pixels.iter().all(|p| p[3] == 0) {
                 continue;
             }
@@ -462,30 +560,73 @@ fn moved_selection(
     Ok(out)
 }
 
-/// Blur radii are in document pixels, so a scale changes them. A non-uniform scale
+/// Smoothing radii are in document pixels, so a scale changes them. A non-uniform scale
 /// has no equivalent radius, and refusing beats a different picture.
 fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effect>>, EngineError> {
-    if !effects
-        .iter()
-        .any(|e| matches!(e, Effect::GaussianBlur { .. }))
-    {
+    let Some(effect_name) = effects.iter().find_map(|effect| match effect {
+        Effect::GaussianBlur { .. } => Some("a Gaussian blur"),
+        Effect::HighPass { .. } => Some("a high-pass radius"),
+        Effect::MotionBlur { distance, .. } if *distance != 0.0 => Some("a motion-blur distance"),
+        Effect::UnsharpMask { radius, .. } if *radius != 0.0 => Some("an unsharp-mask radius"),
+        _ => None,
+    }) else {
         return Ok(None);
-    }
+    };
     if (sx - sy).abs() > 1e-9 {
-        return Err(unsupported(
-            "a non-uniform canvas resize cannot keep a Gaussian blur",
-        ));
+        return Err(unsupported(&format!(
+            "a non-uniform canvas resize cannot keep {effect_name}"
+        )));
     }
     let mut out = effects.to_vec();
     for effect in &mut out {
-        if let Effect::GaussianBlur { radius, .. } = effect {
-            *radius *= sx;
-            if *radius > 64.0 {
-                return Err(unsupported("the resized blur radius would exceed 64"));
+        match effect {
+            Effect::GaussianBlur { radius, .. } => {
+                *radius *= sx;
+                if *radius > 64.0 {
+                    return Err(unsupported("the resized blur radius would exceed 64"));
+                }
             }
+            Effect::HighPass { radius, .. } => {
+                *radius *= sx;
+                if !(0.5..=64.0).contains(radius) {
+                    return Err(unsupported("the resized high-pass radius is out of range"));
+                }
+            }
+            Effect::UnsharpMask { radius, .. } => {
+                *radius *= sx;
+                if *radius > 64.0 {
+                    return Err(unsupported(
+                        "the resized unsharp-mask radius would exceed 64",
+                    ));
+                }
+            }
+            Effect::MotionBlur { distance, .. } => {
+                *distance *= sx;
+                if *distance > 128.0 {
+                    return Err(unsupported(
+                        "the resized motion-blur distance would exceed 128",
+                    ));
+                }
+            }
+            _ => {}
         }
     }
     Ok(Some(out))
+}
+
+fn rotate_effects(effects: &[Effect], quarter_turns: u8) -> Option<Vec<Effect>> {
+    if quarter_turns == 0 {
+        return None;
+    }
+    let mut rotated = effects.to_vec();
+    let mut changed = false;
+    for effect in &mut rotated {
+        if let Effect::MotionBlur { angle, .. } = effect {
+            *angle = (*angle + 90.0 * f64::from(quarter_turns) + 180.0).rem_euclid(360.0) - 180.0;
+            changed = true;
+        }
+    }
+    changed.then_some(rotated)
 }
 
 impl Engine {
@@ -626,6 +767,18 @@ impl Engine {
                     });
                 }
             }
+            if let CanvasEdit::Rotate { quarter_turns } = edit {
+                patch.effects = rotate_effects(&node.props.effects, quarter_turns);
+                if let NodeKind::Adjustment { adjustment } = &node.kind
+                    && let Some(rotated) =
+                        rotate_effects(std::slice::from_ref(adjustment), quarter_turns)
+                {
+                    ops.push(Op::SetAdjustment {
+                        id: node.id,
+                        adjustment: rotated.into_iter().next().expect("one adjustment"),
+                    });
+                }
+            }
             if patch != PropPatch::default() {
                 ops.push(Op::SetProps { id: node.id, patch });
             }
@@ -682,12 +835,12 @@ impl Engine {
         &mut self,
         h: DocHandle,
         edit: LayerEdit,
-        rasterizer: VectorRasterizer,
+        rasterizers: Rasterizers,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         let stage = self.begin_tile_stage();
         let result = match edit {
             LayerEdit::MergeDown { node } => self.prepare_merge_down(h, node, stage),
-            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizer),
+            LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizers),
         };
         if result.is_err() {
             self.release_staged_tiles(stage);
@@ -759,6 +912,7 @@ impl Engine {
             node: node.id,
             bounds,
             no_op: false,
+            missing: 0,
         };
         Ok(PreparedOps {
             stage,
@@ -783,9 +937,47 @@ impl Engine {
             next = node.parent;
         }
         let offset = whole_translation(m).ok_or_else(|| {
-            unsupported("a vector can be rasterized only at a whole-pixel position at scale 1")
+            if matches!(
+                doc.node(id).map(|node| &node.kind),
+                Ok(NodeKind::Text { .. })
+            ) {
+                unsupported("text can be rasterized only at a whole-pixel position at scale 1")
+            } else {
+                unsupported("a vector can be rasterized only at a whole-pixel position at scale 1")
+            }
         })?;
         Ok((world(self, h, id)?, offset))
+    }
+
+    fn text_tiles(
+        &mut self,
+        h: DocHandle,
+        id: NodeId,
+        stage: u64,
+        rasterizers: &Rasterizers,
+    ) -> Result<(ImageBounds, TileMap, usize), EngineError> {
+        let (_, bake) = self
+            .text_bake(h, id)?
+            .ok_or_else(|| unsupported("the text has no bake"))?;
+        let (matrix, offset) = self.pixel_aligned_world(h, id)?;
+        let [x, y, width, height] = (rasterizers.text_extent)(&bake, matrix)
+            .map_err(|e| err("RESOURCE_LIMIT", &e))?
+            .ok_or_else(|| err("INVALID_ARGUMENT", "the text layer is empty"))?;
+        let range_error = |_| err("RESOURCE_LIMIT", "text bounds exceed the image range");
+        let bounds = ImageBounds {
+            x: i32::try_from(i128::from(x) - i128::from(offset.0)).map_err(range_error)?,
+            y: i32::try_from(i128::from(y) - i128::from(offset.1)).map_err(range_error)?,
+            width: u32::try_from(width).map_err(range_error)?,
+            height: u32::try_from(height).map_err(range_error)?,
+        };
+        bounds
+            .validate()
+            .map_err(|e| err("RESOURCE_LIMIT", &e.to_string()))?;
+        let missing = self.text_info(h, id)?.missing.len();
+        let out = tiles_from_q14(bounds, offset, |window| {
+            (rasterizers.text)(&bake, matrix, window).map_err(|e| err("RESOURCE_LIMIT", &e))
+        })?;
+        Ok((bounds, stage_map(self, stage, out)?, missing))
     }
 
     fn prepare_rasterize(
@@ -793,22 +985,48 @@ impl Engine {
         h: DocHandle,
         id: NodeId,
         stage: u64,
-        rasterizer: VectorRasterizer,
+        rasterizers: Rasterizers,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
         unlocked(self, h, id)?;
         let doc = self.document(h)?;
         let node = doc.node(id)?.clone();
-        if node.parent.is_none() {
-            return Err(err("INVALID_ARGUMENT", "the root cannot be rasterized"));
-        }
+        let parent = node
+            .parent
+            .ok_or_else(|| err("INVALID_ARGUMENT", "the root cannot be rasterized"))?;
         match &node.kind {
             NodeKind::Vector { paths } => {
-                // Only the content changes kind. Opacity, blend, masks, effects and the
-                // transform stay on the node and mean the same on the new pixels.
-                let (matrix, offset) = self.pixel_aligned_world(h, id)?;
-                let bounds = vector_extent(paths)?;
-                let out = vector_tiles(paths, bounds, matrix, offset, rasterizer)?;
+                let matrix = world(self, h, id)?;
+                let mut next = node.clone();
+                let (offset, bounds_transform) = if let Some(offset) = fixed_translation(matrix) {
+                    // Retain the local pixel grid and all properties for an aligned vector.
+                    (offset, Affine2::default())
+                } else {
+                    let parent_world = world(self, h, parent)?;
+                    let offset = fixed_translation(parent_world).ok_or_else(|| {
+                        unsupported("a vector's ancestors must be whole-pixel translations")
+                    })?;
+                    let local = FixedAffine::from_affine(node.props.transform)
+                        .ok_or_else(|| err("INVALID_ARGUMENT", "image transform out of range"))?;
+                    bake_relocate(&mut next, local)?;
+                    (offset, affine_from_fixed(local))
+                };
+                let bounds = vector_extent(paths, bounds_transform)?;
+                let out = vector_tiles(paths, bounds, matrix, offset, rasterizers.vector)?;
                 let tiles = stage_map(self, stage, out)?;
+                next.kind = NodeKind::Raster { bounds, tiles };
+                Ok(PreparedOps {
+                    stage,
+                    ops: vec![Op::ReplaceNode { id, node: next }],
+                    result: LayerEditResult {
+                        node: id,
+                        bounds,
+                        no_op: false,
+                        missing: 0,
+                    },
+                })
+            }
+            NodeKind::Text { .. } => {
+                let (bounds, tiles, missing) = self.text_tiles(h, id, stage, &rasterizers)?;
                 let mut next = node.clone();
                 next.kind = NodeKind::Raster { bounds, tiles };
                 Ok(PreparedOps {
@@ -818,6 +1036,7 @@ impl Engine {
                         node: id,
                         bounds,
                         no_op: false,
+                        missing,
                     },
                 })
             }
@@ -839,6 +1058,7 @@ impl Engine {
                             node: id,
                             bounds: *bounds,
                             no_op: true,
+                            missing: 0,
                         },
                     });
                 }
@@ -859,6 +1079,7 @@ impl Engine {
                         node: id,
                         bounds: new_bounds,
                         no_op: false,
+                        missing: 0,
                     },
                 })
             }
@@ -878,6 +1099,7 @@ impl Engine {
                     return Err(err("INVALID_ARGUMENT", "the group is empty"));
                 }
                 let mut layers = vec![];
+                let mut missing = 0;
                 let mut bounds: Option<ImageBounds> = None;
                 for child in children {
                     let child = self.document(h)?.node(*child)?.clone();
@@ -891,9 +1113,16 @@ impl Engine {
                         NodeKind::Vector { paths } => {
                             plain_props(child)?;
                             let (matrix, offset) = self.pixel_aligned_world(h, child.id)?;
-                            let b = vector_extent(paths)?;
-                            let out = vector_tiles(paths, b, matrix, offset, rasterizer)?;
+                            let b = vector_extent(paths, Affine2::default())?;
+                            let out = vector_tiles(paths, b, matrix, offset, rasterizers.vector)?;
                             (b, stage_map(self, stage, out)?)
+                        }
+                        NodeKind::Text { .. } => {
+                            plain_props(child)?;
+                            let (bounds, tiles, count) =
+                                self.text_tiles(h, child.id, stage, &rasterizers)?;
+                            missing += count;
+                            (bounds, tiles)
                         }
                         _ => plain_raster(child)?,
                     };
@@ -924,6 +1153,7 @@ impl Engine {
                         node: id,
                         bounds,
                         no_op: false,
+                        missing,
                     },
                 })
             }
@@ -1102,7 +1332,15 @@ mod tests {
         edit: LayerEdit,
     ) -> Result<LayerEditResult, EngineError> {
         let intent = edit.intent();
-        let p = e.prepare_layer_edit(h, edit, &|_, _, _| Err("no rasterizer".into()))?;
+        let p = e.prepare_layer_edit(
+            h,
+            edit,
+            Rasterizers {
+                vector: &|_, _, _| Err("no rasterizer".into()),
+                text_extent: &|_, _| Err("no rasterizer".into()),
+                text: &|_, _, _| Err("no rasterizer".into()),
+            },
+        )?;
         let revision = e.document(h).unwrap().revision;
         if !p.ops.is_empty() {
             e.transact(h, intent, p.ops, revision).unwrap();
@@ -1311,11 +1549,19 @@ mod tests {
                     id,
                     patch: PropPatch {
                         mask_linked: Some(false),
-                        effects: Some(vec![Effect::GaussianBlur {
-                            radius: 2.0,
-                            selection: None,
-                            extra: Default::default(),
-                        }]),
+                        effects: Some(vec![
+                            Effect::GaussianBlur {
+                                radius: 2.0,
+                                selection: None,
+                                extra: Default::default(),
+                            },
+                            Effect::MotionBlur {
+                                angle: -45.0,
+                                distance: 4.0,
+                                selection: None,
+                                extra: Default::default(),
+                            },
+                        ]),
                         ..Default::default()
                     },
                 },
@@ -1334,6 +1580,10 @@ mod tests {
         );
         let props = &d.node(id).unwrap().props;
         assert_eq!(props.mask_transform.0, [0.0, 1.0, -1.0, 0.0, 4.0, 0.0]);
+        assert!(matches!(
+            props.effects[1],
+            Effect::MotionBlur { angle, distance: 4.0, .. } if angle == 45.0
+        ));
         e.undo(h).unwrap();
         assert_eq!(e.snapshot(h).unwrap(), before);
 
@@ -1350,6 +1600,10 @@ mod tests {
             d.node(id).unwrap().props.effects[0],
             Effect::GaussianBlur { radius, .. } if radius == 4.0
         ));
+        assert!(matches!(
+            d.node(id).unwrap().props.effects[1],
+            Effect::MotionBlur { angle, distance, .. } if angle == -45.0 && distance == 8.0
+        ));
         assert!(!d.selection.as_ref().unwrap().tiles.is_empty());
         e.undo(h).unwrap();
         let refused = e.prepare_canvas_edit(
@@ -1361,6 +1615,73 @@ mod tests {
         );
         assert_eq!(code(refused.err().unwrap()), "UNSUPPORTED");
         assert_eq!(e.snapshot(h).unwrap(), before);
+    }
+
+    #[test]
+    fn canvas_resize_scales_high_pass_within_its_radius_limits() {
+        let effects = [Effect::HighPass {
+            radius: 2.0,
+            selection: None,
+            extra: Default::default(),
+        }];
+        let scaled = scale_effects(&effects, 0.25, 0.25).unwrap().unwrap();
+        assert!(matches!(scaled[0], Effect::HighPass { radius: 0.5, .. }));
+        assert!(scale_effects(&effects, 2.0, 1.0).is_err());
+        assert!(scale_effects(&effects, 0.125, 0.125).is_err());
+        assert!(scale_effects(&effects, 33.0, 33.0).is_err());
+    }
+
+    #[test]
+    fn canvas_resize_changes_unsharp_radius_only() {
+        let unsharp = |radius| Effect::UnsharpMask {
+            radius,
+            amount: 1.25,
+            threshold: 3.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        let effects = [unsharp(2.0)];
+        assert_eq!(
+            scale_effects(&effects, 4.0, 4.0).unwrap(),
+            Some(vec![unsharp(8.0)])
+        );
+        assert!(scale_effects(&effects, 2.0, 1.0).is_err());
+        assert!(scale_effects(&effects, 33.0, 33.0).is_err());
+        assert!(scale_effects(&[unsharp(0.0)], 2.0, 1.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn canvas_rotate_turns_the_motion_blur_angle() {
+        let motion = |angle| Effect::MotionBlur {
+            angle,
+            distance: 4.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        for (turns, expected) in [(1, 90.0), (2, -180.0), (3, -90.0)] {
+            let rotated = rotate_effects(&[motion(0.0)], turns).unwrap();
+            assert!(
+                matches!(rotated[0], Effect::MotionBlur { angle, distance: 4.0, .. } if angle == expected)
+            );
+        }
+        assert!(rotate_effects(&[motion(0.0)], 0).is_none());
+    }
+
+    #[test]
+    fn canvas_resize_scales_motion_blur_distance_and_refuses_nonuniform() {
+        let motion = |distance| Effect::MotionBlur {
+            angle: 27.0,
+            distance,
+            selection: None,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            scale_effects(&[motion(4.0)], 2.0, 2.0).unwrap(),
+            Some(vec![motion(8.0)])
+        );
+        assert!(scale_effects(&[motion(4.0)], 2.0, 1.0).is_err());
+        assert!(scale_effects(&[motion(100.0)], 2.0, 2.0).is_err());
+        assert!(scale_effects(&[motion(0.0)], 2.0, 1.0).unwrap().is_none());
     }
 
     #[test]
@@ -1427,6 +1748,213 @@ mod tests {
         assert_eq!(e.snapshot(h).unwrap(), unchanged);
         let bottom = layer_edit(&mut e, h, LayerEdit::MergeDown { node: lower });
         assert_eq!(code(bottom.err().unwrap()), "INVALID_ARGUMENT");
+    }
+
+    // The engine has no GPU dependency. Inject known Q14 coverage and check the
+    // stored bake at the boundary; alto-gpu tests the production coverage.
+    fn rasterize_test_text(
+        e: &mut Engine,
+        h: DocHandle,
+        id: NodeId,
+    ) -> Result<LayerEditResult, EngineError> {
+        use alto_core::text_bake::{PLACEHOLDER_FONT, TextBake};
+        let p = e.prepare_layer_edit(
+            h,
+            LayerEdit::Rasterize { node: id },
+            Rasterizers {
+                vector: &|_, _, _| panic!("unexpected vector"),
+                text_extent: &|bake, _| {
+                    let bake = TextBake::decode(bake).unwrap();
+                    assert_eq!(bake.glyphs.len(), 1);
+                    assert_eq!(bake.outlines[0].font, PLACEHOLDER_FONT);
+                    Ok(Some([15, 21, 4, 4]))
+                },
+                text: &|_, _, window| {
+                    assert_eq!(window, [12, 18, 256, 256]);
+                    let mut pixels = vec![[0; 4]; 256 * 256];
+                    for y in 3..7 {
+                        for x in 3..7 {
+                            if x == 3 || x == 6 || y == 3 || y == 6 {
+                                pixels[y * 256 + x] = [16384, 0, 0, 16384];
+                            }
+                        }
+                    }
+                    Ok(pixels)
+                },
+            },
+        )?;
+        let revision = e.document(h)?.revision;
+        e.transact(h, "layer.rasterize", p.ops, revision).unwrap();
+        e.release_staged_tiles(p.stage);
+        Ok(p.result)
+    }
+
+    fn insert_text(e: &mut Engine, h: DocHandle, nondefault_props: bool) -> NodeId {
+        let mut node = Node::text(
+            "Missing glyph",
+            alto_text::TextContent {
+                text: "😀".into(),
+                ..Default::default()
+            },
+        );
+        node.props.transform = Affine2([1.0, 0.0, 0.0, 1.0, 12.0, 18.0]);
+        if nondefault_props {
+            node.props.opacity = 0.5;
+            node.props.blend = alto_doc::BlendMode::Multiply;
+        }
+        let id = node.id;
+        let doc = e.document(h).unwrap();
+        e.transact(
+            h,
+            "text",
+            vec![Op::InsertNode {
+                node,
+                parent: doc.root,
+                index: 0,
+            }],
+            doc.revision,
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn text_rasterize_keeps_id_name_opacity_and_blend() {
+        let (mut e, h) = doc(64, 64);
+        let id = insert_text(&mut e, h, true);
+        let before = e.document(h).unwrap().node(id).unwrap().clone();
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        let after = e.document(h).unwrap().node(id).unwrap();
+        assert_eq!(result.node, id);
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.props.opacity, before.props.opacity);
+        assert_eq!(after.props.blend, before.props.blend);
+        assert_eq!(after.props.transform, before.props.transform);
+        assert!(matches!(after.kind, NodeKind::Raster { .. }));
+    }
+
+    #[test]
+    fn text_rasterize_reports_missing_characters() {
+        let (mut e, h) = doc(64, 64);
+        let id = insert_text(&mut e, h, false);
+        let missing = e.text_info(h, id).unwrap().missing.len();
+        assert!(missing > 0);
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        assert_eq!(result.missing, missing);
+        assert_eq!(result.bounds, bounds(3, 3, 4, 4));
+        assert_eq!(
+            e.pick_color(h, id, [3.0, 3.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(e.pick_color(h, id, [4.0, 4.0]).unwrap().bytes, [0; 4]);
+    }
+
+    #[test]
+    fn rasterize_group_accepts_only_pixel_aligned_text_children() {
+        let (mut e, h) = doc(64, 64);
+        let text = insert_text(&mut e, h, false);
+        let group = Node::group("Text group");
+        let id = group.id;
+        let doc = e.document(h).unwrap();
+        e.transact(
+            h,
+            "group",
+            vec![
+                Op::InsertNode {
+                    node: group,
+                    parent: doc.root,
+                    index: 1,
+                },
+                Op::MoveNode {
+                    id: text,
+                    parent: id,
+                    index: 0,
+                },
+                Op::SetProps {
+                    id: text,
+                    patch: PropPatch {
+                        transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 12.5, 18.0])),
+                        ..Default::default()
+                    },
+                },
+            ],
+            doc.revision,
+        )
+        .unwrap();
+
+        let fractional = e.snapshot(h).unwrap();
+        let refused = rasterize_test_text(&mut e, h, id).unwrap_err();
+        assert_eq!(code(refused), "UNSUPPORTED");
+        assert_eq!(e.snapshot(h).unwrap(), fractional);
+        let revision = e.document(h).unwrap().revision;
+        e.transact(
+            h,
+            "align",
+            vec![Op::SetProps {
+                id: text,
+                patch: PropPatch {
+                    transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 12.0, 18.0])),
+                    ..Default::default()
+                },
+            }],
+            revision,
+        )
+        .unwrap();
+
+        let before = e.snapshot(h).unwrap();
+        let result = rasterize_test_text(&mut e, h, id).unwrap();
+        assert_eq!(result.bounds, bounds(15, 21, 4, 4));
+        assert_eq!(result.missing, 1);
+        assert_eq!(
+            e.pick_color(h, id, [15.0, 21.0]).unwrap().bytes,
+            [255, 0, 0, 255]
+        );
+        assert!(e.document(h).unwrap().node(text).is_err());
+        e.undo(h).unwrap();
+        assert_eq!(e.snapshot(h).unwrap(), before);
+    }
+
+    #[test]
+    fn vector_bake_keeps_an_unlinked_mask_in_document_coordinates() {
+        let mut node = Node::vector("vector", vec![]);
+        let transform = Affine2([1.0, 0.5, 0.25, 1.5, 13.25, -4.0]);
+        let mask = Affine2([1.0, 0.0, 0.0, 1.0, 9.0, 17.0]);
+        node.props.transform = transform;
+        node.props.mask = Some(TileMap::new(PixelFormat::R8));
+        node.props.mask_linked = false;
+        node.props.mask_transform = mask;
+        bake_relocate(&mut node, FixedAffine::from_affine(transform).unwrap()).unwrap();
+        assert_eq!(node.props.transform, Affine2::default());
+        assert_eq!(node.props.mask_transform, mask);
+    }
+
+    #[test]
+    fn vector_extent_includes_the_transformed_stroke_margin() {
+        let path = StyledPath {
+            data: alto_vector::PathData::from_svg("M0 0 L20 10 L15 30").unwrap(),
+            fill: None,
+            stroke: Some(alto_vector::Stroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 6.0,
+                cap: Default::default(),
+                join: Default::default(),
+                miter_limit: 3.0,
+                dash: None,
+            }),
+            fill_rule: Default::default(),
+        };
+        let transform = Affine2([1.0, 0.5, -0.75, 2.0, 4.0, -5.0]);
+        let extent = vector_extent(std::slice::from_ref(&path), transform).unwrap();
+        for point in [[-10.0, -10.0], [29.5, 0.5], [5.0, 39.0], [24.0, 39.0]] {
+            let [x, y] = transform.apply(point);
+            assert!(extent.contains(x.floor() as i32, y.floor() as i32));
+        }
+        let too_wide = Affine2([5000.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            code(vector_extent(&[path], too_wide).unwrap_err()),
+            "RESOURCE_LIMIT"
+        );
     }
 
     #[test]

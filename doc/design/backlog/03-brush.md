@@ -1,125 +1,397 @@
 # ブラシ
 
+基点：main `bdf26a9`（2026-11-17 書き直し）
+
 全項目の表と共通規則は [00-ROADMAP.md](00-ROADMAP.md)。
 
-**Goal:** 丸ブラシ以外の先端と、傾き・カーブによる動的な変化を追加する。
+**Goal:** 丸ブラシ以外の先端と、傾き・速度・カーブによる動的な変化を追加し、Undo の深さを設定可能にする。
 
-**Architecture:** ストロークは `StrokeSampler` がダブ列を作り、GPU がスタンプし、終了時に読み戻した結果を正本にする。履歴は結果で持つため、GPU 間の差は文書へ混ざらない。ダブ生成の変更は描画3実装に影響しない。
+**Architecture:** ストロークは `StrokeSampler`（`crates/alto-raster/src/brush.rs`）が入力サンプルからダブ列を作り、GPU（`crates/alto-gpu/shaders/brush.wgsl`）が f32 でスタンプする。終了時に読み戻した画素がタイルの正本で、履歴は結果（`Op::SetTiles`）で持つ。GPU 間の差は文書へ混ざらない。ダブ生成は純粋関数で、入力が同じなら同じダブ列になる。
 
-## 現状
+**ブラシは v3 の整数経路ではない。** 11-04 版は `stroke_q8.rs` を「v3 のストロークのカバレッジ」と書いたが誤りで、`crates/alto-gpu/src/stroke_q8.rs` はベクターパスの線の輪郭（`alto_vector::Stroke`）を整数で作る。ブラシは通らない。ブラシの検証は、WGSL と Rust の `cpu_paint` を ±2 の許容で比べる試験（`tests/e2e/browser-tests.js` の `GPU brush / pressure / tile boundary / exact Undo-Redo / eraser`）で行う。`tests/parity/*.txt` にブラシの行はない。
 
-- `crates/alto-raster/src/brush.rs`：`BrushConfig { size, hardness, spacing, opacity, flow, pressure_size, pressure_opacity }`。`Dab { center, radius, opacity, angle }` の `angle` は常に 0。`StrokeSample.tilt` は受け取るが未使用。
-- `crates/alto-gpu/shaders/brush.wgsl`：円の距離だけを見る。
-- `crates/alto-gpu/src/stroke_q8.rs`：v3 のストロークのカバレッジ。
-- `packages/alto-sdk/src/tools.ts`：`BrushOptions`。`tip: { size, hardness, spacing }`。
-- `AssetKind` には `BrushTip` と `Pattern` が既にあるが、寸法を持たず、読み込み API と描画の経路がない。
+**共通規則2の例外。** ROADMAP 共通規則2（描画の3実装、全バイト一致、v3 のシェーダーに浮動小数の演算を入れない）は、ブラシのストローク（`brush.wgsl`、f32）には適用しない。理由：ストロークの画素は GPU のスタンプ結果を読み戻して `Op::SetTiles` の正本にするので、GPU 間の差は文書へ混ざらず、履歴は結果で持つ。範囲：`brush.wgsl` と `cpu_paint`（ストロークの確定タイル）だけ。表示の合成（`effects-q14.wgsl` など）と、`tests/e2e/cpu-composite.js` を通る v3 の画素は例外に含めない。この例外は 00-ROADMAP の共通規則2に注記として記録した。
 
-## SDK の形
+## 決定が要る点
 
-```ts
-interface BrushOptions {
-  tip?: {
-    size?: number; hardness?: number; spacing?: number;
-    angle?: number;      // BR-1。度、既定 0
-    roundness?: number;  // BR-1。0.01〜1、既定 1
-    image?: AssetId;     // BR-2
-    texture?: { asset: AssetId; scale?: number; depth?: number }; // BR-3
-  };
-  dynamics?: {           // BR-4、BR-5
-    size?: BrushCurve; opacity?: BrushCurve; flow?: BrushCurve;
-    angleFromTilt?: boolean;
-  };
-}
-type BrushCurve = { input: "pressure" | "speed" | "tilt"; points: [number, number][] };
-```
-
-`pressureSize`、`pressureOpacity` は未リリースのため `dynamics` に統合して削除する。
-
-## BR-4 傾きの反映
-
-**設計。** `angleFromTilt` のとき `angle = atan2(tilt_y, tilt_x)`、`tilt` の大きさを入力 `"tilt"` のカーブへ渡す。`tilt` は度（−90〜90）で、入力値は `min(hypot(tx, ty) / 90, 1)`。
-
-## BR-5 筆圧カーブ、速度連動
-
-**設計。** カーブは 2〜8 点の区分線形。`x` は狭義単調増加、両端 0 と 1 を含む。速度は `t_ms` の差と距離から `px/ms` を計算し、指数移動平均（係数 0.3）で平滑化し、`min(v / 4, 1)` へ正規化する。ダブ生成は決定的な純粋関数で、入力サンプルが同じなら同じダブ列になる。
+| 点 | 案 | 既定 |
+|---|---|---|
+| 画像先端・テクスチャ画像を文書に保存するか | A：保存しない。SDK が画素列を持ち、ストロークの開始時に渡す。B：`Op::SetAsset` で文書のアセットにする（`format_version` を上げ、GC の根と使用中の削除拒否が要る） | A |
+| `pressureSize` / `pressureOpacity` の扱い | 削除して `dynamics` へ統合する。SDK の公開 API の破壊的変更になる（`packages/alto-sdk/api/alto-engine.api.md` に載っている） | 削除 |
+| パターンの座標系 | レイヤー座標に固定する。文書座標にするにはシェーダーへワールド行列が要る | レイヤー座標 |
+| Undo のバイト上限 | `Vec<Transaction>` のバイト数に上限を足す（BR-6）。足さないと1000ステップで線形に増える | 足さない（測ってから） |
+| 速度の正規化 | `min(v / 4, 1)`（レイヤー画素 / ms）。ズームに依らず、画面上の速さとは一致しない | 4 px/ms |
 
 ## BR-1 先端の角度と丸み
 
-**設計。** ダブの形を楕円にする。`Dab` に `roundness` を追加する。`brush.wgsl` で点をダブ中心へ移し、`-angle` 回転、短軸方向を `1 / roundness` 倍してから距離を取る。v3 のストローク（`stroke_q8.rs`）も同じ変形を整数で行う。ダブの影響タイルの計算は外接円のままとする（保守的で安全）。
+### 実装前の状態
+
+- `crates/alto-raster/src/brush.rs`：`BrushConfig { size, hardness, spacing, opacity, flow, pressure_size, pressure_opacity }`（`Serialize, Deserialize`、`deny_unknown_fields` なし）。`Dab { center, radius, opacity, angle }` の `angle` は `StrokeSampler::dab` が常に 0 を入れ、どこでも読まない。`cpu_paint(base, origin, dabs, config, color, erase)` が CPU の参照で、円の距離だけを見る。
+- `crates/alto-gpu/shaders/brush.wgsl`：`struct Dab { center_radius: vec4f, extra: vec4f }`。距離は `distance(p, d.center_radius.xy) / max(0.01, d.center_radius.z)`、形は `1 - smoothstep(config.params.x, 1.0, dist)`。`extra` は未使用。
+- `crates/alto-gpu/src/renderer.rs`：`GpuDab { center_radius: [f32; 4], extra: [f32; 4] }`（`extra` は `[0.0; 4]`）と `BrushUniform { color, params, origin, info }`。`crates/alto-gpu/src/renderer/stroke.rs` の `Renderer::stamp` が、ダブの外接円（`center ± radius`）でタイルを選ぶ。
+- `crates/alto-wasm/src/lib.rs`：`Runtime::begin_brush` が `BrushConfig` を JSON で受け、`size`・`hardness`・`spacing`・`opacity`・`flow` のどれかが有限でない、または `size` が 0 以下か 2048 超なら `INVALID_ARGUMENT: brush size`。そのあと `hardness` を 0〜0.999、`spacing` を 0.01〜1、`flow` と `opacity` を 0〜1 へ丸める。`Runtime::cpu_brush_reference`（js_name `cpuBrushReference`）が試験用に `cpu_paint` を呼ぶ。
+- `packages/alto-sdk/src/tools.ts`：`BrushOptions.tip: { size?, hardness?, spacing? }`。`ToolSession` のコンストラクターが `beginBrush` に `config` を渡す。`packages/alto-sdk/src/protocol.ts` の `BrushConfig` が配線上の型。
+
+### 11-04 からの変化
+
+- ブラシ本体（`brush.rs`、`brush.wgsl`、`tools.ts`）は変化なし。
+- `renderer.rs` の分割（`725d6f4`）でスタンプは `crates/alto-gpu/src/renderer/stroke.rs` へ移った。`Editor` の置き場も同様に動いた（BR-6）。
+- 11-04 版の「`stroke_q8.rs` が v3 のストロークのカバレッジ」は誤りで、本版で直した（冒頭）。
+
+### 設計
+
+ダブの形を楕円にする。`radius` は長軸の半径で、短軸の半径は `radius × roundness`。
+
+- `BrushConfig` に `angle: f32`（度、既定 0、`serde(default)`）と `roundness: f32`（既定 1、`serde(default)`）を足す。`begin_brush` で `angle` は有限であること（違えば `INVALID_ARGUMENT: brush angle`）、`roundness` も有限であることを確認した上で `[0.01, 1]` へ丸める（`hardness` などの既存の丸め方に合わせる）。`angle` は `rem_euclid(360)` で正規化する。
+- `Dab` に `roundness: f32` を足す。`angle` は度から**ラジアン**へ変えてダブに入れる。角度はレイヤー座標（`begin_brush` が `input_inverse` で入力をレイヤー座標にしたあとの座標）で測る。回転した表示やレイヤー変形の下でも、描いたレイヤーの中で同じ向きになる。
+- ホストで `cos`・`sin` を計算し、`GpuDab.extra = [cos, sin, roundness, 0]` に入れる。シェーダーに三角関数を入れない。
+- `brush.wgsl`：`roundness >= 1.0`（`extra.z >= 1.0`）のときは今の `distance(...)` をそのまま使う。丸いダブは円で、回転しても形が変わらないので、**角度は見た目に効かない**（BR-4 の傾きも `roundness < 1` か画像先端のときだけ見える。矛盾ではなく仕様）。この分岐で既存の丸いダブが従来と同じ式を通るため、出力は変わらない（同じ GPU の上で試験する）。それ以外は `q = p - center`、`u = q.x*cos + q.y*sin`、`v = -q.x*sin + q.y*cos`、`dist = length(vec2f(u, v / max(roundness, 0.01))) / max(0.01, radius)`。`roundness` は 0.01 以上に丸め済みでゼロ除算は起きない。
+- `cpu_paint` も同じ式にする（分岐も同じ）。
+- タイルの選択（`Renderer::stamp`）は外接円のまま。楕円は外接円に収まるので変えない。
+
+SDK：`BrushOptions.tip` に `angle?: number`（度、既定 0）と `roundness?: number`（0.01〜1、既定 1）。
+
+### 形式と通信
+
+- `format_version`：触れない。ストロークは `Op::SetTiles` で保存され、ダブは保存されない。
+- render v3 の画素：触れない（表示の合成は変えない）。既存の丸いダブは従来と同じ式を通る。
+- `PROTOCOL`（`packages/alto-sdk/src/protocol.ts`）：`beginBrush` の `config` が増えるため BR-1 で 10 に更新した（00-ROADMAP の段階2の回）。段階1のプロトコルは BR-6 で 9 に更新済み。BR-4/5 で旧設定を削除するため 11 に更新した。README と RELEASING を同じ PR で更新する。
+- シェーダー：`brush.wgsl` の既存モードの変更で、新しいモード番号は不要。
+
+### 作業手順
+
+**Files:**
+- Modify `crates/alto-raster/src/brush.rs`（`BrushConfig.angle` / `roundness`、`BrushConfig::normalized()`（新規）、`Dab.roundness`、`cpu_paint`）。
+- Modify `crates/alto-gpu/shaders/brush.wgsl`、`crates/alto-gpu/src/renderer/stroke.rs`（`GpuDab.extra` の充填）。
+- Modify `crates/alto-wasm/src/lib.rs`（`begin_brush` の検証）、`packages/alto-sdk/src/tools.ts`、`packages/alto-sdk/src/protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
+- Modify `tests/e2e/browser-tests.js`。
+
+**試験：**
+- Rust で、基点 `3dc0b48` で実際に生成した円ダブの全画素とハッシュが一致すること、角度と丸みの正規化、細い楕円が中心を塗ることを確認した。
+- Chrome 157 / Apple Metal の functional 48 件が成功した。楕円の長軸が 0 度と 90 度で入れ替わり、CPU 参照との差が各チャンネルで 2 以下だった。丸い先端は 0 度と 45 度で全バイト一致した。楕円が境界をまたぐ両タイルの画素と、回転したレイヤーに先端の角度が従うことも確認した。既存の筆圧、タイル境界、Undo／Redo、消しゴムの試験も成功した。
+
+**完了条件：** 上の試験が通り、既存の丸いブラシの画素が変わらない。
+
+**検証：** `sh scripts/check.sh native`、`pnpm --dir packages/alto-sdk build`、`node scripts/verify-browser.mjs --functional`。
+
+### 依存
+
+- 先に要る項目：なし。
+- 後に続く項目：BR-2（楕円の変形を画像先端が共有する）、BR-4（`angle` を傾きから決める）。COL-2（01。`brush.wgsl` の 16bit 版は BR-1〜BR-3 の後に足す（00-ROADMAP の重なりの表））。
 
 ## BR-2 画像の先端
 
-**設計。** R8 の先端テクスチャをアセットとして持つ。
+### 実装前の状態
 
-- 既存の `AssetKind::BrushTip` を `BrushTip { width, height }` へ変える。形式は R8。辺 16〜1024、白がカバレッジ。
-- `engine.assets.importBrushTip(blob)`：画像を輝度へ変換して内容ハッシュで保存する。GC の根に含める。
-- 描画：ダブごとに先端テクスチャをサンプルする。`brush.wgsl` は GPU のフィルタを使ってよい。結果は読み戻しで確定するので、ハードウェア差は履歴へ混ざらない。
-- `Dab` の `size` は先端の長辺に対応させる。
+- `crates/alto-doc/src/node.rs`：`AssetKind` に `BrushTip` と `Pattern`（どちらも寸法なしの単位バリアント）がある。`crates/alto-doc/src/version.rs` が文字列 `"brush_tip"` / `"pattern"` にするだけで、読み込み・保存・描画の経路はどこにもない。`AssetRecord { id, hash, kind, byte_len, dims }`。
+- `packages/alto-sdk/src/engine.ts`：`engine.assets.importImage(file)`（`createImageBitmap` と `OffscreenCanvas` で画素を取り、Worker の `import` へ送る）、`importFont`、`releaseImport`。
+- `Renderer::stamp`（`crates/alto-gpu/src/renderer/stroke.rs`）は、**タイルが初めて触れられたとき**に、タイルごとの `stroke base`・`stroke output`（`texture` 関数、`Rgba8Unorm` 256×256、`Class::Stroke`）、`coverage` バッファ 262144 バイト、選択があれば選択テクスチャを確保する。見積もりは `tile_bytes = 786432 + (選択あり 262144)` と `command_bytes`。`new_bytes` が `budget_bytes` を、`cpu_finish` が 512 MiB を超えると、確保の前に `RenderError::Budget`（コード `INVALID_ARGUMENT`）で拒否し、ストロークは続けられる。`begin_stroke` は `GpuStroke`（`crates/alto-gpu/src/renderer.rs`）の欄を埋めるだけで確保しない。
+- GPU を失ったストロークは `GPU_LOST` で終わり、文書はストローク前のまま（`doc/verification/ENGINE-HARDENING-RESULTS.md` の `gpu-stroke` の行）。
+- バインドグループは binding 0〜5（`base`、`output`、`coverage`、`dabs`、`config`、`selection`）。`selection` が無いときは `tile.base` のビューを代わりに束ねている。
 
-**注意。** ストローク中のプレビューと確定結果が同じ経路であること。現在の v3 確定経路（`stroke_q8.rs`）が CPU と一致を要求する箇所があるので、実装前に整数の双線形で揃えるか、ストローク確定だけ一致を要求しない分類にするかを試験で確かめる。
+### 11-04 からの変化
+
+- 変化なし（`AssetKind` は `126f2b5` で `lib.rs` から `node.rs` へ移っただけ）。
+- 11-04 版は「`AssetKind::BrushTip` を `BrushTip { width, height }` に変えて GC の根にする」としたが、本版は既定でそれをしない（決定が要る点の A）。ストロークの結果はタイルで、先端の画像は結果に残らないため。「GC の根」と「使用中の削除拒否」は、案 B を選んだ場合のみ要る。
+
+### 設計
+
+R8 の先端画像を、ストロークの開始時に渡して使う（案 A）。
+
+**画像の型。** SDK の `BrushImage { width: number; height: number; pixels: Uint8Array }`（新規）。`pixels` は R8、`width × height` バイト。辺は 16〜1024（非正方形可）。
+
+**取り込み。** `engine.assets.importBrushTip(file: Blob): Promise<BrushImage>`（新規）。`importImage` と同様に `createImageBitmap` と `OffscreenCanvas` で RGBA を取り、整数だけで R8 へ変換する。
+
+`luma = (54 r + 183 g + 19 b + 128) >> 8`、`coverage = (luma * a + 127) / 255`（整数除算）。白く不透明な画素が全カバレッジ、透明と黒が 0。辺が 16 未満か 1024 超なら `INVALID_ARGUMENT`（`importBrushTip` は拒否し、状態を変えない）。エンジンは何も保持しないので、`releaseImport` も GC も要らない。（新規）
+
+**ストロークへ渡す。** `BrushOptions.tip.image?: BrushImage`。`ToolSession` が `beginBrush` へ画像がある場合だけ `tipImage: { width, height, pixels: ArrayBuffer }` を足して送る（`pixels` のコピーを転送し、同じ `BrushImage` を再利用できる）。Worker は `runtime.beginBrush` の引数に足す。`begin_brush` は `pixels.len() == width * height`、辺が 16〜1024 を検証する（違えば `INVALID_ARGUMENT: brush tip`、ストロークは始まらない）。
+
+**描画。**
+- `BrushConfig` には画像を持たせない。`Renderer::begin_stroke` に `tip: Option<BrushImage>`（Rust 側の型は `alto_raster` の `BrushImage`（新規））を足し、`GpuStroke` には CPU 側の画素列を `tip: Option<BrushImage>` で預け、テクスチャ用の欄 `tip_texture`（新規）は空にしておく。`begin_stroke` は確保しない。
+- **確保と予算の検査は `stamp` に置く。** 最初の（ダブが空でない）`stamp` で `tip_texture`（新規）が `None` なら、タイルのループの前に作る。`Rgba8Unorm`（R を値、他を 255。`rgba_pixels` の R8 変換と同じ）、`memory::create_texture`（`Class::Stroke`）、最大 1024×1024×4 = 4 MiB。その大きさを `new_bytes` に足してから既存の予算検査（`budget_used + new_bytes > budget_bytes`）を通す。超えるなら確保せず `RenderError::Budget`（ストロークは続けられる）。CPU の読み戻し予約（`cpu_finish`）には影響しない。解放は、タイルの `StrokeTile` と同じ場所：`cancel_stroke` と、確定後の解放。GPU 喪失のときはストロークごと `GPU_LOST` で終わる。
+- バインドグループに binding 6（先端）を足す。無いときは `tile.base` のビューを束ね、`config.info.w` のビット0 で使用を示す。
+- `Dab.size` に当たるのは `radius` で、画像の**長辺が直径 `2 × radius`**。短辺は縦横比を保つ。`roundness` と `angle` は BR-1 の変形をそのまま使う（`u` / `v` を求めたあとに画像座標へ写す）。`s = 2·radius / max(w, h)`、`tx = u / s + w/2`、`ty = (v / roundness) / s + h/2`。
+- サンプルは `textureLoad` 4 点の手書きの双線形（texel 中心は `t - 0.5`、範囲外の texel は 0）。ハードウェアのサンプラーを使わないので GPU 間の差が出ない。形は `shape = tip(tx, ty)`（`hardness` は無視）。`v = 1 - (1 - v)(1 - shape × d.opacity)` は既存のまま。
+- 画像先端のダブの外接半径は `radius × 1.4143 × (1 + 1 / max(w, h))`。双線形補間で画像の外に残る半テクセル分も含める。`Renderer::stamp` のタイル選択と `bounds` / ダメージの計算でこの半径を使う（長方形が回転したときの対角を覆う）。
+- `cpu_paint` に `tip: Option<&BrushImage>` を足し、同じ式でサンプルする。
+
+**注意。** ストローク中のプレビューと確定結果は同じシェーダーの出力で、確定は読み戻しの画素（`begin_finish_stroke`）を正本にする。ブラシは整数経路ではないので、CPU との一致は ±2 の許容で見る（冒頭）。手書きの双線形で ±2 を超えるなら、最近傍（`round(t)`）へ落とす。その判断は測って決め、速度の約束は書かない。
+
+**上限：** 辺 16〜1024、画素列は `width × height` バイト。1 ストロークに 1 つ。
+
+### 形式と通信
+
+- `format_version`：案 A は触れない。案 B は `AssetKind` が `deny_unknown_fields` の型なので、`BrushTip { width, height }` への変更で上げる（案 B を選んだときだけ。そのとき作業中の回の番号に入れ、回が無ければ次の空き番号を取る。00-ROADMAP の番号の表）。
+- render v3：触れない。
+- `PROTOCOL`：`beginBrush` の要求に `tipImage` が増えるので上げる（12。段階2の回）。`packages/alto-sdk/api/alto-engine.api.md` に `BrushImage` と `importBrushTip` を足す。（新規）
+- シェーダー：`brush.wgsl` の既存モードの変更。
+
+### 作業手順
+
+**Files:**
+- Modify `crates/alto-raster/src/brush.rs`（`BrushImage`（新規）、`cpu_paint`）。
+- Modify `crates/alto-gpu/shaders/brush.wgsl`、`crates/alto-gpu/src/renderer.rs`（`GpuStroke` の欄、束ねる binding の追加）、`crates/alto-gpu/src/renderer/stroke.rs`（`begin_stroke`、`stamp` の予算検査と確保、`cancel_stroke` の解放）、`crates/alto-gpu/src/renderer/readback.rs`（確定後の解放が要る場合）。
+- Modify `crates/alto-wasm/src/lib.rs`（`begin_brush`）、`packages/alto-sdk/src/worker.ts`、`protocol.ts`、`tools.ts`、`engine.ts`（`importBrushTip`）、`packages/alto-sdk/api/alto-engine.api.md`、`tests/e2e/browser-tests.js`。
+
+**試験：**
+- `tip_uses_the_long_side_for_scale_and_blends_to_transparent` は、非正方形の先端の長辺を直径に合わせ、画像の端から透明へ補間することを確認する。
+- `a reusable image tip stamps rotated coverage and saves as ordinary tiles` は、PNG から R8 への変換、同じ画像の再利用、回転した形とタイル境界、CPU 参照との差 ±2、保存・再オープン後の画素一致、アセットが増えないことを確認する。
+- `invalid image tips cannot start a stroke` は、寸法や画素数が不正な入力を SDK と Worker の入口で拒否し、文書が変わらないことを確認する。
+- `GPU loss cancels an image-tip stroke and the same tip works after recovery` は、`GPU_LOST`、文書がストローク前のままであること、GPU 復元後に同じ画像を使えることを確認する。
+- Rust の `brush_image_budget_is_checked_before_the_first_stamp` は GPU 残予算を固定し、初回のスタンプで先端分を含めた見積もりにより拒否されることを確認する。先端とタイルの確保は起こらず、キャンセル後は画像なしのストロークを描ける。`failed_stamp_retires_both_images_and_can_be_retried` は、先端を転送した後の失敗からメモリ使用量が戻り、同じストロークを再試行できることを確認する。
+
+**完了条件：** 上の試験が通り、先端なしのストロークの画素が変わらない。
+
+**検証：** BR-1 と同じ。
+
+### 依存
+
+- 先に要る項目：BR-1（楕円の変形）。
+- 後に続く項目：BR-3（バインドグループとテクスチャの確保を共有する）。案 B を選ぶ場合は 09（保存）。
 
 ## BR-3 テクスチャブラシ
 
-**設計。** カバレッジに紙目のパターンを掛ける。パターンは文書座標で固定する（ストロークと動かない）。
+### 実装前の状態
 
-`coverage' = coverage × (1 − depth × (1 − pattern(x_doc × scale, y_doc × scale)))`。
+- `AssetKind::Pattern`（`crates/alto-doc/src/node.rs`）は単位バリアントで、使われていない。
+- 描画の経路は BR-2 の「現状」と同じ。`brush.wgsl` は、`v = 1 - (1 - v)(1 - shape × d.opacity)` で、ダブごとのカバレッジを累積する。
 
-パターンは既存の `AssetKind::Pattern` を `Pattern { width, height }` へ変えた R8 のアセットで、タイル状に繰り返す。
+### 11-04 からの変化
+
+- 変化なし。11-04 版はパターンを `Pattern { width, height }` のアセットにしたが、本版は BR-2 と同じく既定でアセットにしない。
+
+### 設計
+
+カバレッジに紙目のパターンを掛ける。パターンは**レイヤー座標で固定**する（ストロークの向きや筆の動きと無関係）。
+
+- `BrushImage`（BR-2 と同じ型）。`engine.assets.importBrushTexture(file: Blob): Promise<BrushImage>`（新規。取り込みは `importBrushTip` と同じ変換）。辺は 16〜1024。（新規）
+- `BrushOptions.tip.texture?: { image: BrushImage; scale?: number; depth?: number }`。`scale` は 0.05〜16（既定 1。texel 座標 = レイヤー画素 × scale）、`depth` は 0〜1（既定 1）。範囲外は `INVALID_ARGUMENT`。
+- 式：ダブごとに `shape' = shape × (1 − depth × (1 − pattern(p × scale)))`。累積は `v = 1 - (1 - v)(1 - shape' × d.opacity)`。パターンは画素ごとに固定なので、重なったダブで同じ画素が何度掛かっても、累積は `v` の飽和で収まる。
+- `pattern` は texel 座標を `floor` の剰余で巻き戻し（負の座標を含む）、手書きの双線形（テクセル中心は `p × scale − 0.5`、4 点の `textureLoad`、巻き戻しあり）で求める。ハードウェアのサンプラーを使わない。
+- `GpuStroke.pattern_texture: Option<wgpu::Texture>`（Rgba8Unorm、R を値）、binding 7、`config.info.w` のビット1、`config.params.z = scale`、`config.params.w = depth`。確保と予算の検査、解放は先端と同じ（`stamp` の最初の呼び出し。`begin_stroke` は確保しない）。先端と合わせて `new_bytes` に足す。`depth = 0` では画像を検証し、SDK からの転送と GPU テクスチャの確保を省く。
+- 空のストローク（ダブが 0 個）は何も描かない（既存の `stamp` の早期 return）。
+- `cpu_paint` に `pattern: Option<&BrushPattern>` を足す。
+
+**上限：** 辺 16〜1024、`scale` 0.05〜16、`depth` 0〜1。先端画像と合わせても GPU テクスチャは最大 2 × 4 MiB。
+
+### 形式と通信
+
+- `format_version`：案 A は触れない（BR-2 の決定が要る点と同じ）。
+- render v3：触れない。
+- `PROTOCOL`：`beginBrush` の要求が増えるので上げる（13。段階2の回）。
+- シェーダー：`brush.wgsl` の既存モードの変更。
+
+### 作業手順
+
+**Files:** BR-2 と同じファイルに、`importBrushTexture`（`engine.ts`）を足す。
+
+**試験：**
+- Rust の `pattern_wraps_at_negative_coordinates_and_blends_at_the_seam` と `pattern_uses_layer_pixels_and_depth_zero_preserves_the_plain_brush` で、負座標と繰り返しの継ぎ目、レイヤー座標での固定、深さ 0 の画素一致を確認する。
+- ブラウザの `brush texture stays fixed across strokes and follows the layer` で、紙目の取り込み、CPU 参照との差 ±2、重ね描きとレイヤーの移動、負のレイヤー座標での繰り返し、画像先端との併用、確定後の GPU メモリの回収を確認する。
+- `invalid brush textures cannot start a stroke` と `GPU loss cancels a textured brush and the texture can be reused` で、不正入力と GPU 喪失時に文書が変わらないことを確認する。
+- GPU の Rust 試験で、先端と紙目を合わせた予算検査、転送後の失敗と確保の回収、再試行、テクスチャの再利用を確認する。
+
+**完了条件：** 上の試験が通り、テクスチャなしのストロークの画素が変わらない。
+
+**検証：** BR-1 と同じ。
+
+### 依存
+
+- 先に要る項目：BR-2。
+- 後に続く項目：なし。
+
+## BR-4 傾きの反映
+
+### 実装前の状態
+
+- `crates/alto-raster/src/brush.rs`：`StrokeSample { pos, pressure, tilt: [f32; 2], t_ms: f64 }`。`tilt` は受け取るが `StrokeSampler::input` が読まない。`input` は `pos` と `pressure` の有限性だけを検査し、`tilt` は検査しない。
+- `crates/alto-wasm/src/lib.rs` の `brush_input` が、6 個ずつ `[x, y, pressure, tiltX, tiltY, t_ms]` の `f32` 列を読む。
+- `packages/alto-sdk/src/tools.ts`：`InputSample { x, y, pressure?, tiltX?, tiltY?, time? }`。`PointerEvent` からは `tiltX` と `tiltY` を送る。マウスは `pressure` が 1、`tilt` が 0。
+
+### 11-04 からの変化
+
+- 変化なし。
+
+### 設計
+
+`tilt` は度（−90〜90）。`angle` と、BR-5 のカーブへの入力 `"tilt"` に使う。
+
+- `BrushDynamics`（新規）に `angle_from_tilt: bool`（既定 false）。真のとき、`tilt` の大きさ `hypot(tx, ty)` が 0 でなければ `tilt_angle = atan2(ty, tx)`、0 のとき（マウス、または直立）は**直前のダブの `tilt_angle` を保つ**（ストロークの最初は 0）。ダブの `angle = config.angle + tilt_angle`（ラジアン）。`atan2(0, 0)` で向きが跳ばない。
+- カーブへの入力値 `"tilt"` は `min(hypot(tx, ty) / 90, 1)`。
+- `tilt` が非有限（NaN、無限）のサンプルは、`tilt` だけ 0 として扱う（サンプルは捨てない）。
+- 傾きの向きは入力デバイスの向きで、レイヤーの回転では回さない。回転したレイヤーでは、傾きから決めた向きとレイヤー上の向きがずれる。既知の制限として SDK のコメントに書く。
+- マウス入力（`tilt` が常に 0）では、`angle_from_tilt` が真でも `angle = config.angle` のまま。（新規）
+
+### 形式と通信
+
+- `format_version`：触れない。
+- render v3：触れない（ダブ生成だけ）。
+- `PROTOCOL`：`beginBrush` の `config` に `dynamics` が増えるので 11 に更新する（BR-1 の後、BR-5 と同時）。
+- シェーダー：変更なし（`angle` は BR-1 の `extra` で渡る）。
+
+### 作業手順
+
+**Files:** Modify `crates/alto-raster/src/brush.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/tools.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
+
+**試験：**
+- `brush.rs` の `tilt_rotates_dabs_remembers_the_previous_angle_and_scales_flow` で、ペンの傾きによる角度と流量、直立時の角度保持、非有限な傾きの扱い、同じ入力の再生結果を確認する。`mouse_stroke_with_tilt_enabled_matches_the_fixed_angle` は、マウス入力を固定角度と比較する。
+- `browser-tests.js` の `pen tilt rotates an elliptical dab while round pixels stay identical` は、傾き 0° と 45° で楕円の長軸が入れ替わり、円は全バイト一致することを確認する。
+
+**完了条件：** 上の試験が通り、`angle_from_tilt` なしのストロークの画素が変わらない。
+
+**検証：** BR-1 と同じ。
+
+### 依存
+
+- 先に要る項目：BR-1（`Dab.angle` が `extra` の cos / sin としてシェーダーに届く。丸いダブでは見た目に効かない）、BR-5（`BrushDynamics` の型を共有する。同じ PR で入れてよい）。（新規）
+- 後に続く項目：なし。
+
+## BR-5 筆圧カーブ、速度連動
+
+### 実装前の状態
+
+- `StrokeSampler::dab`（`brush.rs`）：半径 = `size × 0.5 × (pressure_size ? max(pressure, 0.05) : 1)`、`opacity = flow × (pressure_opacity ? pressure : 1)`。間隔 `until` も `size × spacing × (pressure_size ? max(pressure, 0.05) : 1)` を `max(0.25)`。サンプル間は Catmull-Rom で 0.5 px ごとに補間し、筆圧は線形補間。
+- `BrushConfig.opacity` は**ストローク全体の上限**（GPU の `min(v, config.params.y)`）。ダブごとの不透明度は `Dab.opacity` があり、`brush.wgsl` が `shape × d.center_radius.w` としてダブごとに掛ける。
+- `StrokeSample.t_ms` は受け取るが未使用。`brush_input` が `f32` で渡す（`performance.now()` を `f32` に落とす）。
+
+### 11-04 からの変化
+
+- 変化なし。
+- 11-04 版の `dynamics.size` / `opacity` / `flow` の3本のカーブを残す。`Dab.opacity` が既にダブごとに効くので、`opacity` と `flow` のカーブはどちらも実装できる（本版の初稿は誤って `opacity` を除いたが、`Dab.opacity` を見落としていた）。
+
+### 設計
+
+```ts
+type BrushCurve = { input: "pressure" | "speed" | "tilt"; points: [number, number][] };
+interface BrushDynamics {
+  size?: BrushCurve | null;   // 既定：圧力、[[0,0.05],[0.05,0.05],[1,1]]。null で一定（係数1）
+  opacity?: BrushCurve | null; // 既定：null（一定）。ダブごとの不透明度（旧 pressureOpacity）
+  flow?: BrushCurve | null;   // 既定：null（一定）
+  angleFromTilt?: boolean;    // BR-4
+}
+// BrushOptions.dynamics?: BrushDynamics
+```
+
+Rust（新規）：`CurveInput { Pressure, Speed, Tilt }`、`BrushCurve { input: CurveInput, points: Vec<[f32; 2]> }`、`BrushDynamics { size: BrushCurve, opacity: BrushCurve, flow: BrushCurve, angle_from_tilt: bool }`、`BrushConfig.dynamics: BrushDynamics`（`serde(default)`）。`pressure_size` / `pressure_opacity` は削除する。`BrushDynamics::default()` の `size` は `[[0,0.05],[0.05,0.05],[1,1]]`（圧力）で、**今の `max(pressure, 0.05)` と同じ値を返す**。`opacity` と `flow` は一定 `[[0,1],[1,1]]`。SDK は `size` が undefined なら既定のカーブ、`null` なら `[[0,1],[1,1]]` を送る。`opacity` と `flow` は undefined / `null` なら `[[0,1],[1,1]]`。`pressureOpacity: true` に当たるのは `opacity: { input: "pressure", points: [[0,0],[1,1]] }`。`StrokeSampler::new` は `BrushConfig::normalized()` で設定を検証し、不正な場合は `Err` を返す。SDK はカーブの入力位置を f32 に丸めた後も狭義単調増加であることを確認する。
+
+**カーブ。** 2〜8 点の区分線形。`x` は狭義単調増加、`points[0].x = 0`、`points.last().x = 1`、`y` は 0〜1、すべて有限。違えば `INVALID_ARGUMENT: brush curve`（`begin_brush` が原子的に拒否し、ストロークは始まらない）。入力が `[0, 1]` の外なら端へ丸める。
+
+**半径と間隔。** `factor = max(curve(input), 0.05)`、半径 = `size × 0.5 × factor`、`until = max(size × spacing × factor, 0.25)`。ダブの `opacity` = `config.flow × flow カーブ(入力) × opacity カーブ(入力)`（`Dab.opacity`。`flow` と `opacity` は同じ乗数に入る。API を11-04 版のまま保つための分け方で、積は交換可能）。`config.opacity`（ストロークの上限）は一定のまま。
+
+既定のサイズカーブを使う場合、最初のダブから次のダブまでの間隔には従来どおり筆圧を掛けない。以降の間隔には上の式を使う。
+
+**速度。** サンプル間 `dt = t_ms - last.t_ms`、`dx = 距離`（レイヤー画素）。`dt > 0` のとき `v = dx / dt`（px/ms）、指数移動平均 `speed = 0.3 v + 0.7 speed`（最初は `v`）。`dt <= 0`（同じ時刻、逆順、非有限）のときは速度を更新せず直前の値を使う（ゼロ除算なし）。入力値 `min(speed / 4, 1)`。最初のダブの入力値は 0。補間中のダブは、区間の始めの値から終わりの値へ線形補間する（圧力と同じ）。非有限な時刻を含まない次の有効な区間から速度の更新を再開する。
+
+**決定性。** ダブ生成は、サンプル列だけで決まる純粋関数。時刻・乱数・ハードウェアに依らない。`tilt` と `speed` の入力値も、サンプル列だけで決まる。
+
+**cpu_paint：** 変更なし（ダブの `radius` と `opacity` は生成済み）。
+
+### 形式と通信
+
+- `format_version`：触れない。
+- render v3：触れない（ダブ生成だけ。既定のカーブは今の出力と同じ）。
+- `PROTOCOL`：`BrushConfig` の `pressure_size` / `pressure_opacity` が消え `dynamics` が増えるので 11 に更新する（BR-1 の後、BR-4 と同時）。README と RELEASING を同じ PR で更新する。
+- 公開 API：`BrushOptions.pressureSize` / `pressureOpacity` を削除する破壊的変更（決定が要る点）。`packages/alto-sdk/api/alto-engine.api.md` を更新する。
+- シェーダー：変更なし。
+
+### 作業手順
+
+**Files:**
+- Modify `crates/alto-raster/src/brush.rs`、`crates/alto-wasm/src/lib.rs`（`begin_brush` のカーブ検証、`cpu_brush_reference` の呼び出し）、`packages/alto-sdk/src/tools.ts`、`protocol.ts`、`packages/alto-sdk/api/alto-engine.api.md`。
+- Modify `tests/e2e/browser-tests.js`（`cpuReference` の `config` を `pressure_size` から `dynamics` に直す。リポジトリ内の他の `pressureSize` の呼び出しも直す）。Playground の呼び出し（`pressureSize` を使う箇所があれば）。
+
+**試験：**
+- `curve_interpolates_and_clamps` と `invalid_curves_are_rejected` はカーブの補間・範囲制限と点の並び・値の検証を確認する。
+- `default_size_curve_matches_the_old_pressure_rule_exactly` は既定の半径を従来の筆圧式と比較する。`default_stroke_preserves_pixels_on_both_tiles` は筆圧の異なるダブがタイルをまたぐストロークについて、基点 `a3d4651` の左右両タイルの画素ハッシュとの完全一致を確認する。
+- `speed_curve_interpolates_smoothed_speed_and_handles_invalid_timestamps` は速度の補間・平滑化と、重複・逆順・非有限な時刻の後で更新が再開することを確認する。
+- ブラウザの `pressure-driven opacity and speed-driven flow match the CPU reference` は実際の画素を CPU 参照と比較する。`an invalid curve is refused before the stroke starts` は SDK と WASM の拒否、および続く正常なストロークが描けることを確認する。
+
+**完了条件：** 上の試験が通り、既定の設定のストロークが変更前と ±0 で同じ（既存の `GPU brush / pressure / ...` が通る）。
+
+**検証：** BR-1 と同じ。
+
+### 依存
+
+- 先に要る項目：BR-4 と `BrushDynamics` を共有する（同じ PR でよい）。（新規）
+- 後に続く項目：なし。
 
 ## BR-6 Undo の深さの設定
 
-**設計。** `alto-doc` の `max_undo` は 100 に固定で、外から変えられない。`createEngine({ undo: { steps?: number } })` で 1〜1000 を指定する。IMAGE-EDITING の実装順の残りである。タイルの総量の上限は既存の `undos_over_budget` の計算に従い、増やさない。
+### 現状
+
+- `crates/alto-doc/src/editor.rs`：`Editor { doc, undo, redo, max_undo: usize, seq, log, digest }`。`max_undo` は非公開で、`Editor::new` が 100 を入れる。`transact` は `undo.len() > max_undo` で先頭を捨て、`restore_history` も同じ上限で切る。`drop_oldest_undo`、`drop_oldest_undos(count)`、`undo_len`、`redo_len` がある。
+- `crates/alto-engine/src/lib.rs`：`MAX_HISTORY_ONLY_OBJECTS = 2048`（履歴だけが保つオブジェクトの上限）と `undos_over_budget`。`Engine::maintain` が文書ごとにこれを超える古い Undo を捨てる。`add_document` が `Editor::new` を呼ぶ（`self.documents.insert(handle, Editor::new(doc))`）。
+- `Editor` を作って `documents` に入れる場所は、ほかに `crates/alto-engine/src/versions/branches.rs`（`alto_doc::Editor::new(doc)`）と `crates/alto-engine/src/versions/journal.rs`（`rollback_version_state` の `Editor::new(state.doc)`、ほかに他の `Engine` から取り出した editor を入れる箇所）。
+- `crates/alto-wasm/src/lib.rs`：`Runtime` が `Engine::new()` を作り直す箇所がある（`self.engine = engine`、`open_recovery_package` など）。
+- `packages/alto-sdk/src/engine.ts`：`EngineOptions { container, storage?, gpu?, assets?, maxPixelRatio? }`。`init` の要求（`protocol`、`sdk`、`canvas`、`budget`、`namespace`、`journal`）。`packages/alto-sdk/src/worker.ts` の `case "init"` が `Runtime.create(canvas, budget)` を呼ぶ。
+
+### 11-04 からの変化
+
+- `Editor` と `max_undo` は `crates/alto-doc/src/lib.rs` から `editor.rs` へ移った（`126f2b5`）。値と挙動は変化なし。
+- 11-04 版が「既存の `undos_over_budget` の計算に従い、増やさない」と書いた総量の上限は、堅牢化後も同じ（`MAX_HISTORY_ONLY_OBJECTS = 2048`）。
+
+### 設計
+
+`createEngine({ undo: { steps?: number } })`。`steps` は整数で 1〜1000、既定 100。範囲外や非整数は `createEngine` が `INVALID_ARGUMENT` で拒否する（Worker を起動する前）。
+
+**Rust。**
+- `Editor::set_max_undo(&mut self, steps: usize)`（新規）：`max_undo` を変え、超える古い Undo を即座に捨てる（`drop_oldest_undos`）。新しいものが残る。`Editor::max_undo(&self) -> usize`（新規）。
+- `Engine` に `max_undo: usize`（既定 100）を持たせ、`Engine::set_max_undo(&mut self, steps: usize)`（新規）が、保持する全 editor と今後作る editor に適用する。`documents.insert` の4か所を、上限を適用する小さな関数 `Engine::install_editor(&mut self, handle, editor)`（新規）にまとめる（`add_document`、`branches.rs`、`journal.rs` の2か所）。範囲外は `EngineError` の `INVALID_ARGUMENT`。
+- `Runtime`（`crates/alto-wasm/src/lib.rs`）に `setMaxUndo(steps: u32)`（js_name、新規）。`Engine::new()` で作り直す箇所では、直前の上限を引き継ぐ。
+- 上限を上げても、`MAX_HISTORY_ONLY_OBJECTS` で `maintain` が古い Undo を捨てる。ただしこれは**ハッシュで数えたオブジェクト数**（ドキュメントが参照しないもの）の上限で、`Vec<Transaction>` 自体のバイト数は数えない。1000 ステップでは、Op の大きさに比例して線形に増える。このアイテムはバイトの上限を足さない。必要なら別途決める（決定が要る点）。
+
+**SDK / Worker。** `EngineOptions.undo?: { steps?: number }`。`init` の要求に `undoSteps: number` を足し、Worker がプロトコルの照合後に `runtime.setMaxUndo` を呼ぶ。再起動でも同じ値を送る。復旧では保存時の上限（メタデータがない場合は 100）でジャーナルを再生してから、新しい上限を適用する。上限が変わった場合、旧世代に戻った場合、またはジャーナル再生が不一致で止まった場合は、次の編集を追記する前にチェックポイントを作る。保存ファイルの欠損や破損では旧世代を試す。一時的な読み取りエラーでは復旧を中断し、両世代を保存したまま再試行できるようにする。
+
+**エラー：** 範囲外は `INVALID_ARGUMENT`（`details.reason` は `"undo-steps"`）。
+
+### 形式と通信
+
+- `format_version`：触れない（Undo 上限は OPFS の復旧チェックポイントに保存する）。
+- render v3：触れない。
+- `PROTOCOL`：`init` の要求を追加し、段階1のプロトコルを 9 に更新する。README と RELEASING を同じ PR で更新する。
+- シェーダー：変更なし。
+
+### 作業手順
+
+**Files:**
+- Modify `crates/alto-doc/src/editor.rs`（`set_max_undo`、`max_undo`）、`crates/alto-engine/src/lib.rs`（`Engine.max_undo`、`set_max_undo`、`install_editor`）、`crates/alto-engine/src/versions/branches.rs`、`crates/alto-engine/src/versions/journal.rs`、`crates/alto-wasm/src/lib.rs`。
+- Modify `packages/alto-sdk/src/engine.ts`、`protocol.ts`、`worker.ts`、`packages/alto-sdk/api/alto-engine.api.md`、`tests/e2e/browser-tests.js`。
+
+**試験：**
+- `editor.rs` の `configurable_undo_trims_oldest_and_applies_to_future_edits` で Undo と Redo 後の上限を確認する。
+- `undo_depth.rs` で既存・新規文書、範囲外の値、ロールバックと復旧・版の切り替え後の履歴件数を確認する。
+- `browser-tests.js` で範囲外の値、上限到達後の Undo、Worker 再起動、旧世代からの復旧、保存障害と再生の不一致からの再復旧を確認する。
+
+**完了条件：** 上の試験が通り、`undo` を指定しないときの挙動が変わらない（100）。
+
+**検証：** BR-1 と同じ。
+
+### 依存
+
+- 先に要る項目：なし（独立。段階1）。
+- 後に続く項目：なし。履歴の打ち切り（08）が `maintain` の上限を扱うときは、`MAX_HISTORY_ONLY_OBJECTS` の定数をここと合わせて見る。
 
 ## 上限
 
-ダブのバッチ上限は現状を維持する。先端テクスチャの辺は 1024 まで。カーブは 8 点まで。文書で使用中の先端の削除は原子的に拒否する。
+| 項目 | 値 | 場所 |
+|---|---|---|
+| ブラシの大きさ | 0 超 2048 以下 | `begin_brush`（変更なし） |
+| 先端画像・テクスチャの辺 | 16〜1024（BR-2、BR-3） | `begin_brush` と `importBrushTip` / `importBrushTexture`（新規） |
+| カーブの点 | 2〜8 | `begin_brush` |
+| `roundness` | 0.01〜1 に丸める | `begin_brush` |
+| `scale` / `depth`（テクスチャ） | 0.05〜16 / 0〜1 | `begin_brush` |
+| Undo の深さ | 1〜1000、既定 100 | `createEngine` |
+| ダブ数 | 明示の上限なし。ストロークのメモリ見積もりが GPU 予算または CPU の読み戻し予約（512 MiB）を超えると `RenderError::Budget`（コード `INVALID_ARGUMENT`）で拒否し、ストロークは続けられる | `Renderer::stamp`（変更なし） |
 
-## 実装タスク
-
-### Task BR-4 / BR-5: 動的な変化
-
-**Files:** Modify `crates/alto-raster/src/brush.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/tools.ts`、`packages/alto-sdk/api`、Playground の呼び出し。
-
-**Interfaces:** Produces `BrushCurve { input: CurveInput, points: Vec<(f32, f32)> }`、`BrushDynamics { size, opacity, flow, angle_from_tilt }`、`BrushConfig.dynamics`。
-
-- [ ] 試験 `curve_interpolates_and_clamps`、`curve_rejects_non_increasing_points`。
-- [ ] 試験 `angle_from_tilt_sets_the_dab_angle`、`no_tilt_keeps_the_previous_angle`（`atan2(0, 0)` で角度が飛ばない）。
-- [ ] 試験 `speed_curve_uses_smoothed_speed`、`repeated_timestamp_does_not_divide_by_zero`。
-- [ ] 試験 `the_same_samples_make_the_same_dabs`。
-- [ ] 実装、`sh scripts/check.sh native`、PR。
-
-### Task BR-1: 楕円の先端
-
-**Files:** Modify `crates/alto-raster/src/brush.rs`、`crates/alto-gpu/shaders/brush.wgsl`、`crates/alto-gpu/src/stroke_q8.rs`、`tests/e2e/browser-tests.js`。
-
-**Interfaces:** `Dab.roundness: f32`。Dab のバッファレイアウトは `extra` の未使用成分へ入れる。
-
-- [ ] 試験 `round_dab_with_roundness_one_is_unchanged`（既存のストロークの画素が不変）。
-- [ ] ブラウザ試験 `an elliptical brush is wider along its angle`。
-- [ ] 実装、PR。
-
-### Task BR-2 / BR-3: 画像先端とテクスチャ
-
-**Files:** Modify `crates/alto-doc/src/lib.rs`（`AssetKind`）、`crates/alto-gpu/shaders/brush.wgsl`、`crates/alto-gpu/src/renderer.rs`、`packages/alto-sdk/src/engine.ts`、GC の根（`crates/alto-engine/src/versions/gc.rs`）。
-
-**Interfaces:** `engine.assets.importBrushTip(blob): Promise<AssetRef>`。
-
-- [ ] 試験 `removing_a_tip_in_use_is_refused`（アセットがストロークに使われるのは確定後は残らないので、使用中の判定はストローク中のセッションのみ）。
-- [ ] 試験 `brush_tip_survives_save_reopen_and_gc`。
-- [ ] ブラウザ試験 `a stamped tip draws its shape`、`GPU loss during a textured stroke rolls back`。
-- [ ] 実装、PR。
-
-### Task BR-6: Undo の深さ
-
-**Files:** Modify `crates/alto-doc/src/lib.rs`、`crates/alto-wasm/src/lib.rs`、`packages/alto-sdk/src/engine.ts`、`packages/alto-sdk/api`。
-
-- [ ] 試験 `undo_steps_limit_the_stack`、`undo_steps_out_of_range_is_invalid`、`lowering_the_limit_keeps_the_newest_steps`。
-- [ ] 実装、PR。
+エラーコードは既存の `INVALID_ARGUMENT`、`GPU_LOST`、`CONFLICT` を使い、新しいコードは足さない。
 
 ## Review Focus
 
 - `tilt` を持たないマウス入力で、値が 0 でも動作が変わらないこと。
-- 既存の丸ブラシの結果（parity の行）が全く変わらないこと。
-- 細い楕円（roundness 0.01）で距離の計算がゼロ除算にならないこと。
-- 回転した表示やレイヤー変形の下で、角度が文書座標かレイヤー座標かを統一すること。レイヤー座標に統一する。
-- GPU 喪失時に先端テクスチャが内容ハッシュから再構築されること。
+- 既存の丸いブラシの結果（`cpuReference` との ±2 の比較）が全く変わらないこと。`roundness = 1` と画像・テクスチャなしのダブは、ビット単位で同じ出力であること。
+- 細い楕円（`roundness` 0.01）で距離の計算がゼロ除算にならないこと。
+- 角度とパターンがレイヤー座標で測られ、回転した表示やレイヤー変形の下で一貫すること。
+- 不正な設定（カーブ、画像、`scale`、`depth`）を、ストロークを始める前に拒否し、文書を変えないこと。
+- GPU 喪失時に画像先端・テクスチャのストロークが `GPU_LOST` で終わり、次のストロークが同じ画素列から作り直せること。
+- `PROTOCOL` を上げる PR で README と RELEASING を更新したこと。
+- 07（ベクター）と 02（効果）が `renderer.rs` の同じ束ね方を変える場合は、`brush.wgsl` の binding の番号を衝突させないこと。

@@ -5,7 +5,7 @@ pub mod layout;
 pub mod model;
 pub mod orient;
 
-pub use font::{FontData, FontEmbedding, FontError, FontInfo, FontSet, inspect};
+pub use font::{FontAxis, FontData, FontEmbedding, FontError, FontInfo, FontSet, inspect};
 pub use layout::{ClusterBox, GlyphRef, LineBox, PlacedGlyph, TextLayout, layout};
 pub use model::*;
 pub mod outline;

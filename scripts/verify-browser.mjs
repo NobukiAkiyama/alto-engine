@@ -115,9 +115,17 @@ function chromeBin() {
 }
 
 async function startServer() {
+  // Test-only: corrupt decode batches in workers loaded while the switch is on.
+  let corruptDecodeBatches = false;
   const server = createServer(async (req, res) => {
     try {
-      const pathname = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+      const url = new URL(req.url, "http://127.0.0.1");
+      const pathname = decodeURIComponent(url.pathname);
+      if (pathname === "/__alto-test/decode-fault") {
+        corruptDecodeBatches = url.searchParams.get("enabled") === "1";
+        res.writeHead(200).end("ok");
+        return;
+      }
       let path = resolve(root, "." + pathname);
       if (path !== root && !path.startsWith(root + sep)) {
         res.writeHead(403).end();
@@ -125,7 +133,13 @@ async function startServer() {
       }
       if ((await stat(path)).isDirectory()) path = join(path, "index.html");
       res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
-      if ((surfaceRecording || resizeBarrier || presentTiming) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
+      if (corruptDecodeBatches && path === join(root, "packages/alto-sdk/dist/decode-worker.js")) {
+        const source = await readFile(path, "utf8");
+        const target = "const out = decodeBatch(new Uint8Array(data.batch));";
+        if (source.split(target).length !== 2) throw Error("decode fault target changed");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(source.replace(target, "const input = new Uint8Array(data.batch).slice(); if (input.length >= 42) new DataView(input.buffer).setUint32(38, 0xffffffff, true); const out = decodeBatch(input);"));
+      } else if ((surfaceRecording || resizeBarrier || presentTiming) && path === join(root, "packages/alto-sdk/dist/worker.js")) {
         let source = await readFile(path, "utf8");
         if (presentTiming) {
           const replace = (before, after) => {
@@ -208,7 +222,7 @@ async function connect(url, onEvent = () => {}) {
 
 const suites = [
   ["image-versions", `const { runImageVersionTests } = await import('../../tests/e2e/image-version-tests.js'); await runImageVersionTests(window.altoEngine, (line) => console.log(line));`],
-  ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line));`],
+  ["functional", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, false, (line) => console.log(line), { decodeFaultInjection: true });`],
   ["m5", `const { runM5Tests } = await import('../../tests/e2e/m5-tests.js'); await runM5Tests(window.altoEngine, (line) => console.log(line));`],
   ["m6", `const { runM6Tests } = await import('../../tests/e2e/m6-tests.js'); await runM6Tests(window.altoEngine, (line) => console.log(line));`],
   ["m7", `const { runM7Tests } = await import('../../tests/e2e/m7-tests.js'); await runM7Tests(window.altoEngine, (line) => console.log(line));`],
@@ -220,7 +234,7 @@ const suites = [
   ["benchmark", `const { runTests } = await import('../../tests/e2e/browser-tests.js'); await runTests(window.altoEngine, true, (line) => console.log(line));`],
   // Plan E timings, all samples kept. Opt-in with --suite=perf; ALTO_PERF_FIXTURES, ALTO_PERF_REPS (JSON) and ALTO_PERF_STRESS=1 narrow or extend it.
   // Plan F / QA-4 long run. Opt-in with --suite=soak; ALTO_SOAK_MINUTES (default 240) and ALTO_SOAK_SEED (default 1).
-  ["soak", `const { runSoak } = await import('../../tests/e2e/soak.js'); await runSoak(window.altoEngine, (line) => console.log(line), ${JSON.stringify({ minutes: Number(process.env.ALTO_SOAK_MINUTES || 240), seed: Number(process.env.ALTO_SOAK_SEED || 1), inspect: process.env.ALTO_SOAK_INSPECT === "1" })});`],
+  ["soak", `const { runSoak } = await import('../../tests/e2e/soak.js'); await runSoak(window.altoEngine, (line) => console.log(line), ${JSON.stringify({ minutes: Number(process.env.ALTO_SOAK_MINUTES || 240), seed: Number(process.env.ALTO_SOAK_SEED || 1), inspect: process.env.ALTO_SOAK_INSPECT === "1", thin: process.env.ALTO_SOAK_THIN === "1" })});`],
   ["perf", `const { runPerfTests } = await import('../../tests/e2e/perf-tests.js'); await runPerfTests(window.altoEngine, (line) => console.log(line), { ...${JSON.stringify({ fixtures: process.env.ALTO_PERF_FIXTURES?.split(",").map((name) => name.trim()).filter(Boolean), stress: process.env.ALTO_PERF_STRESS === "1" })}, reps: JSON.parse(${JSON.stringify(process.env.ALTO_PERF_REPS || "{}")}) });`],
   ["dense-benchmark", `const { runDenseProduction } = await import('../../tests/diagnostics/dense-production.js'); await runDenseProduction(window.altoEngine);`],
 ];
@@ -270,6 +284,7 @@ try {
   if (embedTest) query.set("embedTest", embedTest);
   if (benchmarkView === "css") query.set("benchmarkView", "css");
   if (process.env.ALTO_BROWSER_PROFILE === "1") query.set("profile", "1");
+  if (process.env.ALTO_BROWSER_GPU_TIMESTAMPS === "1") query.set("gpuTimestamps", "1");
   const pageUrl = `http://127.0.0.1:${address.port}/${behindOnly ? "tests/diagnostics/behind-resize.html" : vectorOnly ? "tests/diagnostics/vector-optimization.html" : lifecycleOnly ? "tests/diagnostics/gpu-lifecycle.html" : "examples/browser-playground/"}${query.size ? "?" + query : ""}`;
   profile = await mkdtemp(join(tmpdir(), "alto-verify-chrome-"));
   let launchError = null;
@@ -540,6 +555,12 @@ try {
         await writeFile(file, report.endsWith("\n") ? report : report + "\n");
       }
       const parsed = report ? JSON.parse(report) : null;
+      if (name === "perf" && parsed) {
+        diagnostics.recovery = (parsed.fixtures ?? []).flatMap(({ fixture, rows }) => {
+          const recover = rows?.["recover (Worker restart + journal replay + first display)"];
+          return recover?.stages ? [{ fixture, ...recover }] : [];
+        });
+      }
       const results = parsed?.results || [];
       const failed = results.filter((result) => result.pass === false);
       const ok = !suiteError && results.length > 0 && failed.length === 0;

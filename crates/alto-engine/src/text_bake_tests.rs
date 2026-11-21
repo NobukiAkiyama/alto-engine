@@ -5,7 +5,7 @@ use crate::text::BAKER_VERSION;
 use alto_core::text_bake::{BakeCommand, PLACEHOLDER_FONT, TextBake};
 use alto_core::{AssetId, NodeId};
 use alto_doc::Node;
-use alto_text::{TextContent, TextFrame, TextStyle, WritingMode};
+use alto_text::{TextContent, TextFrame, TextStyle, Underline, UnderlineKind, WritingMode};
 
 const JP: &[u8] = include_bytes!("../../../tests/fonts/AltoTestJP.otf");
 const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
@@ -65,6 +65,84 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
             TextContent {
                 text: "A B".into(),
                 style: style(vec![], 24.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-hanging",
+            TextContent {
+                text: "あい。う".into(),
+                style: style(vec![jp], 40.0),
+                frame: TextFrame::Area {
+                    width: 100.0,
+                    height: 200.0,
+                },
+                hanging: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline",
+            TextContent {
+                text: "Underline".into(),
+                style: TextStyle {
+                    fonts: vec![latin],
+                    size: 37.5,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline-vertical",
+            TextContent {
+                text: "縦書き".into(),
+                style: TextStyle {
+                    fonts: vec![jp],
+                    size: 40.0,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-skew",
+            TextContent {
+                text: "Alto".into(),
+                style: TextStyle {
+                    italic_skew: 13.2,
+                    ..style(vec![latin], 37.5)
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-skew-vertical",
+            TextContent {
+                text: "吾A12回".into(),
+                style: TextStyle {
+                    italic_skew: -24.75,
+                    ..style(vec![latin, jp], 40.0)
+                },
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-vertical-rtl",
+            TextContent {
+                text: "吾אבג猫".into(),
+                style: style(vec![latin, jp], 40.0),
+                writing_mode: WritingMode::VerticalRl,
                 ..Default::default()
             },
         ),
@@ -225,6 +303,39 @@ fn text_bake_roundtrip_and_validation() {
 }
 
 #[test]
+fn rule_bakes_one_shared_outline() {
+    let (mut e, d, latin, _) = document();
+    let content = TextContent {
+        text: "ABCD".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            underline: Underline {
+                kind: UnderlineKind::Solid,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let id = insert(&mut e, d, content);
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    let rules: Vec<_> = bake
+        .outlines
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.glyph == 0xFF02)
+        .collect();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        bake.glyphs
+            .iter()
+            .filter(|g| g.outline == rules[0].0 as u32)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn text_bake_follows_font_replacement_in_the_same_transaction() {
     let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(0).1;
@@ -282,6 +393,35 @@ fn text_bake_keeps_a_received_bake() {
     )
     .unwrap();
     assert_eq!(bake_of(&e, d, id), Some(hash));
+}
+
+#[test]
+fn skew_zero_bakes_the_same_bytes() {
+    let (mut engine, doc, latin, _) = document();
+    let mut content = TextContent {
+        text: "Alto".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let plain = insert(&mut engine, doc, content.clone());
+    content.style.italic_skew = -0.0;
+    let zero = insert(&mut engine, doc, content.clone());
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, zero));
+
+    content.style.italic_skew = 18.0;
+    content.spans.push(alto_text::TextSpan {
+        start: 0,
+        end: 4,
+        style: alto_text::StylePatch {
+            italic_skew: Some(0.0),
+            ..Default::default()
+        },
+    });
+    let reset = insert(&mut engine, doc, content);
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, reset));
 }
 
 #[test]
@@ -422,4 +562,75 @@ fn render_scenes_carry_the_bake() {
     };
     assert_eq!(bake.hash, hash);
     assert_eq!(*bake.bytes, e.blobs[&hash]);
+}
+
+#[test]
+fn new_format_document_saves_and_reopens() {
+    let (mut e, d, _, jp) = document();
+    let id = insert(
+        &mut e,
+        d,
+        TextContent {
+            text: "あい。う".into(),
+            style: TextStyle {
+                fonts: vec![jp],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    e.commit(d, "before hanging", 1, None, false).unwrap();
+    let mut content = match &e.document(d).unwrap().node(id).unwrap().kind {
+        NodeKind::Text { content, .. } => content.clone(),
+        _ => unreachable!(),
+    };
+    content.hanging = true;
+    content.frame = TextFrame::Area {
+        width: 80.0,
+        height: 200.0,
+    };
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "text.edit",
+        vec![Op::SetText {
+            id,
+            content,
+            bake: None,
+        }],
+        rev,
+    )
+    .unwrap();
+    e.commit(d, "hanging", 2, None, false).unwrap();
+    let old_objects = e.version_only_objects(d).unwrap();
+    assert!(!old_objects.is_empty());
+    let check_manifest = |entries: &std::collections::BTreeMap<String, Vec<u8>>, format| {
+        let m: alto_store::Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!(m.format, format);
+        assert_eq!(m.document_format, 6);
+    };
+    let mut fresh = Engine::new();
+    let bytes = e.save_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&bytes).unwrap(), 2);
+    let package = fresh.open_package(&bytes).unwrap();
+    let folder = e.folder_entries(d).unwrap();
+    check_manifest(&folder, 2);
+    let plan = e.prepare_gc(d, &folder, false).unwrap();
+    check_manifest(&plan.entries, 2);
+    let folder = fresh.open_entries(folder).unwrap();
+    let thin = e.save_thin_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&thin).unwrap(), 3);
+    let mut thin_engine = Engine::new();
+    let thin = thin_engine.open_package(&thin).unwrap();
+    assert_eq!(thin_engine.external_objects(thin.0).unwrap(), old_objects);
+    for (reopened, (h, warnings)) in [(&fresh, package), (&fresh, folder), (&thin_engine, thin)] {
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reopened.document(h).unwrap().meta.format_version, 6);
+        assert_eq!(reopened.text_info(h, id).unwrap().lines[0].end, 3);
+        assert_eq!(
+            reopened.text_bake(h, id).unwrap(),
+            e.text_bake(d, id).unwrap()
+        );
+        assert!(!reopened.version_status(h).unwrap().changed);
+    }
 }

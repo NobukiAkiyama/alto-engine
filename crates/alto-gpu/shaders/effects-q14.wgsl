@@ -314,6 +314,82 @@ fn blur_stage(ix: vec2i) -> vec4i {
  }
  return vec4i((accum+vec4u(32768u))>>vec4u(16u));
 }
+fn high_pass_q14(original: vec4i, blurred: vec4i) -> vec4i {
+ let rgb=clamp(straight_q(original)-straight_q(blurred)+vec3i(8192),vec3i(0),vec3i(Q14_ONE));
+ return vec4i(mul_q(rgb.r,original.a),mul_q(rgb.g,original.a),mul_q(rgb.b,original.a),original.a);
+}
+fn unsharp_mask_q14(original: vec4i, blurred: vec4i, settings: vec4i) -> vec4i {
+ let source = straight_q(original);
+ let d = source - straight_q(blurred);
+ var out = original;
+ for (var i = 0u; i < 3u; i = i + 1u) {
+  if abs(d[i]) > settings.y {
+   let sharpened = clamp(source[i] + ((settings.x * d[i] + 128) >> 8), 0, Q14_ONE);
+   out[i] = mul_q(sharpened, original.a);
+  }
+ }
+ return out;
+}
+fn motion_blur_q14(ix: vec2i, settings: vec4i) -> vec4i {
+ let radius = settings.x;
+ if radius == 0 { return texel_a(ix); }
+ let spacing_q8 = settings.y;
+ let direction = hue_sincos_q14(settings.z);
+ let step = vec2i(
+  (direction.x * spacing_q8 + 128) >> 8,
+  (direction.y * spacing_q8 + 128) >> 8,
+ );
+ var accum = vec4i(0);
+ for (var i = -radius; i <= radius; i = i + 1) {
+  let offset = vec2i(
+   (i * step.x + 8192) >> 14,
+   (i * step.y + 8192) >> 14,
+  );
+  accum = accum + texel_a(ix + offset);
+ }
+ let taps = 2 * radius + 1;
+ return (accum + vec4i(taps / 2)) / taps;
+}
+fn pcg32(v: u32) -> u32 {
+ let state = v * 747796405u + 2891336453u;
+ let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+ return (word >> 22u) ^ word;
+}
+// Add a level-grid pixel index to an i64 ROI origin, then arithmetic-shift by
+// the zoom-in factor. The low word is the signed result modulo 2^32, exactly
+// the bit pattern used by the coordinate hash.
+fn noise_doc_coord(origin_lo: u32, origin_hi: u32, index: i32, shift: u32) -> u32 {
+ let add = bitcast<u32>(index);
+ let lo = origin_lo + add;
+ let carry = select(0u, 1u, lo < origin_lo);
+ let hi = origin_hi + select(0xffffffffu, 0u, index < 0) + carry;
+ if shift == 0u { return lo; }
+ return (lo >> shift) | (hi << (32u - shift));
+}
+fn noise_q14(source: vec4i, ix: vec2i, settings: vec4i) -> vec4i {
+ let amount = settings.y;
+ if amount == 0 { return source; }
+ let alpha = source.a;
+ if alpha == 0 { return vec4i(0); }
+ let origin = bitcast<vec4u>(c.grid[6]);
+ let shift = u32(settings.w);
+ let x = noise_doc_coord(origin.x, origin.y, ix.x, shift);
+ let y = noise_doc_coord(origin.z, origin.w, ix.y, shift);
+ let seed = bitcast<u32>(settings.x);
+ let h = pcg32(x ^ pcg32(y ^ seed));
+ let straight = straight_q(source);
+ var output = vec4i(0);
+ for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+  var sample = h;
+  if settings.z == 0 { sample = pcg32(h ^ (channel + 1u)); }
+  let centered = 2 * i32(sample >> 16u) - 65535;
+  let delta = floor_div(centered * amount + 32768, 65536);
+  let value = clamp(straight[channel] + delta, 0, Q14_ONE);
+  output[channel] = mul_q(value, alpha);
+ }
+ output.a = alpha;
+ return output;
+}
 fn resample_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];let m=u32(settings.z);
  let shift=i32(1u<<m);
@@ -358,5 +434,9 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if c.info.x==31u{out=curves_q14(texel_a(ix),u32(settings.x));}
  else if c.info.x==32u{out=levels_q14(texel_a(ix));}
  else if c.info.x==33u{out=hue_saturation_q14(texel_a(ix));}
+ else if c.info.x==34u{out=high_pass_q14(texel_a(ix),texel_b(ix));}
+ else if c.info.x==35u{out=unsharp_mask_q14(texel_a(ix),texel_b(ix),settings);}
+ else if c.info.x==36u{out=motion_blur_q14(ix,settings);}
+ else if c.info.x==37u{out=noise_q14(texel_a(ix),ix,settings);}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }
