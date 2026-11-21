@@ -107,7 +107,7 @@ mod v3_shader_pins {
         );
         assert_eq!(
             hash(super::integer_effects_shader()),
-            "31aea17359ffcbbadcaab80fccb617bfbba842b67eecaaa547158ad73d4a2690"
+            "455688162bfa5be6c6f11b08852c686ccab1f7803efc86376c1a366b740fa7ed"
         );
     }
 }

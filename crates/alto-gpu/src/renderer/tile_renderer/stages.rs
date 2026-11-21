@@ -1,16 +1,31 @@
 //! Layer properties, blending, clipping and effect stages.
 use super::*;
 
+fn unsharp_is_identity(kind: &REffectKind) -> bool {
+    matches!(
+        *kind,
+        REffectKind::UnsharpMask { radius_q8, amount_q8, threshold_q14, .. }
+            if radius_q8 == 0 || amount_q8 == 0 || threshold_q14 >= 16384
+    )
+}
+
 fn smoothing_radius(kind: &REffectKind) -> Option<(f32, u32)> {
     match *kind {
         REffectKind::GaussianBlur { radius, radius_q8 }
         | REffectKind::HighPass { radius, radius_q8 } => Some((radius, radius_q8)),
+        REffectKind::UnsharpMask {
+            radius, radius_q8, ..
+        } if !unsharp_is_identity(kind) => Some((radius, radius_q8)),
         _ => None,
     }
 }
 
 fn needs_original(effect: &REffect) -> bool {
-    effect.selection.is_some() || matches!(effect.kind, REffectKind::HighPass { .. })
+    effect.selection.is_some()
+        || matches!(
+            effect.kind,
+            REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. }
+        )
 }
 
 pub(super) fn needs_backdrop_halo(effect: &REffect, exact: bool) -> bool {
@@ -316,9 +331,12 @@ impl Context<'_> {
             REffectKind::GaussianBlur { radius, radius_q8 } => {
                 self.gaussian(&input, roi, world, radius, radius_q8)?
             }
-            REffectKind::HighPass { .. } => {
+            REffectKind::UnsharpMask { .. } if unsharp_is_identity(&effect.kind) => {
+                return self.crop(input, roi);
+            }
+            REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. } => {
                 return Err(RenderError::Internal(
-                    "high-pass requires a smoothing stack".into(),
+                    "effect requires a smoothing stack".into(),
                 ));
             }
             REffectKind::ColorAdjust {
@@ -550,13 +568,22 @@ impl Context<'_> {
                     if needs_original(effect) {
                         let original =
                             original.unwrap_or_else(|| use_plane(&mut previous, grid.level));
-                        let filtered = if matches!(effect.kind, REffectKind::HighPass { .. }) {
+                        let combine = match effect.kind {
+                            REffectKind::HighPass { .. } => Some((34, [0; 4])),
+                            REffectKind::UnsharpMask {
+                                amount_q8,
+                                threshold_q14,
+                                ..
+                            } => Some((35, [amount_q8 as i32, threshold_q14 as i32, 0, 0])),
+                            _ => None,
+                        };
+                        let filtered = if let Some((mode, settings)) = combine {
                             let output = self.alloc(roi)?;
                             let params = Self::q14_params(
-                                34,
+                                mode,
                                 roi,
                                 [Some(original.roi), Some(blurred.roi)],
-                                [0; 4],
+                                settings,
                                 None,
                             )?;
                             self.dispatch(&output, &original, &blurred, &original, params, &[])?;

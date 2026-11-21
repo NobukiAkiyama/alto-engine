@@ -86,6 +86,12 @@ pub enum REffectKind {
         radius: f32,
         radius_q8: u32,
     },
+    UnsharpMask {
+        radius: f32,
+        radius_q8: u32,
+        amount_q8: u32,
+        threshold_q14: u32,
+    },
     ColorAdjust {
         brightness: f32,
         contrast: f32,

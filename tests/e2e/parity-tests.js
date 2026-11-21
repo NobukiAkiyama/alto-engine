@@ -2,7 +2,7 @@
 // CPU reference. A mismatch names the first pixel and the number of pixels that differ.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -1077,12 +1077,20 @@ export async function runParityTests(engine, log) {
         { name: "effect-high-pass-seam", image: seam, radius: 12, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
         { name: "effect-high-pass-selected", image: gradient, radius: 8, selection, mask },
         { name: "effect-high-pass-adjustment", image: gradient, radius: 8, adjustment: true },
+        { name: "effect-unsharp", image: gradient, radius: 8, amount: 0.501953125, threshold: 0 },
+        { name: "effect-unsharp-threshold", image: gradient, radius: 8, amount: 2, threshold: 17 },
+        { name: "effect-unsharp-tile-seam", image: seam, radius: 12, amount: 2.5, threshold: 0, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-unsharp-selected", image: gradient, radius: 8, amount: 1.75, threshold: 12, selection, mask },
+        { name: "effect-unsharp-adjustment", image: gradient, radius: 8, amount: 1.25, threshold: 8, adjustment: true },
+        { name: "effect-unsharp-zero-amount", image: gradient, radius: 64, amount: 0, threshold: 0 },
+        { name: "effect-unsharp-zero-radius", image: gradient, radius: 0, amount: 5, threshold: 0 },
       ];
-      for (const { name, image, radius, tiles, selection, mask, adjustment } of cases) {
+      for (const { name, image, radius, amount, threshold, tiles, selection, mask, adjustment } of cases) {
         await test(name, async () => {
           const doc = await engine.createDocument({ width: image.w, height: image.h });
           const asset = await imported(engine, image);
-          const effect = { type: "high_pass", radius };
+          const unsharp = amount !== undefined;
+          const effect = unsharp ? { type: "unsharp_mask", radius, amount, threshold } : { type: "high_pass", radius };
           let layer;
           await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
           if (selection) await doc.selection.apply(selection);
@@ -1092,7 +1100,10 @@ export async function runParityTests(engine, log) {
           assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
           for (const [tx, ty] of tiles ?? [[0, 0]]) {
             const key = tiles ? `${name} (${tx}, ${ty})` : name;
-            const cpu = renderHighPassV3(image, radius, [tx, ty], [image.w, image.h], mask);
+            const canvas = [image.w, image.h];
+            const cpu = unsharp
+              ? renderUnsharpMaskV3(image, effect, [tx, ty], canvas, mask)
+              : renderHighPassV3(image, radius, [tx, ty], canvas, mask);
             const gpu = await gpuTile(engine, { level: 0, tx, ty });
             const row = {
               ...measureRow({ name: key, nodes: [], level: 0, tx, ty }, cpu, gpu),

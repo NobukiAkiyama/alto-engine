@@ -93,3 +93,13 @@ af8612917c753e69 effect-high-pass-seam (0, 1)
 6dd0542f592496e9 effect-high-pass-seam (1, 1)
 8ea3ac6b9c0c1719 effect-high-pass-selected
 f79a2348a412695a effect-high-pass-adjustment
+837d73328a9c1071 effect-unsharp
+86153ffcb571b7b5 effect-unsharp-threshold
+9cb183a14efe7629 effect-unsharp-tile-seam (0, 0)
+d31068a45b90248d effect-unsharp-tile-seam (1, 0)
+87fd5809e8ce66b9 effect-unsharp-tile-seam (0, 1)
+cc8be4e6a78e654c effect-unsharp-tile-seam (1, 1)
+7413ae943cc54ab5 effect-unsharp-selected
+7ac53844709f1eca effect-unsharp-adjustment
+426e4e110a8bc6f0 effect-unsharp-zero-amount
+426e4e110a8bc6f0 effect-unsharp-zero-radius

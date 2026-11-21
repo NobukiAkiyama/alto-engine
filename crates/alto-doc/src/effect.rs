@@ -33,6 +33,13 @@ pub enum Effect {
         selection: Option<TileMap>,
         extra: serde_json::Map<String, serde_json::Value>,
     },
+    UnsharpMask {
+        radius: f64,
+        amount: f64,
+        threshold: f64,
+        selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
     ColorAdjust {
         brightness: f64,
         contrast: f64,
@@ -105,6 +112,13 @@ fn effect_from_map(mut obj: serde_json::Map<String, serde_json::Value>) -> Resul
             selection: effect_selection(&mut obj)?,
             extra: obj,
         }),
+        "unsharp_mask" => Ok(Effect::UnsharpMask {
+            radius: effect_f64(&mut obj, "radius", 8.0)?,
+            amount: effect_f64(&mut obj, "amount", 1.0)?,
+            threshold: effect_f64(&mut obj, "threshold", 0.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
         "color_adjust" => Ok(Effect::ColorAdjust {
             brightness: effect_f64(&mut obj, "brightness", 0.0)?,
             contrast: effect_f64(&mut obj, "contrast", 1.0)?,
@@ -171,6 +185,18 @@ impl Serialize for Effect {
             } => {
                 map.insert("radius".into(), serde_json::json!(radius));
                 ("high_pass", selection, extra)
+            }
+            Self::UnsharpMask {
+                radius,
+                amount,
+                threshold,
+                selection,
+                extra,
+            } => {
+                map.insert("radius".into(), serde_json::json!(radius));
+                map.insert("amount".into(), serde_json::json!(amount));
+                map.insert("threshold".into(), serde_json::json!(threshold));
+                ("unsharp_mask", selection, extra)
             }
             Self::ColorAdjust {
                 brightness,
@@ -255,10 +281,15 @@ impl<'de> Deserialize<'de> for Effect {
 }
 
 impl Effect {
+    pub(crate) fn requires_format_eight(&self) -> bool {
+        matches!(self, Self::HighPass { .. } | Self::UnsharpMask { .. })
+    }
+
     pub fn selection(&self) -> Option<&TileMap> {
         match self {
             Self::GaussianBlur { selection, .. }
             | Self::HighPass { selection, .. }
+            | Self::UnsharpMask { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -270,6 +301,7 @@ impl Effect {
         match self {
             Self::GaussianBlur { selection, .. }
             | Self::HighPass { selection, .. }
+            | Self::UnsharpMask { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -281,6 +313,7 @@ impl Effect {
         let extra = match self {
             Self::GaussianBlur { extra, .. }
             | Self::HighPass { extra, .. }
+            | Self::UnsharpMask { extra, .. }
             | Self::ColorAdjust { extra, .. }
             | Self::Levels { extra, .. }
             | Self::HueSaturation { extra, .. }
@@ -300,6 +333,19 @@ impl Effect {
         match self {
             Self::GaussianBlur { radius, .. } => finite("radius", *radius, 0.0, 64.0)?,
             Self::HighPass { radius, .. } => finite("radius", *radius, 0.5, 64.0)?,
+            Self::UnsharpMask {
+                radius,
+                amount,
+                threshold,
+                ..
+            } => {
+                finite("radius", *radius, 0.0, 64.0)?;
+                finite("amount", *amount, 0.0, 5.0)?;
+                finite("threshold", *threshold, 0.0, 255.0)?;
+                if threshold.fract() != 0.0 {
+                    return Err(DocError::Invalid("threshold must be an integer".into()));
+                }
+            }
             Self::ColorAdjust {
                 brightness,
                 contrast,
@@ -380,6 +426,7 @@ mod tests {
             r#"{"type":"gaussian_blur"}"#,
             r#"{"type":"gaussian_blur","radius":12,"legacy":true}"#,
             r#"{"type":"high_pass","legacy":true}"#,
+            r#"{"type":"unsharp_mask","legacy":true}"#,
             r#"{"type":"color_adjust","brightness":0.25,"contrast":1.5,"saturation":0.5}"#,
             r#"{"type":"color_adjust"}"#,
             r#"{"type":"levels","in_black":0.1,"in_white":0.9,"gamma":1.2,"out_black":0.0,"out_white":1.0}"#,
@@ -488,14 +535,72 @@ mod tests {
     }
 
     #[test]
-    fn high_pass_upgrades_layer_and_adjustment_snapshots_to_format_eight() {
-        for adjustment in [false, true] {
-            let effect = Effect::HighPass {
-                radius: 4.0,
+    fn unsharp_defaults_parse_and_roundtrip() {
+        let effect: Effect = serde_json::from_str(r#"{"type":"unsharp_mask"}"#).unwrap();
+        assert_eq!(
+            effect,
+            Effect::UnsharpMask {
+                radius: 8.0,
+                amount: 1.0,
+                threshold: 0.0,
                 selection: None,
                 extra: Default::default(),
-            };
-            let mut layer = Node::raster("High pass");
+            }
+        );
+        effect.validate().unwrap();
+        let json = serde_json::to_string(&effect).unwrap();
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), effect);
+    }
+
+    #[test]
+    fn validate_rejects_unsharp_parameters_outside_range() {
+        let result = |radius: f64, amount: f64, threshold: f64| {
+            Effect::UnsharpMask {
+                radius,
+                amount,
+                threshold,
+                selection: None,
+                extra: Default::default(),
+            }
+            .validate()
+        };
+        assert!(result(0.0, 0.0, 0.0).is_ok());
+        assert!(result(64.0, 5.0, 255.0).is_ok());
+        for (radius, amount, threshold) in [
+            (-0.1, 1.0, 0.0),
+            (64.1, 1.0, 0.0),
+            (8.0, 5.1, 0.0),
+            (8.0, 1.0, 0.5),
+            (8.0, 1.0, 256.0),
+        ] {
+            assert!(matches!(
+                result(radius, amount, threshold),
+                Err(DocError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn format_eight_effects_upgrade_layer_and_adjustment_snapshots() {
+        let high_pass = Effect::HighPass {
+            radius: 4.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        let unsharp = Effect::UnsharpMask {
+            radius: 0.0,
+            amount: 1.0,
+            threshold: 4.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        for (effect, adjustment) in [
+            (high_pass.clone(), false),
+            (high_pass, true),
+            (unsharp.clone(), false),
+            (unsharp, true),
+        ] {
+            let mut layer = Node::raster("Format eight effect");
             if adjustment {
                 layer.kind = NodeKind::Adjustment { adjustment: effect };
             } else {

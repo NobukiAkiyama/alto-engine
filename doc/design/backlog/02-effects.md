@@ -205,10 +205,10 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 **Interfaces:** Produces `Effect::UnsharpMask { radius, amount, threshold, selection, extra }`、`REffectKind::UnsharpMask { radius, radius_q8, amount_q8, threshold_q14 }`、シャープの結合モード。Consumes FX-4 の基盤。
 
-- [ ] 試験（`effect.rs`）`validate_rejects_unsharp_amount_above_5`、`validate_rejects_unsharp_threshold_with_fraction`、`validate_rejects_unsharp_threshold_above_255`。
-- [ ] 試験（`effect_reference.rs`）`unsharp_zero_amount_is_identity`、`unsharp_threshold_keeps_small_differences`（`|d|` が閾値以下の画素は元のバイトのまま）、`unsharp_negative_difference_rounds_by_floor`（負の `d` の丸めが3実装で同じ）、`unsharp_clamps_at_both_ends`。
-- [ ] parity 症例 `effect-unsharp`、`effect-unsharp-threshold`、`effect-unsharp-tile-seam`。
-- [ ] 完了条件・検証コマンドは FX-4 と同じ。
+- [x] 試験（`effect.rs`）`validate_rejects_unsharp_amount_above_5`、`validate_rejects_unsharp_threshold_with_fraction`、`validate_rejects_unsharp_threshold_above_255`。
+- [x] 試験（`effect_reference.rs`）`unsharp_zero_amount_is_identity`、`unsharp_threshold_keeps_small_differences`（`|d|` が閾値以下の画素は元のバイトのまま）、`unsharp_negative_difference_rounds_by_floor`（負の `d` の丸めが3実装で同じ）、`unsharp_clamps_at_both_ends`。
+- [x] parity 症例 `effect-unsharp`、`effect-unsharp-threshold`、`effect-unsharp-tile-seam` に加え、調整レイヤー、選択、恒等条件を追加。
+- [x] 完了条件・検証コマンドは FX-4 と同じ。Metal／SwiftShader parity 各176件、embed の保存・再読込確認、Rust workspace check が通過。
 
 ### 依存
 

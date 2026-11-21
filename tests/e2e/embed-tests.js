@@ -439,6 +439,38 @@ export async function runEmbedTests(_playground, log) {
       for(const frame of frames) if(frame.pending && !frame.gpu.overviewReady) assert(!frame.display.hasPresented,"partial first present");
       const exact=await unstable(engine).readTileLevel(0,0,0);assert(exact.length===262144 && exact.every(x=>x===0),"exact readback degraded");
     });
+    await test("unsharp mask identity and saved pixels match", async () => {
+      const engine = await engineIn(container(64, 64), { storage: { recovery: false } });
+      const diag = unstable(engine);
+      const doc = await engine.createDocument({ width: 64, height: 64 });
+      const canvas = new OffscreenCanvas(64, 64);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgba(72, 104, 120, 0.5)";
+      ctx.fillRect(0, 0, 32, 64);
+      ctx.fillStyle = "rgba(156, 184, 196, 0.5)";
+      ctx.fillRect(32, 0, 32, 64);
+      const asset = await engine.assets.importImage(await canvas.convertToBlob());
+      let layer;
+      await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+      const read = () => diag.readTile(0, 0);
+      const equal = (a, b) => a.length === b.length && a.every((byte, i) => byte === b[i]);
+      const original = await read();
+      for (const options of [{ radius: 0 }, { amount: 0 }, { threshold: 255 }]) {
+        await doc.effects.set(layer, [{ type: "unsharp_mask", ...options }]);
+        assert(equal(await read(), original), "identity sharpen changed pixels: " + JSON.stringify(options));
+      }
+      assert(await rejectsWith(doc.effects.set(layer, [{ type: "unsharp_mask", threshold: 0.5 }]), "INVALID_ARGUMENT"),
+        "fractional threshold accepted");
+      await doc.effects.set(layer, [{ type: "unsharp_mask", radius: 5, amount: 2, threshold: 1 }]);
+      const sharpened = await read();
+      assert(!equal(sharpened, original), "sharpening did not change an edge");
+      assert(sharpened.every((byte, i) => i % 4 !== 3 || byte === original[i]), "sharpening changed alpha");
+      const hash = await doc.snapshotHash();
+      let archive;
+      await doc.save({ write: async (stream) => { archive = await new Response(stream).blob(); } });
+      const reopened = await engine.open(archive);
+      assert(await reopened.snapshotHash() === hash && equal(await read(), sharpened), "reopened sharpened document differs");
+    });
     await test("the browser is supported", async () => {
       const support = await isSupported();
       assert(support.ok, "isSupported: " + JSON.stringify(support));
