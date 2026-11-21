@@ -12,6 +12,7 @@ import init, { Runtime } from "./pkg/alto_wasm.js";
 import { NO_STREAK, PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
 import { encodePng } from "./png.js";
+import { exportGrid, PngExport, readExportPixels } from "./png-export.js";
 import { compositeOverBackground, lossyQuality } from "./jpeg.js";
 import { tiffBlob, tiffStrips, tiffStripsJson, type TiffCompression } from "./tiff.js";
 /**
@@ -120,7 +121,7 @@ const readableAfterFailure = new Set<string>([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage", "exportStreamOpen", "exportStreamPull", "exportStreamClose",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
   "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
@@ -141,6 +142,7 @@ function checkDocument(epoch: number | undefined) {
     throw Error("CONFLICT: document-closed: the request belongs to a replaced document");
 }
 function adoptDocument(epoch: number | undefined) {
+  void closePngExport();
   documentEpoch = epoch ?? documentEpoch + 1;
   recoveryPending = false;
   recoveryFrame = null;
@@ -667,6 +669,7 @@ function noteDeferred(frame: FrameStats, where: "wait" | "drain") {
 }
 /** Recreate the device from the document. The next tick draws it again. */
 async function recoverLostGpu() {
+  await closePngExport();
   if (recoveryFrame) recoveryFrame = { start: null, waiting: false };
   forceDeferred = false;
   deferLimit = PRESENT_DEFER_LIMIT;
@@ -707,8 +710,60 @@ async function canvasBlob(canvas: OffscreenCanvas, type: string, quality?: numbe
   return blob;
 }
 
-/** Display tiles read back per GPU round trip. */
-// Export requests follow the Rust pool capacity; Rust also validates every batch.
+let pngExport: { id: string; version: string; encoder: PngExport } | undefined;
+
+async function closePngExport(id?: string) {
+  if (!pngExport || (id !== undefined && pngExport.id !== id)) return;
+  const { encoder } = pngExport;
+  pngExport = undefined;
+  await encoder.close();
+}
+
+function readPixels(region: Args<"exportImage">["region"], level: number) {
+  return readExportPixels(region, level, runtime.readbackCapacity(), (l, coords) => runtime.readTiles(l, coords));
+}
+
+async function openPngExport({ region, scale }: Args<"exportStreamOpen">) {
+  if (!(scale > 0 && scale <= 1) || ![region.x0, region.y0, region.x1, region.y1].every(Number.isSafeInteger) ||
+      region.x0 < 0 || region.y0 < 0 || region.x1 > 65536 || region.y1 > 65536 ||
+      region.x0 >= region.x1 || region.y0 >= region.y1) {
+    throw Error("INVALID_ARGUMENT: PNG stream region or scale");
+  }
+  const grid = exportGrid(region, scale);
+  if (!grid.exact) throw Error("UNSUPPORTED: PNG streaming requires an exact display-pyramid match");
+  // At most a band in the GPU handoff and a band in the compressor. Budget
+  // both raw and filtered buffers, the previous row, and bounded tile copies.
+  const stride = grid.width * 4;
+  const bandRows = Math.min(256, grid.height);
+  const tileBatch = Math.max(1, Math.min(64, runtime.readbackCapacity()));
+  const estimate = 2 * bandRows * (stride * 2 + 1) + stride + tileBatch * 262144 * 3;
+  if (estimate > 512 * 1048576) throw Error("INVALID_ARGUMENT: export stream CPU operation exceeds 512 MiB");
+  const version = runtime.exportSceneVersion();
+  if (pngExport?.version === version) throw Error("BUSY: finish or cancel the active image export stream");
+  await closePngExport();
+  const id = crypto.randomUUID();
+  pngExport = { id, version: runtime.exportSceneVersion(), encoder: new PngExport(grid) };
+  return { streamId: id };
+}
+
+async function pullPngExport(id: string) {
+  const current = pngExport;
+  if (!current || current.id !== id)
+    throw Error("CONFLICT: document-changed: the export stream no longer belongs to the active document");
+  try {
+    if (current.version !== runtime.exportSceneVersion())
+      throw Error("CONFLICT: document-changed: the rendered document changed during export");
+    const bytes = await current.encoder.pull(readPixels);
+    if (pngExport !== current || current.version !== runtime.exportSceneVersion())
+      throw Error("CONFLICT: document-changed: the rendered document changed during export");
+    if (bytes === null) await closePngExport(id);
+    return bytes;
+  } catch (error) {
+    await closePngExport(id);
+    throw error;
+  }
+}
+
 /**
  * The document as an image file, from the same display tiles the canvas shows. A
  * reduced export reads the pyramid level at or above its scale: each level halves the
@@ -718,11 +773,7 @@ async function canvasBlob(canvas: OffscreenCanvas, type: string, quality?: numbe
  * again. JPEG is opaque: alpha is composited over `background` before any scaling.
  */
 async function exportImage({ region, scale, type, quality, background, compression }: Args<"exportImage">) {
-  const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
-  const f = 2 ** level;
-  const x0 = Math.floor(region.x0 / f), y0 = Math.floor(region.y0 / f);
-  const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
-  const w = x1 - x0, h = y1 - y0;
+  const { level, factor: f, x0, y0, x1, y1, width: w, height: h, ow, oh, exact } = exportGrid(region, scale);
   if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
   const jpeg = type === "image/jpeg";
   // Includes the source/output arrays, bounded readback copies, and JPEG's opaque
@@ -730,33 +781,9 @@ async function exportImage({ region, scale, type, quality, background, compressi
   const outputPixels = Math.max(1, Math.round((region.x1 - region.x0) * scale)) * Math.max(1, Math.round((region.y1 - region.y0) * scale));
   const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3 + (jpeg ? w * h * 4 : 0);
   if (requestBytes > 512 * 1048576) throw Error("INVALID_ARGUMENT: export CPU operation exceeds 512 MiB");
-  const pixels = new Uint8ClampedArray(w * h * 4);
-  const tiles: [number, number][] = [];
-  for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
-    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) tiles.push([tx, ty]);
-  for (let at = 0; at < tiles.length;) {
-    const count = Math.max(1, runtime.readbackCapacity());
-    const batch = tiles.slice(at, at + count);
-    at += batch.length;
-    const bytes = await runtime.readTiles(level, Int32Array.from(batch.flat()));
-    batch.forEach(([tx, ty], i) => {
-      const tile = bytes.subarray(i * 262144, (i + 1) * 262144);
-      const left = Math.max(x0, tx * 256), right = Math.min(x1, tx * 256 + 256);
-      for (let y = Math.max(y0, ty * 256); y < Math.min(y1, ty * 256 + 256); y++)
-        for (let x = left; x < right; x++) {
-          const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, d = ((y - y0) * w + (x - x0)) * 4;
-          const a = tile[s + 3];
-          pixels[d + 3] = a;
-          if (a) for (let c = 0; c < 3; c++) pixels[d + c] = Math.round((tile[s + c] * 255) / a);
-        }
-    });
-  }
-  // The region in level pixels, and the size the caller asked for.
+  const pixels = await readPixels({ x0, y0, x1, y1 }, level);
   const sx = region.x0 / f - x0, sy = region.y0 / f - y0;
   const sw = (region.x1 - region.x0) / f, sh = (region.y1 - region.y0) / f;
-  const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
-  const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
-  const exact = sx === 0 && sy === 0 && ow === w && oh === h;
   if (jpeg) compositeOverBackground(pixels, background ?? [1, 1, 1]);
   const lossy = lossyQuality(type, quality);
   if (exact && type === "image/png") return encodePng(pixels, w, h);
@@ -1313,6 +1340,13 @@ async function execute(m: Queued): Promise<unknown> {
       return await runtime.readTile(m.x, m.y);
     case "exportImage":
       return exportImage(m);
+    case "exportStreamOpen":
+      return openPngExport(m);
+    case "exportStreamPull":
+      return pullPngExport(m.streamId);
+    case "exportStreamClose":
+      await closePngExport(m.streamId);
+      return true;
     case "destroyGpu":
       runtime.destroyGpu();
       return true;

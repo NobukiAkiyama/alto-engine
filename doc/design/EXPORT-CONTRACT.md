@@ -40,7 +40,9 @@
 | JPEG | 背景色を8bitに丸め、straight sRGB の各チャネルを `round((c × a + bg × (255 − a)) / 255)` で合成する。縮小前に不透明化し、ブラウザが非可逆圧縮する |
 | TIFF | 8bit RGBA、straight alpha（ExtraSamples = 2）、リトルエンディアン。リサンプリングが不要な場合、デコード後の全画素が同条件の PNG と一致する。それ以外はブラウザで縮小するため、画素値は保証しない |
 
-完全一致の場合、PNGはSDKが自前で符号化する（`packages/alto-sdk/src/png.ts`：8bit RGBA、インターレースなし、sRGBチャンク付き）。PNG の Paeth フィルターは最大256行ずつ処理し、帯をまたぐ最初の行には直前の帯の最終行を使う。現行 API は全画素の GPU 読み戻しと単一 IDAT の Blob を引き続き使う。2026-11-09までは常にcanvasの `convertToBlob` を使っていた。canvasは画素をpremultipliedで持つので、半透明の画素で色が最大1ずれていた（512×256の試験画像で3,584画素）。
+完全一致の場合、PNGはSDKが自前で符号化する（`packages/alto-sdk/src/png.ts`：8bit RGBA、インターレースなし、sRGBチャンク付き）。PNG の Paeth フィルターは最大256行ずつ処理し、帯をまたぐ最初の行には直前の帯の最終行を使う。`exportImage` は全画素の GPU 読み戻しと単一 IDAT の Blob を使う。2026-11-09までは常にcanvasの `convertToBlob` を使っていた。canvasは画素をpremultipliedで持つので、半透明の画素で色が最大1ずれていた（512×256の試験画像で3,584画素）。
+
+`doc.exportImageStream(options)` は、読み戻した表示ピクセルと出力寸法が一致する PNG を `ReadableStream<Uint8Array>` で返す。読み戻しは最大256行ずつで、全画像分の画素配列は作らない。各 IDAT は最大1 MiB。Blob 版の6400万画素制限は適用せず、文書の辺の上限は65536。1エンジンにつき同時に1つだけ開ける。途中で読むのをやめる場合はストリームをキャンセルする。文書の編集・差し替えや Worker の再起動を検出した場合は `CONFLICT`（`document-changed`）で終了する。
 
 TIFF は最大256行ずつの帯で組み立てる。Deflate は帯ごとの zlib ストリームで、無圧縮と同じ画素に戻る。WASM が作るのはヘッダーと帯の表で、画素の符号化とファイルの組み立ては Worker が行う。
 

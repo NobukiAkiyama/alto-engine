@@ -182,7 +182,7 @@ export interface CommitView {
 }
 
 // @public
-export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed";
+export type ConflictReason = "tool-active" | "folder-changed" | "folder-occupied" | "another-tab" | "namespace-in-use" | "recovery-pending" | "not-failed" | "no-recovery" | "revision" | "document-closed" | "document-changed";
 
 // @public
 export type ContentDetail = {
@@ -324,6 +324,7 @@ export class DocumentHandle {
         }) => Promise<void>;
     };
     exportImage(options?: ExportImageOptions): Promise<Blob>;
+    exportImageStream(options?: ExportImageOptions): ReadableStream<Uint8Array<ArrayBuffer>>;
     get folder(): ObjectStorageProvider | null;
     getSnapshot(): DocumentSnapshot;
     readonly image: {

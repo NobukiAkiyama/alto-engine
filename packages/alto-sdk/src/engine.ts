@@ -195,7 +195,7 @@ const readableAfterStorageFailure = new Set([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage", "exportStreamOpen", "exportStreamPull", "exportStreamClose",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
   "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
   "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
@@ -292,6 +292,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private pixelRatio: number;
   private state: EngineStatus = { state: "starting", error: null };
   private workerGeneration = 0;
+  /** @internal Identifies the Worker owning a pull-based export. */
+  get workerEpoch(): number { return this.workerGeneration; }
   private restartPromise: Promise<void> | null = null;
   private releaseLease?: () => void;
   /** Settles once the namespace lock is released, after `releaseLease`. */

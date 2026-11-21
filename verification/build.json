@@ -2,7 +2,7 @@
   "date": "2026-10-26",
   "version": "0.4.0",
   "milestone": "M8 + embedding API",
-  "protocolVersion": 17,
+  "protocolVersion": 18,
   "buildHost": "aarch64-apple-darwin",
   "wasmBytes": 6395243,
   "gzipBytes": 1604681,
