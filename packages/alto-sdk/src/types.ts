@@ -207,6 +207,11 @@ export type Effect =
       points: { x: number; y: number }[];
     } & EffectScope);
 
+/** Complete parameter set for the levels effect. */
+export type LevelsParams = Required<Pick<Extract<Effect, { type: "levels" }>,
+  "in_black" | "in_white" | "gamma" | "out_black" | "out_white"
+>>;
+
 // ── Nodes ──────────────────────────────────────────────────────────────────
 
 export interface NodeProps {
