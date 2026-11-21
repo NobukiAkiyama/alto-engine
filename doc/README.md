@@ -1,6 +1,7 @@
 # ドキュメント
 
 - [実装状況（M0〜M8）](MILESTONES.md)
+- [対応ブラウザーと検証状況](BROWSER-SUPPORT.md)
 - [Web アプリへの組み込み方](embedding.md)
 - [Alto Engine 設計書（PDF）](<Alto Engine 設計書.pdf>)
 - [版管理の拡張と最低限の画像編集](design/VERSIONING-AND-IMAGE-EDITING.md)
