@@ -330,6 +330,26 @@ fn unsharp_mask_q14(original: vec4i, blurred: vec4i, settings: vec4i) -> vec4i {
  }
  return out;
 }
+fn motion_blur_q14(ix: vec2i, settings: vec4i) -> vec4i {
+ let radius = settings.x;
+ if radius == 0 { return texel_a(ix); }
+ let spacing_q8 = settings.y;
+ let direction = hue_sincos_q14(settings.z);
+ let step = vec2i(
+  (direction.x * spacing_q8 + 128) >> 8,
+  (direction.y * spacing_q8 + 128) >> 8,
+ );
+ var accum = vec4i(0);
+ for (var i = -radius; i <= radius; i = i + 1) {
+  let offset = vec2i(
+   (i * step.x + 8192) >> 14,
+   (i * step.y + 8192) >> 14,
+  );
+  accum = accum + texel_a(ix + offset);
+ }
+ let taps = 2 * radius + 1;
+ return (accum + vec4i(taps / 2)) / taps;
+}
 fn resample_stage(ix: vec2i) -> vec4i {
  let settings=c.grid[0];let m=u32(settings.z);
  let shift=i32(1u<<m);
@@ -376,5 +396,6 @@ fn resample_stage(ix: vec2i) -> vec4i {
  else if c.info.x==33u{out=hue_saturation_q14(texel_a(ix));}
  else if c.info.x==34u{out=high_pass_q14(texel_a(ix),texel_b(ix));}
  else if c.info.x==35u{out=unsharp_mask_q14(texel_a(ix),texel_b(ix),settings);}
+ else if c.info.x==36u{out=motion_blur_q14(ix,settings);}
  textureStore(output,ix,vec4u(clamp(out,vec4i(0),vec4i(Q14_ONE))));
 }

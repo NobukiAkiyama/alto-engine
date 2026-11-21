@@ -257,12 +257,12 @@ pub fn effect_output_bounds(effects: &[REffect], bounds: IRect) -> Option<IRect>
 
 **Interfaces:** Produces `Effect::MotionBlur { angle, distance, selection, extra }`、`REffectKind::MotionBlur { angle_q16, distance_q8 }`、移動ぼかしのモード、`hue_sincos_q14` の Rust 参照と JS 参照（`effect_reference.rs`、`cpu-composite.js`）。
 
-- [ ] 試験 `hue_sincos_q14_reference_matches_the_shader_on_all_angles`（Q16 度の全域 ±11796480 を刻み 4096 で、Rust 参照と GPU が一致。JS 参照も同じ表）。
-- [ ] 試験 `motion_blur_zero_distance_is_identity`、`motion_blur_of_flat_color_is_flat`、`motion_blur_axis_aligned_is_a_box_average`（角度 0 と 90 度が手計算の箱平均）、`motion_blur_roi_expands_by_half_distance`（`input_roi_v3`）。
-- [ ] 試験（`effect.rs`）`validate_rejects_distance_above_128`、`validate_rejects_angle_outside_range`。
-- [ ] parity 症例 `effect-motion-blur`（0、45、90、−135 度）、`effect-motion-blur-tile-seam`（タイル境界をまたぐ矩形）。
-- [ ] 試験（`canvas.rs`）`canvas_rotate_turns_the_motion_blur_angle`、`canvas_resize_scales_the_distance`、`nonuniform_resize_refuses_motion_blur`。
-- [ ] 完了条件・検証コマンドは FX-4 と同じ。
+- [x] 試験 `hue_sincos_q14_reference_matches_the_shader_on_all_angles`（Q16 度の全域 ±11796480 を刻み 4096 で、Rust 参照と GPU が一致。JS 参照も同じ表）。
+- [x] 試験 `motion_blur_zero_distance_is_identity`、`motion_blur_of_flat_color_is_flat`、`motion_blur_axis_aligned_is_a_box_average`（角度 0 と 90 度が手計算の箱平均）、`motion_blur_roi_expands_by_half_distance`（`input_roi_v3`）。
+- [x] 試験（`effect.rs`）距離と角度の範囲検証。
+- [x] parity 症例 `effect-motion-blur`（0、45、90、−135 度）、`effect-motion-blur-tile-seam`、選択範囲、調整レイヤー、距離0。
+- [x] 試験（`canvas.rs`）回転、等倍率リサイズ、非一様リサイズ拒否。
+- [x] FX-4 と同じ完了条件を満たし、Metal と SwiftShader の parity 185件、形式8パッケージ往復、SDK API チェック、ネイティブ全体検証を実施。
 
 ### 依存
 

@@ -40,6 +40,12 @@ pub enum Effect {
         selection: Option<TileMap>,
         extra: serde_json::Map<String, serde_json::Value>,
     },
+    MotionBlur {
+        angle: f64,
+        distance: f64,
+        selection: Option<TileMap>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
     ColorAdjust {
         brightness: f64,
         contrast: f64,
@@ -109,6 +115,12 @@ fn effect_from_map(mut obj: serde_json::Map<String, serde_json::Value>) -> Resul
         }),
         "high_pass" => Ok(Effect::HighPass {
             radius: effect_f64(&mut obj, "radius", 8.0)?,
+            selection: effect_selection(&mut obj)?,
+            extra: obj,
+        }),
+        "motion_blur" => Ok(Effect::MotionBlur {
+            angle: effect_f64(&mut obj, "angle", 0.0)?,
+            distance: effect_f64(&mut obj, "distance", 4.0)?,
             selection: effect_selection(&mut obj)?,
             extra: obj,
         }),
@@ -239,6 +251,16 @@ impl Serialize for Effect {
                 ("hue_saturation", selection, extra)
             }
             Self::Invert { selection, extra } => ("invert", selection, extra),
+            Self::MotionBlur {
+                angle,
+                distance,
+                selection,
+                extra,
+            } => {
+                map.insert("angle".into(), serde_json::json!(angle));
+                map.insert("distance".into(), serde_json::json!(distance));
+                ("motion_blur", selection, extra)
+            }
             Self::Curves {
                 channel,
                 points,
@@ -282,7 +304,10 @@ impl<'de> Deserialize<'de> for Effect {
 
 impl Effect {
     pub(crate) fn requires_format_eight(&self) -> bool {
-        matches!(self, Self::HighPass { .. } | Self::UnsharpMask { .. })
+        matches!(
+            self,
+            Self::HighPass { .. } | Self::UnsharpMask { .. } | Self::MotionBlur { .. }
+        )
     }
 
     pub fn selection(&self) -> Option<&TileMap> {
@@ -292,6 +317,7 @@ impl Effect {
             | Self::UnsharpMask { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
+            | Self::MotionBlur { selection, .. }
             | Self::HueSaturation { selection, .. }
             | Self::Invert { selection, .. }
             | Self::Curves { selection, .. } => selection.as_ref(),
@@ -302,6 +328,7 @@ impl Effect {
             Self::GaussianBlur { selection, .. }
             | Self::HighPass { selection, .. }
             | Self::UnsharpMask { selection, .. }
+            | Self::MotionBlur { selection, .. }
             | Self::ColorAdjust { selection, .. }
             | Self::Levels { selection, .. }
             | Self::HueSaturation { selection, .. }
@@ -318,7 +345,8 @@ impl Effect {
             | Self::Levels { extra, .. }
             | Self::HueSaturation { extra, .. }
             | Self::Invert { extra, .. }
-            | Self::Curves { extra, .. } => extra,
+            | Self::Curves { extra, .. }
+            | Self::MotionBlur { extra, .. } => extra,
         };
         if !extra.is_empty() {
             return Err(DocError::Unsupported("unknown effect fields".into()));
@@ -344,6 +372,19 @@ impl Effect {
                 finite("threshold", *threshold, 0.0, 255.0)?;
                 if threshold.fract() != 0.0 {
                     return Err(DocError::Invalid("threshold must be an integer".into()));
+                }
+            }
+            Self::MotionBlur {
+                angle, distance, ..
+            } => {
+                if !angle.is_finite() || !distance.is_finite() {
+                    return Err(DocError::Invalid("Invalid angle or distance".into()));
+                }
+                if !(-180.0..=180.0).contains(angle) {
+                    return Err(DocError::Invalid("angle must be in [-180, 180]".into()));
+                }
+                if !(0.0..=128.0).contains(distance) {
+                    return Err(DocError::Invalid("distance must be in [0, 128]".into()));
                 }
             }
             Self::ColorAdjust {
@@ -426,6 +467,7 @@ mod tests {
             r#"{"type":"gaussian_blur"}"#,
             r#"{"type":"gaussian_blur","radius":12,"legacy":true}"#,
             r#"{"type":"high_pass","legacy":true}"#,
+            r#"{"type":"motion_blur","angle":45,"distance":32}"#,
             r#"{"type":"unsharp_mask","legacy":true}"#,
             r#"{"type":"color_adjust","brightness":0.25,"contrast":1.5,"saturation":0.5}"#,
             r#"{"type":"color_adjust"}"#,
@@ -535,6 +577,50 @@ mod tests {
     }
 
     #[test]
+    fn motion_blur_defaults_parse_and_roundtrip() {
+        let effect: Effect = serde_json::from_str(r#"{"type":"motion_blur"}"#).unwrap();
+        assert_eq!(
+            effect,
+            Effect::MotionBlur {
+                angle: 0.0,
+                distance: 4.0,
+                selection: None,
+                extra: Default::default(),
+            }
+        );
+        effect.validate().unwrap();
+        let json = serde_json::to_string(&effect).unwrap();
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), effect);
+    }
+
+    #[test]
+    fn validate_rejects_motion_blur_distance_and_angle_outside_range() {
+        let validate = |angle, distance| {
+            Effect::MotionBlur {
+                angle,
+                distance,
+                selection: None,
+                extra: Default::default(),
+            }
+            .validate()
+        };
+        for (angle, distance) in [(-180.0, 0.0), (180.0, 128.0), (45.0, 64.0)] {
+            validate(angle, distance).unwrap();
+        }
+        for (angle, distance) in [
+            (-180.001, 4.0),
+            (180.001, 4.0),
+            (0.0, -0.001),
+            (0.0, 128.001),
+        ] {
+            assert!(matches!(
+                validate(angle, distance),
+                Err(DocError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
     fn unsharp_defaults_parse_and_roundtrip() {
         let effect: Effect = serde_json::from_str(r#"{"type":"unsharp_mask"}"#).unwrap();
         assert_eq!(
@@ -594,11 +680,19 @@ mod tests {
             selection: None,
             extra: Default::default(),
         };
+        let motion_blur = Effect::MotionBlur {
+            angle: 45.0,
+            distance: 32.0,
+            selection: None,
+            extra: Default::default(),
+        };
         for (effect, adjustment) in [
             (high_pass.clone(), false),
             (high_pass, true),
             (unsharp.clone(), false),
             (unsharp, true),
+            (motion_blur.clone(), false),
+            (motion_blur, true),
         ] {
             let mut layer = Node::raster("Format eight effect");
             if adjustment {

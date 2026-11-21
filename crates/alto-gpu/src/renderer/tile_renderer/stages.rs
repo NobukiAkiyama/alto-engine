@@ -16,6 +16,10 @@ fn smoothing_radius(kind: &REffectKind) -> Option<(f32, u32)> {
         REffectKind::UnsharpMask {
             radius, radius_q8, ..
         } if !unsharp_is_identity(kind) => Some((radius, radius_q8)),
+        REffectKind::MotionBlur { distance_q8, .. } if distance_q8 != 0 => {
+            let half_q8 = distance_q8.div_ceil(2);
+            Some((half_q8 as f32 / 256.0, half_q8))
+        }
         _ => None,
     }
 }
@@ -26,6 +30,23 @@ fn needs_original(effect: &REffect) -> bool {
             effect.kind,
             REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. }
         )
+}
+
+fn motion_blur_settings(kind: &REffectKind, sample: RoiQ) -> Result<[i32; 4]> {
+    let REffectKind::MotionBlur {
+        angle_q16,
+        distance_q8,
+    } = *kind
+    else {
+        unreachable!("motion blur settings requested for another effect")
+    };
+    let half_q8 = distance_q8.div_ceil(2);
+    let (radius, rho8) = sample.taps(half_q8)?;
+    if radius == 0 {
+        return Ok([0, 0, angle_q16, 0]);
+    }
+    let spacing_q8 = (rho8 + radius / 2) / radius;
+    Ok([radius as i32, spacing_q8 as i32, angle_q16, 0])
 }
 
 pub(super) fn needs_backdrop_halo(effect: &REffect, exact: bool) -> bool {
@@ -334,6 +355,12 @@ impl Context<'_> {
             REffectKind::UnsharpMask { .. } if unsharp_is_identity(&effect.kind) => {
                 return self.crop(input, roi);
             }
+            REffectKind::MotionBlur { distance_q8: 0, .. } => return self.crop(input, roi),
+            REffectKind::MotionBlur { .. } => {
+                return Err(RenderError::Internal(
+                    "motion blur requires an integer motion-blur stage".into(),
+                ));
+            }
             REffectKind::HighPass { .. } | REffectKind::UnsharpMask { .. } => {
                 return Err(RenderError::Internal(
                     "effect requires a smoothing stack".into(),
@@ -558,42 +585,73 @@ impl Context<'_> {
                 let roi = grid.to_roi()?;
                 let filtered = if let Some((sample, _)) = smoothing_grid(effect, grid)? {
                     let source = use_plane(&mut previous, sample.level);
-                    let (radius, radius_q8) =
-                        smoothing_radius(&effect.kind).expect("smoothing effect");
-                    let blurred =
-                        self.gaussian(&source, sample.to_roi()?, world, radius, radius_q8)?;
-                    let original =
-                        (sample.level == grid.level && needs_original(effect)).then_some(source);
-                    let blurred = self.crop(blurred, roi)?;
-                    if needs_original(effect) {
-                        let original =
-                            original.unwrap_or_else(|| use_plane(&mut previous, grid.level));
-                        let combine = match effect.kind {
-                            REffectKind::HighPass { .. } => Some((34, [0; 4])),
-                            REffectKind::UnsharpMask {
-                                amount_q8,
-                                threshold_q14,
-                                ..
-                            } => Some((35, [amount_q8 as i32, threshold_q14 as i32, 0, 0])),
-                            _ => None,
-                        };
-                        let filtered = if let Some((mode, settings)) = combine {
-                            let output = self.alloc(roi)?;
-                            let params = Self::q14_params(
-                                mode,
-                                roi,
-                                [Some(original.roi), Some(blurred.roi)],
-                                settings,
-                                None,
-                            )?;
-                            self.dispatch(&output, &original, &blurred, &original, params, &[])?;
-                            output
+                    if matches!(effect.kind, REffectKind::MotionBlur { .. }) {
+                        let sample_roi = sample.to_roi()?;
+                        let output = self.alloc(sample_roi)?;
+                        let params = Self::q14_params(
+                            36,
+                            sample_roi,
+                            [Some(source.roi), None],
+                            motion_blur_settings(&effect.kind, sample)?,
+                            None,
+                        )?;
+                        self.dispatch(&output, &source, &source, &source, params, &[])?;
+                        let filtered = self.crop(output, roi)?;
+                        if needs_original(effect) {
+                            let original = if sample.level == grid.level {
+                                self.crop(source, roi)?
+                            } else {
+                                use_plane(&mut previous, grid.level)
+                            };
+                            self.select_effect(&original, filtered, effect, roi, world)?
+                        } else {
+                            filtered
+                        }
+                    } else {
+                        let (radius, radius_q8) =
+                            smoothing_radius(&effect.kind).expect("smoothing effect");
+                        let blurred =
+                            self.gaussian(&source, sample.to_roi()?, world, radius, radius_q8)?;
+                        let original = (sample.level == grid.level && needs_original(effect))
+                            .then_some(source);
+                        let blurred = self.crop(blurred, roi)?;
+                        if needs_original(effect) {
+                            let original =
+                                original.unwrap_or_else(|| use_plane(&mut previous, grid.level));
+                            let combine = match effect.kind {
+                                REffectKind::HighPass { .. } => Some((34, [0; 4])),
+                                REffectKind::UnsharpMask {
+                                    amount_q8,
+                                    threshold_q14,
+                                    ..
+                                } => Some((35, [amount_q8 as i32, threshold_q14 as i32, 0, 0])),
+                                _ => None,
+                            };
+                            let filtered = if let Some((mode, settings)) = combine {
+                                let output = self.alloc(roi)?;
+                                let params = Self::q14_params(
+                                    mode,
+                                    roi,
+                                    [Some(original.roi), Some(blurred.roi)],
+                                    settings,
+                                    None,
+                                )?;
+                                self.dispatch(
+                                    &output,
+                                    &original,
+                                    &blurred,
+                                    &original,
+                                    params,
+                                    &[],
+                                )?;
+                                output
+                            } else {
+                                blurred
+                            };
+                            self.select_effect(&original, filtered, effect, roi, world)?
                         } else {
                             blurred
-                        };
-                        self.select_effect(&original, filtered, effect, roi, world)?
-                    } else {
-                        blurred
+                        }
                     }
                 } else {
                     self.stage(use_plane(&mut previous, grid.level), effect, roi, world)?
@@ -697,6 +755,34 @@ mod tests {
         assert_eq!(
             smoothing_grid(&blur, desired).unwrap(),
             smoothing_grid(&high_pass, desired).unwrap()
+        );
+    }
+
+    #[test]
+    fn motion_blur_roi_expands_by_half_distance() {
+        let effect = REffect {
+            kind: REffectKind::MotionBlur {
+                angle_q16: 45 * 65536,
+                distance_q8: 32 * 256,
+            },
+            selection: None,
+        };
+        let desired = Roi {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            w: 256,
+            h: 256,
+        };
+        let input = Context::input_roi_v3(std::slice::from_ref(&effect), desired).unwrap();
+        assert_eq!(
+            (input.x, input.y, input.w, input.h),
+            (-16.0, -16.0, 288, 288)
+        );
+        let grid = RoiQ::from_roi(desired).unwrap();
+        assert_eq!(
+            motion_blur_settings(&effect.kind, grid).unwrap(),
+            [16, 256, 45 * 65536, 0]
         );
     }
 

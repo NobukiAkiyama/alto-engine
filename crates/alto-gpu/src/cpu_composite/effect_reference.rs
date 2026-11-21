@@ -1,6 +1,333 @@
 //! Reference blend for a Q14 input and its Gaussian-smoothed plane.
 use super::q14::{Q, straight};
 
+const CORDIC_ATAN_DEG_Q16: [i64; 16] = [
+    2949120, 1740967, 919879, 466945, 234379, 117304, 58666, 29335, 14668, 7334, 3667, 1833, 917,
+    458, 229, 115,
+];
+
+fn hue_sincos_q14(angle: i32) -> [i64; 2] {
+    let angle = i64::from(angle);
+    match angle {
+        0 => return [Q, 0],
+        5_898_240 => return [0, Q],
+        -5_898_240 => return [0, -Q],
+        11_796_480 | -11_796_480 => return [-Q, 0],
+        _ => {}
+    }
+    let mut z = angle;
+    let mut x = 9949i64;
+    let mut y = 0i64;
+    if z > 5_898_240 {
+        z -= 11_796_480;
+        x = -x;
+        y = -y;
+    }
+    if z < -5_898_240 {
+        z += 11_796_480;
+        x = -x;
+        y = -y;
+    }
+    for (i, atan) in CORDIC_ATAN_DEG_Q16.iter().enumerate() {
+        let step_x = y >> i;
+        let step_y = x >> i;
+        if z >= 0 {
+            x -= step_x;
+            y += step_y;
+            z -= atan;
+        } else {
+            x += step_x;
+            y -= step_y;
+            z += atan;
+        }
+    }
+    [x.clamp(-Q, Q), y.clamp(-Q, Q)]
+}
+
+fn motion_blur_q14(
+    source: &[[i64; 4]],
+    size: [usize; 2],
+    x: i32,
+    y: i32,
+    radius: i32,
+    spacing_q8: i32,
+    angle_q16: i32,
+) -> [i64; 4] {
+    if radius == 0 {
+        return if x >= 0 && y >= 0 && (x as usize) < size[0] && (y as usize) < size[1] {
+            source[y as usize * size[0] + x as usize]
+        } else {
+            [0; 4]
+        };
+    }
+    let [cos, sin] = hue_sincos_q14(angle_q16);
+    let step = [
+        (cos * i64::from(spacing_q8) + 128) >> 8,
+        (sin * i64::from(spacing_q8) + 128) >> 8,
+    ];
+    let mut sum = [0i64; 4];
+    for i in -radius..=radius {
+        let offset = [
+            (i64::from(i) * step[0] + 8192) >> 14,
+            (i64::from(i) * step[1] + 8192) >> 14,
+        ];
+        let sx = i64::from(x) + offset[0];
+        let sy = i64::from(y) + offset[1];
+        if sx >= 0 && sy >= 0 && sx < size[0] as i64 && sy < size[1] as i64 {
+            let pixel = source[sy as usize * size[0] + sx as usize];
+            for (sum, value) in sum.iter_mut().zip(pixel) {
+                *sum += value;
+            }
+        }
+    }
+    let taps = i64::from(radius * 2 + 1);
+    sum.map(|value| (value + taps / 2) / taps)
+}
+
+#[test]
+fn hue_sincos_q14_reference_covers_the_full_angle_domain() {
+    for angle in (-11_796_480..=11_796_480).step_by(4096) {
+        let [cos, sin] = hue_sincos_q14(angle);
+        assert!((-Q..=Q).contains(&cos));
+        assert!((-Q..=Q).contains(&sin));
+        assert!((cos * cos + sin * sin - Q * Q).abs() < 262_144);
+    }
+    assert_eq!(hue_sincos_q14(0), [Q, 0]);
+    assert_eq!(hue_sincos_q14(5_898_240), [0, Q]);
+    assert_eq!(hue_sincos_q14(-5_898_240), [0, -Q]);
+    assert_eq!(hue_sincos_q14(11_796_480), [-Q, 0]);
+}
+
+#[test]
+fn hue_sincos_q14_reference_matches_the_shader_on_all_angles() {
+    use super::{Gpu, map_readback};
+
+    let gpu = match Gpu::new() {
+        Ok(Some(gpu)) => gpu,
+        Ok(None) if !cfg!(target_os = "macos") => {
+            eprintln!("hue CORDIC GPU comparison skipped: no adapter");
+            return;
+        }
+        Ok(None) => panic!("hue CORDIC GPU comparison requires an adapter"),
+        Err(error) => panic!("hue CORDIC GPU setup failed: {error}"),
+    };
+    let production = include_str!("../../shaders/effects-q14.wgsl");
+    let start = production.find("const CORDIC_ATAN_DEG_Q16").unwrap();
+    let end = production.find("fn hue_saturation_q14").unwrap();
+    let helper = &production[start..end];
+    let shader = format!(
+        r#"
+const Q14_ONE: i32 = 16384;
+{helper}
+@group(0) @binding(0) var<storage, read_write> output: array<vec2i>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {{
+    if id.x >= 5761u {{ return; }}
+    let angle = -11796480 + i32(id.x) * 4096;
+    output[id.x] = hue_sincos_q14(angle);
+}}
+"#
+    );
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("exhaustive hue CORDIC comparison"),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("exhaustive hue CORDIC comparison"),
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let size = (5761 * std::mem::size_of::<[i32; 2]>()) as u64;
+    let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hue CORDIC results"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hue CORDIC readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("hue CORDIC results"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output.as_entire_binding(),
+        }],
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("hue CORDIC comparison"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("hue CORDIC comparison"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(91, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+    gpu.queue.submit(Some(encoder.finish()));
+    map_readback(&gpu.device, &readback).unwrap();
+    let mapped = readback.slice(..).get_mapped_range().unwrap();
+    let actual: &[[i32; 2]] = bytemuck::cast_slice(&mapped);
+    let mut hash = 0xcbf29ce484222325u64;
+    for (index, angle) in (-11_796_480..=11_796_480).step_by(4096).enumerate() {
+        let expected = hue_sincos_q14(angle);
+        assert_eq!(
+            actual[index],
+            [expected[0] as i32, expected[1] as i32],
+            "angle {angle}"
+        );
+        for value in actual[index] {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    eprintln!("hue CORDIC exhaustive FNV64: {hash:016x}");
+    drop(mapped);
+    readback.unmap();
+}
+
+#[test]
+fn motion_blur_zero_distance_is_identity() {
+    let source = [[234, 117, 200, 280], [100, 200, 300, 400]];
+    assert_eq!(motion_blur_q14(&source, [2, 1], 0, 0, 0, 0, 0), source[0]);
+    assert_eq!(motion_blur_q14(&source, [2, 1], -1, 0, 0, 0, 0), [0; 4]);
+}
+
+#[test]
+fn motion_blur_of_flat_color_is_flat_inside_the_roi() {
+    let pixel = [4096, 2048, 1024, Q];
+    let source = [pixel; 25];
+    for y in 1..4 {
+        for x in 1..4 {
+            assert_eq!(motion_blur_q14(&source, [5, 5], x, y, 1, 256, 0), pixel);
+        }
+    }
+}
+
+#[test]
+fn motion_blur_axis_aligned_is_a_box_average() {
+    let source: Vec<_> = (0..25)
+        .map(|i| {
+            let value = ((i / 5 * 10 + i % 5) as i64) * 1000;
+            [value, value, value, Q]
+        })
+        .collect();
+    assert_eq!(
+        motion_blur_q14(&source, [5, 5], 2, 2, 1, 256, 0),
+        [22_000, 22_000, 22_000, Q]
+    );
+    assert_eq!(
+        motion_blur_q14(&source, [5, 5], 2, 2, 1, 256, 5_898_240),
+        [22_000, 22_000, 22_000, Q]
+    );
+}
+
+#[test]
+fn motion_blur_reference_matches_renderer() {
+    use super::{byte_q14, premul_byte_q14, scene, v3_test_render_with};
+    use alto_core::{PixelFormat, TileKey};
+    use alto_scene::{RContent, REffect, REffectKind, RFeatures};
+
+    const W: usize = 256;
+    const DISTANCE_Q8: u32 = 8 * 256;
+    const RADIUS: i32 = 4;
+    let mut bytes = vec![0u8; W * W * 4];
+    for y in 0..W {
+        for x in 0..W {
+            let offset = (y * W + x) * 4;
+            bytes[offset..offset + 4].copy_from_slice(&[
+                (x & 255) as u8,
+                (y & 255) as u8,
+                ((x + y) & 255) as u8,
+                128,
+            ]);
+        }
+    }
+    let source: Vec<[i64; 4]> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let alpha = u32::from(p[3]);
+            [
+                i64::from(premul_byte_q14(u32::from(p[0]), alpha)),
+                i64::from(premul_byte_q14(u32::from(p[1]), alpha)),
+                i64::from(premul_byte_q14(u32::from(p[2]), alpha)),
+                i64::from(byte_q14(alpha)),
+            ]
+        })
+        .collect();
+    let reference: Vec<u8> = (0..W * W)
+        .flat_map(|i| {
+            motion_blur_q14(
+                &source,
+                [W, W],
+                (i % W) as i32,
+                (i / W) as i32,
+                RADIUS,
+                256,
+                45 * 65536,
+            )
+            .map(|v| ((v * 255 + Q / 2) / Q) as u8)
+        })
+        .collect();
+
+    let mut store = alto_raster::ObjectStore::default();
+    let hash = store.insert_tile(&alto_raster::TileData::new(PixelFormat::Rgba8, bytes).unwrap());
+    let mut document = scene(
+        RContent::Tiles(vec![crate::RenderTile {
+            key: TileKey { tx: 0, ty: 0 },
+            hash,
+        }]),
+        RFeatures {
+            effects: vec![REffect {
+                kind: REffectKind::MotionBlur {
+                    angle_q16: 45 * 65536,
+                    distance_q8: DISTANCE_Q8,
+                },
+                selection: None,
+            }],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_EXACT;
+    if let Some(gpu) = v3_test_render_with(&document, &store, (0, 0, 0)) {
+        assert_eq!(gpu.len(), reference.len());
+        if let Some(i) = gpu
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.as_chunks::<4>().0)
+            .position(|(actual, expected)| actual != expected)
+        {
+            panic!(
+                "motion-blur pixel ({}, {}): GPU {:?}, reference {:?}",
+                i % W,
+                i / W,
+                &gpu[i * 4..i * 4 + 4],
+                &reference[i * 4..i * 4 + 4],
+            );
+        }
+    }
+}
+
 fn high_pass_q14(source: [i64; 4], blurred: [i64; 4]) -> [i64; 4] {
     let a = straight(source);
     let b = straight(blurred);

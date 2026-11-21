@@ -1148,6 +1148,62 @@ export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 25
   });
 }
 
+const CORDIC_ATAN_DEG_Q16 = [2949120, 1740967, 919879, 466945, 234379, 117304, 58666, 29335,
+  14668, 7334, 3667, 1833, 917, 458, 229, 115];
+
+/** Integer port of `hue_sincos_q14` from effects-q14.wgsl. */
+export function hueSinCosQ14(angle) {
+  if (angle === 0) return [Q14_ONE, 0];
+  if (angle === 5898240) return [0, Q14_ONE];
+  if (angle === -5898240) return [0, -Q14_ONE];
+  if (angle === 11796480 || angle === -11796480) return [-Q14_ONE, 0];
+  let z = angle, x = 9949, y = 0;
+  if (z > 5898240) { z -= 11796480; x = -x; y = -y; }
+  if (z < -5898240) { z += 11796480; x = -x; y = -y; }
+  for (let i = 0; i < 16; i++) {
+    const stepX = y >> i, stepY = x >> i;
+    if (z >= 0) { x -= stepX; y += stepY; z -= CORDIC_ATAN_DEG_Q16[i]; }
+    else { x += stepX; y -= stepY; z += CORDIC_ATAN_DEG_Q16[i]; }
+  }
+  return [Math.min(Q14_ONE, Math.max(-Q14_ONE, x)), Math.min(Q14_ONE, Math.max(-Q14_ONE, y))];
+}
+
+/** Independent level-0 CPU reference for one integer motion-blur tile. */
+export function renderMotionBlurV3(image, { angle, distance }, tile = [0, 0], canvas = [256, 256], selection) {
+  const angleQ16 = Number(qFromF64Bits(f64Bits(angle), 16));
+  const distanceQ8 = Number(qFromF64Bits(f64Bits(distance), 8));
+  const halfQ8 = Math.floor((distanceQ8 + 1) / 2);
+  const radius = Math.ceil(halfQ8 / 256);
+  const spacingQ8 = radius ? Math.floor((halfQ8 + Math.floor(radius / 2)) / radius) : 0;
+  const [cos, sin] = hueSinCosQ14(angleQ16);
+  const step = [(cos * spacingQ8 + 128) >> 8, (sin * spacingQ8 + 128) >> 8];
+  const origin = tile.map((index) => index * 256);
+  const frame = { origin, scale: 1 };
+  const out = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const dx = origin[0] + x, dy = origin[1] + y;
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1]) continue;
+    const sum = [0, 0, 0, 0];
+    for (let i = -radius; i <= radius; i++) {
+      const sx = dx + ((i * step[0] + 8192) >> 14);
+      const sy = dy + ((i * step[1] + 8192) >> 14);
+      if (sx < 0 || sy < 0 || sx >= image.w || sy >= image.h) continue;
+      const offset = (sy * image.w + sx) * 4;
+      const q = ingressQ14(image.pixels.subarray(offset, offset + 4));
+      for (let c = 0; c < 4; c++) sum[c] += Number(q[c]);
+    }
+    const taps = radius * 2 + 1;
+    const filtered = sum.map((value) => BigInt(Math.floor((value + Math.floor(taps / 2)) / taps)));
+    const inputOffset = (dy * image.w + dx) * 4;
+    const original = ingressQ14(image.pixels.subarray(inputOffset, inputOffset + 4)).map(BigInt);
+    const result = selection
+      ? maskSelectQ14(original, filtered, maskCoverage(selection, x, y, frame))
+      : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
 /** Q14 unsharp mask over the Gaussian-smoothed straight channels. The
  * threshold comparison is per channel, including equality. */
 export function renderUnsharpMaskV3(image, { radius, amount, threshold }, tile = [0, 0], canvas = [256, 256], selection) {
@@ -1670,7 +1726,7 @@ export function fnv64(bytes) {
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
 // Every document effect has an integer v3 stage; selections use mode 22.
-const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "motion_blur", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:

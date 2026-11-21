@@ -54,6 +54,14 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
                 .expect("validated unsharp-mask amount") as u32,
             threshold_q14: (*threshold as u32 * 16384 + 127) / 255,
         },
+        alto_doc::Effect::MotionBlur {
+            angle, distance, ..
+        } => REffectKind::MotionBlur {
+            angle_q16: alto_core::q_from_f64_bits(angle.to_bits(), 16)
+                .expect("validated motion-blur angle") as i32,
+            distance_q8: alto_core::q_from_f64_bits(distance.to_bits(), 8)
+                .expect("validated motion-blur distance") as u32,
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,
@@ -898,6 +906,23 @@ mod tests {
                 radius_q8: 128,
                 amount_q8: 1,
                 threshold_q14: 8160,
+            }
+        );
+    }
+
+    #[test]
+    fn motion_blur_scene_quantizes_angle_and_distance() {
+        let effect = alto_doc::Effect::MotionBlur {
+            angle: 45.0,
+            distance: 12.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            render_effect(&effect).kind,
+            REffectKind::MotionBlur {
+                angle_q16: 45 * 65536,
+                distance_q8: 12 * 256,
             }
         );
     }

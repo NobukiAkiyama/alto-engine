@@ -514,6 +514,10 @@ export type Effect = ({
     amount?: number;
     threshold?: number;
 } & EffectScope) | ({
+    type: "motion_blur";
+    angle?: number;
+    distance?: number;
+} & EffectScope) | ({
     type: "color_adjust";
     brightness?: number;
     contrast?: number;
