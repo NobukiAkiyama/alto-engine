@@ -569,7 +569,7 @@ impl Document {
     }
     /// The oldest format that supports all semantics used by this document.
     pub fn required_format(&self) -> u32 {
-        if self.has_high_pass() {
+        if self.has_format_eight_effects() {
             FORMAT_VERSION
         } else if self.nodes.values().any(|node| {
             matches!(
@@ -597,17 +597,12 @@ impl Document {
         }
     }
 
-    fn has_high_pass(&self) -> bool {
+    fn has_format_eight_effects(&self) -> bool {
         self.nodes.values().any(|node| {
-            node.props
-                .effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::HighPass { .. }))
+            node.props.effects.iter().any(Effect::requires_format_eight)
                 || matches!(
                     &node.kind,
-                    NodeKind::Adjustment {
-                        adjustment: Effect::HighPass { .. }
-                    }
+                    NodeKind::Adjustment { adjustment } if adjustment.requires_format_eight()
                 )
         })
     }
@@ -669,9 +664,9 @@ impl Document {
         if doc.assets.len() != asset_count {
             return Err(DocError::Invalid("Duplicate asset ID".into()));
         }
-        if doc.meta.format_version < FORMAT_VERSION && doc.has_high_pass() {
+        if doc.meta.format_version < FORMAT_VERSION && doc.has_format_eight_effects() {
             return Err(DocError::Unsupported(format!(
-                "high-pass effects require document format {FORMAT_VERSION}"
+                "document effects require format {FORMAT_VERSION}"
             )));
         }
         doc.validate_graph()?;

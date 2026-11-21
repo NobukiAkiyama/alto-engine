@@ -41,6 +41,19 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
                 .expect("validated high-pass radius"),
         },
+        alto_doc::Effect::UnsharpMask {
+            radius,
+            amount,
+            threshold,
+            ..
+        } => REffectKind::UnsharpMask {
+            radius: f(*radius),
+            radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
+                .expect("validated unsharp-mask radius"),
+            amount_q8: alto_core::q_from_f64_bits(amount.to_bits(), 8)
+                .expect("validated unsharp-mask amount") as u32,
+            threshold_q14: (*threshold as u32 * 16384 + 127) / 255,
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,
@@ -857,6 +870,36 @@ mod tests {
         };
         assert_eq!((radius_q8(&a), radius_q8(&b)), (0, 1));
         assert_eq!(radius_q8(&blur(64.0)), 16384);
+    }
+
+    #[test]
+    fn unsharp_scene_uses_exact_radius_amount_and_threshold() {
+        let effect = |amount: f64| {
+            render_effect(&alto_doc::Effect::UnsharpMask {
+                radius: 0.5,
+                amount,
+                threshold: 127.0,
+                selection: None,
+                extra: Default::default(),
+            })
+        };
+        let tie = 1.0f64 / 512.0;
+        let below = f64::from_bits(tie.to_bits() - 1);
+        assert_eq!(below as f32, tie as f32);
+        let (a, b) = (effect(below), effect(tie));
+        assert!(matches!(
+            a.kind,
+            REffectKind::UnsharpMask { amount_q8: 0, .. }
+        ));
+        assert_eq!(
+            b.kind,
+            REffectKind::UnsharpMask {
+                radius: 0.5,
+                radius_q8: 128,
+                amount_q8: 1,
+                threshold_q14: 8160,
+            }
+        );
     }
 
     #[test]

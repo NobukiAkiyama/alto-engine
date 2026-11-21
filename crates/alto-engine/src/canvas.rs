@@ -487,19 +487,18 @@ fn moved_selection(
 /// Smoothing radii are in document pixels, so a scale changes them. A non-uniform scale
 /// has no equivalent radius, and refusing beats a different picture.
 fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effect>>, EngineError> {
-    let Some(effect) = effects
-        .iter()
-        .find(|e| matches!(e, Effect::GaussianBlur { .. } | Effect::HighPass { .. }))
-    else {
+    let Some(effect_name) = effects.iter().find_map(|effect| match effect {
+        Effect::GaussianBlur { .. } => Some("a Gaussian blur"),
+        Effect::HighPass { .. } => Some("a high-pass radius"),
+        Effect::UnsharpMask { radius, .. } if *radius != 0.0 => Some("an unsharp-mask radius"),
+        _ => None,
+    }) else {
         return Ok(None);
     };
     if (sx - sy).abs() > 1e-9 {
-        let message = if matches!(effect, Effect::GaussianBlur { .. }) {
-            "a non-uniform canvas resize cannot keep a Gaussian blur"
-        } else {
-            "a non-uniform canvas resize cannot keep a high-pass radius"
-        };
-        return Err(unsupported(message));
+        return Err(unsupported(&format!(
+            "a non-uniform canvas resize cannot keep {effect_name}"
+        )));
     }
     let mut out = effects.to_vec();
     for effect in &mut out {
@@ -514,6 +513,14 @@ fn scale_effects(effects: &[Effect], sx: f64, sy: f64) -> Result<Option<Vec<Effe
                 *radius *= sx;
                 if !(0.5..=64.0).contains(radius) {
                     return Err(unsupported("the resized high-pass radius is out of range"));
+                }
+            }
+            Effect::UnsharpMask { radius, .. } => {
+                *radius *= sx;
+                if *radius > 64.0 {
+                    return Err(unsupported(
+                        "the resized unsharp-mask radius would exceed 64",
+                    ));
                 }
             }
             _ => {}
@@ -1439,6 +1446,25 @@ mod tests {
         assert!(scale_effects(&effects, 2.0, 1.0).is_err());
         assert!(scale_effects(&effects, 0.125, 0.125).is_err());
         assert!(scale_effects(&effects, 33.0, 33.0).is_err());
+    }
+
+    #[test]
+    fn canvas_resize_changes_unsharp_radius_only() {
+        let unsharp = |radius| Effect::UnsharpMask {
+            radius,
+            amount: 1.25,
+            threshold: 3.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        let effects = [unsharp(2.0)];
+        assert_eq!(
+            scale_effects(&effects, 4.0, 4.0).unwrap(),
+            Some(vec![unsharp(8.0)])
+        );
+        assert!(scale_effects(&effects, 2.0, 1.0).is_err());
+        assert!(scale_effects(&effects, 33.0, 33.0).is_err());
+        assert!(scale_effects(&[unsharp(0.0)], 2.0, 1.0).unwrap().is_none());
     }
 
     #[test]

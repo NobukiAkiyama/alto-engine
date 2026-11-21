@@ -13,6 +13,64 @@ fn high_pass_q14(source: [i64; 4], blurred: [i64; 4]) -> [i64; 4] {
     output
 }
 
+fn unsharp_mask_q14(
+    source: [i64; 4],
+    blurred: [i64; 4],
+    amount_q8: i64,
+    threshold_q14: i64,
+) -> [i64; 4] {
+    let a = straight(source);
+    let b = straight(blurred);
+    let alpha = source[3];
+    let mut output = source;
+    for channel in 0..3 {
+        let difference = a[channel] - b[channel];
+        if difference.abs() > threshold_q14 && amount_q8 != 0 {
+            let delta = (amount_q8 * difference + 128).div_euclid(256);
+            let sharp = (a[channel] + delta).clamp(0, Q);
+            output[channel] = (sharp * alpha + Q / 2) / Q;
+        }
+    }
+    output
+}
+
+#[test]
+fn unsharp_zero_amount_is_identity() {
+    let source = [234, 117, 200, 280];
+    assert_eq!(unsharp_mask_q14(source, [0, 0, 0, Q], 0, 0), source);
+    assert_eq!(unsharp_mask_q14([0; 4], [Q; 4], 1280, 0), [0; 4]);
+}
+
+#[test]
+fn unsharp_threshold_keeps_small_differences() {
+    let source = [4000, 7000, 10000, Q];
+    let blurred = [3999, 7005, Q, Q];
+    assert_eq!(
+        unsharp_mask_q14(source, blurred, 128, 5),
+        [4000, 7000, 6808, Q]
+    );
+}
+
+#[test]
+fn unsharp_negative_difference_rounds_by_floor() {
+    let source = [1000, 1000, 1000, Q];
+    let blurred = [1003, 1002, 997, Q];
+    assert_eq!(
+        unsharp_mask_q14(source, blurred, 64, 0),
+        [999, 1000, 1001, Q]
+    );
+}
+
+#[test]
+fn unsharp_clamps_at_both_ends() {
+    let source = [2048, 6144, 4096, Q / 2];
+    let blurred = [6144, 2048, 4096, Q / 2];
+    assert_eq!(
+        unsharp_mask_q14(source, blurred, 1280, 0),
+        [0, Q / 2, 4096, Q / 2]
+    );
+}
+
 #[test]
 fn high_pass_of_flat_color_is_mid_gray() {
     let color = [1024, 5120, 3072, 8192];

@@ -1139,9 +1139,35 @@ export function renderBlurV3(image, radii, tile = [0, 0], canvas = [256, 256]) {
 /** A level-0 high-pass tile. The two separable blur passes need a source halo
  * equal to the kernel's radius, including neighbor tiles across tile seams. */
 export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 256], selection) {
+  return renderDifferenceV3(image, radius, tile, canvas, selection, (input, low) => {
+    const high = cqStraight(input).map((value, channel) => {
+      const straight = value - low[channel] + CQ / 2n;
+      return cqMul(cqClamp(straight), input[3]);
+    });
+    return [...high, input[3]];
+  });
+}
+
+/** Q14 unsharp mask over the Gaussian-smoothed straight channels. The
+ * threshold comparison is per channel, including equality. */
+export function renderUnsharpMaskV3(image, { radius, amount, threshold }, tile = [0, 0], canvas = [256, 256], selection) {
+  const strength = qFromF64Bits(f64Bits(amount), 8);
+  const cutoff = BigInt(byteQ14(threshold));
+  return renderDifferenceV3(image, strength === 0n ? 0 : radius, tile, canvas, selection, (input, low) => {
+    if (strength === 0n || radius === 0) return input;
+    const sharp = cqStraight(input).map((value, channel) => {
+      const d = value - low[channel];
+      if (d >= -cutoff && d <= cutoff) return input[channel];
+      // BigInt's right shift floors, including for negative differences.
+      return cqMul(cqClamp(value + ((strength * d + 128n) >> 8n)), input[3]);
+    });
+    return [...sharp, input[3]];
+  });
+}
+
+function renderDifferenceV3(image, radius, tile, canvas, selection, combine) {
   const rho = blurRadiusQ8(radius);
   const halo = Math.ceil(rho / 256);
-  const weights = blurKernelQ16(halo, rho);
   const span = 256 + 2 * halo;
   const origin = tile.map((index) => index * 256);
   const source = new Array(span * span);
@@ -1152,8 +1178,12 @@ export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 25
       ? ingressQ14(image.pixels.subarray(offset, offset + 4))
       : [0, 0, 0, 0];
   }
-  const horizontal = blurPassQ14(source, span, span, weights, false);
-  const blurred = blurPassQ14(horizontal, span, span, weights, true);
+  let blurred = source;
+  if (halo > 0) {
+    const weights = blurKernelQ16(halo, rho);
+    const horizontal = blurPassQ14(source, span, span, weights, false);
+    blurred = blurPassQ14(horizontal, span, span, weights, true);
+  }
   const out = new Uint8Array(256 * 256 * 4);
   const frame = { origin, scale: 1 };
   for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
@@ -1161,12 +1191,7 @@ export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 25
     const index = (y + halo) * span + x + halo;
     const input = source[index].map(BigInt);
     const low = cqStraight(blurred[index].map(BigInt));
-    const high = cqStraight(input).map((value, channel) => {
-      const straight = value - low[channel] + CQ / 2n;
-      const clamped = straight < 0n ? 0n : straight > CQ ? CQ : straight;
-      return cqMul(clamped, input[3]);
-    });
-    const filtered = [...high, input[3]];
+    const filtered = combine(input, low);
     const result = selection ? maskSelectQ14(input, filtered, maskCoverage(selection, x, y, frame)) : filtered;
     out.set(resolveQ14(result), (y * 256 + x) * 4);
   }
@@ -1645,7 +1670,7 @@ export function fnv64(bytes) {
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
 // Every document effect has an integer v3 stage; selections use mode 22.
-const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:
