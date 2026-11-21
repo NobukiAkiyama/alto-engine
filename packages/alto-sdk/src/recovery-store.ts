@@ -25,14 +25,20 @@ async function measure(dir: FileSystemDirectoryHandle, skipLabel = false): Promi
     modified = 0;
   for await (const [name, handle] of (dir as unknown as Entries).entries()) {
     if (skipLabel && name === "label.json") continue;
-    if (handle.kind === "directory") {
-      const inner = await measure(handle as FileSystemDirectoryHandle);
-      bytes += inner.bytes;
-      modified = Math.max(modified, inner.modified);
-    } else {
-      const file = await (handle as FileSystemFileHandle).getFile();
-      bytes += file.size;
-      modified = Math.max(modified, file.lastModified);
+    try {
+      if (handle.kind === "directory") {
+        const inner = await measure(handle as FileSystemDirectoryHandle);
+        bytes += inner.bytes;
+        modified = Math.max(modified, inner.modified);
+      } else {
+        const file = await (handle as FileSystemFileHandle).getFile();
+        bytes += file.size;
+        modified = Math.max(modified, file.lastModified);
+      }
+    } catch (error) {
+      // Checkpoint compaction and atomic writes can retire a file between
+      // enumeration and getFile. The remaining entries are still listable.
+      if (!(error instanceof DOMException) || error.name !== "NotFoundError") throw error;
     }
   }
   return { bytes, modified };
