@@ -6,6 +6,8 @@ Rust / WASM / WebGPUの画像編集エンジン、TypeScript SDK、編集用Play
 
 [ドキュメント一覧](doc/README.md) / [実装状況](doc/MILESTONES.md) / [リリース手順とバージョン方針](RELEASING.md) / [追加実装の検証](doc/verification/VERSIONING-IMAGE-EDITING-2026-11-03.md) / [既存の検証記録](doc/verification/RESULTS.md) / [M7/M8サンプル文書（format 5）](verification/sample-m78.alto) / [M6サンプル文書](verification/sample-m6.alto) / [lyon・vello比較](doc/verification/VECTOR-COMPARISON.md) / [alto-gitの実行記録](doc/verification/m8-git-transcript.txt)
 
+対応ブラウザーは **Chrome、Edge、Firefox、Safari** です。WebGPUが利用できる最新バージョンを使ってください。機能ごとの対応状況と確認済み範囲は[対応ブラウザー](doc/BROWSER-SUPPORT.md)に記載しています。ブラウザー標準APIの違いにより、一部のファイル操作では保存・ダウンロードなど別の操作になります。
+
 [コールド表示の実装・測定結果](doc/verification/COLD-RENDERING-RESULTS-2026-10-24.md) / [設計と後続段階](doc/design/COLD-RENDERING-DESIGN.md)。通常ラスタの可視描画を中断可能にしました。
 
 [エンジン再設計（差分描画・エラー一本化）](doc/design/2026-10-24-engine-redesign.md)。編集後は、変更した範囲の表示タイルだけを作り直します。
@@ -20,7 +22,7 @@ sh scripts/build-vector-comparison.sh   # 比較ページを使う場合
 sh scripts/run.sh
 ```
 
-ChromeまたはEdgeのWebGPU対応環境で **http://localhost:8765/examples/browser-playground/** を開きます。サーバーはプロジェクトのルートから起動してください。`file://` では動作しません。別ポートは `ALTO_PORT=8766 sh scripts/run.sh` で指定できます。
+WebGPU対応のChrome、Edge、FirefoxまたはSafariで **http://localhost:8765/examples/browser-playground/** を開きます。サーバーはプロジェクトのルートから起動してください。`file://` では動作しません。別ポートは `ALTO_PORT=8766 sh scripts/run.sh` で指定できます。
 
 ### 操作
 
@@ -109,7 +111,7 @@ const info = await doc.text.info(id); // 行、未表示文字、使用フォン
 
 ### フォルダ形式（`.altoproj`）
 
-「フォルダに保存」で保存先フォルダを選ぶと、`manifest.json`・`document.json`・`snapshots/`・`commits/`・`objects/` を書きます（Chrome/EdgeのFile System Access APIが必要）。2回目以降は新しいオブジェクトだけを書き、最後に `manifest.json` を置き換えます。別の場所でフォルダが変更されていれば、上書きせずにエラーにします。「フォルダを開く」で読み込みます。
+「フォルダに保存」で保存先フォルダを選ぶと、`manifest.json`・`document.json`・`snapshots/`・`commits/`・`objects/` を書きます（File System Access API対応ブラウザーが必要。現状はChrome/Edge）。Safari/Firefoxでは `.alto` ファイルへの保存・読み込みを使ってください。2回目以降は新しいオブジェクトだけを書き、最後に `manifest.json` を置き換えます。別の場所でフォルダが変更されていれば、上書きせずにエラーにします。「フォルダを開く」で読み込みます。
 
 ### Gitで管理する（alto-git）
 
@@ -307,7 +309,7 @@ await doc.transact('layer.props', tx => tx.setProps(layer, { clip_to_below: true
 
 ## ソースから再ビルド
 
-Rust **1.99.1**（`rust-toolchain.toml`）、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**（`crates/alto-wasm/Cargo.toml` の `wasm-bindgen` と同じピン）、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。`sh scripts/check.sh` はリリースWASMを組み直し、出力のSHA-256が `wasm/SHA256SUMS` と違えば失敗します。PR・main/tag push・通常の手動実行では `wasm` と `wasm-build` が macos-15 で並列に動き、`wasm-build` の成果物を受け取った `wasm-browser` の4グループが macos-15 で並列に動きます。どれかが失敗すれば CI は失敗し、`ci-ok` ジョブがその結果をひとつにまとめます。doc/ と README.md・RELEASING.md・THIRD-PARTY-NOTICES.md だけを変えた PR ではビルドとテストを省き、`ci-ok` だけが報告します。`wasm` は `check.sh wasm-fast` の検査を行い、リリースハッシュ差分はレポートするだけです。`wasm-build` はリリース WASM・SDK・比較用 WASM を一度だけビルドして `browser-build` artifact で渡し、`wasm-hashes` artifact に全対象の SHA-256・サイズと build.json の提案値を保存します。`wasm-browser` は SwiftShader のブラウザ機能検証をグループに分けて実行し、parity グループが半透明 parity を記録（`alpha-measure-swiftshader` artifact）、embed グループが埋め込み例のビルドと実行、vector グループがバッチ描画と legacy RGBA16F の画素比較も担当します。main push の `wasm-release-hashes` は arm64 macOS の別々のクリーンターゲットで2回ビルドし、両者のハッシュ・サイズの不一致をすべて表示して失敗します。コミット済み値との差分では失敗せず、`wasm-hashes-main` artifact に提案値を保存します。tag push だけがコミット済み値と照合し、不一致をまとめて表示して直ちに失敗します。タグ前の更新手順は [RELEASING.md](RELEASING.md) を参照してください。リリースバイナリのハッシュはリリース時に一度更新し、描画の v1/v2 render hash とは無関係です。`examples/browser-playground/pkg` はビルド成果物のディレクトリで、`check.sh` が丸ごと作り直します。ハッシュの更新は aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` です。このスクリプトは `enforce_vector=1` にしますが、`wasm/RELEASE` の `tag=` は変えません。CIもそのホストで組み直します。`v*` タグのリリースworkflowは `enforce_vector=0` の間、Releaseを作りません。
+Rust **1.99.1**（`rust-toolchain.toml`）、`wasm32-unknown-unknown`、wasm-bindgen-cli **0.2.129**（`crates/alto-wasm/Cargo.toml` の `wasm-bindgen` と同じピン）、Node.js、pnpmが必要です。依存バージョンはCargo.lockとpnpm-lock.yamlで固定しています。`sh scripts/check.sh` はリリースWASMを組み直し、出力のSHA-256が `wasm/SHA256SUMS` と違えば失敗します。PR・main/tag push・通常の手動実行では `wasm` と `wasm-build` が macos-15 で並列に動き、`wasm-build` の成果物を受け取った `wasm-browser` の4グループ（Chrome/SwiftShader）とSafari・Firefoxのネイティブブラウザー検証が動きます。FirefoxはCI上で機能・画素スイートを実行します。Safariも同じ検証を試みますが、GitHub-hosted macOS 26 runnerではWebGPUアダプターが得られずテスト開始前に失敗しており、SafariのCI自動検証は未成立です。どれかが失敗すれば CI は失敗し、`ci-ok` ジョブがその結果をひとつにまとめます。doc/ と README.md・RELEASING.md・THIRD-PARTY-NOTICES.md だけを変えた PR ではビルドとテストを省き、`ci-ok` だけが報告します。`wasm` は `check.sh wasm-fast` の検査を行い、リリースハッシュ差分はレポートするだけです。`wasm-build` はリリース WASM・SDK・比較用 WASM を一度だけビルドして `browser-build` artifact で渡し、`wasm-hashes` artifact に全対象の SHA-256・サイズと build.json の提案値を保存します。`wasm-browser` は SwiftShader のブラウザ機能検証をグループに分けて実行し、parity グループが半透明 parity を記録（`alpha-measure-swiftshader` artifact）、embed グループが埋め込み例のビルドと実行、vector グループがバッチ描画と legacy RGBA16F の画素比較も担当します。main push の `wasm-release-hashes` は arm64 macOS の別々のクリーンターゲットで2回ビルドし、両者のハッシュ・サイズの不一致をすべて表示して失敗します。コミット済み値との差分では失敗せず、`wasm-hashes-main` artifact に提案値を保存します。tag push だけがコミット済み値と照合し、不一致をまとめて表示して直ちに失敗します。タグ前の更新手順は [RELEASING.md](RELEASING.md) を参照してください。リリースバイナリのハッシュはリリース時に一度更新し、描画の v1/v2 render hash とは無関係です。`examples/browser-playground/pkg` はビルド成果物のディレクトリで、`check.sh` が丸ごと作り直します。ハッシュの更新は aarch64-apple-darwin で `sh scripts/update-wasm-sums.sh` です。このスクリプトは `enforce_vector=1` にしますが、`wasm/RELEASE` の `tag=` は変えません。CIもそのホストで組み直します。`v*` タグのリリースworkflowは `enforce_vector=0` の間、Releaseを作りません。
 
 `@alto/engine` の公開物にはWASMを含めます。`pnpm --dir packages/alto-sdk build`（`npm publish` の `prepack` も同じ）が Playground の pkg を `dist/pkg` へコピーし、`package.json` の `files` が `dist` を梱包します。WASMが無いとビルドは失敗します。`.gitignore` は生成物をリポジトリから外すだけで、パック対象からは外しません。
 
