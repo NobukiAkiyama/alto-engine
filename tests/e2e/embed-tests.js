@@ -967,6 +967,23 @@ export async function runEmbedTests(_playground, log) {
         }
       }
     });
+    await test("exportImage PNG preserves display pixels across the encoder's band boundary", async () => {
+      const width = 18, height = 273;
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width, height });
+      let layer;
+      await doc.transact("raster", (tx) => {
+        layer = tx.addRaster({ bounds: { x: 0, y: 0, width, height } });
+      });
+      await doc.image.gradient(layer, {
+        kind: "linear", start: [0, 0], end: [width, height],
+        stops: [{ offset: 0, color: [0, 0.5, 1, 0.2] }, { offset: 1, color: [1, 0, 0.1, 0.7] }],
+      });
+      const png = await decodePng(await doc.exportImage());
+      const want = await displayStraight(engine, width, height);
+      const diff = pixelDiff(png.pixels, want, width);
+      assert(png.width === width && png.height === height && diff.count === 0, "band boundary: " + diff.first.join(" | "));
+    });
     await test("a frame that takes seconds on the GPU is not reported as a lost GPU", async () => {
       // The 600×300 scene the exactness test used before it was shrunk: one frame of it
       // takes 3–5 s on SwiftShader. A healthy device that is still working is not lost.
