@@ -203,7 +203,17 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        17
+        18
+    }
+    /// A cheap token that detects both document edits and live render changes.
+    #[wasm_bindgen(js_name=exportSceneVersion)]
+    pub fn export_scene_version(&self) -> Result<String, JsValue> {
+        let revision = self.engine.document(self.doc).map_err(error)?.revision;
+        let display = self.renderer.display_report();
+        Ok(format!(
+            "{revision}:{}:{}",
+            display.generation, display.device_epoch
+        ))
     }
     #[wasm_bindgen(js_name=setMaxUndo)]
     pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
