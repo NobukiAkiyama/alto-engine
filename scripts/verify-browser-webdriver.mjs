@@ -56,6 +56,23 @@ function suiteBody(name) {
   return modules[name];
 }
 
+async function runInPage(source, timeoutMs) {
+  const id = crypto.randomUUID();
+  const moduleSource = `(() => { const id=${JSON.stringify(id)}; (async()=>{${source}})().then(value=>{window.__altoWebDriverRuns??={};window.__altoWebDriverRuns[id]={ok:true,value}},error=>{window.__altoWebDriverRuns??={};window.__altoWebDriverRuns[id]={ok:false,error:String(error?.stack||error)}}); })();`;
+  await evaluate(`(()=>{const script=document.createElement('script');script.type='module';script.textContent=${JSON.stringify(moduleSource)};document.head.append(script);return true})()`);
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const result = await evaluate(`window.__altoWebDriverRuns?.[${JSON.stringify(id)}]||null`);
+    if (result) {
+      await evaluate(`delete window.__altoWebDriverRuns[${JSON.stringify(id)}]`);
+      if (!result.ok) throw Error(result.error);
+      return result.value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw Error(`Page script timed out after ${timeoutMs} ms`);
+}
+
 try {
   await mkdir(reportDir, { recursive: true });
   server = createServer(async (req, res) => {
@@ -122,7 +139,7 @@ try {
     await evaluate("(async()=>{document.querySelector('#test-results').dataset.report=''})()");
     let error = null;
     try {
-      await evaluate(`(async()=>{${suiteBody(name)}})()`, 1_200_000);
+      await runInPage(suiteBody(name), 1_200_000);
     } catch (e) { error = String(e); }
     const report = await evaluate("document.querySelector('#test-results').dataset.report||''").catch(() => "");
     const parsed = report ? JSON.parse(report) : null;

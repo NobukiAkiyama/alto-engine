@@ -436,7 +436,7 @@ jobs:
       - name: Enable Safari WebDriver
         if: matrix.browser == 'safari'
         run: |
-          safaridriver --enable
+          sudo safaridriver --enable
           safaridriver --port 4444 > "$RUNNER_TEMP/safaridriver.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/webdriver.pid"
       - name: Install Firefox and geckodriver
