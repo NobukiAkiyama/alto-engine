@@ -523,6 +523,7 @@ async function pump() {
       return;
     }
     durableSeq = w.seq!;
+    if (w.kind === "checkpoint") postMessage({ t: "checkpointStored" });
     if (w.kind === "append") {
       journaledBytes += size;
       journaledRecords++;
