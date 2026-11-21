@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (v, m) => {
@@ -655,15 +656,7 @@ export async function runM5Tests(engine, log) {
         same(reference, await read("ZIP open")),
         "M5 ZIP pixels",
       );
-      const restored = new Promise((resolve) => {
-        const off = unstable(engine).onGpu((gpuEvent) => {
-          if (gpuEvent !== "restored") return;
-          off();
-          resolve();
-        });
-      });
-      await testing(engine).destroyGpu();
-      await restored;
+      await gpuRestored(engine);
       assert(
         same(reference, await read("GPU recovery")),
         "M5 GPU loss",

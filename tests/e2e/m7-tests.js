@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 // M7: text, Japanese vertical layout, font fallback, OpenType features and selection,
 // checked on GPU-rendered pixels through the SDK.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
@@ -246,26 +247,7 @@ export async function runM7Tests(engine, log) {
       await testing(engine).crash();
       doc = engine.document;
       assert(saved === (await doc.snapshotHash()) && same(after, await unstable(engine).readTile(0, 0)), "journal");
-      const gpu = unstable(engine);
-      let restored = false, finished = false, timer, off;
-      const recovery = new Promise((resolve, reject) => {
-        off = gpu.onGpu((event) => {
-          if (event === "restored") { restored = true; resolve(); }
-        });
-        timer = setTimeout(() => reject(Error("GPU recovery timeout")), 15000);
-      });
-      const driveRecovery = async () => {
-        await testing(engine).destroyGpu();
-        // Hidden pages may not dispatch animation frames. Drive the same
-        // recovery path through waitFrame while the device-loss callback arrives.
-        while (!restored && !finished) {
-          try { await gpu.settle(); }
-          catch (error) { if (error.code !== "GPU_LOST") throw error; }
-          if (!restored && !finished) await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      };
-      try { await Promise.race([recovery, driveRecovery()]); }
-      finally { finished = true; clearTimeout(timer); off(); }
+      await gpuRestored(engine);
       assert(same(after, await unstable(engine).readTile(0, 0)), "GPU rebuild");
       await frame(engine);
     });
