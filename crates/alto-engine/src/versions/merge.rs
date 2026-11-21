@@ -58,6 +58,45 @@ pub(super) struct MergeSession {
     revision: u64,
     working: ContentHash,
     result: Value,
+    canvas: Option<CanvasLink>,
+}
+/// A canvas edit moves the root transform and resizes the canvas together, so the
+/// transform only fits the canvas size of its own side. When the root transform
+/// conflicts, its resolution carries that side's size along.
+#[derive(Clone)]
+struct CanvasLink {
+    conflict: String,
+    theirs: Value,
+}
+const CANVAS_SIZE: [&str; 2] = ["width", "height"];
+fn canvas_size(doc: &Value) -> Value {
+    let meta = &doc["meta"];
+    serde_json::json!({ "width": meta["width"], "height": meta["height"] })
+}
+fn set_canvas_size(doc: &mut Value, size: &Value) {
+    for key in CANVAS_SIZE {
+        doc["meta"][key] = size[key].clone();
+    }
+}
+/// Folds the canvas size into a root transform conflict. The result starts with our
+/// size, matching the default of keeping our transform.
+fn link_canvas(
+    result: &mut Value,
+    ours: &Value,
+    theirs: &Value,
+    conflicts: &mut Vec<MergeConflict>,
+) -> Option<CanvasLink> {
+    let root = ours["root"].as_str()?;
+    let transform = ["nodes", root, "props", "transform"];
+    let conflict = conflicts.iter().find(|c| c.path == transform)?.id.clone();
+    conflicts.retain(|c| {
+        !(c.path.len() == 2 && c.path[0] == "meta" && CANVAS_SIZE.contains(&c.path[1].as_str()))
+    });
+    set_canvas_size(result, &canvas_size(ours));
+    Some(CanvasLink {
+        conflict,
+        theirs: canvas_size(theirs),
+    })
 }
 impl MergeSession {
     pub(super) fn roots(&self) -> impl Iterator<Item = ContentHash> {
@@ -327,7 +366,7 @@ impl Engine {
             None => None,
         };
         let mut conflicts = vec![];
-        let result = merge_value(
+        let mut result = merge_value(
             bv.as_ref(),
             Some(&ov),
             Some(&tv),
@@ -335,6 +374,7 @@ impl Engine {
             &mut conflicts,
         )
         .ok_or_else(|| fail("INVALID_MERGE_RESULT", "stash merge produced no document"))?;
+        let canvas = link_canvas(&mut result, &ov, &tv, &mut conflicts);
         if conflicts.is_empty() && result_doc(result.clone()).is_err() {
             conflicts.push(MergeConflict {
                 id: "0".into(),
@@ -365,6 +405,7 @@ impl Engine {
             revision: self.document(h)?.revision,
             working: ContentHash::of(&self.snapshot(h)?),
             result,
+            canvas,
         };
         self.versions.get_mut(&h).unwrap().merge = Some(session);
         Ok(Some(plan))
@@ -424,10 +465,12 @@ impl Engine {
         let ov = value(&o)?;
         let tv = value(&t)?;
         let mut conflicts = vec![];
+        let mut canvas = None;
         let result = if let Some(base) = base {
             let bv = value(&self.resolve(h, VersionRef::Commit(base))?)?;
-            let v =
+            let mut v =
                 merge_value(Some(&bv), Some(&ov), Some(&tv), &mut vec![], &mut conflicts).unwrap();
+            canvas = link_canvas(&mut v, &ov, &tv, &mut conflicts);
             if conflicts.is_empty() && result_doc(v.clone()).is_err() {
                 conflicts.push(MergeConflict {
                     id: "0".into(),
@@ -459,6 +502,7 @@ impl Engine {
             revision: self.document(h)?.revision,
             working: ContentHash::of(&self.snapshot(h)?),
             result,
+            canvas,
         };
         self.versions.get_mut(&h).unwrap().merge = Some(session);
         Ok(plan)
@@ -542,6 +586,12 @@ impl Engine {
                 _ => return Err(fail("INVALID_ARGUMENT", "unknown resolution choice")),
             };
             set_path(&mut result, &c.path, selected.optional())?;
+            // An explicit transform keeps our size, the default the plan started with.
+            if let Some(link) = plan.canvas.as_ref().filter(|l| l.conflict == c.id)
+                && r.choice == "theirs"
+            {
+                set_canvas_size(&mut result, &link.theirs);
+            }
         }
         if plan.view.kind == "no_op" {
             self.cancel_merge(h)?;
