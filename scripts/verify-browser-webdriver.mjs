@@ -111,7 +111,15 @@ try {
     if (i === 119) throw Error("Document did not open");
   }
   for (const name of selected) {
+    for (let i = 0; i < 120; i++) {
+      const state = await evaluate("window.altoEngine?.status?.state||''").catch(() => "");
+      if (state === "ready") break;
+      if (state === "failed" || state === "disposed") throw Error(`Playground engine is ${state} before ${name}`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
+    }
     console.log("RUN", name);
+    await evaluate("(async()=>{document.querySelector('#test-results').dataset.report=''})()");
     let error = null;
     try {
       await evaluate(`(async()=>{${suiteBody(name)}})()`, 1_200_000);
