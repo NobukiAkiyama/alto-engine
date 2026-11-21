@@ -137,6 +137,15 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
                 ..Default::default()
             },
         ),
+        (
+            "text-v3-vertical-rtl",
+            TextContent {
+                text: "吾אבג猫".into(),
+                style: style(vec![latin, jp], 40.0),
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
     ]
 }
 

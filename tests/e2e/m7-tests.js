@@ -134,6 +134,15 @@ export async function runM7Tests(engine, log) {
       assert((await doc.text.info(id)).glyphs === 2, "liga=0");
       metrics.features = { plain, palt, fwid };
     });
+    await test("vertical RTL reads upward and hit testing follows the caret", async () => {
+      await setup();
+      await addText(vertical("אבג", [latin.id, jp.id]));
+      const start = await doc.text.caret(id, 0);
+      const end = await doc.text.caret(id, 3);
+      assert(start.a[1] > end.a[1], "the first character should start at the bottom of the run");
+      assert(await doc.text.hitTest(id, ...start.a) === 0, "hit at the bottom");
+      assert(await doc.text.hitTest(id, ...end.a) === 3, "hit at the top");
+    });
     await test("selection: hit test / caret / rectangles / motion through layer transforms and surrogate pairs", async () => {
       await setup(1024, 768);
       await doc.transact("text", (tx) => { id = tx.addText({ text: "あいう\nえお𠮷", style: { fonts: [jp.id], size: 100, line_height: 1.5 }, writing_mode: "horizontal_tb", frame: { kind: "point" } }); tx.setTransform(id, [2, 0, 0, 2, 100, 50]); });

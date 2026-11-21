@@ -584,15 +584,8 @@ fn shape_paragraph(it: &mut Itemizer, base: usize, para: &str, vertical: bool) -
     if para.is_empty() {
         return vec![];
     }
-    let levels: Vec<u8> = if vertical {
-        vec![0; para.len()]
-    } else {
-        unicode_bidi::BidiInfo::new(para, None)
-            .levels
-            .iter()
-            .map(|l| l.number())
-            .collect()
-    };
+    let paragraph_level = vertical.then(unicode_bidi::Level::ltr);
+    let bidi = unicode_bidi::BidiInfo::new(para, paragraph_level);
     let mut breaks = vec![false; para.len() + 1];
     for (i, _) in unicode_linebreak::linebreaks(para) {
         breaks[i] = true;
@@ -640,7 +633,10 @@ fn shape_paragraph(it: &mut Itemizer, base: usize, para: &str, vertical: bool) -
         let key = Key {
             style,
             font,
-            level: levels[g0],
+            level: match mode {
+                Mode::Upright | Mode::Tcy(_) => 0,
+                Mode::Horizontal | Mode::Sideways => bidi.levels[g0].number(),
+            },
             mode,
         };
         match runs.last_mut() {
