@@ -18,6 +18,15 @@ pub enum FontEmbedding {
     Editable,
 }
 
+/// An OpenType variation axis in the selected face's design units.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontAxis {
+    pub tag: String,
+    pub min: f32,
+    pub default: f32,
+    pub max: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FontInfo {
     pub family: String,
@@ -31,6 +40,8 @@ pub struct FontInfo {
     pub has_vertical_metrics: bool,
     pub has_vertical_alternates: bool,
     pub outline: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub axes: Vec<FontAxis>,
 }
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[error("Invalid font: {0}")]
@@ -110,7 +121,24 @@ pub fn inspect(data: &[u8], face_index: u32) -> Result<FontInfo, FontError> {
         None => (FontEmbedding::Installable, true),
     };
     let t = face.tables();
+    let axes = face
+        .variation_axes()
+        .into_iter()
+        .filter_map(|axis| {
+            let tag = axis.tag.to_bytes();
+            if !tag.iter().all(|byte| (b' '..=b'~').contains(byte)) {
+                return None;
+            }
+            Some(FontAxis {
+                tag: tag.into_iter().map(char::from).collect(),
+                min: axis.min_value,
+                default: axis.def_value,
+                max: axis.max_value,
+            })
+        })
+        .collect();
     Ok(FontInfo {
+        axes,
         family: name(&face, &[16, 1]).unwrap_or_else(|| "Unknown".into()),
         subfamily: name(&face, &[17, 2]).unwrap_or_default(),
         face_index,
