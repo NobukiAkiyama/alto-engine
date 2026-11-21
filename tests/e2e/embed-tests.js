@@ -116,6 +116,19 @@ async function quadrants(engine, doc) {
   await doc.transact("image.import", (tx) => tx.addRasterFromAsset(image));
 }
 
+async function pngStreamBlob(stream) {
+  const reader = stream.getReader(), chunks = [];
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) return new Blob(chunks, { type: "image/png" });
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** Decodes an 8-bit, non-interlaced RGB/RGBA PNG to straight RGBA bytes, without a canvas. */
 async function decodePng(blob) {
   const b = new Uint8Array(await blob.arrayBuffer()), v = new DataView(b.buffer);
@@ -1066,6 +1079,76 @@ export async function runEmbedTests(_playground, log) {
       const want = await displayStraight(engine, width, height);
       const diff = pixelDiff(png.pixels, want, width);
       assert(png.width === width && png.height === height && diff.count === 0, "band boundary: " + diff.first.join(" | "));
+    });
+    await test("PNG stream matches Blob export and releases the worker on cancel and edit", async () => {
+      const engine = await engineIn(container());
+      const doc = await engine.createDocument({ width: 54, height: 567 });
+      let layer;
+      await doc.transact("add raster", (tx) => {
+        layer = tx.addRaster({ bounds: { x: 0, y: 0, width: 54, height: 567 } });
+      });
+      await doc.image.gradient(layer, {
+        kind: "linear", start: [0, 0], end: [54, 567],
+        stops: [{ offset: 0, color: [0, 0.5, 1, 0.2] }, { offset: 1, color: [1, 0, 0.1, 0.8] }],
+      });
+      for (const options of [{ region: { x0: 3, y0: 13, x1: 49, y1: 550 } }, { scale: 0.5 }]) {
+        const want = await decodePng(await doc.exportImage(options));
+        const got = await decodePng(await pngStreamBlob(doc.exportImageStream(options)));
+        const diff = pixelDiff(got.pixels, want.pixels, want.width);
+        assert(got.width === want.width && got.height === want.height && diff.count === 0, "stream pixels: " + diff.first.join(" | "));
+      }
+      const reader = doc.exportImageStream().getReader();
+      assert(!(await reader.read()).done, "missing header");
+      assert(await rejectsWith(doc.exportImageStream().getReader().read(), "BUSY"), "second stream was accepted");
+      engine.viewport.panBy(10, 15);
+      await unstable(engine).settle();
+      assert(!(await reader.read()).done, "panning broke the stream");
+      await reader.cancel();
+      assert((await doc.exportImage()).size > 0, "cancel blocked Blob export");
+
+      const edited = doc.exportImageStream().getReader();
+      await edited.read();
+      await doc.transact("edit", (tx) => tx.setProps(layer, { opacity: 0.5 }));
+      assert(await rejectsWith(edited.read(), "CONFLICT", "document-changed"), "stream survived an edit");
+      assert(await rejectsWith(doc.exportImageStream({ scale: 0.7 }).getReader().read(), "UNSUPPORTED"), "inexact export accepted");
+      assert(await rejectsWith(doc.exportImageStream({ type: "image/jpeg" }).getReader().read(), "UNSUPPORTED"), "non-PNG stream accepted");
+
+      const restarted = doc.exportImageStream().getReader();
+      await restarted.read();
+      await doc.durable();
+      await testing(engine).crash();
+      assert(await rejectsWith(restarted.read(), "CONFLICT", "document-changed"), "stream survived a Worker restart");
+
+      const replaced = doc.exportImageStream().getReader();
+      await replaced.read();
+      const next = await engine.createDocument({ width: 8, height: 8 });
+      assert(await rejectsWith(replaced.read(), "CONFLICT", "document-changed"), "stream survived document replacement");
+      assert((await pngStreamBlob(next.exportImageStream())).size > 0, "replacement could not stream");
+    });
+
+    await test("PNG stream can export a document larger than 64 million pixels", async () => {
+      const width = 1024, height = 62501;
+      const engine = await engineIn(container(60, 60));
+      const doc = await engine.createDocument({ width, height });
+      assert(await rejectsWith(doc.exportImage(), "INVALID_ARGUMENT"), "Blob export cap was not enforced");
+      const reader = doc.exportImageStream().getReader();
+      const header = (await reader.read()).value;
+      const size = new DataView(header.buffer, header.byteOffset);
+      assert(size.getUint32(16) === width && size.getUint32(20) === height, "wrong streamed dimensions");
+      const first = (await reader.read()).value;
+      assert(String.fromCharCode(...first.subarray(4, 8)) === "IDAT", "missing large image data");
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter?.info.architecture.includes("swiftshader")) {
+        await reader.cancel();
+      } else {
+        let last;
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          last = next.value;
+        }
+        assert(last && String.fromCharCode(...last.subarray(4, 8)) === "IEND", "large PNG was truncated");
+      }
     });
     await test("a frame that takes seconds on the GPU is not reported as a lost GPU", async () => {
       // The 600×300 scene the exactness test used before it was shrunk: one frame of it

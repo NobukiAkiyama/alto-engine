@@ -25,7 +25,8 @@ export type ConflictReason =
   | "not-failed"
   | "no-recovery"
   | "revision"
-  | "document-closed";
+  | "document-closed"
+  | "document-changed";
 
 /**
  * Values that let a host tell cases of one code apart. Which keys appear depends on
@@ -76,6 +77,7 @@ export function fromWorkerError(error: { code?: string; message?: string } | und
 /** Engine messages name some conflicts in their text; carry them as a reason. */
 function conflictDetails(code: ErrorCode, message = ""): ErrorDetails | undefined {
   if (code !== "CONFLICT") return undefined;
+  if (message.includes("document-changed")) return { reason: "document-changed" };
   if (message.includes("document-closed")) return { reason: "document-closed" };
   if (message.includes("no-recovery")) return { reason: "no-recovery" };
   if (message.includes("recovery-pending")) return { reason: "recovery-pending" };

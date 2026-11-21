@@ -18,7 +18,7 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 17;
+export const PROTOCOL = 18;
 export const DEFAULT_UNDO_STEPS = 100;
 export const MAX_UNDO_STEPS = 1000;
 
@@ -225,6 +225,9 @@ export interface Requests {
     background?: [number, number, number];
     compression?: "none" | "deflate";
   }, Blob>;
+  exportStreamOpen: Q<{ region: Rect; scale: number }, { streamId: string }>;
+  exportStreamPull: Q<{ streamId: string }, Uint8Array<ArrayBuffer> | null>;
+  exportStreamClose: Q<{ streamId: string }, true>;
   injectFinishJournalFailure: Q<None, true>;
   injectReadbackFailure: Q<{ after: number }, true>;
   // Diagnostics (unstable entry point).

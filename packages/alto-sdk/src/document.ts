@@ -640,6 +640,83 @@ export class DocumentHandle {
       throw new AltoError("INVALID_ARGUMENT", "JPEG background must contain three channels between 0 and 1", { reason: "background" });
     if (compression !== undefined && (type !== "image/tiff" || (compression !== "none" && compression !== "deflate")))
       throw new AltoError("INVALID_ARGUMENT", "compression must be none or deflate for TIFF", { reason: "compression" });
+    const { region, scale } = this.exportRegion(options);
+    const request: Args<"exportImage"> = { region, scale, type, quality, compression };
+    if (background !== undefined) request.background = [...background];
+    await this.endTool();
+    return this.request("exportImage", request);
+  }
+  /**
+   * Streams exact display-pyramid pixels as PNG chunks. At most one stream per
+   * engine is active. Validation and opening happen on the first read. Cancel
+   * an unread remainder to release the export.
+   * Editing, replacing the document, or restarting the Worker invalidates the stream.
+   */
+  exportImageStream(options: ExportImageOptions = {}): ReadableStream<Uint8Array<ArrayBuffer>> {
+    let opening: Promise<{ streamId: string }> | undefined;
+    let workerEpoch: number | undefined;
+    let cancelled = false;
+    const close = async () => {
+      if (!opening) return;
+      const opened = await opening.catch(() => undefined);
+      if (opened) {
+        await this.request("exportStreamClose", { streamId: opened.streamId }).catch(() => {});
+      }
+    };
+    const checkCurrent = () => {
+      if (this.closed || (workerEpoch !== undefined && this.core.workerEpoch !== workerEpoch)) {
+        throw new AltoError("CONFLICT", "the document changed during PNG export", { reason: "document-changed" });
+      }
+    };
+    return new ReadableStream<Uint8Array<ArrayBuffer>>({
+      pull: async (controller) => {
+        try {
+          checkCurrent();
+          if (!opening) {
+            if ((options.type ?? "image/png") !== "image/png" || options.quality !== undefined ||
+                options.background !== undefined || options.compression !== undefined) {
+              throw new AltoError("UNSUPPORTED", "streaming image export supports exact PNG only");
+            }
+            await this.endTool();
+            if (cancelled) return;
+            checkCurrent();
+            const { region, scale } = this.exportRegion(options);
+            workerEpoch = this.core.workerEpoch;
+            opening = this.request("exportStreamOpen", { region, scale });
+          }
+          const { streamId } = await opening;
+          while (!cancelled) {
+            checkCurrent();
+            const bytes = await this.request("exportStreamPull", { streamId });
+            if (cancelled) return;
+            checkCurrent();
+            if (bytes === null) {
+              controller.close();
+              return;
+            }
+            if (bytes.length) {
+              controller.enqueue(bytes);
+              return;
+            }
+          }
+        } catch (error) {
+          await close();
+          if (cancelled) return;
+          checkCurrent();
+          if (error instanceof AltoError && error.code === "WORKER_CRASHED") {
+            throw new AltoError("CONFLICT", "the Worker restarted during PNG export", { reason: "document-changed" });
+          }
+          throw error;
+        }
+      },
+      cancel: async () => {
+        cancelled = true;
+        await close();
+      },
+    }, { highWaterMark: 0 });
+  }
+
+  private exportRegion(options: ExportImageOptions): { region: Rect; scale: number } {
     const scale = options.scale ?? 1;
     if (!(scale > 0 && scale <= 1))
       throw new AltoError("INVALID_ARGUMENT", "scale must be greater than 0 and at most 1", { reason: "scale" });
@@ -655,11 +732,9 @@ export class DocumentHandle {
     };
     if (region.x1 <= region.x0 || region.y1 <= region.y0)
       throw new AltoError("INVALID_ARGUMENT", "region is empty or outside the document");
-    const request: Args<"exportImage"> = { region, scale, type, quality, compression };
-    if (background !== undefined) request.background = [...background];
-    await this.endTool();
-    return this.request("exportImage", request);
+    return { region, scale };
   }
+
   /**
    * The document's size against the `.alto` cap now. For a folder opened on demand this
    * reads the objects still in the folder first. The `packageSize` event reports the same
