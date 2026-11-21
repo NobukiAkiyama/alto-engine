@@ -579,6 +579,7 @@ export interface Engine {
     dispose(): Promise<void>;
     readonly document: DocumentHandle | null;
     readonly element: HTMLCanvasElement;
+    readonly namespace: string;
     on<K extends keyof EngineEvents>(name: K, listener: (value: EngineEvents[K]) => void): () => void;
     open(source: Blob | ArchiveSource, options?: {
         history?: ObjectStorageProvider;
@@ -592,6 +593,7 @@ export interface Engine {
     readonly recovery: {
         readonly available: boolean;
         restore(): Promise<DocumentHandle>;
+        setLabel(label: string): Promise<void>;
         discard(): Promise<void>;
         exportEmergency(): Promise<Blob>;
         recoverAfterStorageFailure(): Promise<RecoveryReport>;
@@ -638,6 +640,7 @@ export interface EngineOptions {
     // (undocumented)
     storage?: {
         namespace?: string;
+        literalNamespace?: boolean;
         recovery?: boolean;
     };
     undo?: {
@@ -961,11 +964,7 @@ export type LevelsParams = Required<Pick<Extract<Effect, {
 }>, "in_black" | "in_white" | "gamma" | "out_black" | "out_white">>;
 
 // @public
-export function listRecoveryNamespaces(): Promise<{
-    namespace: string;
-    bytes: number;
-    modified: number;
-}[]>;
+export function listRecoveryNamespaces(): Promise<RecoveryNamespace[]>;
 
 // @public (undocumented)
 export class MemoryObjectProvider implements ObjectStorageProvider {
@@ -1274,6 +1273,22 @@ export interface RasterTilesSummary {
     count: number;
     // (undocumented)
     format: "rgba8" | "r8";
+}
+
+// @public
+export interface RecoveryNamespace {
+    // (undocumented)
+    bytes: number;
+    // (undocumented)
+    height?: number;
+    // (undocumented)
+    label?: string;
+    // (undocumented)
+    modified: number;
+    // (undocumented)
+    namespace: string;
+    // (undocumented)
+    width?: number;
 }
 
 // @public (undocumented)

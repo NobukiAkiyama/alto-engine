@@ -877,6 +877,88 @@ export async function runEmbedTests(_playground, log) {
       await deleteRecovery(namespace);
       assert(!(await listRecoveryNamespaces()).some((n) => n.namespace === namespace), "deleted namespace still listed");
     });
+    await test("auto namespaces isolate two journals and list their recovery labels", async () => {
+      const a = await engineIn(container(), { storage: { namespace: "auto" } });
+      let b, reopened;
+      try {
+        b = await engineIn(container(), { storage: { namespace: "auto" } });
+        assert(a.namespace.startsWith("auto/") && b.namespace.startsWith("auto/"), "auto prefix");
+        assert(a.namespace !== b.namespace, "auto namespaces collided");
+        await a.recovery.setLabel("Sketch");
+        const [first, second] = await Promise.all([
+          a.createDocument({ width: 64, height: 80 }),
+          b.createDocument({ width: 96, height: 112 }),
+        ]);
+        await b.recovery.setLabel("Reference");
+        for (const invalid of ["", "a".repeat(257)]) {
+          assert(await rejectsWith(a.recovery.setLabel(invalid), "INVALID_ARGUMENT"), "accepted invalid label");
+        }
+        await Promise.all([
+          first.transact("draw", (tx) => tx.addRaster({ name: "Sketch layer" })),
+          second.transact("draw", (tx) => tx.addRaster({ name: "Reference layer" })),
+        ]);
+        await Promise.all([first.durable(), second.durable()]);
+        const lookup = async (namespace) => (await listRecoveryNamespaces()).find((row) => row.namespace === namespace);
+        const sketch = await lookup(a.namespace);
+        const reference = await lookup(b.namespace);
+        assert(sketch?.label === "Sketch" && sketch.width === 64 && sketch.height === 80, "first recovery label");
+        assert(reference?.label === "Reference" && reference.width === 96 && reference.height === 112, "second recovery label");
+
+        await first.canvas.resize(72, 88);
+        await first.save(blobTarget());
+        const deadline = performance.now() + 5000;
+        let resized;
+        do {
+          resized = await lookup(a.namespace);
+          if (resized?.width === 72 && resized.height === 88) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        } while (performance.now() < deadline);
+        assert(resized?.width === 72 && resized.height === 88, "checkpoint did not refresh dimensions");
+        // Keep an unsaved change so the journal is offered for recovery after a clean exit.
+        await first.transact("draw", (tx) => tx.addRaster({ name: "Unsaved layer" }));
+        const hash = await first.snapshotHash();
+        await a.dispose();
+        reopened = await engineIn(container(), { storage: { namespace: a.namespace } });
+        const restored = await reopened.recovery.restore();
+        assert(await restored.snapshotHash() === hash, "restored the wrong journal");
+        assert((await lookup(a.namespace))?.label === "Sketch", "restoring lost the label");
+
+        await b.dispose();
+        const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+        const hex = Array.from(new TextEncoder().encode(b.namespace), (value) => value.toString(16).padStart(2, "0")).join("");
+        const folder = await root.getDirectoryHandle("ns-" + hex);
+        const file = await (await folder.getFileHandle("label.json")).createWritable();
+        await file.write("{damaged");
+        await file.close();
+        const damaged = await lookup(b.namespace);
+        assert(damaged?.bytes > 0 && damaged.label === undefined && damaged.width === undefined, "bad label hid or polluted the journal");
+      } finally {
+        await reopened?.dispose();
+        await Promise.all([a.dispose(), b?.dispose()]);
+        await deleteRecovery(a.namespace);
+        if (b) await deleteRecovery(b.namespace);
+      }
+    });
+    await test("the literal auto namespace can still be recovered or discarded", async () => {
+      const storage = { namespace: "auto", literalNamespace: true };
+      let engine = await engineIn(container(), { storage });
+      try {
+        assert(engine.namespace === "auto", "literal namespace was replaced");
+        const doc = await engine.createDocument({ width: 64, height: 64 });
+        await engine.recovery.setLabel("Existing namespace");
+        await doc.transact("draw", (tx) => tx.addRaster());
+        await doc.durable();
+        await engine.dispose();
+        engine = await engineIn(container(), { storage });
+        assert(engine.recovery.available, "literal namespace was not recoverable");
+        await engine.recovery.discard();
+        const row = (await listRecoveryNamespaces()).find(({ namespace }) => namespace === "auto");
+        assert(!row?.label && !engine.recovery.available, "discard left the sidecar or journal");
+      } finally {
+        await engine.dispose();
+        await deleteRecovery("auto");
+      }
+    });
     await test("an engine without a journal writes nothing and shares no lock", async () => {
       const namespace = name("none");
       const a = await engineIn(container(), { storage: { namespace, recovery: false } });
@@ -885,6 +967,7 @@ export async function runEmbedTests(_playground, log) {
       await doc.transact("layer.add", (tx) => tx.addRaster());
       await doc.durable();
       await b.createDocument({ width: 64, height: 64 });
+      assert(await rejectsWith(a.recovery.setLabel("No journal"), "NOT_FOUND"), "label accepted without a journal");
       assert(!(await listRecoveryNamespaces()).some((n) => n.namespace === namespace), "a journal-free engine wrote a journal");
       assert(await rejectsWith(a.recovery.restore(), "NOT_FOUND"), "restore without a journal did not report NOT_FOUND");
     });

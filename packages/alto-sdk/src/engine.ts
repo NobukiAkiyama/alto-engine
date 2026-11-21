@@ -2,6 +2,7 @@ import { DocumentHandle } from "./document.js";
 import { AltoError, fromWorkerError } from "./errors.js";
 import { Emitter } from "./events.js";
 import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, type Args, type DocumentScope, type RequestName, type Result, type StreamMessage, type FrameStats, type WorkerMessage } from "./protocol.js";
+import { readRecoveryLabel, validRecoveryLabel, writeRecoveryLabel } from "./recovery-store.js";
 import type { WireState } from "./snapshot.js";
 import { frameEntries, sha256Hex, type ArchiveSource, type ObjectStorageProvider } from "./storage.js";
 import type { BrushImage, ToolHost, ToolSession } from "./tools.js";
@@ -43,8 +44,12 @@ export interface EngineOptions {
     /**
      * Separates recovery journals: one engine per name runs at a time, across tabs.
      * 1–128 characters of `A-Z a-z 0-9 . _ - /`; default `default`.
+     * Use `"auto"` for a new namespace each time. To reopen one after a reload,
+     * select it from `listRecoveryNamespaces()` and pass its full name.
      */
     namespace?: string;
+    /** Opens the pre-existing literal namespace `"auto"`, rather than generating one. */
+    literalNamespace?: boolean;
     /** Set false to keep no recovery journal; unsaved edits are then lost in a crash. */
     recovery?: boolean;
   };
@@ -126,6 +131,8 @@ export interface Engine {
   readonly status: EngineStatus;
   /** The open document. The same handle stays valid across Worker restarts. */
   readonly document: DocumentHandle | null;
+  /** This engine's resolved recovery namespace, including any generated suffix. */
+  readonly namespace: string;
   /** Where the canvas looks; zoom is in CSS pixels. */
   readonly viewport: ViewportControl;
   readonly presentation: PresentationSnapshot;
@@ -133,6 +140,11 @@ export interface Engine {
     /** A journal from an earlier session is waiting. */
     readonly available: boolean;
     restore(): Promise<DocumentHandle>;
+    /**
+     * Sets the recovery-list label (1–256 Unicode code points). Before a document
+     * opens, the engine holds it in memory. Writing the optional label is best effort.
+     */
+    setLabel(label: string): Promise<void>;
     /** Deletes the waiting journal, so a new document can start. Refused when a document is open. */
     discard(): Promise<void>;
     /** The live document as a `.alto` archive, for use when storage has failed. */
@@ -199,8 +211,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   readonly viewport: ViewportControl;
   /** @internal */
   readonly diagnostics = new Emitter<DiagnosticEvents>();
-  /** @internal */
   readonly namespace: string;
+  private recoveryLabel?: string;
+  private recoveryLabelWrite: Promise<void> | undefined;
+  private pendingRecoveryLabel?: [string, number, number];
+  private storedRecoveryLabel?: string;
   private worker: Worker | null = null;
   private sequence = 1;
   private pending = new Map<number, Pending>();
@@ -309,7 +324,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   private constructor(private readonly options: EngineOptions) {
     super();
     this.undoSteps = options.undo?.steps ?? DEFAULT_UNDO_STEPS;
-    this.namespace = options.storage?.namespace ?? "default";
+    const namespace = options.storage?.namespace ?? "default";
+    this.namespace = namespace === "auto" && !options.storage?.literalNamespace ? `auto/${crypto.randomUUID()}` : namespace;
     this.pixelRatio = this.currentRatio();
     this.workerURL = options.assets?.baseURL
       ? new URL("worker.js", new URL(options.assets.baseURL, location.href))
@@ -435,6 +451,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
             return;
           }
           this.releaseLease = release;
+          this.storedRecoveryLabel = undefined;
           resolve();
           await hold;
         })
@@ -516,6 +533,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
       if(this.document && this.document.getSnapshot().revision!==data.value.revision)
         this.publishDisplay({...this.displayState,phase:this.displayState.presentedViewport ? "holding" : "preparing",interactionReady:false});
       this.document?.apply(data.value);
+    } else if (data.t === "checkpointStored") {
+      void this.refreshRecoveryLabel();
     } else if (data.t === "storageFailure") {
       if (this.state.state !== "storage-failed") {
         const error = new AltoError("STORAGE", data.value.message);
@@ -586,7 +605,13 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     if (doc !== this.document || epoch === undefined)
       return Promise.reject(new AltoError("CONFLICT", "this document was replaced by another one", { reason: "document-closed" }));
     const [args, transfer = []] = rest;
-    return this.requestCore(t, (args ?? {}) as Args<K>, transfer, false, 0, { documentEpoch: epoch }) as Promise<Result<K>>;
+    const result = this.requestCore(t, (args ?? {}) as Args<K>, transfer, false, 0, { documentEpoch: epoch }) as Promise<Result<K>>;
+    if (t !== "durable") return result;
+    return result.then((value) => {
+      // Also refresh when paired with an older Worker that sends no checkpoint notice.
+      if (doc === this.document) void this.refreshRecoveryLabel();
+      return value;
+    });
   }
   private requestCore<K extends RequestName>(
     t: K,
@@ -709,6 +734,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.document = new DocumentHandle(this, state as WireState);
     this.documentEpoch = epoch;
     this.documentEpochs.set(this.document, epoch);
+    this.storedRecoveryLabel = undefined;
+    void this.refreshRecoveryLabel();
     this.deferredView=null;
     this.resetDisplay();
     this.emit("document", this.document);
@@ -804,14 +831,60 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         return self.recoveryWaiting;
       },
       restore: () => self.restoreRecovery(),
+      setLabel: (label: string) => self.setRecoveryLabel(label),
       discard: () => self.discardRecovery(),
       exportEmergency: () => self.exportEmergency(),
       recoverAfterStorageFailure: () => self.recoverAfterStorageFailure(),
     };
   }
+  private async setRecoveryLabel(label: string): Promise<void> {
+    if (!validRecoveryLabel(label))
+      throw new AltoError("INVALID_ARGUMENT", "the recovery label must contain 1–256 characters");
+    if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
+    if (!this.journaled) throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
+    this.recoveryLabel = label;
+    this.storedRecoveryLabel = undefined;
+    await this.refreshRecoveryLabel();
+  }
+
+  private async refreshRecoveryLabel(): Promise<void> {
+    const label = this.recoveryLabel;
+    const meta = this.document?.getSnapshot().meta;
+    if (!this.releaseLease || !meta || label === undefined) return;
+    this.pendingRecoveryLabel = [label, meta.width, meta.height];
+    this.recoveryLabelWrite ??= Promise.resolve().then(() => this.flushRecoveryLabels());
+    await this.recoveryLabelWrite;
+  }
+
+  private async flushRecoveryLabels(): Promise<void> {
+    try {
+      while (this.pendingRecoveryLabel) {
+        const entry = this.pendingRecoveryLabel;
+        this.pendingRecoveryLabel = undefined;
+        const key = JSON.stringify(entry);
+        if (this.storedRecoveryLabel !== key && await writeRecoveryLabel(this.namespace, ...entry)) {
+          this.storedRecoveryLabel = key;
+        }
+      }
+    } finally {
+      this.recoveryLabelWrite = undefined;
+    }
+  }
+
+  private releaseRecoveryLease() {
+    const release = this.releaseLease;
+    this.releaseLease = undefined;
+    if (this.recoveryLabelWrite) void this.recoveryLabelWrite.then(release);
+    else release?.();
+  }
+
   private restoreRecovery = (): Promise<DocumentHandle> => this.serialize(async () => {
     if (!this.journaled) throw new AltoError("NOT_FOUND", "the engine keeps no recovery journal");
     this.requireWaitingRecovery();
+    if (this.recoveryLabel === undefined) {
+      const storedLabel = await readRecoveryLabel(this.namespace);
+      this.recoveryLabel ??= storedLabel;
+    }
     const epoch = ++this.nextDocumentEpoch;
     const state = await this.requestReplacement("recover", {}, epoch);
     this.recoveryWaiting = false;
@@ -819,7 +892,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
   });
   private discardRecovery = (): Promise<void> => this.serialize(async () => {
     this.requireWaitingRecovery();
+    await this.recoveryLabelWrite;
     await this.request("discardRecovery");
+    this.storedRecoveryLabel = undefined;
     this.recoveryWaiting = false;
   });
   private requireWaitingRecovery() {
@@ -931,6 +1006,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         // The same handle carries on; the host's references stay valid.
         if (this.document) {
           this.document.apply(state);
+          this.storedRecoveryLabel = undefined;
+          void this.refreshRecoveryLabel();
           this.viewport.publish();
         } else this.adopt(state, true, epoch);
         if (!storageFailure) this.emit("status", this.state);
@@ -970,8 +1047,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     const paused = new AltoError("WORKER_UNAVAILABLE", "the page was put in the back/forward cache");
     this.document?.abortTool(paused);
     this.rejectPending(paused);
-    this.releaseLease?.();
-    this.releaseLease = undefined;
+    this.releaseRecoveryLease();
     this.setStatus("restarting", null);
   }
   /** The page came back from the back/forward cache: take the namespace again and restart. */
@@ -993,8 +1069,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     cancelAnimationFrame(this.raf);
     this.worker?.terminate();
     this.worker = null;
-    this.releaseLease?.();
-    this.releaseLease = undefined;
+    this.releaseRecoveryLease();
     this.resizeObserver.disconnect();
     if (this.resizeTimer !== null) clearTimeout(this.resizeTimer);
     this.ratioQuery?.removeEventListener("change", this.onRatioChange);

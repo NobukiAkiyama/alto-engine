@@ -293,6 +293,7 @@ export type Reply = { t: "reply"; id: number } & ({ ok: true; value: unknown } |
 export type Notice =
   | { t: "patch"; value: WireState }
   | { t: "frame"; value: FrameStats }
+  | { t: "checkpointStored" }
   | { t: "storageFailure"; value: WireError }
   | { t: "diagnostic"; value: Record<string, unknown> }
   | { t: "diagnostic-storage"; value: string }
