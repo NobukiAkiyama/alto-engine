@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert=(v,m)=>{if(!v)throw Error(m);};
@@ -102,8 +103,7 @@ export async function runM6Tests(engine,log){
    assert((await at(engine,200,250))[3]===0,'dense mask exterior');assert((await at(engine,300,300))[3]>200,'dense mask interior');
    const masked=await unstable(engine).readTile(0,0),hash=await doc.snapshotHash(),bytes=await testing(engine).saveBytes();
    doc=await engine.open(new Blob([bytes]));assert(hash===await doc.snapshotHash(),'dense ZIP hash');assert(same(masked,await unstable(engine).readTile(0,0)),'dense ZIP pixels');
-   const restored=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{off();reject(Error('dense GPU recovery timeout'));},15000);const off=unstable(engine).onGpu(g=>{if(g==='restored'){clearTimeout(timer);off();resolve();}});});
-   await testing(engine).destroyGpu();await restored;
+   await gpuRestored(engine);
    assert(same(masked,await unstable(engine).readTile(0,0)),'dense GPU rebuild pixels');await frame(engine);
  });
  await test('invalid vector edits reject atomically',async()=>{
@@ -118,7 +118,7 @@ export async function runM6Tests(engine,log){
  await test('M6 ZIP / GPU loss / journal recovery retain paths, masks, clips and pixels',async()=>{
    const p=doc.getSnapshot().nodes.get(layer).paths[0];await doc.vectors.setMask(layer,{path:p.data,feather:4});await doc.vectors.setClipPath(layer,{path:await engine.vectors.parseSvg('M0 0 H350 V512 H0 Z')});
    const hash=(await doc.snapshotHash()),before=await unstable(engine).readTile(0,0),bytes=await testing(engine).saveBytes();doc=await engine.open(new Blob([bytes]));assert(hash===(await doc.snapshotHash()),'ZIP snapshot hash');assert(same(before,await unstable(engine).readTile(0,0)),'ZIP pixels');
-   await testing(engine).destroyGpu();await new Promise((resolve,reject)=>{const off=unstable(engine).onGpu((g)=>{if(g!=='restored')return;off();resolve();});setTimeout(()=>reject(Error('GPU recovery timeout')),15000);});assert(same(before,await unstable(engine).readTile(0,0)),'GPU rebuild');
+   await gpuRestored(engine);assert(same(before,await unstable(engine).readTile(0,0)),'GPU rebuild');
    await doc.transact('journal vector',tx=>tx.setVector(layer,[{...p,fill:[0,1,0,1]}]));const after=await unstable(engine).readTile(0,0),savedHash=(await doc.snapshotHash());await doc.durable();await testing(engine).crash();doc=engine.document;assert(savedHash===(await doc.snapshotHash()),'journal snapshot');assert(same(after,await unstable(engine).readTile(0,0)),'journal pixels');await frame(engine);
  });
  }catch(error){results.push({name:String(error.stack||error),pass:false});log('FAIL '+error);throw error;}

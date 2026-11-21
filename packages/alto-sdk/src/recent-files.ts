@@ -75,11 +75,54 @@ async function access<T>(
   }
 }
 
-function entries(): Promise<RecentFile[]> {
+type RecentHandle = RecentFile["handle"];
+type StoredHandle = RecentHandle | { opfsPath: string[] };
+type StoredFile = Omit<RecentFile, "handle" | "history"> & {
+  handle: StoredHandle;
+  history?: FileSystemDirectoryHandle | { opfsPath: string[] };
+};
+
+async function opfsLocation(handle: RecentHandle) {
+  const root = await navigator.storage.getDirectory();
+  const opfsPath = await root.resolve(handle);
+  if (!opfsPath) throw new AltoError("UNSUPPORTED", "this browser cannot persist external file handles");
+  return { opfsPath };
+}
+
+async function reopenHandle(handle: StoredHandle, kind: RecentFile["kind"]): Promise<RecentHandle> {
+  if (!("opfsPath" in handle)) return handle;
+  const path = handle.opfsPath;
+  let directory = await navigator.storage.getDirectory();
+  for (const name of path.slice(0, -1)) directory = await directory.getDirectoryHandle(name);
+  const name = path.at(-1);
+  if (kind === "folder") return name === undefined ? directory : directory.getDirectoryHandle(name);
+  if (name === undefined) throw new AltoError("CORRUPT_DATA", "recent file has no OPFS filename");
+  return directory.getFileHandle(name);
+}
+
+async function reopenEntry(entry: StoredFile): Promise<RecentFile> {
+  const { handle, history, ...metadata } = entry;
+  return {
+    ...metadata,
+    handle: await reopenHandle(handle, entry.kind),
+    ...(history ? { history: await reopenHandle(history, "folder") as FileSystemDirectoryHandle } : {}),
+  };
+}
+
+async function openAvailable(entry: StoredFile): Promise<RecentFile | undefined> {
+  try {
+    return await reopenEntry(entry);
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "NotFoundError") return undefined;
+    throw cause;
+  }
+}
+
+function entries(): Promise<StoredFile[]> {
   return access("readonly", (store, done, onResult) => onResult(store.getAll(), done));
 }
 
-const newestFirst = (a: RecentFile, b: RecentFile) => b.opened - a.opened;
+const newestFirst = (a: Pick<RecentFile, "opened">, b: Pick<RecentFile, "opened">) => b.opened - a.opened;
 
 /**
  * Saves a file or folder in the recent list and returns its stable ID.
@@ -93,12 +136,21 @@ export async function rememberFile(
   const newHistory = options?.history;
   if (newHistory && kind === "folder")
     throw new AltoError("INVALID_ARGUMENT", "a separate history folder applies to archives");
+  let storedHandle: StoredHandle = handle;
+  let storedHistory: StoredFile["history"] | null = newHistory;
   for (;;) {
     const before = await entries();
     let matched: string | undefined;
     try {
       for (const entry of before) {
-        if (await handle.isSameEntry(entry.handle)) {
+        let existing: RecentHandle;
+        try {
+          existing = await reopenHandle(entry.handle, entry.kind);
+        } catch (cause) {
+          if (cause instanceof DOMException && cause.name === "NotFoundError") continue;
+          throw cause;
+        }
+        if (await handle.isSameEntry(existing)) {
           matched = entry.id;
           break;
         }
@@ -109,19 +161,19 @@ export async function rememberFile(
 
     // isSameEntry runs outside IndexedDB. Recheck the IDs in the write transaction
     // so a concurrent insert or deletion can neither create duplicates nor be lost.
-    const saved = await access<RecentFile | undefined>("readwrite", (store, done, onResult) => {
-      onResult<RecentFile[]>(store.getAll(), (current) => {
+    const save = () => access<StoredFile | undefined>("readwrite", (store, done, onResult) => {
+      onResult<StoredFile[]>(store.getAll(), (current) => {
         if (current.length !== before.length || current.some((entry, i) => entry.id !== before[i].id)) return;
         const previous = current.find((entry) => entry.id === matched);
         const latest = current.reduce((time, entry) => Math.max(time, entry.opened), 0);
-        const entry: RecentFile = {
+        const entry: StoredFile = {
           id: previous?.id ?? crypto.randomUUID(),
           name: handle.name,
           kind,
-          handle,
+          handle: storedHandle,
           opened: Math.max(Date.now(), latest + 1),
         };
-        const history = newHistory === undefined ? previous?.history : newHistory;
+        const history = storedHistory === undefined ? previous?.history : storedHistory;
         if (history) entry.history = history;
         const retained = current.filter((item) => item.id !== entry.id).sort(newestFirst);
         for (const old of retained.slice(MAX_RECENT_FILES - 1)) store.delete(old.id);
@@ -129,14 +181,24 @@ export async function rememberFile(
         done(entry);
       });
     });
-    if (saved) return saved;
+    try {
+      const saved = await save();
+      if (saved) return reopenEntry(saved);
+    } catch (error) {
+      if (!(error instanceof AltoError && error.cause instanceof DOMException &&
+        error.cause.name === "DataCloneError") || "opfsPath" in storedHandle) throw error;
+      // Some browsers provide OPFS but cannot store its native handles in IndexedDB.
+      storedHandle = await opfsLocation(handle);
+      if (newHistory) storedHistory = await opfsLocation(newHistory);
+    }
   }
 }
 
 /** Lists remembered files newest first without checking permissions. */
 export async function recentFiles(): Promise<RecentFile[]> {
   try {
-    return (await entries()).sort(newestFirst);
+    const available = await Promise.all((await entries()).map(openAvailable));
+    return available.filter((entry) => entry !== undefined).sort(newestFirst);
   } catch (error) {
     if (error instanceof AltoError && error.code === "UNSUPPORTED") return [];
     throw error;
@@ -177,7 +239,8 @@ async function requirePermissions(handles: PermissionHandle[]): Promise<void> {
 }
 
 export async function permittedRecentFile(id: string): Promise<RecentFile> {
-  const entry = await access<RecentFile | undefined>("readonly", (store, done, onResult) => onResult(store.get(id), done));
+  const row = await access<StoredFile | undefined>("readonly", (store, done, onResult) => onResult(store.get(id), done));
+  const entry = row && await openAvailable(row);
   if (!entry) throw new AltoError("NOT_FOUND", "recent file not found");
   await requirePermissions(entry.history ? [entry.handle, entry.history] : [entry.handle]);
   return entry;
