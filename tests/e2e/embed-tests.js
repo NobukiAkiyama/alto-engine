@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 // Embedding: engines a host creates in its own containers, with their own storage
 // namespaces, through the public API. Each test starts and disposes its own engines.
 import { createEngine, deleteRecovery, isSupported, listRecoveryNamespaces, FileSystemDirectoryProvider, MemoryObjectProvider } from "../../packages/alto-sdk/dist/index.js";
@@ -429,12 +430,9 @@ export async function runEmbedTests(_playground, log) {
       const interrupted=doc.tools.begin("brush",{layer});
       interrupted.input({x:32,y:32});await interrupted.flush();
       engine.viewport.panBy(20,0);
-      const restored=new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>{off();reject(Error("GPU recovery timed out"));},15000);
-        const off=unstable(engine).onGpu(e=>{if(e==="restored"){clearTimeout(timer);off();resolve();}});
-      });
       const restoreStart = performance.now();
-      await testing(engine).destroyGpu();await restored;await unstable(engine).settle();
+      await gpuRestored(engine);
+      await unstable(engine).settle();
       log("PRESENT-RESTORE " + JSON.stringify({ ms: performance.now() - restoreStart }));
       assert(engine.presentation.interactionReady && engine.presentation.presentedViewVersion===engine.presentation.requestedViewVersion,"GPU restore stranded deferred viewport");
       await engine.createDocument({width:256,height:256});assert(engine.presentation.phase==="preparing" && engine.presentation.presentedViewport===null,"cross-document fallback");
