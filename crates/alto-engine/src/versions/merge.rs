@@ -366,7 +366,7 @@ impl Engine {
             None => None,
         };
         let mut conflicts = vec![];
-        let result = merge_value(
+        let mut result = merge_value(
             bv.as_ref(),
             Some(&ov),
             Some(&tv),
@@ -374,6 +374,7 @@ impl Engine {
             &mut conflicts,
         )
         .ok_or_else(|| fail("INVALID_MERGE_RESULT", "stash merge produced no document"))?;
+        let canvas = link_canvas(&mut result, &ov, &tv, &mut conflicts);
         if conflicts.is_empty() && result_doc(result.clone()).is_err() {
             conflicts.push(MergeConflict {
                 id: "0".into(),
@@ -404,6 +405,7 @@ impl Engine {
             revision: self.document(h)?.revision,
             working: ContentHash::of(&self.snapshot(h)?),
             result,
+            canvas,
         };
         self.versions.get_mut(&h).unwrap().merge = Some(session);
         Ok(Some(plan))
