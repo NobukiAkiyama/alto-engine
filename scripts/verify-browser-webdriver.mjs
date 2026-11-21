@@ -155,6 +155,8 @@ try {
 } catch (error) {
   console.error("WebDriver browser verification failed:", error);
   results.push({ name: "startup", ok: false, error: String(error) });
+  await mkdir(reportDir, { recursive: true }).catch(() => {});
+  await writeFile(join(reportDir, "summary.json"), JSON.stringify({ browser, results }, null, 2) + "\n").catch(() => {});
 } finally {
   if (sessionId) await command("DELETE", `/session/${sessionId}`).catch((error) => console.error("Could not close WebDriver session:", error));
   if (server) await new Promise((resolve) => server.close(resolve));
