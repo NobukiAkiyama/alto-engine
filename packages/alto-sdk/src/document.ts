@@ -491,8 +491,10 @@ export class DocumentHandle {
     mergeDown: (node: NodeId) => this.layerCommand({ type: "merge_down", node }),
     /**
      * Bakes a raster's whole-pixel offset, rasterizes a vector or text layer on the same node, or
-     * flattens a group of rasters, vectors, and text. Vectors and text must sit at a whole-pixel
-     * position at scale 1. The result's `missing` counts missing characters in rasterized text.
+     * flattens a group of rasters, vectors, and text. A standalone vector can bake its own
+     * transform when its ancestors compose to a whole-pixel translation and its effects
+     * have no saved selections. Text and vectors inside a flattened group still require
+     * whole-pixel placement at scale 1. `missing` counts missing characters in rasterized text.
      */
     rasterize: (node: NodeId) => this.layerCommand({ type: "rasterize", node }),
     histogram: (node: NodeId, range?: ImageBounds): Promise<ImageHistogram> => this.request("imageHistogram", range ? { node, range } : { node }),
