@@ -53,6 +53,10 @@ jobs:
           case "$FUZZ_SECONDS" in
             '' | *[!0-9]*) echo "seconds must be a whole number" >&2; exit 1 ;;
           esac
+          case "$FUZZ_SECONDS" in
+            *[1-9]*) ;;
+            *) echo "seconds must be positive" >&2; exit 1 ;;
+          esac
           sh fuzz/run-all.sh "$FUZZ_SECONDS"
       - uses: actions/upload-artifact@v7
         if: failure()

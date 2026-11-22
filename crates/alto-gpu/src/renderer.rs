@@ -14,6 +14,8 @@ use std::{
 mod cache;
 mod tile_renderer;
 use cache::overview_level;
+#[cfg(test)]
+pub(crate) use tile_renderer::with_sibling_walk;
 mod memory;
 mod presentation;
 mod readback;

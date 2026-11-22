@@ -34,7 +34,7 @@ pub(super) fn v3_test_try_render_with_budget(
     let mut renderer =
         match pollster::block_on(crate::renderer::Renderer::headless(&instance, budget_mb)) {
             Ok(renderer) => renderer,
-            Err(err)
+            Err(err @ crate::RenderError::GpuUnsupported(_))
                 if !cfg!(target_os = "macos")
                     && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
             {
@@ -768,6 +768,92 @@ fn v3_clipped_adjustment_keeps_base_coverage() {
         |x: usize, y: usize| -> [u8; 4] { image[(y * 256 + x) * 4..][..4].try_into().unwrap() };
     assert_eq!(pixel(50, 50), [0, 0, 0, 0]);
     assert_eq!(pixel(100, 100), [255, 51, 51, 255]);
+}
+
+#[test]
+fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
+    let blur = REffectKind::GaussianBlur {
+        radius: 1.0,
+        radius_q8: 256,
+    };
+    let (mut document, mut store) =
+        v3_square_under(v3_adjustment(blur.clone(), RFeatures::default()));
+    for _ in 1..12 {
+        let index = document.nodes.len();
+        document
+            .nodes
+            .push(v3_adjustment(blur.clone(), RFeatures::default()));
+        let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+            unreachable!()
+        };
+        children.push(index);
+    }
+    for tile in [(0, 0, 0), (-4, 5, 5)] {
+        if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+            actual.expect("twelve backdrop blurs should fit the command budget");
+        }
+    }
+    // Invisible siblings between the adjustments leave the backdrop unchanged,
+    // so both documents must render the same pixels.
+    let mut reference = document.clone();
+    let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+        unreachable!()
+    };
+    children.truncate(4);
+    reference.nodes = document.nodes.clone();
+    let mut indices = vec![1];
+    for index in 2..=4 {
+        if index > 2 {
+            let mut invisible = v3_adjustment(blur.clone(), RFeatures::default());
+            invisible.visible = false;
+            indices.push(reference.nodes.len());
+            reference.nodes.push(invisible);
+        }
+        indices.push(index);
+    }
+    let RContent::Group { children, .. } = &mut reference.nodes[0].content else {
+        unreachable!()
+    };
+    *children = indices;
+    let mask_hash = store.insert_tile(
+        &alto_raster::TileData::new(alto_core::PixelFormat::R8, vec![128; 256 * 256]).unwrap(),
+    );
+    let mask = alto_scene::RMask {
+        tiles: vec![crate::RenderTile {
+            key: alto_core::TileKey { tx: 0, ty: 0 },
+            hash: mask_hash,
+        }],
+        linked: true,
+        transform: super::ident(),
+    };
+    for node in [&mut document.nodes, &mut reference.nodes] {
+        for (index, radius) in [(2, 1.0), (3, 2.0), (4, 4.0)] {
+            let RContent::Adjustment(effect) = &mut node[index].content else {
+                unreachable!()
+            };
+            effect.kind = REffectKind::GaussianBlur {
+                radius,
+                radius_q8: (radius * 256.0) as u32,
+            };
+            effect.selection = Some(mask.clone());
+        }
+    }
+    for version in [1, 2, 3] {
+        document.render_version = version;
+        reference.render_version = version;
+        for tile in [(0, 0, 0), (-4, 5, 5)] {
+            if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+                let actual = actual.unwrap();
+                let expected = v3_test_try_render(&reference, &store, tile)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    actual == expected,
+                    "render version {version}, tile {tile:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

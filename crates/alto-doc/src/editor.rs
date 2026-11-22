@@ -140,12 +140,14 @@ impl Editor {
         &mut self,
         ops: Vec<Op>,
         enforce: bool,
+        derived_bakes: bool,
     ) -> Result<(Vec<AppliedOp>, ChangeSet), DocError> {
         let revision = self.doc.revision;
         let mut applied = Vec::with_capacity(ops.len());
         let mut changes = ChangeSet::default();
         for op in ops {
-            match self.doc.apply(op.clone(), enforce) {
+            let check_lock = enforce && !(derived_bakes && matches!(op, Op::SetTextBake { .. }));
+            match self.doc.apply(op.clone(), check_lock) {
                 Ok((inverse, change)) => {
                     applied.push(AppliedOp { op, inverse });
                     changes.merge(change);
@@ -198,7 +200,35 @@ impl Editor {
         if ops.is_empty() {
             return Ok(ChangeSet::default());
         }
-        let (applied, changes) = self.replay(ops, true)?;
+        self.transact_inner(intent, ops, base_revision, false)
+    }
+    /// Engine-only path for validated derived bake operations.
+    #[doc(hidden)]
+    pub fn transact_with_derived_bakes(
+        &mut self,
+        intent: impl Into<Intent>,
+        ops: Vec<Op>,
+        base_revision: u64,
+    ) -> Result<ChangeSet, DocError> {
+        self.transact_inner(intent, ops, base_revision, true)
+    }
+    fn transact_inner(
+        &mut self,
+        intent: impl Into<Intent>,
+        ops: Vec<Op>,
+        base_revision: u64,
+        derived_bakes: bool,
+    ) -> Result<ChangeSet, DocError> {
+        if base_revision != self.doc.revision {
+            return Err(DocError::Conflict {
+                expected: base_revision,
+                actual: self.doc.revision,
+            });
+        }
+        if ops.is_empty() {
+            return Ok(ChangeSet::default());
+        }
+        let (applied, changes) = self.replay(ops, true, derived_bakes)?;
         self.doc.revision += 1;
         self.seq += 1;
         let intent = intent.into();
@@ -226,7 +256,7 @@ impl Editor {
             .rev()
             .map(|item| item.inverse.clone())
             .collect();
-        let (_, changes) = self.replay(inverses, false)?;
+        let (_, changes) = self.replay(inverses, false, false)?;
         self.doc.revision += 1;
         self.undo.pop();
         if self.log.last().is_some_and(|e| e.seq == tx.seq) {
@@ -243,7 +273,7 @@ impl Editor {
             return Ok(None);
         };
         let ops = tx.ops.iter().map(|item| item.op.clone()).collect();
-        let (_, changes) = self.replay(ops, true)?;
+        let (_, changes) = self.replay(ops, true, true)?;
         self.doc.revision += 1;
         self.redo.pop();
         self.log_tx(&tx, false);

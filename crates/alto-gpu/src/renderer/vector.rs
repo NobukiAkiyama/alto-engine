@@ -151,6 +151,12 @@ pub struct VectorResources {
     last_queue: Option<wgpu::Queue>,
     format: wgpu::TextureFormat,
     dense: Option<dense::Dense>,
+    // The current encoder may still refer to dense scratch.
+    dense_pending: bool,
+    /// Dense scratch released after its last submission, with a flag set when
+    /// that submitted work completes. The GPU still holds those bytes until
+    /// then, so allocation checks charge them.
+    reclaiming: Vec<(u64, Arc<std::sync::atomic::AtomicBool>)>,
     /// The dense pipelines were built (first use, or again after a budget retire)
     /// since the renderer last asked.
     pipelines_built: bool,
@@ -392,6 +398,8 @@ impl VectorResources {
             last_queue: None,
             format,
             dense: None,
+            dense_pending: false,
+            reclaiming: Vec::new(),
             pipelines_built: false,
             geometry: g,
             pooled_geometry,
@@ -428,6 +436,7 @@ impl VectorResources {
     }
     /// Called only after submitting every command encoded with this resource set.
     pub fn after_submit(&mut self) {
+        self.dense_pending = false;
         self.uniforms.reset();
         if let Some(dense) = &mut self.dense {
             dense.uniforms.reset();
@@ -448,10 +457,19 @@ impl VectorResources {
             governor.submitted(&queue);
         }
     }
+    /// Dense scratch bytes the GPU may still hold after their release.
+    fn reclaiming_bytes(&self) -> u64 {
+        self.reclaiming
+            .iter()
+            .filter(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(bytes, _)| bytes)
+            .sum()
+    }
     fn check_allocation(&self, additional: u64, budget: u64) -> Result<()> {
         if self
             .bytes()
             .saturating_add(self.retired.bytes().total())
+            .saturating_add(self.reclaiming_bytes())
             .saturating_add(additional)
             > budget
         {
@@ -652,6 +670,8 @@ impl VectorResources {
         use_atlas: bool,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let px_per_unit = max_scale([world[0], world[1], world[2], world[3]]) / scale;
         let mut batches = Vec::new();
@@ -844,6 +864,8 @@ impl VectorResources {
         clear: bool,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
@@ -859,7 +881,24 @@ impl VectorResources {
                 > budget
             && let Some(dense) = self.dense.take()
         {
-            dense.retire(&mut self.retired);
+            if self.dense_pending {
+                dense.retire(&mut self.retired);
+            } else {
+                // No command in the current encoder reads it. Release it now
+                // and charge its bytes until the submitted work completes, so
+                // a retry after completion fits without another submission.
+                let bytes = dense.bytes();
+                let mut retired = super::Retired::new(self.governor.clone());
+                dense.retire(&mut retired);
+                retired.release();
+                self.governor.submitted(queue);
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = done.clone();
+                queue.on_submitted_work_done(move || {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                });
+                self.reclaiming.push((bytes, done));
+            }
         }
         let fixed_bytes = regular_fixed + self.dense.as_ref().map_or(0, |d| d.bytes());
         let mesh_limit = 32 * 1024 * 1024u64;
@@ -1290,6 +1329,7 @@ impl VectorResources {
         }
         let coverage = self.coverage.as_ref().unwrap();
         let fixed = self.retired.bytes().total()
+            + self.reclaiming_bytes()
             + self.mesh_bytes()
             + w as u64 * h as u64 * 5
             + self.atlas.as_ref().map_or(0, |a| {
@@ -1308,6 +1348,7 @@ impl VectorResources {
             || (self.mode == VectorMode::Batched
                 && dense_candidate(paths.len(), plan.groups.len()));
         if use_dense && !draws.is_empty() && dense::Dense::supported(device) {
+            self.dense_pending = true;
             self.pipelines_built |= self.dense.is_none();
             let dense = self
                 .dense
@@ -1426,7 +1467,7 @@ impl VectorResources {
 
 #[cfg(test)]
 mod dense_selection_tests {
-    use super::dense_candidate;
+    use super::*;
     #[test]
     fn dense_selection_leaves_sparse_and_small_calls_on_the_disjoint_path() {
         assert!(!dense_candidate(100, 1));
@@ -1435,5 +1476,143 @@ mod dense_selection_tests {
         assert!(dense_candidate(8, 8));
         assert!(dense_candidate(11, 11));
         assert!(dense_candidate(100, 80));
+    }
+
+    #[test]
+    fn submitted_dense_scratch_can_be_reclaimed_for_small_budget() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
+            Ok(adapter) => adapter,
+            Err(err)
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("dense scratch test skipped: {err}");
+                return;
+            }
+            Err(err) => panic!("dense scratch test could not find an adapter: {err}"),
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        if !VectorResources::supports_dense(&device) {
+            return;
+        }
+        let mut resources =
+            VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
+        resources.set_mode(VectorMode::Dense);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let path = |x| StyledPath {
+            data: alto_vector::PathData {
+                commands: vec![
+                    alto_vector::PathCommand::Move { x, y: 0.0 },
+                    alto_vector::PathCommand::Line {
+                        x: x + 10.0,
+                        y: 0.0,
+                    },
+                    alto_vector::PathCommand::Line { x, y: 10.0 },
+                    alto_vector::PathCommand::Close,
+                ],
+            },
+            fill: Some([1.0, 0.0, 0.0, 1.0]),
+            stroke: None,
+            fill_rule: alto_vector::FillRule::NonZero,
+        };
+        let first = path(0.0);
+        let second = path(1.0);
+        let world = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let roi = [0.0, 0.0, 1.0, 256.0, 256.0];
+        let mut encoder = device.create_command_encoder(&Default::default());
+        resources
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&first],
+                world,
+                roi,
+                1,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+        assert!(resources.dense.as_ref().unwrap().bytes() > 1024 * 1024);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.set_mode(VectorMode::Legacy);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let render_second = |resources: &mut VectorResources,
+                             encoder: &mut wgpu::CommandEncoder| {
+            resources.render(
+                &device,
+                &queue,
+                encoder,
+                &target,
+                &[&second],
+                world,
+                roi,
+                2,
+                1024 * 1024,
+            )
+        };
+        // The released scratch stays charged until its submitted work completes,
+        // then a retry fits without another submission.
+        assert!(matches!(
+            render_second(&mut resources, &mut encoder),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(resources.reclaiming_bytes() > 1024 * 1024);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        render_second(&mut resources, &mut encoder).unwrap();
+        assert_eq!(resources.reclaiming_bytes(), 0);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.set_mode(VectorMode::Dense);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        resources
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&first],
+                world,
+                roi,
+                3,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+        resources.set_mode(VectorMode::Legacy);
+        let third = path(2.0);
+        assert!(matches!(
+            resources.render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&third],
+                world,
+                roi,
+                4,
+                1024 * 1024
+            ),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(resources.retired.bytes().total() > 1024 * 1024);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.destroy_after_submit();
     }
 }

@@ -121,18 +121,13 @@ impl Renderer {
                                     (max[1] / 256.0).ceil() as i32,
                                 )
                             };
-                            let mut opaque =
-                                x1 > x0 && y1 > y0 && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
-                            for x in x0..x1 {
-                                for y in y0..y1 {
-                                    let k = TileKey { tx: x, ty: y };
-                                    opaque &= !b.overrides.contains_key(&(cn.key, k))
-                                        && ts
-                                            .binary_search_by_key(&k, |t| t.key)
-                                            .ok()
-                                            .is_some_and(|j| store.is_opaque(&ts[j].hash));
-                                }
-                            }
+                            let opaque = opaque_footprint([x0, y0, x1, y1], |k| {
+                                !b.overrides.contains_key(&(cn.key, k))
+                                    && ts
+                                        .binary_search_by_key(&k, |t| t.key)
+                                        .ok()
+                                        .is_some_and(|j| store.is_opaque(&ts[j].hash))
+                            });
                             if opaque {
                                 start = i;
                                 break;
@@ -480,7 +475,7 @@ impl Renderer {
         slot: usize,
         mut commands: Vec<Command>,
         entries: Vec<Entry>,
-        mut encoder: wgpu::CommandEncoder,
+        encoder: wgpu::CommandEncoder,
         prefetch: bool,
         pending: &HashMap<ContentHash, PendingPreview>,
     ) -> Result<bool> {
@@ -526,6 +521,26 @@ impl Renderer {
             )?)
         } else {
             None
+        };
+        // On setup failure the encoder must be discarded before destroying an
+        // unsubmitted output buffer. On success ownership passes to Retired.
+        struct CompositeOutput {
+            encoder: Option<wgpu::CommandEncoder>,
+            output: Option<wgpu::Buffer>,
+            governor: Arc<Governor>,
+        }
+        impl Drop for CompositeOutput {
+            fn drop(&mut self) {
+                drop(self.encoder.take());
+                if let Some(output) = self.output.take() {
+                    memory::destroy_buffer(&self.governor, &output, true);
+                }
+            }
+        }
+        let mut submission = CompositeOutput {
+            encoder: Some(encoder),
+            output: integer_output,
+            governor: self.governor.clone(),
         };
         let cb = buffer(
             &self.governor,
@@ -604,7 +619,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: match &integer_output {
+                    resource: match &submission.output {
                         Some(out) => out.as_entire_binding(),
                         None => wgpu::BindingResource::TextureView(&self.cache_view),
                     },
@@ -624,18 +639,20 @@ impl Renderer {
             ],
         });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("composite"),
-                timestamp_writes: None,
-            });
+            let mut pass = submission.encoder.as_mut().unwrap().begin_compute_pass(
+                &wgpu::ComputePassDescriptor {
+                    label: Some("composite"),
+                    timestamp_writes: None,
+                },
+            );
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(16, 16, 1);
         }
-        if let Some(out) = integer_output {
-            encoder.copy_buffer_to_texture(
+        if let Some(out) = &submission.output {
+            submission.encoder.as_mut().unwrap().copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &out,
+                    buffer: out,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(1024),
@@ -658,9 +675,12 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
+        }
+        self.queue
+            .submit(Some(submission.encoder.take().unwrap().finish()));
+        if let Some(out) = submission.output.take() {
             self.retired.classified_buffer(&out, MemoryClass::Fixed);
         }
-        self.queue.submit(Some(encoder.finish()));
         self.release_retired();
         self.publish_pending_previews(pending);
         self.cache_slots[slot] = Some(key);
@@ -673,5 +693,84 @@ impl Renderer {
             },
         );
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn failed_integer_composite_releases_unsubmitted_output() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut renderer = match pollster::block_on(Renderer::headless(&instance, 64)) {
+            Ok(renderer) => renderer,
+            Err(RenderError::GpuUnsupported(err))
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("composite allocation test skipped: {err}");
+                return;
+            }
+            Err(err) => panic!("composite allocation test could not start: {err}"),
+        };
+        let work = memory::create_buffer(
+            &renderer.governor,
+            &renderer.device,
+            &wgpu::BufferDescriptor {
+                label: None,
+                size: 3 * 256 * 1024,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            Class::Fixed,
+            true,
+        )
+        .unwrap();
+        let snapshot = renderer.governor.snapshot();
+        let filler = memory::create_buffer(
+            &renderer.governor,
+            &renderer.device,
+            &wgpu::BufferDescriptor {
+                label: None,
+                size: snapshot.budget_limit - snapshot.budget_used,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            Class::Effects,
+            false,
+        )
+        .unwrap();
+        let before = renderer.governor.snapshot().budget_used;
+        let scene = RenderScene {
+            canvas: alto_core::IRect {
+                x0: 0,
+                y0: 0,
+                x1: 256,
+                y1: 256,
+            },
+            root: 0,
+            nodes: vec![],
+            render_version: 3,
+        };
+        for _ in 0..2 {
+            let encoder = renderer.device.create_command_encoder(&Default::default());
+            assert!(matches!(
+                renderer.submit_composite(
+                    &scene,
+                    (0, 0, 0),
+                    0,
+                    vec![],
+                    vec![],
+                    encoder,
+                    false,
+                    &HashMap::new()
+                ),
+                Err(RenderError::Budget(_))
+            ));
+            assert_eq!(renderer.governor.snapshot().budget_used, before);
+        }
+        memory::destroy_buffer(&renderer.governor, &filler, true);
+        memory::destroy_buffer(&renderer.governor, &work, true);
     }
 }

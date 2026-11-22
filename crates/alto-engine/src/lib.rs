@@ -76,6 +76,7 @@ pub struct Engine {
     /// Blobs stored by import and not yet referenced by a committed transaction.
     pending_blobs: std::collections::BTreeSet<ContentHash>,
     staged_tiles: BTreeMap<u64, std::collections::BTreeSet<ContentHash>>,
+    stage_documents: BTreeMap<u64, DocHandle>,
     next_stage: u64,
     versions: BTreeMap<DocHandle, versions::VersionStore>,
     empty_versions: versions::VersionStore,
@@ -107,6 +108,7 @@ impl Engine {
             imported: std::collections::BTreeSet::new(),
             pending_blobs: std::collections::BTreeSet::new(),
             staged_tiles: BTreeMap::new(),
+            stage_documents: BTreeMap::new(),
             next_stage: 0,
             versions: BTreeMap::new(),
             empty_versions: Default::default(),
@@ -174,13 +176,19 @@ impl Engine {
         }
     }
 
-    /// Encodes a pending stroke tile without growing the raw decoded cache.
-    /// The caller keeps this hash rooted until its one atomic transaction finishes.
+    /// Starts an unowned in-memory stage. Use `begin_tile_stage_for` when the
+    /// stage must also be retained by a document's folder GC.
     pub fn begin_tile_stage(&mut self) -> u64 {
         self.next_stage += 1;
         self.staged_tiles
             .insert(self.next_stage, Default::default());
         self.next_stage
+    }
+    /// Stages belonging to a document are included only in that document's folder GC.
+    pub fn begin_tile_stage_for(&mut self, h: DocHandle) -> u64 {
+        let stage = self.begin_tile_stage();
+        self.stage_documents.insert(stage, h);
+        stage
     }
     pub fn stage_tile(
         &mut self,
@@ -202,6 +210,7 @@ impl Engine {
     }
     pub fn release_staged_tiles(&mut self, stage: u64) {
         self.staged_tiles.remove(&stage);
+        self.stage_documents.remove(&stage);
         self.maintain();
     }
     pub fn tile(
@@ -390,7 +399,7 @@ impl Engine {
             .documents
             .get_mut(&handle)
             .ok_or(EngineError::NotFound(handle))?
-            .transact(intent, ops, base_revision)?;
+            .transact_with_derived_bakes(intent, ops, base_revision)?;
         if self.document(handle)?.revision != old_revision {
             self.invalidate_merge(handle);
         }
@@ -406,6 +415,24 @@ impl Engine {
         handle: DocHandle,
         mut ops: Vec<Op>,
     ) -> Result<Vec<Op>, EngineError> {
+        // A received derived bake is accepted only for a node that this same
+        // transaction really needs to re-bake. Never let it bypass a lock as
+        // an independent user-authored edit.
+        let mut supplied = BTreeMap::new();
+        ops.retain(|op| {
+            if let Op::SetTextBake { id, bake } = op {
+                supplied.entry(*id).or_insert_with(Vec::new).push(*bake);
+                false
+            } else {
+                true
+            }
+        });
+        if supplied.values().any(|values| values.len() != 1) {
+            return Err(DocError::Invalid("duplicate derived text bake".into()).into());
+        }
+        if supplied.values().any(|values| values[0].is_none()) {
+            return Err(DocError::Invalid("missing derived text bake".into()).into());
+        }
         let doc = &self
             .documents
             .get(&handle)
@@ -413,6 +440,16 @@ impl Engine {
             .doc;
         for bytes in self.bake_ops(doc, &mut ops) {
             self.put_blob(bytes);
+        }
+        for op in &mut ops {
+            if let Op::SetTextBake { id, bake } = op
+                && let Some(value) = supplied.remove(id)
+            {
+                *bake = value[0];
+            }
+        }
+        if !supplied.is_empty() {
+            return Err(DocError::Invalid("unexpected derived text bake".into()).into());
         }
         Ok(ops)
     }
@@ -867,6 +904,9 @@ impl Engine {
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
+                if self.tiles.promote(&h) {
+                    continue;
+                }
                 let insert = if deferred_verify {
                     ObjectStore::insert_deferred
                 } else {
@@ -884,7 +924,9 @@ impl Engine {
                     opaque.contains(&h),
                 );
             } else {
-                self.install_object(h, &b)?;
+                if !self.blobs.contains_key(&h) {
+                    self.install_object(h, &b)?;
+                }
             }
         }
         timer.split_register();
@@ -1073,6 +1115,11 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
             }
         }
         Op::SetAdjustment { adjustment, .. } => selection::effect_hashes(adjustment, h),
+        Op::SetTextBake {
+            bake: Some(hash), ..
+        } => {
+            h.insert(*hash);
+        }
         Op::SetText {
             bake: Some(bake), ..
         } => {

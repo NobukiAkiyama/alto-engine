@@ -725,6 +725,7 @@ impl Context<'_> {
                 world,
                 depth,
             } => self.raw_node(index, desired, world, depth),
+            #[cfg(test)]
             StackInput::Siblings {
                 children,
                 world,
@@ -733,7 +734,46 @@ impl Context<'_> {
                 let blank = self.zero(desired)?;
                 self.children(children, blank, world, depth)
             }
+            StackInput::Planes(planes) => {
+                let plane = planes
+                    .get(&super::graph::scale_key(desired))
+                    .filter(|plane| super::graph::covers(plane.roi, desired))
+                    .ok_or(RenderError::Internal("unplanned backdrop region".into()))?;
+                self.crop(plane.clone(), desired)
+            }
         }
+    }
+
+    /// The inputs `stack` reads for `effects` at `desired`, one ROI per
+    /// sampling scale.
+    pub(super) fn stack_inputs(&self, effects: &[REffect], desired: Roi) -> Result<Vec<Roi>> {
+        if effects.is_empty() {
+            return Ok(vec![desired]);
+        }
+        if self.resources.exact {
+            let plan = stack_plan(effects, RoiQ::from_roi(desired)?)?;
+            return plan[0].values().map(|plane| plane.grid.to_roi()).collect();
+        }
+        // The requests of `legacy_stack`, joined per scale at each prefix.
+        let mut requests = super::graph::Requests::new();
+        requests.insert(super::graph::scale_key(desired), desired);
+        for effect in effects.iter().rev() {
+            let mut inputs = super::graph::Requests::new();
+            for &roi in requests.values() {
+                if let REffectKind::GaussianBlur { radius, .. } = effect.kind {
+                    let sample = roi.coarsen(radius / 64.0);
+                    let halo = (radius / sample.scale).ceil() as u32;
+                    self.request(&mut inputs, sample.expand(halo, halo))?;
+                    if effect.selection.is_some() && sample.scale != roi.scale {
+                        self.request(&mut inputs, roi)?;
+                    }
+                } else {
+                    self.request(&mut inputs, roi)?;
+                }
+            }
+            requests = inputs;
+        }
+        Ok(requests.into_values().collect())
     }
 
     fn legacy_stack(
@@ -753,7 +793,11 @@ impl Context<'_> {
             let filtered = self.gaussian(&source, sample, world, radius, radius_q8)?;
             let filtered = self.crop(filtered, desired)?;
             if effect.selection.is_some() {
-                let original = self.legacy_stack(input, previous, desired, world)?;
+                let original = if sample.scale == desired.scale {
+                    source
+                } else {
+                    self.legacy_stack(input, previous, desired, world)?
+                };
                 return self.select_effect(&original, filtered, effect, desired, world);
             }
             Ok(filtered)

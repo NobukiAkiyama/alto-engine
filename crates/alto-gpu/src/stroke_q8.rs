@@ -432,7 +432,7 @@ fn stroke_polyline(
             LineJoin::Bevel => polygon(outline, &[vertex, p1, p2], world, level, bits)?,
             LineJoin::Miter => {
                 if let Some(tip) = miter(vertex, first, second, n1, n2, miter_limit) {
-                    polygon(outline, &[p1, tip, p2], world, level, bits)?;
+                    polygon(outline, &[vertex, p1, tip, p2], world, level, bits)?;
                 } else {
                     polygon(outline, &[vertex, p1, p2], world, level, bits)?;
                 }
@@ -935,6 +935,32 @@ mod tests {
         assert_eq!(coverage[20], 255);
         assert_eq!(coverage[5 * 48 + 20], 255);
         assert_eq!(coverage[5 * 48 + 10], 0);
+    }
+
+    #[test]
+    fn miter_covers_bevel_and_tip_and_respects_limit() {
+        let path = PathData {
+            commands: vec![
+                PathCommand::Move { x: 8.0, y: 20.0 },
+                PathCommand::Line { x: 20.0, y: 20.0 },
+                PathCommand::Line { x: 20.0, y: 32.0 },
+            ],
+        };
+        let mut style = stroke();
+        style.cap = LineCap::Butt;
+        style.join = LineJoin::Miter;
+        style.width = 8.0;
+        let render = |s: &Stroke| {
+            rasterize_stroke(&path, s, FixedAffine::IDENTITY, 0, [0, 0, 48, 48]).unwrap()
+        };
+        let miter = render(&style);
+        assert_eq!(miter[18 * 48 + 21], 255);
+        assert_eq!(miter[16 * 48 + 23], 255);
+        style.miter_limit = 1.0;
+        let bevel = render(&style);
+        assert_eq!(bevel[16 * 48 + 23], 0);
+        style.join = LineJoin::Bevel;
+        assert_eq!(bevel, render(&style));
     }
 
     #[test]
