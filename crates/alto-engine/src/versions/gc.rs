@@ -633,6 +633,15 @@ impl Engine {
         expected: Option<&str>,
     ) -> Result<GcReport, EngineError> {
         let target = alto_store::archive::lock(path)?;
+        self.gc_archive_session(h, &target, dry_run, expected)
+    }
+    fn gc_archive_session(
+        &mut self,
+        h: DocHandle,
+        target: &impl GcArchive,
+        dry_run: bool,
+        expected: Option<&str>,
+    ) -> Result<GcReport, EngineError> {
         let original = target.read()?.ok_or_else(|| fail("NOT_FOUND", "archive"))?;
         let stored = alto_store::read_entries(&original)?;
         let plan = self.prepare_gc(h, &stored, dry_run)?;
@@ -653,12 +662,34 @@ impl Engine {
         if !warnings.is_empty() {
             return Err(fail("CORRUPT_DATA", "archive roots failed validation"));
         }
-        let publication = target.replace(&bytes, &alto_store::sha256_hex(&original));
-        if target.read()?.as_deref() == Some(bytes.as_slice()) {
-            self.adopt_gc(h, &manifest)?;
+        // As for a folder: adopt a confirmed replacement at once, and let readback
+        // settle only a replacement that reported a failure.
+        if let Err(e) = target.replace(&bytes, &alto_store::sha256_hex(&original)) {
+            if target
+                .read()
+                .is_ok_and(|now| now.as_deref() == Some(bytes.as_slice()))
+            {
+                self.adopt_gc(h, &manifest)?;
+            }
+            return Err(e.into());
         }
-        publication?;
+        self.adopt_gc(h, &manifest)?;
         Ok(plan.report)
+    }
+}
+/// The locked archive operations a GC uses, so tests can fail one of them.
+#[cfg(not(target_arch = "wasm32"))]
+trait GcArchive {
+    fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError>;
+    fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError>;
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl GcArchive for alto_store::archive::LockedArchive {
+    fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError> {
+        alto_store::archive::LockedArchive::read(self)
+    }
+    fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError> {
+        alto_store::archive::LockedArchive::replace(self, bytes, expected)
     }
 }
 
@@ -688,6 +719,47 @@ mod archive_tests {
         assert_eq!(f.version_status(d).unwrap().head, Some(c.hash));
         assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
         assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// A locked archive whose reads fail once it has been replaced.
+    struct FlakyArchive {
+        archive: alto_store::archive::LockedArchive,
+        replaced: std::cell::Cell<bool>,
+    }
+    impl GcArchive for FlakyArchive {
+        fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError> {
+            if self.replaced.get() {
+                return Err(alto_store::StoreError::Io("read failed".into()));
+            }
+            self.archive.read()
+        }
+        fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError> {
+            self.archive.replace(bytes, expected)?;
+            self.replaced.set(true);
+            Ok(())
+        }
+    }
+    #[test]
+    fn a_replaced_archive_is_adopted_even_when_the_readback_fails() {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(16, 16)).unwrap();
+        e.commit(h, "first", 1, None, false).unwrap();
+        let dir = std::env::temp_dir().join(format!("alto-archive-gc-{}", NodeId::new().0));
+        let path = dir.join("image.alto");
+        let archive = alto_store::archive::lock(&path).unwrap();
+        archive.replace(&e.save_package(h).unwrap(), "").unwrap();
+        let flaky = FlakyArchive {
+            archive,
+            replaced: false.into(),
+        };
+        e.gc_archive_session(h, &flaky, false, None).unwrap();
+        drop(flaky);
+        let mut f = Engine::new();
+        let (d, _) = f.open_package(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        // A retry passes the manifest comparison.
+        e.gc_archive_file(h, &path, false, None).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
