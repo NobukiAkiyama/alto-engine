@@ -423,9 +423,6 @@ impl Renderer {
         prefetch: bool,
     ) -> Result<JobStep> {
         let now = self.clock;
-        if let Some(hash) = self.decoder.as_mut().and_then(|d| d.failed.take()) {
-            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
-        }
         if !job.planned {
             let start = now();
             loop {
@@ -448,6 +445,19 @@ impl Renderer {
                 return Ok(JobStep::Blocked);
             }
             return Ok(JobStep::Progress);
+        }
+        let failed = self.decoder.as_ref().and_then(|decoder| {
+            decoder
+                .failed
+                .iter()
+                .find(|hash| job.unique.contains(hash))
+                .copied()
+        });
+        if let Some(hash) = failed {
+            if let Some(decoder) = self.decoder.as_mut() {
+                decoder.failed.remove(&hash);
+            }
+            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
         }
         if job.unique.len() > self.atlas_slots.len() {
             return Ok(JobStep::Blocked);
@@ -497,8 +507,14 @@ impl Renderer {
                 let hash = job.unique[job.cursor];
                 if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
                     let input_start = now();
-                    let (slot, cost) =
-                        self.upload_timed(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
+                    let (slot, cost) = self.upload_timed(
+                        hash,
+                        store,
+                        &mut pinned,
+                        &mut encoder,
+                        &HashMap::new(),
+                        &mut HashMap::new(),
+                    )?;
                     if prefetch {
                         let s = &mut self.prefetch_stats;
                         s.max_input_ms = s.max_input_ms.max(now() - input_start);
@@ -572,6 +588,7 @@ impl Renderer {
             entries,
             encoder,
             prefetch,
+            &HashMap::new(),
         )?;
         if prefetch {
             self.prefetch_stats.max_submit_ms =

@@ -8,6 +8,7 @@ impl Renderer {
         key: CacheKey,
         store: &dyn TileStore,
         encoder: &mut wgpu::CommandEncoder,
+        pending: &mut HashMap<ContentHash, PendingPreview>,
     ) -> Result<(Vec<Command>, Vec<Entry>)> {
         let mut previews = HashMap::new();
         let mut overrides = BTreeMap::new();
@@ -51,6 +52,7 @@ impl Renderer {
             encoder: &mut wgpu::CommandEncoder,
             pinned: &mut HashSet<u32>,
             previews: &HashMap<ContentHash, wgpu::Texture>,
+            pending: &mut HashMap<ContentHash, PendingPreview>,
         ) -> Result<()> {
             let n = b
                 .scene
@@ -145,6 +147,7 @@ impl Renderer {
                             encoder,
                             pinned,
                             previews,
+                            pending,
                         )?;
                     }
                     if isolate {
@@ -201,7 +204,7 @@ impl Renderer {
                         if skip {
                             continue;
                         }
-                        let slot = r.upload(hash, store, pinned, encoder, previews)?;
+                        let slot = r.upload(hash, store, pinned, encoder, previews, pending)?;
                         entries.push(Entry {
                             xy: [k.tx, k.ty],
                             slot,
@@ -250,8 +253,30 @@ impl Renderer {
             encoder,
             &mut pinned,
             &previews,
+            pending,
         )?;
         Ok((commands, entries))
+    }
+    pub(super) fn discard_pending_previews(
+        &mut self,
+        pending: &HashMap<ContentHash, PendingPreview>,
+    ) {
+        for (hash, preview) in pending {
+            if self.atlas_slots[preview.slot as usize]
+                .as_ref()
+                .is_some_and(|slot| slot.hash == *hash)
+            {
+                self.atlas_slots[preview.slot as usize] = None;
+            }
+        }
+    }
+    pub(super) fn publish_pending_previews(
+        &mut self,
+        pending: &HashMap<ContentHash, PendingPreview>,
+    ) {
+        for (hash, preview) in pending {
+            self.atlas_map.insert(*hash, preview.slot);
+        }
     }
     pub(super) fn cache_slot(&mut self, key: CacheKey, prefetch: bool) -> Result<Option<usize>> {
         let slot = if let Some(i) = self.cache_slots.iter().position(Option::is_none) {
@@ -356,12 +381,26 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compose tile"),
             });
+        let mut pending = HashMap::new();
         let commands_start = (self.clock)();
-        let (commands, entries) = self.commands(scene, key, store, &mut encoder)?;
+        let (commands, entries) = match self.commands(scene, key, store, &mut encoder, &mut pending)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.discard_pending_previews(&pending);
+                return Err(error);
+            }
+        };
         if self.profiling {
             self.profile.commands_ms += (self.clock)() - commands_start;
         }
-        self.submit_composite(scene, key, slot, commands, entries, encoder, prefetch)
+        let result = self.submit_composite(
+            scene, key, slot, commands, entries, encoder, prefetch, &pending,
+        );
+        if result.is_err() {
+            self.discard_pending_previews(&pending);
+        }
+        result
     }
     /// Render version 3 defines a level >= 1 tile only as the integer downsample of
     /// its children, so a cold request builds the missing children first and its
@@ -438,6 +477,7 @@ impl Renderer {
         entries: Vec<Entry>,
         mut encoder: wgpu::CommandEncoder,
         prefetch: bool,
+        pending: &HashMap<ContentHash, PendingPreview>,
     ) -> Result<bool> {
         let integer = scene.render_version == 3;
         if integer {
@@ -617,6 +657,7 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.release_retired();
+        self.publish_pending_previews(pending);
         self.cache_slots[slot] = Some(key);
         self.cache_map.insert(
             key,

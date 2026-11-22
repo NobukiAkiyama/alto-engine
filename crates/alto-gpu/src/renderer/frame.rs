@@ -203,7 +203,11 @@ impl Renderer {
                 break;
             }
             if self.presentation.hierarchy == Some(*key) {
-                self.hierarchy_step(scene, store, *key)?;
+                if self.hierarchy_step(scene, store, *key)? == JobStep::Blocked {
+                    return Err(RenderError::Budget(
+                        "GPU budget too small for the v3 display pyramid".into(),
+                    ));
+                }
                 self.profile.steps += 1;
                 if self.cache_map.contains_key(key) {
                     self.presentation.hierarchy = None;

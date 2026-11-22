@@ -308,7 +308,7 @@ struct TileJob {
 struct Decoder {
     queued: std::collections::VecDeque<ContentHash>,
     in_flight: HashMap<ContentHash, Arc<alto_raster::StoredTile>>,
-    failed: Option<ContentHash>,
+    failed: HashSet<ContentHash>,
     decoded: u64,
 }
 impl Decoder {
@@ -329,6 +329,9 @@ struct UploadCost {
 struct AtlasSlot {
     hash: ContentHash,
     used: u64,
+}
+struct PendingPreview {
+    slot: u32,
 }
 struct Cached {
     slot: u32,

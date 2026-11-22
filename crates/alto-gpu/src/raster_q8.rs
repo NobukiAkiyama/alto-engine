@@ -21,6 +21,7 @@ pub enum FillRule {
 
 /// `NMAX`: the most segments one curve is flattened into.
 pub const CURVE_LIMIT: u32 = 4096;
+const EVEN_ODD_GROUP_ROWS: usize = 32;
 
 /// Why a path has no coverage bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -903,6 +904,7 @@ pub const GLYPH_CURVE_LIMIT: u32 = 64;
 /// Glyph coordinates, from the glyph's own pixel origin, are at most this
 /// (about 65536 pixels); a larger glyph is not drawn (memo "前提の検査").
 pub const GLYPH_EXTENT: i64 = 1 << 24;
+const GLYPH_RASTER_CHUNK: usize = 1024;
 
 /// A glyph's nonzero coverage (doc/design/2026-10-28-v3-integer-text.md
 /// "カバレッジ"): the shared core with curves capped at 64 segments instead of
@@ -924,14 +926,42 @@ pub fn rasterize_glyph(commands: &[Command], window: [i64; 4]) -> Result<Vec<u8>
     if too_wide {
         return Err(RasterError::Range);
     }
-    rasterize_with(
-        commands,
-        FillRule::NonZero,
-        window,
-        Curves::Clamp(GLYPH_CURVE_LIMIT),
-        true,
-        false,
-    )
+    let [ox, oy, width, height] = window;
+    let width = usize::try_from(width).map_err(|_| RasterError::Range)?;
+    let height = usize::try_from(height).map_err(|_| RasterError::Range)?;
+    let len = width.checked_mul(height).ok_or(RasterError::Range)?;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut coverage = Vec::new();
+    coverage
+        .try_reserve_exact(len)
+        .map_err(|_| RasterError::Range)?;
+    coverage.resize(len, 0);
+    for y in (0..height).step_by(GLYPH_RASTER_CHUNK) {
+        for x in (0..width).step_by(GLYPH_RASTER_CHUNK) {
+            let chunk_width = (width - x).min(GLYPH_RASTER_CHUNK);
+            let chunk_height = (height - y).min(GLYPH_RASTER_CHUNK);
+            let chunk = rasterize_with(
+                commands,
+                FillRule::NonZero,
+                [
+                    ox.checked_add(x as i64).ok_or(RasterError::Range)?,
+                    oy.checked_add(y as i64).ok_or(RasterError::Range)?,
+                    chunk_width as i64,
+                    chunk_height as i64,
+                ],
+                Curves::Clamp(GLYPH_CURVE_LIMIT),
+                true,
+                false,
+            )?;
+            for (row, source) in chunk.chunks_exact(chunk_width).enumerate() {
+                let offset = (y + row) * width + x;
+                coverage[offset..offset + chunk_width].copy_from_slice(source);
+            }
+        }
+    }
+    Ok(coverage)
 }
 
 /// `skip` drops curves that cannot reach the window (`flatten`); `whole_rows`
@@ -1081,36 +1111,46 @@ fn rasterize_normalized(
             }
         }
         FillRule::EvenOdd => {
-            let mut sink = EvenOdd {
-                window,
-                crossings: vec![vec![]; height * 16],
-            };
-            flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
-            let mut tally = vec![0u32; len];
-            for (index, xs) in sink.crossings.iter_mut().enumerate() {
-                let row = index / 16;
-                xs.sort_unstable();
-                // A skipped curve right of the window drops crossings at or
-                // beyond XR; the last open interval then ends at XR.
-                if xs.len() % 2 == 1 {
-                    xs.push((xr - xl) as u32);
-                }
-                for &[x0, x1] in xs.as_chunks::<2>().0 {
-                    let (left, right) = (i64::from(x0) + xl, i64::from(x1) + xl);
-                    if left >= right {
-                        continue;
+            for group_start in (0..height).step_by(EVEN_ODD_GROUP_ROWS) {
+                let group_rows = (height - group_start).min(EVEN_ODD_GROUP_ROWS);
+                let group_window = Window {
+                    yt: yt + group_start as i64 * 256,
+                    yb: yt + (group_start + group_rows) as i64 * 256,
+                    height: group_rows,
+                    ..window
+                };
+                let mut sink = EvenOdd {
+                    window: group_window,
+                    crossings: vec![vec![]; group_rows * 16],
+                };
+                flatten(&commands, curve_limit, group_window, skip, true, &mut sink)?;
+                let mut tally = vec![0u32; group_rows * width];
+                for (index, xs) in sink.crossings.iter_mut().enumerate() {
+                    let row = index / 16;
+                    xs.sort_unstable();
+                    // A skipped curve right of the window drops crossings at or
+                    // beyond XR; the last open interval then ends at XR.
+                    if xs.len() % 2 == 1 {
+                        xs.push((xr - xl) as u32);
                     }
-                    let first = left.div_euclid(256);
-                    let last = (right - 1).div_euclid(256);
-                    for col in first..=last {
-                        let cell_left = col * 256;
-                        let overlap = right.min(cell_left + 256) - left.max(cell_left);
-                        tally[row * width + (col - lx) as usize] += overlap as u32;
+                    for &[x0, x1] in xs.as_chunks::<2>().0 {
+                        let (left, right) = (i64::from(x0) + xl, i64::from(x1) + xl);
+                        if left >= right {
+                            continue;
+                        }
+                        let first = left.div_euclid(256);
+                        let last = (right - 1).div_euclid(256);
+                        for col in first..=last {
+                            let cell_left = col * 256;
+                            let overlap = right.min(cell_left + 256) - left.max(cell_left);
+                            tally[row * width + (col - lx) as usize] += overlap as u32;
+                        }
                     }
                 }
-            }
-            for (byte, t) in bytes.iter_mut().zip(tally) {
-                *byte = coverage_byte(u128::from(t) * 32);
+                let offset = group_start * width;
+                for (byte, t) in bytes[offset..offset + tally.len()].iter_mut().zip(tally) {
+                    *byte = coverage_byte(u128::from(t) * 32);
+                }
             }
             Some([0, 0, width, height])
         }
@@ -1553,6 +1593,19 @@ mod tests {
         assert_eq!(&full[8..12], &[0, 255, 255, 0]);
         let crop = rasterize(&path, FillRule::NonZero, [1, 1, 2, 2], 4096).unwrap();
         assert_eq!(crop, vec![255; 4]);
+    }
+
+    #[test]
+    fn glyph_raster_splits_windows_over_the_area_limit() {
+        let path = square(0, 0, 1025);
+        let coverage = rasterize_glyph(&path, [0, 0, 1025, 1025]).unwrap();
+        assert_eq!(coverage.len(), 1025 * 1025);
+        assert_eq!(coverage[512 * 1025 + 512], 255);
+        for (x, y) in [(1023, 1023), (1024, 0), (0, 1024), (1024, 1024)] {
+            assert_eq!(coverage[y * 1025 + x], 255, "at ({x}, {y})");
+        }
+        assert!(rasterize_glyph(&path, [i64::MAX - 10, 0, 2048, 1]).is_err());
+        assert_eq!(rasterize_glyph(&path, [0, 0, 0, i64::MAX]), Ok(Vec::new()));
     }
 
     #[test]

@@ -373,7 +373,7 @@ impl Renderer {
         }
         let expected = 256 * 256 * object.format.bytes_per_pixel();
         if pixels.len() != expected {
-            d.failed = Some(hash);
+            d.failed.insert(hash);
             return Ok(());
         }
         // Inputs the waiting jobs already have must stay until those jobs compose.
@@ -427,7 +427,7 @@ impl Renderer {
     pub fn decode_failed(&mut self, hash: ContentHash) {
         if let Some(d) = self.decoder.as_mut() {
             d.in_flight.remove(&hash);
-            d.failed = Some(hash);
+            d.failed.insert(hash);
         }
     }
     /// Inputs decoded on other threads so far.
