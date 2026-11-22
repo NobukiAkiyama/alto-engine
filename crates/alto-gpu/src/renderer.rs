@@ -50,6 +50,8 @@ const MAX_JOB_RETRIES: u32 = 8;
 const SCRATCH_BYTES: u64 = 512 * 512 * 4;
 const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
 const MAX_PYRAMID_STEPS_IN_FLIGHT: u32 = 8;
+/// More pyramid work may overlap the GPU while a live stroke needs prompt display feedback.
+const MAX_STROKE_PYRAMID_STEPS_IN_FLIGHT: u32 = 64;
 /// Jobs that need at most this many inputs decode them inline even with a pool.
 const INLINE_DECODE_MAX: usize = 8;
 
