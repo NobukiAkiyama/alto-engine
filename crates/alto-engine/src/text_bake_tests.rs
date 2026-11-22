@@ -808,6 +808,15 @@ fn switching_the_face_of_a_collection_refreshes_the_layout() {
         "the faces lay out alike; the test needs them to differ"
     );
     assert_eq!(info_json(&e, d, id), face1);
+    // The glyph outlines follow the face too, not only the layout.
+    let paths = |e: &Engine, d: DocHandle| {
+        let doc = e.document(d).unwrap();
+        let NodeKind::Text { content, .. } = &doc.node(id).unwrap().kind else {
+            panic!()
+        };
+        format!("{:?}", e.text_entry(doc, content).paths)
+    };
+    assert_eq!(paths(&e, d), paths(&fresh, r));
 }
 
 #[test]
