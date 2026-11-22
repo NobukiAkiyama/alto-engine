@@ -15,13 +15,7 @@ impl Renderer {
             && !stroke.mask
         {
             for (k, t) in &stroke.tiles {
-                let hash = ContentHash::of(
-                    format!(
-                        "preview:{:?}:{},{}:{}",
-                        stroke.layer, k.tx, k.ty, stroke.epoch
-                    )
-                    .as_bytes(),
-                );
+                let hash = preview_hash(stroke.layer, *k, stroke.preview_id, stroke.epoch);
                 previews.insert(hash, t.output.clone());
                 overrides.insert((stroke.layer, *k), hash);
             }

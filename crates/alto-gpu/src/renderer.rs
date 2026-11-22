@@ -352,6 +352,9 @@ pub struct GpuStroke {
     pub hardness: f32,
     pub opacity: f32,
     pub erase: bool,
+    /// Unique for this renderer's lifetime; preview atlas hashes must not alias
+    /// tiles left behind by an earlier stroke on the same layer.
+    pub preview_id: u64,
     pub epoch: u64,
     pub mask: bool,
     /// Layer to document transform, so damage is tracked in display coordinates.
@@ -361,6 +364,24 @@ pub struct GpuStroke {
     pub fixed_world: Option<alto_core::FixedAffine>,
     /// Document pixels this stroke has shown so far.
     pub damage: Option<Rect>,
+}
+
+fn preview_hash(layer: NodeId, key: TileKey, preview_id: u64, epoch: u64) -> ContentHash {
+    ContentHash::of(
+        format!("preview:{layer:?}:{},{}:{preview_id}:{epoch}", key.tx, key.ty).as_bytes(),
+    )
+}
+
+#[cfg(test)]
+mod preview_hash_tests {
+    use super::*;
+
+    #[test]
+    fn preview_hash_is_unique_across_strokes_on_the_same_tile() {
+        let layer = NodeId::new();
+        let key = TileKey { tx: 3, ty: -2 };
+        assert_ne!(preview_hash(layer, key, 1, 0), preview_hash(layer, key, 2, 0));
+    }
 }
 
 pub struct Renderer {
@@ -425,6 +446,7 @@ pub struct Renderer {
     /// The reason and message the device was lost with, for error reports.
     lost_detail: Arc<std::sync::Mutex<String>>,
     frame: u64,
+    next_preview_id: u64,
     pub stroke: Option<GpuStroke>,
     pub adapter_name: String,
     budget_bytes: u64,
