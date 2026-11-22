@@ -111,7 +111,7 @@ impl TileJob {
                                         let Some(inv) = inverse(child_world.legacy()?) else {
                                             continue;
                                         };
-                                        let (min, max) = bounds_through(inv, self.region);
+                                        let (min, max) = legacy_bounds(inv, self.region);
                                         (
                                             (min[0] / 256.0).floor() as i32,
                                             (min[1] / 256.0).floor() as i32,
@@ -163,7 +163,7 @@ impl TileJob {
                                 let Some(inv) = inverse(world) else {
                                     return Ok(());
                                 };
-                                let (min, max) = bounds_through(inv, self.region);
+                                let (min, max) = legacy_bounds(inv, self.region);
                                 (inv, min, max, None)
                             }
                         };

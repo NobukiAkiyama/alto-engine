@@ -113,7 +113,7 @@ impl Renderer {
                                 let Some(inv) = inverse(child_world.legacy()?) else {
                                     continue;
                                 };
-                                let (min, max) = bounds_through(inv, b.region);
+                                let (min, max) = legacy_bounds(inv, b.region);
                                 (
                                     (min[0] / 256.0).floor() as i32,
                                     (min[1] / 256.0).floor() as i32,
@@ -170,7 +170,7 @@ impl Renderer {
                             let Some(inv) = inverse(world) else {
                                 return Ok(());
                             };
-                            let (min, max) = bounds_through(inv, b.region);
+                            let (min, max) = legacy_bounds(inv, b.region);
                             (inv, min[0], max[0], min[1], max[1])
                         }
                         WorldTransform::V3(_) => ([0.0; 6], 0.0, 0.0, 0.0, 0.0),
