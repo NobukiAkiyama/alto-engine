@@ -651,7 +651,7 @@ impl Renderer {
                 pass.dispatch_workgroups(16, 16, 1);
             }
             cx.r.queue.submit(Some(cx.encoder.finish()));
-            cx.r.publish_pending_previews(&cx.pending);
+            cx.r.publish_pending_previews(cx.pending);
             cx.r.release_retired();
             if let Some(vector) = &mut cx.r.vector {
                 vector.after_submit();
