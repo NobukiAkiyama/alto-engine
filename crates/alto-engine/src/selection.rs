@@ -791,28 +791,38 @@ impl Engine {
         let Some(map) = &self.document(h)?.selection else {
             return Ok(String::new());
         };
-        let mut grid = OutlineGrid::new(&decode(map, self)?);
-        loop {
-            if let Some(path) = grid.outline(MAX_OUTLINE_SEGMENTS) {
-                return Ok(path);
-            }
-            grid = grid.coarser();
-        }
+        Ok(OutlineGrid::new(&decode(map, self)?).bounded(MAX_OUTLINE_SEGMENTS))
     }
 }
 
-/// Selected blocks of `scale`×`scale` pixels, kept as `n`×`n` cells per key.
-/// At `scale` 256 and above each key holds one cell, and keys merge as it grows.
+/// Selected blocks of `scale`×`scale` pixels, kept as `n`×`n` cells per key, one
+/// bit each. At `scale` 256 and above each key holds one cell, and keys merge as it
+/// grows. Coordinates are `i64`: tile keys span the whole `i32` range, and the block
+/// size can outgrow it.
 struct OutlineGrid {
-    scale: i32,
-    n: i32,
-    cells: BTreeMap<TileKey, Vec<bool>>,
+    scale: i64,
+    n: i64,
+    cells: BTreeMap<TileKey, Vec<u64>>,
+}
+fn bit(cells: &[u64], i: i64) -> bool {
+    cells[(i >> 6) as usize] >> (i & 63) & 1 == 1
+}
+fn set_bit(cells: &mut [u64], i: i64) {
+    cells[(i >> 6) as usize] |= 1 << (i & 63);
 }
 impl OutlineGrid {
     fn new(decoded: &Decoded) -> Self {
         let cells = decoded
             .iter()
-            .map(|(key, tile)| (*key, tile.pixels.iter().map(|v| *v >= 128).collect()))
+            .map(|(key, tile)| {
+                let mut cells = vec![0; 1024];
+                for (i, v) in tile.pixels.iter().enumerate() {
+                    if *v >= 128 {
+                        set_bit(&mut cells, i as i64);
+                    }
+                }
+                (*key, cells)
+            })
             .collect();
         Self {
             scale: 1,
@@ -820,13 +830,18 @@ impl OutlineGrid {
             cells,
         }
     }
-    fn on(&self, bx: i32, by: i32) -> bool {
-        let key = TileKey {
-            tx: bx.div_euclid(self.n),
-            ty: by.div_euclid(self.n),
+    fn on(&self, bx: i64, by: i64) -> bool {
+        let (Ok(tx), Ok(ty)) = (
+            i32::try_from(bx.div_euclid(self.n)),
+            i32::try_from(by.div_euclid(self.n)),
+        ) else {
+            return false;
         };
-        self.cells.get(&key).is_some_and(|cells| {
-            cells[(by.rem_euclid(self.n) * self.n + bx.rem_euclid(self.n)) as usize]
+        self.cells.get(&TileKey { tx, ty }).is_some_and(|cells| {
+            bit(
+                cells,
+                by.rem_euclid(self.n) * self.n + bx.rem_euclid(self.n),
+            )
         })
     }
     /// The outline, or `None` once it would pass `budget` segments.
@@ -843,17 +858,17 @@ impl OutlineGrid {
         for (key, cells) in &self.cells {
             for y in 0..n {
                 for x in 0..n {
-                    if !cells[(y * n + x) as usize] {
+                    if !bit(cells, y * n + x) {
                         continue;
                     }
-                    let bx = key.tx * n + x;
-                    let by = key.ty * n + y;
+                    let bx = i64::from(key.tx) * n + x;
+                    let by = i64::from(key.ty) * n + y;
                     let (px, py) = (bx * s, by * s);
                     // Neighbours inside this key are read directly.
-                    let at = |dx: i32, dy: i32| {
+                    let at = |dx: i64, dy: i64| {
                         let (cx, cy) = (x + dx, y + dy);
                         if (0..n).contains(&cx) && (0..n).contains(&cy) {
-                            cells[(cy * n + cx) as usize]
+                            bit(cells, cy * n + cx)
                         } else {
                             self.on(bx + dx, by + dy)
                         }
@@ -870,18 +885,37 @@ impl OutlineGrid {
         }
         Some(path)
     }
+    /// The finest outline within `budget` segments. Coarsening ends at the blocks
+    /// around the origin (at most four, 8 segments), whose outline is returned even
+    /// over a smaller budget.
+    fn bounded(mut self, budget: usize) -> String {
+        loop {
+            if let Some(path) = self.outline(budget) {
+                return path;
+            }
+            let last = self.n == 1
+                && self
+                    .cells
+                    .keys()
+                    .all(|k| (-1..=0).contains(&k.tx) && (-1..=0).contains(&k.ty));
+            if last {
+                return self.outline(usize::MAX).unwrap_or_default();
+            }
+            self = self.coarser();
+        }
+    }
     /// The grid at twice the block size: a block is selected when any of its four
     /// halves is.
     fn coarser(self) -> Self {
-        let mut cells: BTreeMap<TileKey, Vec<bool>> = BTreeMap::new();
+        let mut cells: BTreeMap<TileKey, Vec<u64>> = BTreeMap::new();
         if self.n > 1 {
             let n = self.n / 2;
             for (key, old) in self.cells {
-                let mut new = vec![false; (n * n) as usize];
+                let mut new = vec![0; ((n * n + 63) / 64) as usize];
                 for y in 0..self.n {
                     for x in 0..self.n {
-                        if old[(y * self.n + x) as usize] {
-                            new[((y / 2) * n + x / 2) as usize] = true;
+                        if bit(&old, y * self.n + x) {
+                            set_bit(&mut new, (y / 2) * n + x / 2);
                         }
                     }
                 }
@@ -894,13 +928,13 @@ impl OutlineGrid {
             };
         }
         for (key, old) in self.cells {
-            if old[0] {
+            if bit(&old, 0) {
                 cells.insert(
                     TileKey {
                         tx: key.tx.div_euclid(2),
                         ty: key.ty.div_euclid(2),
                     },
-                    vec![true],
+                    vec![1],
                 );
             }
         }
@@ -1249,6 +1283,25 @@ mod tests {
         assert!(outline.starts_with("M0,0h2"), "{}", &outline[..40]);
     }
     #[test]
+    fn an_outline_of_tiles_at_the_ends_of_the_key_range_does_not_overflow() {
+        let mut decoded = Decoded::new();
+        for (tx, i) in [(i32::MIN, 0), (i32::MAX, 65535)] {
+            let mut pixels = vec![0; 65536];
+            pixels[i] = 255;
+            decoded.insert(
+                TileKey { tx, ty: 0 },
+                Arc::new(TileData::new(PixelFormat::R8, pixels).unwrap()),
+            );
+        }
+        let grid = OutlineGrid::new(&decoded);
+        let exact = grid.outline(8).unwrap();
+        assert!(exact.starts_with("M-549755813888,0h1"), "{exact}");
+        // The two blocks either side of the origin never merge into one.
+        let path = grid.bounded(4);
+        assert_eq!(path.matches('M').count(), 6, "{path}");
+        assert!(path.starts_with("M-549755813888,0h549755813888"), "{path}");
+    }
+    #[test]
     fn an_outline_coarsens_past_the_tile_size_until_it_fits() {
         let mut decoded = Decoded::new();
         for (key, i) in [
@@ -1262,14 +1315,9 @@ mod tests {
                 Arc::new(TileData::new(PixelFormat::R8, pixels).unwrap()),
             );
         }
-        let mut grid = OutlineGrid::new(&decoded);
+        let grid = OutlineGrid::new(&decoded);
         assert_eq!(grid.outline(8).unwrap().matches('M').count(), 8);
-        let path = loop {
-            if let Some(path) = grid.outline(4) {
-                break path;
-            }
-            grid = grid.coarser();
-        };
+        let path = grid.bounded(4);
         // Both pixels end up in one 1024-pixel block.
         assert_eq!(path, "M0,0h1024M0,1024h1024M0,0v1024M1024,0v1024");
     }
