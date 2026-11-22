@@ -517,6 +517,7 @@ struct Context<'a> {
     encoder: wgpu::CommandEncoder,
     pinned: HashSet<u32>,
     previews: HashMap<ContentHash, wgpu::Texture>,
+    pending: &'a mut HashMap<ContentHash, PendingPreview>,
     overrides: BTreeMap<(NodeId, TileKey), ContentHash>,
     mask_preview: bool,
 }
@@ -559,6 +560,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("M5 display tile"),
             });
+        let mut pending = HashMap::new();
         let result = (|| {
             let mask_preview = self.stroke.as_ref().is_some_and(|s| s.mask);
             let mut cx = Context {
@@ -569,6 +571,7 @@ impl Renderer {
                 encoder,
                 pinned: HashSet::new(),
                 previews,
+                pending: &mut pending,
                 overrides,
                 mask_preview,
             };
@@ -648,6 +651,7 @@ impl Renderer {
                 pass.dispatch_workgroups(16, 16, 1);
             }
             cx.r.queue.submit(Some(cx.encoder.finish()));
+            cx.r.publish_pending_previews(&cx.pending);
             cx.r.release_retired();
             if let Some(vector) = &mut cx.r.vector {
                 vector.after_submit();
@@ -655,6 +659,7 @@ impl Renderer {
             Ok(())
         })();
         if result.is_err() {
+            self.discard_pending_previews(&pending);
             self.queue.submit(std::iter::empty());
             if let Some(vector) = &mut self.vector {
                 self.retired.take(&mut vector.retired);

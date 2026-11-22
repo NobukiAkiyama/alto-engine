@@ -349,6 +349,7 @@ impl Context<'_> {
                 &mut self.pinned,
                 &mut self.encoder,
                 &self.previews,
+                &mut self.pending,
             )?;
             entries.push(Entry {
                 xy: [key.tx, key.ty],
