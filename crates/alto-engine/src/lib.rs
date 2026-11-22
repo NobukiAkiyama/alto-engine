@@ -430,6 +430,9 @@ impl Engine {
         if supplied.values().any(|values| values.len() != 1) {
             return Err(DocError::Invalid("duplicate derived text bake".into()).into());
         }
+        if supplied.values().any(|values| values[0].is_none()) {
+            return Err(DocError::Invalid("missing derived text bake".into()).into());
+        }
         let doc = &self
             .documents
             .get(&handle)
