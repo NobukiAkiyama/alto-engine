@@ -255,8 +255,10 @@ mod tests {
 
     #[test]
     fn pending_display_cannot_become_interactive_when_work_finishes_late() {
-        let mut p = Presentation::default();
-        p.pending = 1;
+        let mut p = Presentation {
+            pending: 1,
+            ..Default::default()
+        };
         p.published();
         p.pending = 0;
         let report = p.report(false);
