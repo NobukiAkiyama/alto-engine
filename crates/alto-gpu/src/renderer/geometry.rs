@@ -559,3 +559,31 @@ pub(super) fn bounds_through(m: [f64; 6], r: [f64; 4]) -> ([f64; 2], [f64; 2]) {
     }
     (min, max)
 }
+/// Bounds of the source coordinates sampled by a legacy draw. Bilinear fetches
+/// read the texel after the floor of each coordinate, unlike nearest sampling.
+pub(super) fn legacy_bounds(inv: [f64; 6], region: [f64; 4]) -> ([f64; 2], [f64; 2]) {
+    let (min, mut max) = bounds_through(inv, region);
+    if !crate::sample::axis_unit(inv.map(|v| v as f32)) {
+        max[0] += 1.0;
+        max[1] += 1.0;
+    }
+    (min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_bilinear_bounds_include_the_next_texel() {
+        let (_, max) = legacy_bounds([1.0, 0.0, 0.0, 1.1, 0.0, 0.0], [0.0, 0.0, 255.5, 255.5]);
+        assert_eq!(max[0], 256.5);
+        assert!(max[1] > 256.5);
+    }
+
+    #[test]
+    fn legacy_nearest_bounds_remain_narrow() {
+        let (_, max) = legacy_bounds([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 255.5, 255.5]);
+        assert_eq!(max, [255.5, 255.5]);
+    }
+}
