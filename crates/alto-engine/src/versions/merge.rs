@@ -239,6 +239,182 @@ fn result_doc(v: Value) -> Result<Document, EngineError> {
         .map_err(|e| fail("INVALID_MERGE_RESULT", e.to_string()))?;
     Ok(doc)
 }
+fn structure(doc: &Value) -> Option<Value> {
+    let nodes = doc.get("nodes")?.as_object()?;
+    Some(Value::Object(
+        nodes
+            .iter()
+            .map(|(id, node)| {
+                let mut entry = serde_json::Map::new();
+                entry.insert(
+                    "parent".into(),
+                    node.get("parent").cloned().unwrap_or(Value::Null),
+                );
+                if let Some(children) = node.get("kind").and_then(|kind| kind.get("children")) {
+                    entry.insert("children".into(), children.clone());
+                }
+                (id.clone(), Value::Object(entry))
+            })
+            .collect(),
+    ))
+}
+fn set_structure(doc: &mut Value, selected: &Value) -> Result<(), EngineError> {
+    let entries = selected
+        .as_object()
+        .ok_or_else(|| fail("INVALID_ARGUMENT", "invalid structure"))?;
+    let nodes = doc
+        .get_mut("nodes")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| fail("INVALID_MERGE_RESULT", "missing nodes"))?;
+    if nodes.len() != entries.len() || nodes.keys().any(|id| !entries.contains_key(id)) {
+        return Err(fail("INVALID_MERGE_RESULT", "structure nodes do not match"));
+    }
+    for (id, entry) in entries {
+        let node = nodes.get_mut(id).unwrap();
+        node["parent"] = entry
+            .get("parent")
+            .cloned()
+            .ok_or_else(|| fail("INVALID_ARGUMENT", "missing parent"))?;
+        match (
+            node.get_mut("kind").and_then(Value::as_object_mut),
+            entry.get("children"),
+        ) {
+            (Some(kind), Some(children)) if kind.contains_key("children") => {
+                kind.insert("children".into(), children.clone());
+            }
+            (Some(kind), None) if !kind.contains_key("children") => {}
+            _ => return Err(fail("INVALID_MERGE_RESULT", "structure node kind mismatch")),
+        }
+    }
+    Ok(())
+}
+fn link_structure(
+    result: &Value,
+    base: Option<&Value>,
+    ours: &Value,
+    theirs: &Value,
+    conflicts: &mut Vec<MergeConflict>,
+) {
+    if result_doc(result.clone()).is_ok() {
+        return;
+    }
+    let Some((o, t)) = structure(ours).zip(structure(theirs)) else {
+        return;
+    };
+    for candidate in [&o, &t] {
+        let mut checked = result.clone();
+        if set_structure(&mut checked, candidate).is_err() || result_doc(checked).is_err() {
+            return;
+        }
+    }
+    conflicts.retain(|c| {
+        !(c.path.first().is_some_and(|p| p == "nodes")
+            && matches!(
+                c.path.last().map(String::as_str),
+                Some("parent" | "children")
+            ))
+    });
+    let id = conflicts
+        .iter()
+        .filter_map(|c| c.id.parse::<usize>().ok())
+        .max()
+        .map_or(0, |id| id + 1)
+        .to_string();
+    conflicts.push(MergeConflict {
+        id,
+        kind: "structure".into(),
+        path: vec![],
+        base: MergeValue::of(base.and_then(structure).as_ref()),
+        ours: MergeValue::of(Some(&o)),
+        theirs: MergeValue::of(Some(&t)),
+    });
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use alto_doc::{DocumentMeta, Node, Op};
+
+    #[test]
+    fn opposing_reparents_offer_repair_without_losing_other_fields() {
+        let mut engine = Engine::new();
+        let h = engine
+            .create_document(DocumentMeta::srgb_u8(16, 16))
+            .unwrap();
+        let root = engine.document(h).unwrap().root;
+        let a = Node::group("A");
+        let b = Node::group("B");
+        let (aid, bid) = (a.id, b.id);
+        engine
+            .transact(
+                h,
+                "groups",
+                vec![
+                    Op::InsertNode {
+                        node: a,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: b,
+                        parent: root,
+                        index: 1,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        let base = value(engine.document(h).unwrap()).unwrap();
+        let rev = engine.document(h).unwrap().revision;
+        engine
+            .transact(
+                h,
+                "move A",
+                vec![Op::MoveNode {
+                    id: aid,
+                    parent: bid,
+                    index: 0,
+                }],
+                rev,
+            )
+            .unwrap();
+        let ours = value(engine.document(h).unwrap()).unwrap();
+        engine.undo(h).unwrap();
+        let rev = engine.document(h).unwrap().revision;
+        engine
+            .transact(
+                h,
+                "move B",
+                vec![Op::MoveNode {
+                    id: bid,
+                    parent: aid,
+                    index: 0,
+                }],
+                rev,
+            )
+            .unwrap();
+        let mut theirs = value(engine.document(h).unwrap()).unwrap();
+        theirs["nodes"][aid.0.to_string()]["name"] = Value::String("changed".into());
+        let mut conflicts = vec![];
+        let merged = merge_value(
+            Some(&base),
+            Some(&ours),
+            Some(&theirs),
+            &mut vec![],
+            &mut conflicts,
+        )
+        .unwrap();
+        assert!(result_doc(merged.clone()).is_err());
+        link_structure(&merged, Some(&base), &ours, &theirs, &mut conflicts);
+        let repair = conflicts.iter().find(|c| c.kind == "structure").unwrap();
+        for choice in [&repair.ours, &repair.theirs] {
+            let mut result = merged.clone();
+            set_structure(&mut result, &choice.value).unwrap();
+            let doc = result_doc(result).unwrap();
+            assert_eq!(doc.nodes[&aid].name, "changed");
+        }
+    }
+}
 fn set_path(
     value: &mut Value,
     path: &[String],
@@ -375,6 +551,7 @@ impl Engine {
         )
         .ok_or_else(|| fail("INVALID_MERGE_RESULT", "stash merge produced no document"))?;
         let canvas = link_canvas(&mut result, &ov, &tv, &mut conflicts);
+        link_structure(&result, bv.as_ref(), &ov, &tv, &mut conflicts);
         if conflicts.is_empty() && result_doc(result.clone()).is_err() {
             conflicts.push(MergeConflict {
                 id: "0".into(),
@@ -471,6 +648,7 @@ impl Engine {
             let mut v =
                 merge_value(Some(&bv), Some(&ov), Some(&tv), &mut vec![], &mut conflicts).unwrap();
             canvas = link_canvas(&mut v, &ov, &tv, &mut conflicts);
+            link_structure(&v, Some(&bv), &ov, &tv, &mut conflicts);
             if conflicts.is_empty() && result_doc(v.clone()).is_err() {
                 conflicts.push(MergeConflict {
                     id: "0".into(),
@@ -585,7 +763,16 @@ impl Engine {
                     .ok_or_else(|| fail("INVALID_ARGUMENT", "missing explicit value"))?,
                 _ => return Err(fail("INVALID_ARGUMENT", "unknown resolution choice")),
             };
-            set_path(&mut result, &c.path, selected.optional())?;
+            if c.kind == "structure" && c.path.is_empty() && selected.value.get("nodes").is_none() {
+                set_structure(
+                    &mut result,
+                    &selected
+                        .optional()
+                        .ok_or_else(|| fail("INVALID_ARGUMENT", "missing structure"))?,
+                )?;
+            } else {
+                set_path(&mut result, &c.path, selected.optional())?;
+            }
             // An explicit transform keeps our size, the default the plan started with.
             if let Some(link) = plan.canvas.as_ref().filter(|l| l.conflict == c.id)
                 && r.choice == "theirs"
