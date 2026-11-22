@@ -904,6 +904,7 @@ pub const GLYPH_CURVE_LIMIT: u32 = 64;
 /// Glyph coordinates, from the glyph's own pixel origin, are at most this
 /// (about 65536 pixels); a larger glyph is not drawn (memo "前提の検査").
 pub const GLYPH_EXTENT: i64 = 1 << 24;
+const GLYPH_RASTER_CHUNK: usize = 1024;
 
 /// A glyph's nonzero coverage (doc/design/2026-10-28-v3-integer-text.md
 /// "カバレッジ"): the shared core with curves capped at 64 segments instead of
@@ -925,14 +926,42 @@ pub fn rasterize_glyph(commands: &[Command], window: [i64; 4]) -> Result<Vec<u8>
     if too_wide {
         return Err(RasterError::Range);
     }
-    rasterize_with(
-        commands,
-        FillRule::NonZero,
-        window,
-        Curves::Clamp(GLYPH_CURVE_LIMIT),
-        true,
-        false,
-    )
+    let [ox, oy, width, height] = window;
+    let width = usize::try_from(width).map_err(|_| RasterError::Range)?;
+    let height = usize::try_from(height).map_err(|_| RasterError::Range)?;
+    let len = width.checked_mul(height).ok_or(RasterError::Range)?;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut coverage = Vec::new();
+    coverage
+        .try_reserve_exact(len)
+        .map_err(|_| RasterError::Range)?;
+    coverage.resize(len, 0);
+    for y in (0..height).step_by(GLYPH_RASTER_CHUNK) {
+        for x in (0..width).step_by(GLYPH_RASTER_CHUNK) {
+            let chunk_width = (width - x).min(GLYPH_RASTER_CHUNK);
+            let chunk_height = (height - y).min(GLYPH_RASTER_CHUNK);
+            let chunk = rasterize_with(
+                commands,
+                FillRule::NonZero,
+                [
+                    ox.checked_add(x as i64).ok_or(RasterError::Range)?,
+                    oy.checked_add(y as i64).ok_or(RasterError::Range)?,
+                    chunk_width as i64,
+                    chunk_height as i64,
+                ],
+                Curves::Clamp(GLYPH_CURVE_LIMIT),
+                true,
+                false,
+            )?;
+            for (row, source) in chunk.chunks_exact(chunk_width).enumerate() {
+                let offset = (y + row) * width + x;
+                coverage[offset..offset + chunk_width].copy_from_slice(source);
+            }
+        }
+    }
+    Ok(coverage)
 }
 
 /// `skip` drops curves that cannot reach the window (`flatten`); `whole_rows`
@@ -1564,6 +1593,19 @@ mod tests {
         assert_eq!(&full[8..12], &[0, 255, 255, 0]);
         let crop = rasterize(&path, FillRule::NonZero, [1, 1, 2, 2], 4096).unwrap();
         assert_eq!(crop, vec![255; 4]);
+    }
+
+    #[test]
+    fn glyph_raster_splits_windows_over_the_area_limit() {
+        let path = square(0, 0, 1025);
+        let coverage = rasterize_glyph(&path, [0, 0, 1025, 1025]).unwrap();
+        assert_eq!(coverage.len(), 1025 * 1025);
+        assert_eq!(coverage[512 * 1025 + 512], 255);
+        for (x, y) in [(1023, 1023), (1024, 0), (0, 1024), (1024, 1024)] {
+            assert_eq!(coverage[y * 1025 + x], 255, "at ({x}, {y})");
+        }
+        assert!(rasterize_glyph(&path, [i64::MAX - 10, 0, 2048, 1]).is_err());
+        assert_eq!(rasterize_glyph(&path, [0, 0, 0, i64::MAX]), Ok(Vec::new()));
     }
 
     #[test]
