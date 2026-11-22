@@ -1005,6 +1005,55 @@ fn legacy_selected_blur_stack_renders_without_repeating_prefixes() {
 }
 
 #[test]
+fn legacy_coarsened_selected_blur_keeps_fine_original() {
+    use super::{scene, v3_test_try_render};
+    use alto_core::{PixelFormat, TileKey};
+    use alto_scene::{RContent, REffect, REffectKind, RFeatures, RMask};
+    let mut store = alto_raster::ObjectStore::default();
+    let key = TileKey { tx: 0, ty: 0 };
+    let mut rgba = Vec::new();
+    for _ in 0..256 {
+        for x in 0..256 {
+            rgba.extend(if x % 2 == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            });
+        }
+    }
+    let pixels = store.insert_tile(&alto_raster::TileData::new(PixelFormat::Rgba8, rgba).unwrap());
+    let mask = store
+        .insert_tile(&alto_raster::TileData::new(PixelFormat::R8, vec![0; 256 * 256]).unwrap());
+    let effect = REffect {
+        kind: REffectKind::GaussianBlur {
+            radius: 65.0,
+            radius_q8: 65 * 256,
+        },
+        selection: Some(RMask {
+            tiles: vec![crate::RenderTile { key, hash: mask }],
+            linked: true,
+            transform: super::ident(),
+        }),
+    };
+    let mut document = scene(
+        RContent::Tiles(vec![crate::RenderTile { key, hash: pixels }]),
+        RFeatures {
+            effects: vec![effect],
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_F32;
+    if let Some(rendered) = v3_test_try_render(&document, &store, (0, 0, 0)) {
+        let bytes = rendered.expect("coarsened selected blur should render");
+        let center = (128 * 256 + 128) * 4;
+        assert_eq!(
+            &bytes[center..center + 8],
+            &[255, 0, 0, 255, 0, 0, 255, 255]
+        );
+    }
+}
+
+#[test]
 fn selected_blur_stack_renders_32_effects_at_mixed_sampling_levels() {
     use super::{scene, v3_test_try_render, v3_test_try_render_with_budget};
     use alto_core::{PixelFormat, TileKey, blur::blur_radius_q8_f32};
