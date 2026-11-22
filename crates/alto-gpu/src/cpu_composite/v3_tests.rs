@@ -776,7 +776,8 @@ fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
         radius: 1.0,
         radius_q8: 256,
     };
-    let (mut document, store) = v3_square_under(v3_adjustment(blur.clone(), RFeatures::default()));
+    let (mut document, mut store) =
+        v3_square_under(v3_adjustment(blur.clone(), RFeatures::default()));
     for _ in 1..12 {
         let index = document.nodes.len();
         document
@@ -814,6 +815,29 @@ fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
         unreachable!()
     };
     *children = indices;
+    let mask_hash = store.insert_tile(
+        &alto_raster::TileData::new(alto_core::PixelFormat::R8, vec![128; 256 * 256]).unwrap(),
+    );
+    let mask = alto_scene::RMask {
+        tiles: vec![crate::RenderTile {
+            key: alto_core::TileKey { tx: 0, ty: 0 },
+            hash: mask_hash,
+        }],
+        linked: true,
+        transform: super::ident(),
+    };
+    for node in [&mut document.nodes, &mut reference.nodes] {
+        for (index, radius) in [(2, 1.0), (3, 2.0), (4, 4.0)] {
+            let RContent::Adjustment(effect) = &mut node[index].content else {
+                unreachable!()
+            };
+            effect.kind = REffectKind::GaussianBlur {
+                radius,
+                radius_q8: (radius * 256.0) as u32,
+            };
+            effect.selection = Some(mask.clone());
+        }
+    }
     for version in [1, 2, 3] {
         document.render_version = version;
         reference.render_version = version;
