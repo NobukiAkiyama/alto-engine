@@ -83,6 +83,10 @@ impl<'de> Deserialize<'de> for Unique {
                     // can enable), a number arrives as a one-entry map holding its digits.
                     if std::mem::take(&mut first) && key == NUMBER_TOKEN && numbers_are_maps() {
                         let digits: String = map.next_value()?;
+                        // Without the feature serde_json refuses a number past f64.
+                        if !digits.parse::<f64>().is_ok_and(f64::is_finite) {
+                            return Err(de::Error::custom("number out of range"));
+                        }
                         let number: Number = digits.parse().map_err(de::Error::custom)?;
                         if map.next_key::<String>()?.is_some() {
                             return Err(de::Error::custom("malformed JSON number"));
@@ -154,6 +158,8 @@ mod tests {
             from_slice::<u64>(b"18446744073709551615").unwrap(),
             u64::MAX
         );
+        assert!(from_slice::<f64>(b"1e999").is_err());
+        assert!(from_slice::<Value>(b"[-1e999]").is_err());
         assert_eq!(
             from_slice::<Value>(br#"{"a":0.1}"#).unwrap(),
             serde_json::json!({"a": 0.1})
