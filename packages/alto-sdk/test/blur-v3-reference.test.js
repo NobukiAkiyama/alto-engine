@@ -94,8 +94,8 @@ test("v3 blur passes are horizontal first and keep a constant plane constant", (
 });
 
 test("v3 blur reference refuses what Rust refuses and clips at the canvas origin", () => {
-  for (const radius of [-1, 65, NaN, Infinity]) assert.throws(() => blurRadiusQ8(radius), RangeError, String(radius));
-  assert.throws(() => blurRadiusQ8F32(-1), RangeError);
+  for (const radius of [-1, -1 / 1024, -Number.MIN_VALUE, 65, NaN, Infinity]) assert.throws(() => blurRadiusQ8(radius), RangeError, String(radius));
+  for (const feather of [-1, -1 / 1024]) assert.throws(() => blurRadiusQ8F32(feather), RangeError, String(feather));
   for (const rf of [-1, NaN, Infinity]) assert.equal(blurCoarsenK(rf), null, String(rf));
   assert.equal(blurCoarsenK(-0), null);
   for (const [r, rho8] of [[0, 256], [65, 16384], [64, 16385], [1.5, 256]]) {
