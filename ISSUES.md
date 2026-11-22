@@ -2,17 +2,12 @@
 
 > 取得日: 2026-11-22 (JST)  |  対象: [NobukiAkiyama/alto-engine](https://github.com/NobukiAkiyama/alto-engine) の未解決Issue
 
-未解決 **39件**。内訳: P1 18件 / P2 15件 / P3 5件 / 優先度なし 1件。
+未解決 **34件**。内訳: P1 13件 / P2 15件 / P3 5件 / 優先度なし 1件。
 
 ## Issue一覧
 
 ### P1 — 高優先度 (24件)
 
-- [#206 — [CodeRabbit][major] Make a dropped `next_batch` future leave the reader in a safe state.](https://github.com/NobukiAkiyama/alto-engine/issues/206) **priority:p1** — Mark the reader failed before removing tiles. Clear that state only after delivering the batch successfully. Use a guard to unmap and clear the registered waker if the pending future is dropped.
-- [#204 — [CodeRabbit][major] Validate surface dimensions before configuring the surface.](https://github.com/NobukiAkiyama/alto-engine/issues/204) **priority:p1**
-- [#203 — [CodeRabbit][major] Require a completed exact publication before enabling interaction.](https://github.com/NobukiAkiyama/alto-engine/issues/203) **priority:p1**
-- [#202 — [CodeRabbit][major] Include the extra bilinear tap in legacy tile reach.](https://github.com/NobukiAkiyama/alto-engine/issues/202) **priority:p1**
-- [#200 — [CodeRabbit][major] Preserve text paint order across atlas and vector glyphs.](https://github.com/NobukiAkiyama/alto-engine/issues/200) **priority:p1**
 - [#196 — [CodeRabbit][major] Normalize the branch name before checking object availability.](https://github.com/NobukiAkiyama/alto-engine/issues/196) **priority:p1**
 - [#195 — [CodeRabbit][major] Keep the replayed edit reversible until its digest matches.](https://github.com/NobukiAkiyama/alto-engine/issues/195) **priority:p1** — Apply the record to staged state, or retain an independent rollback state and its objects. Enforce the history budget after the digest matches.
 - [#191 — [CodeRabbit][major] Budget the edge visits that feathered lassos perform.](https://github.com/NobukiAkiyama/alto-engine/issues/191) **priority:p1**
