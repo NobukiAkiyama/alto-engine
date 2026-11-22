@@ -146,6 +146,14 @@ impl Renderer {
             distance(a).total_cmp(&distance(b)).then(a.cmp(b))
         });
         let mut composed = 0;
+        // Live strokes invalidate many neighboring display tiles at once. Allow more
+        // hierarchy submissions to overlap the GPU so a long stroke does not reveal
+        // itself one tile per worker tick. Keep the conservative cap for idle redraws.
+        let max_pyramid_steps = if self.stroke.is_some() {
+            MAX_STROKE_PYRAMID_STEPS_IN_FLIGHT
+        } else {
+            MAX_PYRAMID_STEPS_IN_FLIGHT
+        };
         for key in &required {
             if self.cache_map.contains_key(key) {
                 continue;
@@ -178,7 +186,7 @@ impl Renderer {
                         done = true;
                         break;
                     }
-                    if self.pyramid_submissions_since_wait >= MAX_PYRAMID_STEPS_IN_FLIGHT {
+                    if self.pyramid_submissions_since_wait >= max_pyramid_steps {
                         self.gpu_wait_requested = true;
                         break;
                     }
