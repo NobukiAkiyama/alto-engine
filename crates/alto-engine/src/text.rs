@@ -33,77 +33,6 @@ pub struct TextCache {
 const FONT_CACHE_FACES: usize = 64;
 const FONT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(test)]
-mod font_cache_tests {
-    use super::*;
-
-    #[test]
-    fn faces_share_bytes_and_cache_stays_bounded() {
-        let font = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
-        // Two face indices point to the same sfnt in a minimal collection.
-        let mut sfnt = font.to_vec();
-        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
-        for i in 0..tables {
-            let p = 12 + i * 16 + 8;
-            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + 20;
-            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
-        }
-        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x02\0\0\0\x14\0\0\0\x14".to_vec();
-        collection.extend(sfnt);
-        let mut engine = Engine::new();
-        let hash = ContentHash::of(&collection);
-        engine.blobs.insert(hash, collection);
-        let mut assets = Assets::new();
-        let mut content = TextContent::default();
-        for face_index in 0..2 {
-            let id = AssetId::new();
-            assets.insert(
-                id,
-                AssetRecord {
-                    id,
-                    hash,
-                    kind: AssetKind::Font {
-                        family: "test".into(),
-                        face_index,
-                        embedding: FontEmbedding::Installable,
-                    },
-                    byte_len: 0,
-                    dims: None,
-                },
-            );
-            content.style.fonts.push(id);
-        }
-        let fonts = engine.font_set(&assets, &content);
-        assert!(Arc::ptr_eq(
-            &fonts.get(&content.style.fonts[0]).unwrap().bytes,
-            &fonts.get(&content.style.fonts[1]).unwrap().bytes
-        ));
-        for index in 0..(FONT_CACHE_FACES + 5) {
-            let fake_hash = ContentHash::of(&index.to_le_bytes());
-            engine.blobs.insert(fake_hash, font.to_vec());
-            let id = AssetId::new();
-            let mut one = TextContent::default();
-            one.style.fonts.push(id);
-            assets.insert(
-                id,
-                AssetRecord {
-                    id,
-                    hash: fake_hash,
-                    kind: AssetKind::Font {
-                        family: "test".into(),
-                        face_index: 0,
-                        embedding: FontEmbedding::Installable,
-                    },
-                    byte_len: 0,
-                    dims: None,
-                },
-            );
-            engine.font_set(&assets, &one);
-            assert!(engine.text.fonts.borrow().len() <= FONT_CACHE_FACES);
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportedFont {
     pub record: AssetRecord,
@@ -816,5 +745,76 @@ impl Engine {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod font_cache_tests {
+    use super::*;
+
+    #[test]
+    fn faces_share_bytes_and_cache_stays_bounded() {
+        let font = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
+        // Two face indices point to the same sfnt in a minimal collection.
+        let mut sfnt = font.to_vec();
+        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        for i in 0..tables {
+            let p = 12 + i * 16 + 8;
+            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + 20;
+            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x02\0\0\0\x14\0\0\0\x14".to_vec();
+        collection.extend(sfnt);
+        let mut engine = Engine::new();
+        let hash = ContentHash::of(&collection);
+        engine.blobs.insert(hash, collection);
+        let mut assets = Assets::new();
+        let mut content = TextContent::default();
+        for face_index in 0..2 {
+            let id = AssetId::new();
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            content.style.fonts.push(id);
+        }
+        let fonts = engine.font_set(&assets, &content);
+        assert!(Arc::ptr_eq(
+            &fonts.get(&content.style.fonts[0]).unwrap().bytes,
+            &fonts.get(&content.style.fonts[1]).unwrap().bytes
+        ));
+        for index in 0..(FONT_CACHE_FACES + 5) {
+            let fake_hash = ContentHash::of(&index.to_le_bytes());
+            engine.blobs.insert(fake_hash, font.to_vec());
+            let id = AssetId::new();
+            let mut one = TextContent::default();
+            one.style.fonts.push(id);
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash: fake_hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index: 0,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            engine.font_set(&assets, &one);
+            assert!(engine.text.fonts.borrow().len() <= FONT_CACHE_FACES);
+        }
     }
 }
