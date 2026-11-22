@@ -9,8 +9,11 @@ impl Renderer {
         pinned: &mut HashSet<u32>,
         encoder: &mut wgpu::CommandEncoder,
         previews: &HashMap<ContentHash, wgpu::Texture>,
+        pending: &mut HashMap<ContentHash, PendingPreview>,
     ) -> Result<u32> {
-        Ok(self.upload_timed(hash, store, pinned, encoder, previews)?.0)
+        Ok(self
+            .upload_timed(hash, store, pinned, encoder, previews, pending)?
+            .0)
     }
     /// The empty or least recently used atlas slot outside `pinned`, emptied.
     pub(super) fn free_atlas_slot(&mut self, pinned: &HashSet<u32>) -> Result<usize> {
@@ -60,6 +63,7 @@ impl Renderer {
         pinned: &mut HashSet<u32>,
         encoder: &mut wgpu::CommandEncoder,
         previews: &HashMap<ContentHash, wgpu::Texture>,
+        pending: &mut HashMap<ContentHash, PendingPreview>,
     ) -> Result<(u32, UploadCost)> {
         let mut cost = UploadCost::default();
         if let Some(&slot) = self.atlas_map.get(&hash) {
@@ -72,6 +76,10 @@ impl Renderer {
                 .used = self.frame;
             pinned.insert(slot);
             return Ok((slot, cost));
+        }
+        if let Some(preview) = pending.get(&hash) {
+            pinned.insert(preview.slot);
+            return Ok((preview.slot, cost));
         }
         let now = self.clock;
         let t = now();
@@ -144,7 +152,11 @@ impl Renderer {
             hash,
             used: self.frame,
         });
-        self.atlas_map.insert(hash, slot as u32);
+        if previews.contains_key(&hash) {
+            pending.insert(hash, PendingPreview { slot: slot as u32 });
+        } else {
+            self.atlas_map.insert(hash, slot as u32);
+        }
         pinned.insert(slot as u32);
         Ok((slot as u32, cost))
     }

@@ -1,6 +1,9 @@
 //! Live brush strokes: stamping dabs and invalidating the damage.
 use super::*;
 
+const MAX_AFFECTED_TILES: usize = 1 << 16;
+const MAX_DAB_TILE_ASSOCIATIONS: u64 = 1 << 18;
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)] // One value per brush setting; the Worker passes them positionally.
     pub fn begin_stroke(
@@ -63,6 +66,58 @@ impl Renderer {
             x1: f64::NEG_INFINITY,
             y1: f64::NEG_INFINITY,
         };
+        let mut projected_associations = 0u64;
+        for d in dabs {
+            let r = if let Some(tip) = &stroke.tip {
+                let [width, height] = tip.dimensions();
+                d.radius.max(0.01) * 1.4143 * (1.0 + 1.0 / width.max(height) as f32)
+            } else {
+                d.radius
+            };
+            if !d.center.iter().all(|value| value.is_finite()) || !r.is_finite() {
+                self.stroke = Some(stroke);
+                return Err(RenderError::InvalidArgument("non-finite dab".into()));
+            }
+            let min_x = ((d.center[0] - r) / 256.0).floor() as f64;
+            let max_x = ((d.center[0] + r) / 256.0).floor() as f64;
+            let min_y = ((d.center[1] - r) / 256.0).floor() as f64;
+            let max_y = ((d.center[1] + r) / 256.0).floor() as f64;
+            let bounds = [min_x, max_x, min_y, max_y];
+            if !bounds.iter().all(|value| {
+                value.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(value)
+            }) {
+                self.stroke = Some(stroke);
+                return Err(RenderError::Budget(
+                    "stroke dab footprint exceeds the tile budget".into(),
+                ));
+            }
+            let span_x = (max_x - min_x + 1.0) as u64;
+            let span_y = (max_y - min_y + 1.0) as u64;
+            let Some(associations) = span_x.checked_mul(span_y) else {
+                self.stroke = Some(stroke);
+                return Err(RenderError::Budget(
+                    "stroke dab footprint exceeds the tile budget".into(),
+                ));
+            };
+            projected_associations = match projected_associations.checked_add(associations) {
+                Some(total) => total,
+                None => {
+                    self.stroke = Some(stroke);
+                    return Err(RenderError::Budget(
+                        "stroke dab footprint exceeds the tile budget".into(),
+                    ));
+                }
+            };
+            if projected_associations > MAX_DAB_TILE_ASSOCIATIONS
+                || associations > MAX_AFFECTED_TILES as u64
+            {
+                self.stroke = Some(stroke);
+                return Err(RenderError::Budget(
+                    "stroke dab footprint exceeds the tile budget".into(),
+                ));
+            }
+        }
+        let mut inserted_associations = 0u64;
         for d in dabs {
             // Bilinear filtering has a half-texel margin outside the image.
             let r = if let Some(tip) = &stroke.tip {
@@ -86,13 +141,24 @@ impl Renderer {
                 for x in ((d.center[0] - r) / 256.0).floor() as i32
                     ..=((d.center[0] + r) / 256.0).floor() as i32
                 {
-                    affected
-                        .entry(TileKey { tx: x, ty: y })
-                        .or_default()
-                        .push(GpuDab {
-                            center_radius: [d.center[0], d.center[1], d.radius, d.opacity],
-                            extra: [cos, sin, d.roundness, 0.0],
-                        });
+                    let key = TileKey { tx: x, ty: y };
+                    if !affected.contains_key(&key) && affected.len() >= MAX_AFFECTED_TILES {
+                        self.stroke = Some(stroke);
+                        return Err(RenderError::Budget(
+                            "stroke affected tile count exceeds the tile budget".into(),
+                        ));
+                    }
+                    if inserted_associations >= MAX_DAB_TILE_ASSOCIATIONS {
+                        self.stroke = Some(stroke);
+                        return Err(RenderError::Budget(
+                            "stroke dab count exceeds the tile budget".into(),
+                        ));
+                    }
+                    affected.entry(key).or_default().push(GpuDab {
+                        center_radius: [d.center[0], d.center[1], d.radius, d.opacity],
+                        extra: [cos, sin, d.roundness, 0.0],
+                    });
+                    inserted_associations += 1;
                 }
             }
         }
@@ -701,6 +767,54 @@ mod tests {
                 .stamp(&[dab], &tiles, &store, None)
                 .unwrap()
                 .is_some()
+        );
+        renderer.cancel_stroke();
+    }
+
+    #[test]
+    fn oversized_dab_is_rejected_before_building_tile_map() {
+        let _gpu = crate::cpu_composite::GPU_RENDERER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(mut renderer) = pollster::block_on(Renderer::headless(&instance, 64)) else {
+            return;
+        };
+        renderer
+            .begin_stroke(
+                NodeId::new(),
+                [0.0, 0.0, 0.0, 1.0],
+                0.8,
+                1.0,
+                false,
+                false,
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let dab = Dab {
+            center: [0.0, 0.0],
+            radius: 1_000_000.0,
+            opacity: 1.0,
+            angle: 0.0,
+            roundness: 1.0,
+        };
+        assert!(matches!(
+            renderer.stamp(
+                &[dab],
+                &BTreeMap::new(),
+                &alto_raster::ObjectStore::default(),
+                None
+            ),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(
+            renderer
+                .stroke
+                .as_ref()
+                .is_some_and(|stroke| stroke.tiles.is_empty())
         );
         renderer.cancel_stroke();
     }
