@@ -49,6 +49,14 @@ struct GlyphInstance {
     src: [u32; 2],
     color: [f32; 4],
 }
+enum TextPath<'a> {
+    Borrowed(&'a StyledPath),
+    Owned(StyledPath),
+}
+enum TextBatch<'a> {
+    Vector(Vec<TextPath<'a>>),
+    Atlas(Vec<GlyphInstance>),
+}
 struct Atlas {
     alloc: GlyphAtlas,
     texture: wgpu::Texture,
@@ -469,10 +477,28 @@ impl VectorResources {
         frame: u64,
         budget: u64,
     ) -> Result<()> {
+        self.render_legacy_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_legacy_with_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        paths: &[&StyledPath],
+        world: [f64; 6],
+        roi: [f64; 5],
+        frame: u64,
+        budget: u64,
+        clear: bool,
+    ) -> Result<()> {
         let mode = self.mode;
         self.mode = VectorMode::Legacy;
-        let result = self.render(
-            device, queue, encoder, target, paths, world, roi, frame, budget,
+        let result = self.render_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, clear,
         );
         self.mode = mode;
         result
@@ -531,6 +557,83 @@ impl VectorResources {
         }
         s
     }
+    #[allow(clippy::too_many_arguments)]
+    fn render_glyph_batch(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        instances: &[GlyphInstance],
+        width: u32,
+        height: u32,
+        budget: u64,
+        clear: bool,
+    ) -> Result<()> {
+        let atlas = self
+            .atlas
+            .as_ref()
+            .ok_or(RenderError::Internal("glyph atlas missing".into()))?;
+        self.check_allocation(
+            16 + (instances.len().max(1) * std::mem::size_of::<GlyphInstance>()) as u64,
+            budget,
+        )?;
+        let uniform = buffer(
+            &self.governor,
+            device,
+            queue,
+            "glyph atlas config",
+            &[[width as f32, height as f32, 0.0, 0.0]],
+            wgpu::BufferUsages::UNIFORM,
+        )?;
+        let glyphs = buffer(
+            &self.governor,
+            device,
+            queue,
+            "glyph instances",
+            instances,
+            wgpu::BufferUsages::VERTEX,
+        )?;
+        self.retired.buffer(&uniform);
+        self.retired.buffer(&glyphs);
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glyph atlas"),
+            layout: &self.glyph.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas.view),
+                },
+            ],
+        });
+        let view = target.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("paint glyph atlas"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.glyph);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.set_vertex_buffer(0, glyphs.slice(..));
+        pass.draw(0..6, 0..instances.len() as u32);
+        Ok(())
+    }
     /// Text: runs whose em is below `ATLAS_MAX_EM_PX` output pixels on this level copy
     /// glyph coverage from the atlas; the rest (and glyphs the atlas cannot hold) take
     /// the vector path.
@@ -551,13 +654,17 @@ impl VectorResources {
         self.last_queue = Some(queue.clone());
         let [x, y, scale, w, h] = roi;
         let px_per_unit = max_scale([world[0], world[1], world[2], world[3]]) / scale;
-        let mut vector: Vec<&StyledPath> = vec![];
-        let mut fallback = vec![];
-        let mut instances: Vec<GlyphInstance> = vec![];
+        let mut batches = Vec::new();
         for run in runs {
             let em_px = run.em * px_per_unit;
             if !use_atlas || !em_px.is_finite() || em_px >= ATLAS_MAX_EM_PX {
-                vector.extend(run.paths.iter());
+                if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                    paths.extend(run.paths.iter().map(TextPath::Borrowed));
+                } else {
+                    batches.push(TextBatch::Vector(
+                        run.paths.iter().map(TextPath::Borrowed).collect(),
+                    ));
+                }
                 self.glyph_stats.vector_runs += 1;
                 continue;
             }
@@ -607,7 +714,11 @@ impl VectorResources {
                     (t[5] - y) / scale,
                 ];
                 let Some(p) = place(&g.outline, m) else {
-                    fallback.push(g.to_path());
+                    if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                        paths.push(TextPath::Owned(g.to_path()));
+                    } else {
+                        batches.push(TextBatch::Vector(vec![TextPath::Owned(g.to_path())]));
+                    }
                     continue;
                 };
                 if p.dst[0] >= w as i64
@@ -647,81 +758,57 @@ impl VectorResources {
                             r
                         }
                         None => {
-                            fallback.push(g.to_path());
+                            if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                                paths.push(TextPath::Owned(g.to_path()));
+                            } else {
+                                batches.push(TextBatch::Vector(vec![TextPath::Owned(g.to_path())]));
+                            }
                             continue;
                         }
                     },
                 };
-                instances.push(GlyphInstance {
+                let instance = GlyphInstance {
                     dst: [p.dst[0] as i32, p.dst[1] as i32, p.w as i32, p.h as i32],
                     src: [rect.x, rect.y],
                     color: g.color,
-                });
+                };
+                if let Some(TextBatch::Atlas(instances)) = batches.last_mut() {
+                    instances.push(instance);
+                } else {
+                    batches.push(TextBatch::Atlas(vec![instance]));
+                }
             }
         }
-        self.glyph_stats.atlas_glyphs += instances.len() as u64;
-        self.glyph_stats.fallback_glyphs += fallback.len() as u64;
-        vector.extend(fallback.iter());
-        self.render_legacy(
-            device, queue, encoder, target, &vector, world, roi, frame, budget,
-        )?;
-        let Some(atlas) = self.atlas.as_ref().filter(|_| !instances.is_empty()) else {
-            return Ok(());
-        };
-        self.check_allocation(
-            16 + (instances.len().max(1) * std::mem::size_of::<GlyphInstance>()) as u64,
-            budget,
-        )?;
-        let uniform = buffer(
-            &self.governor,
-            device,
-            queue,
-            "glyph atlas config",
-            &[[w as f32, h as f32, 0.0, 0.0]],
-            wgpu::BufferUsages::UNIFORM,
-        )?;
-        let glyphs = buffer(
-            &self.governor,
-            device,
-            queue,
-            "glyph instances",
-            &instances,
-            wgpu::BufferUsages::VERTEX,
-        )?;
-        self.retired.buffer(&uniform);
-        self.retired.buffer(&glyphs);
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("glyph atlas"),
-            layout: &self.glyph.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
-                },
-            ],
-        });
-        let view = target.create_view(&Default::default());
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("paint glyph atlas"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.glyph);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.set_vertex_buffer(0, glyphs.slice(..));
-        pass.draw(0..6, 0..instances.len() as u32);
+        let mut clear = true;
+        for batch in batches {
+            match batch {
+                TextBatch::Vector(paths) => {
+                    let fallback_count = paths
+                        .iter()
+                        .filter(|path| matches!(path, TextPath::Owned(_)))
+                        .count();
+                    let refs: Vec<_> = paths
+                        .iter()
+                        .map(|path| match path {
+                            TextPath::Borrowed(path) => *path,
+                            TextPath::Owned(path) => path,
+                        })
+                        .collect();
+                    self.render_legacy_with_load(
+                        device, queue, encoder, target, &refs, world, roi, frame, budget, clear,
+                    )?;
+                    self.glyph_stats.fallback_glyphs += fallback_count as u64;
+                }
+                TextBatch::Atlas(instances) => {
+                    self.render_glyph_batch(
+                        device, queue, encoder, target, &instances, w as u32, h as u32, budget,
+                        clear,
+                    )?;
+                    self.glyph_stats.atlas_glyphs += instances.len() as u64;
+                }
+            }
+            clear = false;
+        }
         Ok(())
     }
     /// ROI is [origin x, origin y, document pixels per output pixel, width, height].
@@ -737,6 +824,24 @@ impl VectorResources {
         roi: [f64; 5],
         frame: u64,
         budget: u64,
+    ) -> Result<()> {
+        self.render_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        paths: &[&StyledPath],
+        world: [f64; 6],
+        roi: [f64; 5],
+        frame: u64,
+        budget: u64,
+        clear: bool,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
         let [x, y, scale, w, h] = roi;
@@ -922,7 +1027,7 @@ impl VectorResources {
         let multi = coverage.multi_view.clone();
         let resolved = coverage.resolved_view.clone();
         let target = target.create_view(&Default::default());
-        {
+        if clear {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear vector content"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
