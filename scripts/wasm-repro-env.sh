@@ -42,10 +42,15 @@ wasm_repro_env() {
   # rustc uses the last matching prefix, so the target directory (often inside
   # the checkout) comes last. Callers' RUSTFLAGS are not inherited: an extra
   # flag would make the recorded wasm unreproducible.
+  # Cargo splits RUSTFLAGS on whitespace, which would break a checkout path
+  # with spaces. CARGO_ENCODED_RUSTFLAGS separates arguments with 0x1f instead
+  # and takes precedence over RUSTFLAGS.
   root=$(pwd)
   sysroot=$(rustc --print sysroot)
   cargo_home=${CARGO_HOME:-$HOME/.cargo}
   mkdir -p "$CARGO_TARGET_DIR"
   target_dir=$(CDPATH= cd "$CARGO_TARGET_DIR" && pwd)
-  export RUSTFLAGS="--remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${sysroot}=/sysroot --remap-path-prefix=${root}=/src --remap-path-prefix=${target_dir}=/target"
+  sep=$(printf '\037')
+  unset RUSTFLAGS
+  export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${cargo_home}=/cargo${sep}--remap-path-prefix=${sysroot}=/sysroot${sep}--remap-path-prefix=${root}=/src${sep}--remap-path-prefix=${target_dir}=/target"
 }
