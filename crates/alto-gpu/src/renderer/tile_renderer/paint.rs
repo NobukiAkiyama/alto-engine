@@ -29,16 +29,8 @@ impl Context<'_> {
             .position(|v| Arc::ptr_eq(&v.paths, paths) && v.world == world && v.level == level);
         let mut prepared = match found {
             Some(index) => self.resources.vectors.swap_remove(index),
-            None => PreparedVector {
-                paths: paths.clone(),
-                world,
-                level,
-                used: 0,
-                // VECTOR_TRANSFORM_RANGE: a world that puts a point of the node
-                // outside the Q8 grid's integer range makes the whole node
-                // transparent (not the tile refused), like TEXT_TRANSFORM_RANGE.
-                // It depends on the node and level only, so every tile agrees.
-                mapped: paths
+            None => {
+                let mapped: Option<Vec<_>> = paths
                     .iter()
                     .map(|path| crate::raster_q8::map_path(&path.data, world, level))
                     .collect::<Option<Vec<_>>>()
@@ -52,23 +44,52 @@ impl Context<'_> {
                                 )
                             })
                             .collect()
-                    }),
-                outlines: vec![None; paths.len()],
-                bytes: 0,
-            },
+                    });
+                let bytes = mapped.as_ref().map_or(0, |mapped| {
+                    mapped
+                        .iter()
+                        .filter_map(|entry| entry.as_ref().ok())
+                        .map(|entry| entry.bytes())
+                        .sum()
+                });
+                PreparedVector {
+                    paths: paths.clone(),
+                    world,
+                    level,
+                    used: 0,
+                    // VECTOR_TRANSFORM_RANGE: a world that puts a point of the node
+                    // outside the Q8 grid's integer range makes the whole node
+                    // transparent (not the tile refused), like TEXT_TRANSFORM_RANGE.
+                    // It depends on the node and level only, so every tile agrees.
+                    mapped,
+                    outlines: vec![None; paths.len()],
+                    bytes,
+                }
+            }
         };
+        while keep
+            && prepared.bytes <= PREPARED_BYTES
+            && !self.resources.vectors.is_empty()
+            && (self.resources.vectors.len() >= PREPARED_VECTORS
+                || self
+                    .resources
+                    .vectors
+                    .iter()
+                    .map(|v| v.bytes)
+                    .sum::<usize>()
+                    > PREPARED_BYTES - prepared.bytes)
+        {
+            let oldest = (0..self.resources.vectors.len())
+                .min_by_key(|&i| self.resources.vectors[i].used)
+                .unwrap();
+            self.resources.vectors.swap_remove(oldest);
+        }
         let others: usize = self.resources.vectors.iter().map(|v| v.bytes).sum();
         prepared.used = self.r.frame;
         let room = PREPARED_BYTES.saturating_sub(others);
         let result = self.vector_q14_prepared(&mut prepared, [ox, oy], level, roi, room);
-        if !keep {
+        if !keep || prepared.bytes > PREPARED_BYTES {
             return result;
-        }
-        if self.resources.vectors.len() >= PREPARED_VECTORS {
-            let oldest = (0..self.resources.vectors.len())
-                .min_by_key(|&i| self.resources.vectors[i].used)
-                .expect("a full cache");
-            self.resources.vectors.swap_remove(oldest);
         }
         self.resources.vectors.push(prepared);
         result
