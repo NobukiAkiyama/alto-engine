@@ -368,7 +368,11 @@ pub struct GpuStroke {
 
 fn preview_hash(layer: NodeId, key: TileKey, preview_id: u64, epoch: u64) -> ContentHash {
     ContentHash::of(
-        format!("preview:{layer:?}:{},{}:{preview_id}:{epoch}", key.tx, key.ty).as_bytes(),
+        format!(
+            "preview:{layer:?}:{},{}:{preview_id}:{epoch}",
+            key.tx, key.ty
+        )
+        .as_bytes(),
     )
 }
 
@@ -380,7 +384,10 @@ mod preview_hash_tests {
     fn preview_hash_is_unique_across_strokes_on_the_same_tile() {
         let layer = NodeId::new();
         let key = TileKey { tx: 3, ty: -2 };
-        assert_ne!(preview_hash(layer, key, 1, 0), preview_hash(layer, key, 2, 0));
+        assert_ne!(
+            preview_hash(layer, key, 1, 0),
+            preview_hash(layer, key, 2, 0)
+        );
     }
 }
 
