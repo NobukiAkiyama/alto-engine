@@ -347,6 +347,9 @@ impl Engine {
         let mut assets = doc.assets.clone();
         let mut replaced = std::collections::BTreeSet::new();
         let mut written = std::collections::BTreeSet::new();
+        // Group membership as each op leaves it, so a removal takes the subtree it
+        // has at that point in the transaction, not the one it had before.
+        let mut tree = TreeOverlay::new(doc);
         for op in ops.iter() {
             match op {
                 Op::SetMeta { meta } => exact = v3(meta),
@@ -366,15 +369,32 @@ impl Engine {
                 | Op::ReplaceNode { id, .. } => {
                     written.insert(*id);
                 }
-                Op::InsertNode { node, .. } => {
+                Op::InsertNode { node, parent, .. } => {
                     written.insert(node.id);
+                    tree.attach(node, *parent);
                 }
-                Op::RestoreSubtree { nodes, .. } => written.extend(nodes.iter().map(|n| n.id)),
+                Op::RestoreSubtree { nodes, parent, .. } => {
+                    written.extend(nodes.iter().map(|n| n.id));
+                    for node in nodes {
+                        tree.children.insert(
+                            node.id,
+                            node.children().map(<[NodeId]>::to_vec).unwrap_or_default(),
+                        );
+                        if let Some(p) = node.parent {
+                            tree.parent.insert(node.id, p);
+                        }
+                    }
+                    if let Some(top) = nodes.last() {
+                        tree.link(top.id, *parent);
+                    }
+                }
+                Op::MoveNode { id, parent, .. } => tree.link(*id, *parent),
                 Op::RemoveNode { id } => {
+                    tree.unlink(*id);
                     let mut stack = vec![*id];
                     while let Some(n) = stack.pop() {
                         written.insert(n);
-                        if let Some(children) = doc.nodes.get(&n).and_then(|n| n.children()) {
+                        if let Some(children) = tree.children.get(&n) {
                             stack.extend(children.iter().copied());
                         }
                     }
@@ -745,6 +765,50 @@ impl Engine {
             }
         }
         Ok(out)
+    }
+}
+
+/// The parent and child links of a document's nodes, updated op by op without
+/// touching the document. Only the links are kept; ops the document would refuse
+/// are refused later by the transaction itself.
+struct TreeOverlay {
+    parent: std::collections::BTreeMap<NodeId, NodeId>,
+    children: std::collections::BTreeMap<NodeId, Vec<NodeId>>,
+}
+impl TreeOverlay {
+    fn new(doc: &Document) -> Self {
+        let mut tree = Self {
+            parent: Default::default(),
+            children: Default::default(),
+        };
+        for node in doc.nodes.values() {
+            if let Some(p) = node.parent {
+                tree.parent.insert(node.id, p);
+            }
+            if let Some(children) = node.children() {
+                tree.children.insert(node.id, children.to_vec());
+            }
+        }
+        tree
+    }
+    fn attach(&mut self, node: &Node, parent: NodeId) {
+        self.children.insert(
+            node.id,
+            node.children().map(<[NodeId]>::to_vec).unwrap_or_default(),
+        );
+        self.link(node.id, parent);
+    }
+    fn unlink(&mut self, id: NodeId) {
+        if let Some(old) = self.parent.remove(&id)
+            && let Some(siblings) = self.children.get_mut(&old)
+        {
+            siblings.retain(|c| *c != id);
+        }
+    }
+    fn link(&mut self, id: NodeId, parent: NodeId) {
+        self.unlink(id);
+        self.parent.insert(id, parent);
+        self.children.entry(parent).or_default().push(id);
     }
 }
 

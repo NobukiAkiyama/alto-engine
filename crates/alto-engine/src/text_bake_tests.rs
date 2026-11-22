@@ -604,6 +604,103 @@ fn text_bake_skips_nodes_the_transaction_removes() {
     assert!(e.document(d).unwrap().node(id).is_err());
 }
 
+/// A group at the root, and a text layer inside it or beside it.
+fn grouped(e: &mut Engine, d: DocHandle, content: TextContent, inside: bool) -> (NodeId, NodeId) {
+    let group = Node::group("G");
+    let g = group.id;
+    let root = e.document(d).unwrap().root;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "group",
+        vec![Op::InsertNode {
+            node: group,
+            parent: root,
+            index: 0,
+        }],
+        rev,
+    )
+    .unwrap();
+    let id = insert(e, d, content);
+    if inside {
+        let rev = e.document(d).unwrap().revision;
+        e.transact(
+            d,
+            "into group",
+            vec![Op::MoveNode {
+                id,
+                parent: g,
+                index: 0,
+            }],
+            rev,
+        )
+        .unwrap();
+    }
+    (g, id)
+}
+
+#[test]
+fn text_bake_follows_a_layer_moved_out_of_a_removed_group() {
+    let (mut e, d, latin, jp) = document();
+    let (g, id) = grouped(&mut e, d, texts(latin, jp).remove(0).1, true);
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let (root, rev) = {
+        let doc = e.document(d).unwrap();
+        (doc.root, doc.revision)
+    };
+    e.transact(
+        d,
+        "replace, move out, delete group",
+        vec![
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+            Op::MoveNode {
+                id,
+                parent: root,
+                index: 0,
+            },
+            Op::RemoveNode { id: g },
+        ],
+        rev,
+    )
+    .unwrap();
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    assert_eq!(
+        bake.fonts[0].hash.to_string(),
+        JP_BLAKE3,
+        "the bake is stale"
+    );
+}
+
+#[test]
+fn text_bake_skips_a_layer_moved_into_a_removed_group() {
+    let (mut e, d, latin, jp) = document();
+    let (g, id) = grouped(&mut e, d, texts(latin, jp).remove(0).1, false);
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "replace, move in, delete group",
+        vec![
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+            Op::MoveNode {
+                id,
+                parent: g,
+                index: 0,
+            },
+            Op::RemoveNode { id: g },
+        ],
+        rev,
+    )
+    .expect("no re-bake is added for a removed node");
+    assert!(e.document(d).unwrap().node(id).is_err());
+}
+
 #[test]
 fn text_bake_on_restore() {
     let (mut e, d, latin, jp) = document();
