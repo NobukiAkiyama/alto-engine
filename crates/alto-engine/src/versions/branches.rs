@@ -210,14 +210,10 @@ impl Engine {
         Ok(())
     }
     pub fn checkout(&mut self, h: DocHandle, name: &str) -> Result<(), EngineError> {
-        self.require_objects(
-            h,
-            &super::lazy::ObjectTarget::Branch {
-                name: name.to_string(),
-            },
-        )?;
-        self.clean_head(h)?;
+        // Both the object check and the lookup below use the stored spelling.
         let name = ref_name(name)?;
+        self.require_objects(h, &super::lazy::ObjectTarget::Branch { name: name.clone() })?;
+        self.clean_head(h)?;
         let store = self.versions(h)?;
         let head = store
             .refs
