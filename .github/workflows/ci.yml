@@ -411,6 +411,76 @@ jobs:
           path: ${{ runner.temp }}/alto-browser
           if-no-files-found: ignore
 
+  # Native browser coverage complements the pinned Chrome/SwiftShader suite.
+  # SafariDriver and geckodriver do not expose CDP, so these jobs run the same
+  # in-page functional and pixel suites without the CDP-only crash diagnostics.
+  wasm-native-browser:
+    needs: [changes, wasm-build]
+    if: ${{ !inputs.gpu_lifecycle && needs.changes.outputs.code == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: safari
+            runner: macos-26
+          - browser: firefox
+            runner: macos-15
+    name: wasm-native-browser (${{ matrix.browser }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: browser-build
+          path: .
+      - name: Enable Safari WebDriver
+        if: matrix.browser == 'safari'
+        run: |
+          sudo safaridriver --enable
+          safaridriver --port 4444 > "$RUNNER_TEMP/safaridriver.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/webdriver.pid"
+      - name: Install Firefox and geckodriver
+        if: matrix.browser == 'firefox'
+        run: |
+          brew list --cask firefox >/dev/null 2>&1 || brew install --cask firefox
+          brew list geckodriver >/dev/null 2>&1 || brew install geckodriver
+          geckodriver --host 127.0.0.1 --port 4444 > "$RUNNER_TEMP/geckodriver.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/webdriver.pid"
+      - name: Wait for WebDriver
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4444/status > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP"/*driver.log || true
+          exit 1
+      - name: Run native browser suites
+        env:
+          ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/${{ matrix.browser }}
+        run: node scripts/verify-browser-webdriver.mjs "--browser=${{ matrix.browser }}"
+      - name: Add native browser results to the job summary
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/alto-browser/${{ matrix.browser }}/summary.json"
+          if [ -f "$report" ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alto-browser-reports-${{ matrix.browser }}
+          path: ${{ runner.temp }}/alto-browser
+          if-no-files-found: ignore
+      - name: Stop WebDriver
+        if: always()
+        run: if [ -f "$RUNNER_TEMP/webdriver.pid" ]; then kill "$(cat "$RUNNER_TEMP/webdriver.pid")" || true; fi
+
   wasm-release-hashes:
     if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: macos-15
@@ -687,7 +757,7 @@ jobs:
   # or was cancelled, and passes when jobs were skipped on purpose.
   ci-ok:
     if: ${{ always() }}
-    needs: [changes, versions, native, wasm, wasm-build, wasm-browser, wasm-release-hashes, gpu-parity, gpu-lifecycle]
+    needs: [changes, versions, native, wasm, wasm-build, wasm-browser, wasm-native-browser, wasm-release-hashes, gpu-parity, gpu-lifecycle]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
