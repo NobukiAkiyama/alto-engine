@@ -962,6 +962,49 @@ fn high_pass_keeps_nested_raster_and_adjustment_stacks_separate() {
 }
 
 #[test]
+fn legacy_selected_blur_stack_renders_without_repeating_prefixes() {
+    use super::{scene, v3_test_try_render};
+    use alto_core::{PixelFormat, TileKey};
+    use alto_scene::{RContent, REffect, REffectKind, RFeatures, RMask};
+
+    let mut store = alto_raster::ObjectStore::default();
+    let key = TileKey { tx: 0, ty: 0 };
+    let pixels = store.insert_tile(
+        &alto_raster::TileData::new(PixelFormat::Rgba8, [255, 0, 0, 255].repeat(256 * 256))
+            .unwrap(),
+    );
+    let mask = store
+        .insert_tile(&alto_raster::TileData::new(PixelFormat::R8, vec![255; 256 * 256]).unwrap());
+    let selection = RMask {
+        tiles: vec![crate::RenderTile { key, hash: mask }],
+        linked: true,
+        transform: super::ident(),
+    };
+    let effects = (0..12)
+        .map(|_| REffect {
+            kind: REffectKind::GaussianBlur {
+                radius: 1.0,
+                radius_q8: 256,
+            },
+            selection: Some(selection.clone()),
+        })
+        .collect();
+    let mut document = scene(
+        RContent::Tiles(vec![crate::RenderTile { key, hash: pixels }]),
+        RFeatures {
+            effects,
+            ..RFeatures::default()
+        },
+    );
+    document.render_version = alto_core::RENDER_VERSION_F32;
+    if let Some(rendered) = v3_test_try_render(&document, &store, (0, 0, 0)) {
+        let bytes = rendered.expect("legacy selected blur stack should render");
+        let center = (128 * 256 + 128) * 4;
+        assert_eq!(&bytes[center..center + 4], &[255, 0, 0, 255]);
+    }
+}
+
+#[test]
 fn selected_blur_stack_renders_32_effects_at_mixed_sampling_levels() {
     use super::{scene, v3_test_try_render, v3_test_try_render_with_budget};
     use alto_core::{PixelFormat, TileKey, blur::blur_radius_q8_f32};

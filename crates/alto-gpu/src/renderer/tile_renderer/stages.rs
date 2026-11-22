@@ -753,7 +753,11 @@ impl Context<'_> {
             let filtered = self.gaussian(&source, sample, world, radius, radius_q8)?;
             let filtered = self.crop(filtered, desired)?;
             if effect.selection.is_some() {
-                let original = self.legacy_stack(input, previous, desired, world)?;
+                let original = if sample.scale == desired.scale {
+                    source
+                } else {
+                    self.legacy_stack(input, previous, desired, world)?
+                };
                 return self.select_effect(&original, filtered, effect, desired, world);
             }
             Ok(filtered)
