@@ -76,6 +76,7 @@ pub struct Engine {
     /// Blobs stored by import and not yet referenced by a committed transaction.
     pending_blobs: std::collections::BTreeSet<ContentHash>,
     staged_tiles: BTreeMap<u64, std::collections::BTreeSet<ContentHash>>,
+    stage_documents: BTreeMap<u64, DocHandle>,
     next_stage: u64,
     versions: BTreeMap<DocHandle, versions::VersionStore>,
     empty_versions: versions::VersionStore,
@@ -107,6 +108,7 @@ impl Engine {
             imported: std::collections::BTreeSet::new(),
             pending_blobs: std::collections::BTreeSet::new(),
             staged_tiles: BTreeMap::new(),
+            stage_documents: BTreeMap::new(),
             next_stage: 0,
             versions: BTreeMap::new(),
             empty_versions: Default::default(),
@@ -174,13 +176,19 @@ impl Engine {
         }
     }
 
-    /// Encodes a pending stroke tile without growing the raw decoded cache.
-    /// The caller keeps this hash rooted until its one atomic transaction finishes.
+    /// Starts an unowned in-memory stage. Use `begin_tile_stage_for` when the
+    /// stage must also be retained by a document's folder GC.
     pub fn begin_tile_stage(&mut self) -> u64 {
         self.next_stage += 1;
         self.staged_tiles
             .insert(self.next_stage, Default::default());
         self.next_stage
+    }
+    /// Stages belonging to a document are included only in that document's folder GC.
+    pub fn begin_tile_stage_for(&mut self, h: DocHandle) -> u64 {
+        let stage = self.begin_tile_stage();
+        self.stage_documents.insert(stage, h);
+        stage
     }
     pub fn stage_tile(
         &mut self,
@@ -202,6 +210,7 @@ impl Engine {
     }
     pub fn release_staged_tiles(&mut self, stage: u64) {
         self.staged_tiles.remove(&stage);
+        self.stage_documents.remove(&stage);
         self.maintain();
     }
     pub fn tile(

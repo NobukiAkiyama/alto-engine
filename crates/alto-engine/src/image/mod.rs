@@ -287,7 +287,7 @@ impl Engine {
         h: DocHandle,
         edit: ImageEdit,
     ) -> Result<PreparedImageEdit, EngineError> {
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         let result = self.prepare_image_inner(h, edit, stage);
         if result.is_err() {
             self.release_staged_tiles(stage);

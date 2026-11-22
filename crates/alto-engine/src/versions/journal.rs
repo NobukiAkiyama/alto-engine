@@ -31,7 +31,7 @@ impl Engine {
             crate::tx_hashes(tx, &mut hashes);
         }
         let digest = self.version_state_digest(h)?;
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         self.staged_tiles.insert(stage, hashes.clone());
         Ok(VersionCheckpoint {
             doc,

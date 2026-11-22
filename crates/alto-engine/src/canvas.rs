@@ -635,7 +635,7 @@ impl Engine {
         h: DocHandle,
         edit: CanvasEdit,
     ) -> Result<PreparedOps<CanvasEditResult>, EngineError> {
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         let result = self.prepare_canvas_inner(h, edit, stage);
         if result.is_err() {
             self.release_staged_tiles(stage);
@@ -837,7 +837,7 @@ impl Engine {
         edit: LayerEdit,
         rasterizers: Rasterizers,
     ) -> Result<PreparedOps<LayerEditResult>, EngineError> {
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         let result = match edit {
             LayerEdit::MergeDown { node } => self.prepare_merge_down(h, node, stage),
             LayerEdit::Rasterize { node } => self.prepare_rasterize(h, node, stage, rasterizers),

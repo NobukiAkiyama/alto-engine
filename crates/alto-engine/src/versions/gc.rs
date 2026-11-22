@@ -104,8 +104,10 @@ impl Engine {
         for tx in history.undo.iter().chain(&history.redo) {
             crate::tx_hashes(tx, &mut direct_objects);
         }
-        for stage in self.staged_tiles.values() {
-            direct_objects.extend(stage.iter().copied());
+        for (id, stage) in &self.staged_tiles {
+            if self.stage_documents.get(id) == Some(&h) {
+                direct_objects.extend(stage.iter().copied());
+            }
         }
         hashes.extend(direct_objects.iter().copied());
         let mut objects = BTreeMap::new();
@@ -326,6 +328,34 @@ mod tests {
         e.checkout(h, "main").unwrap();
         e.delete_branch(h, "discard", true).unwrap();
         (e, h, removed)
+    }
+    #[test]
+    fn gc_only_marks_stages_owned_by_its_document() {
+        let (mut engine, b, _) = setup();
+        let stored = engine.folder_entries(b).unwrap();
+        let a = engine
+            .create_document(DocumentMeta::srgb_u8(16, 16))
+            .unwrap();
+        let missing = ContentHash::of(b"an external tile belonging to document A");
+        let stage_a = engine.begin_tile_stage_for(a);
+        engine
+            .staged_tiles
+            .get_mut(&stage_a)
+            .unwrap()
+            .insert(missing);
+        assert!(engine.prepare_gc(b, &stored, true).is_ok());
+        let stage_b = engine.begin_tile_stage_for(b);
+        engine
+            .staged_tiles
+            .get_mut(&stage_b)
+            .unwrap()
+            .insert(missing);
+        assert!(
+            matches!(engine.prepare_gc(b, &stored, true), Err(EngineError::MissingTile(hash)) if hash == missing)
+        );
+        engine.release_staged_tiles(stage_a);
+        engine.release_staged_tiles(stage_b);
+        assert!(engine.stage_documents.is_empty());
     }
     #[test]
     fn archive_gc_keeps_all_references_and_rejects_corrupt_garbage() {

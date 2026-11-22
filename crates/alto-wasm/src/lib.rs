@@ -874,7 +874,7 @@ impl Runtime {
             .begin_finish_stroke(control.clone())
             .map_err(error)?;
         let mut changes = vec![];
-        let staged = self.engine.begin_tile_stage();
+        let staged = self.engine.begin_tile_stage_for(self.doc);
         let result = async {
             while let Some(batch) = reader.next_batch().await? {
                 for (key, before, tile) in batch {
