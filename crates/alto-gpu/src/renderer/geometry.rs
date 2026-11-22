@@ -1,6 +1,40 @@
 //! Coordinate math shared by the passes: reaches, inverses, mask grids and v3 integer draws.
 use super::*;
 
+pub(super) fn opaque_footprint(bounds: [i32; 4], mut opaque: impl FnMut(TileKey) -> bool) -> bool {
+    let [x0, y0, x1, y1] = bounds;
+    let width = i64::from(x1) - i64::from(x0);
+    let height = i64::from(y1) - i64::from(y0);
+    if width <= 0 || height <= 0 || width > 1024 || height > 1024 || width * height > 1024 {
+        return false;
+    }
+    (x0..x1).all(|x| (y0..y1).all(|y| opaque(TileKey { tx: x, ty: y })))
+}
+
+#[cfg(test)]
+mod opaque_footprint_tests {
+    use super::*;
+    #[test]
+    fn bounds_and_first_miss_limit_lookups() {
+        let mut calls = 0;
+        assert!(!opaque_footprint([i32::MIN, 0, i32::MAX, 1], |_| {
+            calls += 1;
+            true
+        }));
+        assert!(!opaque_footprint([0, 0, 0, 1], |_| {
+            calls += 1;
+            true
+        }));
+        assert_eq!(calls, 0);
+        assert!(!opaque_footprint([0, 0, 32, 32], |_| {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 1);
+        assert!(opaque_footprint([0, 0, 32, 32], |_| true));
+    }
+}
+
 pub(super) fn mode(m: RenderBlend) -> f32 {
     m as u32 as f32
 }

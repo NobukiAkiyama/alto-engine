@@ -119,18 +119,13 @@ impl Renderer {
                                     (max[1] / 256.0).ceil() as i32,
                                 )
                             };
-                            let mut opaque =
-                                x1 > x0 && y1 > y0 && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
-                            for x in x0..x1 {
-                                for y in y0..y1 {
-                                    let k = TileKey { tx: x, ty: y };
-                                    opaque &= !b.overrides.contains_key(&(cn.key, k))
-                                        && ts
-                                            .binary_search_by_key(&k, |t| t.key)
-                                            .ok()
-                                            .is_some_and(|j| store.is_opaque(&ts[j].hash));
-                                }
-                            }
+                            let opaque = opaque_footprint([x0, y0, x1, y1], |k| {
+                                !b.overrides.contains_key(&(cn.key, k))
+                                    && ts
+                                        .binary_search_by_key(&k, |t| t.key)
+                                        .ok()
+                                        .is_some_and(|j| store.is_opaque(&ts[j].hash))
+                            });
                             if opaque {
                                 start = i;
                                 break;
