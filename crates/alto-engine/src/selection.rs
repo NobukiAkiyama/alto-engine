@@ -202,6 +202,8 @@ impl LayerPixels<'_> {
 const MAX_SELECTION_SOURCE_TILES: usize = 1024;
 /// Selections and masks are stored as at most this many R8 tiles.
 const MAX_SELECTION_TILES: usize = 4096;
+/// Segments in the outline handed to the editor, about 13 bytes each.
+const MAX_OUTLINE_SEGMENTS: usize = 1 << 18;
 
 fn generated_selection(
     engine: &mut Engine,
@@ -781,37 +783,132 @@ impl Engine {
             },
         }])
     }
+    /// The selection's outline as SVG path data. It is exact when it fits in
+    /// `MAX_OUTLINE_SEGMENTS`; otherwise it outlines the blocks of a coarser grid that
+    /// hold a selected pixel, doubling the block until it fits, so it still encloses
+    /// the selection.
     pub fn selection_outline(&self, h: DocHandle) -> Result<String, EngineError> {
         let Some(map) = &self.document(h)?.selection else {
             return Ok(String::new());
         };
-        let decoded = decode(map, self)?;
-        let mut path = String::new();
+        let mut grid = OutlineGrid::new(&decode(map, self)?);
+        loop {
+            if let Some(path) = grid.outline(MAX_OUTLINE_SEGMENTS) {
+                return Ok(path);
+            }
+            grid = grid.coarser();
+        }
+    }
+}
+
+/// Selected blocks of `scale`×`scale` pixels, kept as `n`×`n` cells per key.
+/// At `scale` 256 and above each key holds one cell, and keys merge as it grows.
+struct OutlineGrid {
+    scale: i32,
+    n: i32,
+    cells: BTreeMap<TileKey, Vec<bool>>,
+}
+impl OutlineGrid {
+    fn new(decoded: &Decoded) -> Self {
+        let cells = decoded
+            .iter()
+            .map(|(key, tile)| (*key, tile.pixels.iter().map(|v| *v >= 128).collect()))
+            .collect();
+        Self {
+            scale: 1,
+            n: 256,
+            cells,
+        }
+    }
+    fn on(&self, bx: i32, by: i32) -> bool {
+        let key = TileKey {
+            tx: bx.div_euclid(self.n),
+            ty: by.div_euclid(self.n),
+        };
+        self.cells.get(&key).is_some_and(|cells| {
+            cells[(by.rem_euclid(self.n) * self.n + bx.rem_euclid(self.n)) as usize]
+        })
+    }
+    /// The outline, or `None` once it would pass `budget` segments.
+    fn outline(&self, budget: usize) -> Option<String> {
         use std::fmt::Write;
-        for (key, tile) in &decoded {
-            for y in 0..256 {
-                for x in 0..256 {
-                    if tile.pixels[(y * 256 + x) as usize] < 128 {
+        let (s, n) = (self.scale, self.n);
+        let mut path = String::new();
+        let mut segments = 0;
+        let mut segment = |path: &mut String, args: std::fmt::Arguments| {
+            segments += 1;
+            let _ = path.write_fmt(args);
+            segments <= budget
+        };
+        for (key, cells) in &self.cells {
+            for y in 0..n {
+                for x in 0..n {
+                    if !cells[(y * n + x) as usize] {
                         continue;
                     }
-                    let px = key.tx * 256 + x;
-                    let py = key.ty * 256 + y;
-                    if sample(&decoded, px, py - 1) < 128 {
-                        let _ = write!(path, "M{px},{py}h1");
-                    }
-                    if sample(&decoded, px, py + 1) < 128 {
-                        let _ = write!(path, "M{px},{}h1", py + 1);
-                    }
-                    if sample(&decoded, px - 1, py) < 128 {
-                        let _ = write!(path, "M{px},{py}v1");
-                    }
-                    if sample(&decoded, px + 1, py) < 128 {
-                        let _ = write!(path, "M{},{py}v1", px + 1);
+                    let bx = key.tx * n + x;
+                    let by = key.ty * n + y;
+                    let (px, py) = (bx * s, by * s);
+                    // Neighbours inside this key are read directly.
+                    let at = |dx: i32, dy: i32| {
+                        let (cx, cy) = (x + dx, y + dy);
+                        if (0..n).contains(&cx) && (0..n).contains(&cy) {
+                            cells[(cy * n + cx) as usize]
+                        } else {
+                            self.on(bx + dx, by + dy)
+                        }
+                    };
+                    if !at(0, -1) && !segment(&mut path, format_args!("M{px},{py}h{s}"))
+                        || !at(0, 1) && !segment(&mut path, format_args!("M{px},{}h{s}", py + s))
+                        || !at(-1, 0) && !segment(&mut path, format_args!("M{px},{py}v{s}"))
+                        || !at(1, 0) && !segment(&mut path, format_args!("M{},{py}v{s}", px + s))
+                    {
+                        return None;
                     }
                 }
             }
         }
-        Ok(path)
+        Some(path)
+    }
+    /// The grid at twice the block size: a block is selected when any of its four
+    /// halves is.
+    fn coarser(self) -> Self {
+        let mut cells: BTreeMap<TileKey, Vec<bool>> = BTreeMap::new();
+        if self.n > 1 {
+            let n = self.n / 2;
+            for (key, old) in self.cells {
+                let mut new = vec![false; (n * n) as usize];
+                for y in 0..self.n {
+                    for x in 0..self.n {
+                        if old[(y * self.n + x) as usize] {
+                            new[((y / 2) * n + x / 2) as usize] = true;
+                        }
+                    }
+                }
+                cells.insert(key, new);
+            }
+            return Self {
+                scale: self.scale * 2,
+                n,
+                cells,
+            };
+        }
+        for (key, old) in self.cells {
+            if old[0] {
+                cells.insert(
+                    TileKey {
+                        tx: key.tx.div_euclid(2),
+                        ty: key.ty.div_euclid(2),
+                    },
+                    vec![true],
+                );
+            }
+        }
+        Self {
+            scale: self.scale * 2,
+            n: 1,
+            cells,
+        }
     }
 }
 
@@ -1073,6 +1170,108 @@ mod tests {
         for hash in mask_hashes {
             assert!(recovered.tile(&hash).unwrap().is_some());
         }
+    }
+    /// The selection `pixel(x, y)` describes, set directly on a `w`×`h` document.
+    fn with_selection(w: u32, h: u32, pixel: impl Fn(i32, i32) -> u8) -> (Engine, DocHandle) {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
+        let mut map = empty();
+        for ty in 0..h.div_ceil(256) as i32 {
+            for tx in 0..w.div_ceil(256) as i32 {
+                let pixels = (0..65536)
+                    .map(|i| pixel(tx * 256 + i % 256, ty * 256 + i / 256))
+                    .collect();
+                let hash = e
+                    .put_tile(TileData::new(PixelFormat::R8, pixels).unwrap())
+                    .unwrap();
+                map.tiles.insert(TileKey { tx, ty }, hash);
+            }
+        }
+        commit(
+            &mut e,
+            d,
+            vec![Op::SetSelection {
+                selection: Some(map),
+            }],
+        );
+        (e, d)
+    }
+    /// The exact outline: a unit segment on every side of a selected pixel that
+    /// borders an unselected one.
+    fn exact_outline(w: i32, h: i32, on: impl Fn(i32, i32) -> bool) -> String {
+        let on = |x: i32, y: i32| {
+            x >= 0 && y >= 0 && x < (w + 255) / 256 * 256 && y < (h + 255) / 256 * 256 && on(x, y)
+        };
+        let mut path = String::new();
+        for ty in 0..(h + 255) / 256 {
+            for tx in 0..(w + 255) / 256 {
+                for y in ty * 256..ty * 256 + 256 {
+                    for x in tx * 256..tx * 256 + 256 {
+                        if !on(x, y) {
+                            continue;
+                        }
+                        if !on(x, y - 1) {
+                            path += &format!("M{x},{y}h1");
+                        }
+                        if !on(x, y + 1) {
+                            path += &format!("M{x},{}h1", y + 1);
+                        }
+                        if !on(x - 1, y) {
+                            path += &format!("M{x},{y}v1");
+                        }
+                        if !on(x + 1, y) {
+                            path += &format!("M{},{y}v1", x + 1);
+                        }
+                    }
+                }
+            }
+        }
+        path
+    }
+    #[test]
+    fn a_selection_within_the_budget_keeps_its_exact_outline() {
+        let on = |x: i32, y: i32| {
+            (30..300).contains(&x)
+                && (10..200).contains(&y)
+                && (x - 100) * (x - 100) + (y - 90) * (y - 90) > 900
+        };
+        let (e, d) = with_selection(512, 256, |x, y| if on(x, y) { 255 } else { 0 });
+        assert_eq!(e.selection_outline(d).unwrap(), exact_outline(512, 256, on));
+    }
+    #[test]
+    fn a_checkerboard_selection_outline_stays_within_the_segment_budget() {
+        let (e, d) = with_selection(512, 512, |x, y| if (x + y) % 2 == 0 { 255 } else { 0 });
+        let outline = e.selection_outline(d).unwrap();
+        let segments = outline.matches('M').count();
+        assert!(segments <= MAX_OUTLINE_SEGMENTS, "{segments} segments");
+        // Every 2×2 block holds a selected pixel, so the outline is the border.
+        assert_eq!(segments, 4 * 256);
+        assert!(outline.starts_with("M0,0h2"), "{}", &outline[..40]);
+    }
+    #[test]
+    fn an_outline_coarsens_past_the_tile_size_until_it_fits() {
+        let mut decoded = Decoded::new();
+        for (key, i) in [
+            (TileKey { tx: 0, ty: 0 }, 0),
+            (TileKey { tx: 2, ty: 1 }, 44 * 256 + 188),
+        ] {
+            let mut pixels = vec![0; 65536];
+            pixels[i] = 255;
+            decoded.insert(
+                key,
+                Arc::new(TileData::new(PixelFormat::R8, pixels).unwrap()),
+            );
+        }
+        let mut grid = OutlineGrid::new(&decoded);
+        assert_eq!(grid.outline(8).unwrap().matches('M').count(), 8);
+        let path = loop {
+            if let Some(path) = grid.outline(4) {
+                break path;
+            }
+            grid = grid.coarser();
+        };
+        // Both pixels end up in one 1024-pixel block.
+        assert_eq!(path, "M0,0h1024M0,1024h1024M0,0v1024M1024,0v1024");
     }
     #[test]
     fn feather_crosses_tile_boundary_for_rectangle_and_lasso() {
