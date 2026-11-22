@@ -30,6 +30,80 @@ pub struct TextCache {
     outlines: OutlineCache,
 }
 
+const FONT_CACHE_FACES: usize = 64;
+const FONT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(test)]
+mod font_cache_tests {
+    use super::*;
+
+    #[test]
+    fn faces_share_bytes_and_cache_stays_bounded() {
+        let font = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
+        // Two face indices point to the same sfnt in a minimal collection.
+        let mut sfnt = font.to_vec();
+        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        for i in 0..tables {
+            let p = 12 + i * 16 + 8;
+            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + 20;
+            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x02\0\0\0\x14\0\0\0\x14".to_vec();
+        collection.extend(sfnt);
+        let mut engine = Engine::new();
+        let hash = ContentHash::of(&collection);
+        engine.blobs.insert(hash, collection);
+        let mut assets = Assets::new();
+        let mut content = TextContent::default();
+        for face_index in 0..2 {
+            let id = AssetId::new();
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            content.style.fonts.push(id);
+        }
+        let fonts = engine.font_set(&assets, &content);
+        assert!(Arc::ptr_eq(
+            &fonts.get(&content.style.fonts[0]).unwrap().bytes,
+            &fonts.get(&content.style.fonts[1]).unwrap().bytes
+        ));
+        for index in 0..(FONT_CACHE_FACES + 5) {
+            let fake_hash = ContentHash::of(&index.to_le_bytes());
+            engine.blobs.insert(fake_hash, font.to_vec());
+            let id = AssetId::new();
+            let mut one = TextContent::default();
+            one.style.fonts.push(id);
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash: fake_hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index: 0,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            engine.font_set(&assets, &one);
+            assert!(engine.text.fonts.borrow().len() <= FONT_CACHE_FACES);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportedFont {
     pub record: AssetRecord,
@@ -494,11 +568,43 @@ impl Engine {
             };
             let key = (*hash, *face_index);
             let mut fonts = self.text.fonts.borrow_mut();
-            let data = fonts.entry(key).or_insert_with(|| {
-                self.blobs
-                    .get(hash)
-                    .and_then(|b| FontData::new(id, Arc::new(b.clone()), *face_index).ok())
-            });
+            if !fonts.contains_key(&key) {
+                // Missing blobs may arrive later; do not cache their absence.
+                let Some(blob) = self.blobs.get(hash) else {
+                    continue;
+                };
+                let shared = fonts.iter().find_map(|((cached_hash, _), font)| {
+                    (*cached_hash == *hash)
+                        .then_some(font.as_ref())
+                        .flatten()
+                        .map(|font| font.bytes.clone())
+                });
+                let already_cached = shared.is_some();
+                let bytes = shared.unwrap_or_else(|| Arc::new(blob.clone()));
+                let data = FontData::new(id, bytes, *face_index).ok();
+                let mut seen = std::collections::HashSet::new();
+                let used: usize = fonts
+                    .iter()
+                    .filter_map(|((cached_hash, _), font)| {
+                        font.as_ref()
+                            .filter(|_| seen.insert(*cached_hash))
+                            .map(|font| font.bytes.len())
+                    })
+                    .sum();
+                let extra = if already_cached { 0 } else { blob.len() };
+                if fonts.len() >= FONT_CACHE_FACES || used.saturating_add(extra) > FONT_CACHE_BYTES
+                {
+                    fonts.clear();
+                }
+                if blob.len() <= FONT_CACHE_BYTES {
+                    fonts.insert(key, data.clone());
+                }
+                if let Some(data) = data {
+                    set.insert(data);
+                }
+                continue;
+            }
+            let data = fonts.get(&key).expect("cached font");
             if let Some(d) = data {
                 let mut d = d.clone();
                 d.id = id;
