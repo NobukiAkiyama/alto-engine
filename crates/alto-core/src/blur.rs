@@ -3,7 +3,13 @@
 use crate::q_from_f64_bits;
 
 pub fn blur_radius_q8_f64(radius: f64) -> Option<u32> {
-    u32::try_from(q_from_f64_bits(radius.to_bits(), 8)?)
+    // Reject negatives before quantization, as the f32 decoder does, so a tiny
+    // negative radius is not rounded to zero. -0.0 stays valid.
+    let bits = radius.to_bits();
+    if bits >> 63 != 0 && bits & 0x7fff_ffff_ffff_ffff != 0 {
+        return None;
+    }
+    u32::try_from(q_from_f64_bits(bits, 8)?)
         .ok()
         .filter(|&v| v <= 16384)
 }
@@ -107,6 +113,12 @@ mod tests {
         assert_eq!(blur_radius_q8_f64(-1.0), None);
         assert_eq!(blur_radius_q8_f32(-1.0), None);
         assert_eq!(blur_radius_q8_f32(f32::NAN), None);
+        // Negative values that would quantize to zero are still negative.
+        assert_eq!(blur_radius_q8_f64(-1.0 / 1024.0), None);
+        assert_eq!(blur_radius_q8_f32(-1.0 / 1024.0), None);
+        assert_eq!(blur_radius_q8_f64(-f64::MIN_POSITIVE), None);
+        assert_eq!(blur_radius_q8_f64(-f64::from_bits(1)), None);
+        assert_eq!(blur_radius_q8_f32(-f32::from_bits(1)), None);
     }
 
     #[test]
