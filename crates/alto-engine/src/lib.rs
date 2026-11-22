@@ -876,6 +876,9 @@ impl Engine {
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         for (h, b) in objects {
             if b[8] == 1 || b[8] == 4 {
+                if self.tiles.promote(&h) {
+                    continue;
+                }
                 let insert = if deferred_verify {
                     ObjectStore::insert_deferred
                 } else {
@@ -893,7 +896,9 @@ impl Engine {
                     opaque.contains(&h),
                 );
             } else {
-                self.install_object(h, &b)?;
+                if !self.blobs.contains_key(&h) {
+                    self.install_object(h, &b)?;
+                }
             }
         }
         timer.split_register();

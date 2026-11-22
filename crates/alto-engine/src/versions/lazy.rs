@@ -491,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_open_rolls_back_only_newly_registered_objects() {
+        let f = fixture();
+        let mut entries = f.entries.clone();
+        entries.remove(&alto_store::object_path(&f.old_tile));
+        let mut engine = Engine::new();
+        let stage = engine.begin_tile_stage();
+        let mut pixels = vec![0u8; 256 * 256 * 4];
+        pixels[0..4].copy_from_slice(&[1, 2, 3, 255]);
+        let existing = engine
+            .stage_tile(
+                stage,
+                alto_raster::TileData::new(alto_core::PixelFormat::Rgba8, pixels).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            assert!(engine.open_entries(entries.clone()).is_err());
+            assert!(!engine.tiles.reachable(&f.head_tile));
+            assert!(engine.tiles.reachable(&existing));
+        }
+        engine.release_staged_tiles(stage);
+    }
+
+    #[test]
     fn a_history_object_outside_the_folder_is_still_corruption() {
         let f = fixture();
         let mut entries = f.entries.clone();

@@ -839,52 +839,83 @@ impl Engine {
         // Snapshot and history parsing so far is restore; the object inserts that
         // follow are register, and the snapshot install after them restores again.
         timer.split_restore();
-        let (handle, mut warnings) = self.install_package(
-            p.objects,
-            p.opaque,
-            &p.snapshot,
-            vec![],
-            deferred_verify,
-            timer,
-        )?;
-        for hash in &store.retained {
-            if !self.tiles.contains(hash)
-                && !self.blobs.contains_key(hash)
-                && !lazy.as_ref().is_some_and(|known| known.contains(hash))
-            {
-                self.documents.remove(&handle);
-                return Err(branches::fail(
-                    "CORRUPT_DATA",
-                    format!("history object missing: {hash}"),
-                ));
+        let new_tiles: BTreeSet<_> = p
+            .objects
+            .iter()
+            .filter_map(|(hash, bytes)| {
+                (matches!(bytes.get(8), Some(1 | 4)) && !self.tiles.reachable(hash))
+                    .then_some(*hash)
+            })
+            .collect();
+        let new_blobs: BTreeSet<_> = p
+            .objects
+            .iter()
+            .filter_map(|(hash, bytes)| {
+                (bytes.get(8) == Some(&0) && !self.blobs.contains_key(hash)).then_some(*hash)
+            })
+            .collect();
+        let installed = (|| -> Result<_, EngineError> {
+            let (handle, warnings) = self.install_package(
+                p.objects,
+                p.opaque,
+                &p.snapshot,
+                vec![],
+                deferred_verify,
+                timer,
+            )?;
+            for hash in &store.retained {
+                if !self.tiles.contains(hash)
+                    && !self.blobs.contains_key(hash)
+                    && !lazy.as_ref().is_some_and(|known| known.contains(hash))
+                {
+                    self.documents.remove(&handle);
+                    return Err(branches::fail(
+                        "CORRUPT_DATA",
+                        format!("history object missing: {hash}"),
+                    ));
+                }
             }
-        }
-        {
-            let validation = (|| -> Result<(), EngineError> {
-                if let Some(selection) = &self.document(handle)?.selection {
-                    self.validate_mask_plane_impl(selection, deferred_verify)?;
-                }
-                for node in self.document(handle)?.nodes.values() {
-                    self.validate_node_content_impl(node, deferred_verify)?;
-                }
-                // With objects left in the folder, a version is checked when they are read.
-                let versions = store.snapshots.values().filter(|_| lazy.is_none());
-                for bytes in versions {
-                    let doc = Document::from_snapshot_bytes(bytes)?;
-                    if let Some(selection) = &doc.selection {
+            {
+                let validation = (|| -> Result<(), EngineError> {
+                    if let Some(selection) = &self.document(handle)?.selection {
                         self.validate_mask_plane_impl(selection, deferred_verify)?;
                     }
-                    for node in doc.nodes.values() {
+                    for node in self.document(handle)?.nodes.values() {
                         self.validate_node_content_impl(node, deferred_verify)?;
                     }
+                    // With objects left in the folder, a version is checked when they are read.
+                    let versions = store.snapshots.values().filter(|_| lazy.is_none());
+                    for bytes in versions {
+                        let doc = Document::from_snapshot_bytes(bytes)?;
+                        if let Some(selection) = &doc.selection {
+                            self.validate_mask_plane_impl(selection, deferred_verify)?;
+                        }
+                        for node in doc.nodes.values() {
+                            self.validate_node_content_impl(node, deferred_verify)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = validation {
+                    self.documents.remove(&handle);
+                    return Err(error);
                 }
-                Ok(())
-            })();
-            if let Err(error) = validation {
-                self.documents.remove(&handle);
+            }
+            Ok((handle, warnings))
+        })();
+        let (handle, mut warnings) = match installed {
+            Ok(result) => result,
+            Err(error) => {
+                self.tiles.remove_all(&new_tiles);
+                self.decoded
+                    .get_mut()
+                    .retain(|hash| !new_tiles.contains(hash));
+                for hash in &new_blobs {
+                    self.blobs.remove(hash);
+                }
                 return Err(error);
             }
-        }
+        };
         warnings.dedup();
         self.versions.insert(handle, store);
         if let Some(known) = lazy {
