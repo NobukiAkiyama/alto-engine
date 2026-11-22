@@ -274,6 +274,7 @@ impl Renderer {
             lost,
             lost_detail,
             frame: 0,
+            next_preview_id: 0,
             stroke: None,
             adapter_name: adapter.get_info().name,
             budget_bytes: budget_mb as u64 * 1048576,

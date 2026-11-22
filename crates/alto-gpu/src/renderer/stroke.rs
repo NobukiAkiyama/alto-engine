@@ -20,6 +20,8 @@ impl Renderer {
             return Err(RenderError::Conflict("stroke already active".into()));
         }
         self.governor.reset_peak();
+        let preview_id = self.next_preview_id;
+        self.next_preview_id = self.next_preview_id.wrapping_add(1);
         self.stroke = Some(GpuStroke {
             tip,
             tip_texture: None,
@@ -31,6 +33,7 @@ impl Renderer {
             hardness: hardness.clamp(0.0, 0.999),
             opacity: opacity.clamp(0.0, 1.0),
             erase,
+            preview_id,
             epoch: 0,
             mask,
             world,
