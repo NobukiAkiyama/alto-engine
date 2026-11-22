@@ -816,7 +816,8 @@ impl OutlineGrid {
             .iter()
             .map(|(key, tile)| {
                 let mut cells = vec![0; 1024];
-                for (i, v) in tile.pixels.iter().enumerate() {
+                // Selections are R8; read no more than one tile of bytes regardless.
+                for (i, v) in tile.pixels.iter().take(65536).enumerate() {
                     if *v >= 128 {
                         set_bit(&mut cells, i as i64);
                     }
@@ -886,7 +887,7 @@ impl OutlineGrid {
         Some(path)
     }
     /// The finest outline within `budget` segments. Coarsening ends at the blocks
-    /// around the origin (at most four, 8 segments), whose outline is returned even
+    /// around the origin (at most four, 16 segments), whose outline is returned even
     /// over a smaller budget.
     fn bounded(mut self, budget: usize) -> String {
         loop {
