@@ -787,8 +787,10 @@ fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
         };
         children.push(index);
     }
-    if let Some(actual) = v3_test_try_render(&document, &store, (0, 0, 0)) {
-        actual.expect("twelve backdrop blurs should fit the command budget");
+    for tile in [(0, 0, 0), (-4, 5, 5)] {
+        if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+            actual.expect("twelve backdrop blurs should fit the command budget");
+        }
     }
     // Invisible nodes prevent grouping while leaving the backdrop unchanged.
     // Three adjustments keep the old recursive path small enough to compare.
