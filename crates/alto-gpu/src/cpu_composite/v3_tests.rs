@@ -34,7 +34,7 @@ pub(super) fn v3_test_try_render_with_budget(
     let mut renderer =
         match pollster::block_on(crate::renderer::Renderer::headless(&instance, budget_mb)) {
             Ok(renderer) => renderer,
-            Err(err)
+            Err(err @ crate::RenderError::GpuUnsupported(_))
                 if !cfg!(target_os = "macos")
                     && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
             {

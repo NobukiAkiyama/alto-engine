@@ -1347,8 +1347,16 @@ mod dense_selection_tests {
     #[test]
     fn submitted_dense_scratch_can_be_reclaimed_for_small_budget() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
-            return;
+        let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
+            Ok(adapter) => adapter,
+            Err(err)
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("dense scratch test skipped: {err}");
+                return;
+            }
+            Err(err) => panic!("dense scratch test could not find an adapter: {err}"),
         };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
