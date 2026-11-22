@@ -462,6 +462,15 @@ jobs:
         env:
           ALTO_BROWSER_REPORT_DIR: ${{ runner.temp }}/alto-browser/${{ matrix.browser }}
         run: node scripts/verify-browser-webdriver.mjs "--browser=${{ matrix.browser }}"
+      - name: Add native browser results to the job summary
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/alto-browser/${{ matrix.browser }}/summary.json"
+          if [ -f "$report" ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

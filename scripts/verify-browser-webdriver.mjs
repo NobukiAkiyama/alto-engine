@@ -109,48 +109,55 @@ try {
   const caps = created.capabilities || created.value?.capabilities || {};
   console.log(`${browser} ${caps.browserVersion || caps.version || "version unknown"}`);
   await command("POST", `/session/${sessionId}/url`, { url: pageUrl });
-  let ready = false;
-  for (let i = 0; i < 240; i++) {
-    ready = await evaluate("!!window.altoEngine && !!navigator.gpu").catch(() => false);
-    if (ready) break;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  if (!ready) {
-    const error = await evaluate("document.querySelector('#error')?.textContent || ''").catch(() => "");
-    throw Error(`Engine did not start in ${browser}; WebGPU available=${await evaluate("!!navigator.gpu").catch(() => false)} ${error}`);
-  }
-  const adapter = await evaluate("(async()=>{const info=(await navigator.gpu.requestAdapter())?.info;return info?{vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description}:null})()");
+  const adapter = await evaluate("(async()=>{if(!navigator.gpu)return null;const info=(await navigator.gpu.requestAdapter())?.info;return info?{vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description}:null})()");
   console.log("WebGPU adapter", JSON.stringify(adapter));
-  await evaluate("(async()=>{if(!document.querySelector('#recovery').hidden)document.querySelector('#discard').click()})()");
-  for (let i = 0; i < 120; i++) {
-    if (await evaluate("!!window.altoEngine.document")) break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    if (i === 119) throw Error("Document did not open");
-  }
-  for (const name of selected) {
-    for (let i = 0; i < 120; i++) {
-      const state = await evaluate("window.altoEngine?.status?.state||''").catch(() => "");
-      if (state === "ready") break;
-      if (state === "failed" || state === "disposed") throw Error(`Playground engine is ${state} before ${name}`);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
+  if (browser === "safari" && !adapter) {
+    const reason = "Safari WebDriver is available, but this runner has no WebGPU adapter; browser suites were not run";
+    console.log(`::warning title=Safari WebGPU unavailable::${reason}`);
+    results.push({ name: "webgpu", ok: null, skipped: true, reason });
+    await writeFile(join(reportDir, "summary.json"), JSON.stringify({ browser, version: caps.browserVersion || null, adapter, status: "skipped", reason, results }, null, 2) + "\n");
+  } else {
+    let ready = false;
+    for (let i = 0; i < 240; i++) {
+      ready = await evaluate("!!window.altoEngine && !!navigator.gpu").catch(() => false);
+      if (ready) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    console.log("RUN", name);
-    await evaluate("(async()=>{document.querySelector('#test-results').dataset.report=''})()");
-    let error = null;
-    try {
-      await runInPage(suiteBody(name), 1_200_000);
-    } catch (e) { error = String(e); }
-    const report = await evaluate("document.querySelector('#test-results').dataset.report||''").catch(() => "");
-    const parsed = report ? JSON.parse(report) : null;
-    if (report) await writeFile(join(reportDir, `${name}.json`), report.endsWith("\n") ? report : report + "\n");
-    const rows = parsed?.results || [];
-    const failed = rows.filter((row) => row.pass === false);
-    const ok = !error && rows.length > 0 && failed.length === 0;
-    results.push({ name, ok, count: rows.length, failed: failed.length, ...(error ? { error } : {}) });
-    console.log(`${name}: ${ok ? "PASS" : "FAIL"} (${rows.length} cases, ${failed.length} failed)${error ? ` ${error}` : ""}`);
-    await writeFile(join(reportDir, "summary.json"), JSON.stringify({ browser, version: caps.browserVersion || null, adapter, results }, null, 2) + "\n");
-    if (!ok) break;
+    if (!ready) {
+      const error = await evaluate("document.querySelector('#error')?.textContent || ''").catch(() => "");
+      throw Error(`Engine did not start in ${browser}; WebGPU available=${await evaluate("!!navigator.gpu").catch(() => false)} ${error}`);
+    }
+    await evaluate("(async()=>{if(!document.querySelector('#recovery').hidden)document.querySelector('#discard').click()})()");
+    for (let i = 0; i < 120; i++) {
+      if (await evaluate("!!window.altoEngine.document")) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (i === 119) throw Error("Document did not open");
+    }
+    for (const name of selected) {
+      for (let i = 0; i < 120; i++) {
+        const state = await evaluate("window.altoEngine?.status?.state||''").catch(() => "");
+        if (state === "ready") break;
+        if (state === "failed" || state === "disposed") throw Error(`Playground engine is ${state} before ${name}`);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (i === 119) throw Error(`Playground engine stayed ${state} before ${name}`);
+      }
+      console.log("RUN", name);
+      await evaluate("(async()=>{document.querySelector('#test-results').dataset.report=''})()");
+      let error = null;
+      try {
+        await runInPage(suiteBody(name), 1_200_000);
+      } catch (e) { error = String(e); }
+      const report = await evaluate("document.querySelector('#test-results').dataset.report||''").catch(() => "");
+      const parsed = report ? JSON.parse(report) : null;
+      if (report) await writeFile(join(reportDir, `${name}.json`), report.endsWith("\n") ? report : report + "\n");
+      const rows = parsed?.results || [];
+      const failed = rows.filter((row) => row.pass === false);
+      const ok = !error && rows.length > 0 && failed.length === 0;
+      results.push({ name, ok, count: rows.length, failed: failed.length, ...(error ? { error } : {}) });
+      console.log(`${name}: ${ok ? "PASS" : "FAIL"} (${rows.length} cases, ${failed.length} failed)${error ? ` ${error}` : ""}`);
+      await writeFile(join(reportDir, "summary.json"), JSON.stringify({ browser, version: caps.browserVersion || null, adapter, results }, null, 2) + "\n");
+      if (!ok) break;
+    }
   }
 } catch (error) {
   console.error("WebDriver browser verification failed:", error);
@@ -162,4 +169,4 @@ try {
   if (server) await new Promise((resolve) => server.close(resolve));
 }
 console.log(JSON.stringify(results, null, 2));
-if (!results.length || results.some((result) => !result.ok)) process.exitCode = 1;
+if (!results.length || results.some((result) => result.ok === false)) process.exitCode = 1;
