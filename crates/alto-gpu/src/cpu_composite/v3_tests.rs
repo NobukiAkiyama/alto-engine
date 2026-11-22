@@ -793,8 +793,8 @@ fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
             actual.expect("twelve backdrop blurs should fit the command budget");
         }
     }
-    // Invisible nodes prevent grouping while leaving the backdrop unchanged.
-    // Three adjustments keep the old recursive path small enough to compare.
+    // Invisible siblings between the adjustments leave the backdrop unchanged,
+    // so both documents must render the same pixels.
     let mut reference = document.clone();
     let RContent::Group { children, .. } = &mut document.nodes[0].content else {
         unreachable!()

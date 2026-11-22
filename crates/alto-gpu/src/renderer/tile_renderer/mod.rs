@@ -12,6 +12,8 @@ fn bucket(n: u32) -> u32 {
 use crate::{REffect, REffectKind, RMask, RNode};
 use alto_vector::{FillRule, StyledPath};
 mod graph;
+#[cfg(test)]
+mod graph_reference;
 mod paint;
 mod params;
 #[cfg(test)]
@@ -503,11 +505,32 @@ enum StackInput<'a> {
         world: WorldTransform,
         depth: usize,
     },
+    /// The recursive walk's sibling prefix, rendered again for each request.
+    #[cfg(test)]
     Siblings {
         children: &'a [usize],
         world: WorldTransform,
         depth: usize,
     },
+    /// A planned sibling prefix by sampling scale (`graph::Requests`).
+    Planes(&'a BTreeMap<u32, Target>),
+}
+#[cfg(test)]
+thread_local! {
+    /// Routes sibling walks through `graph_reference` on this thread.
+    static REFERENCE_SIBLINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Counts `raw_node` renders on this thread.
+    static RAW_NODE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Runs `f` with the recursive sibling walk on or off and returns its result
+/// with the number of node renders it made.
+#[cfg(test)]
+pub(crate) fn with_sibling_walk<T>(reference: bool, f: impl FnOnce() -> T) -> (T, usize) {
+    let previous = REFERENCE_SIBLINGS.replace(reference);
+    let renders = RAW_NODE_RENDERS.replace(0);
+    let result = f();
+    REFERENCE_SIBLINGS.set(previous);
+    (result, RAW_NODE_RENDERS.replace(renders))
 }
 struct Context<'a> {
     r: &'a mut Renderer,
