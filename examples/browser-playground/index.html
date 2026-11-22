@@ -160,9 +160,6 @@
       cursor: pointer;
     }
     @media (max-width: 700px) {
-      main {
-        grid-template-columns: minmax(0, 1fr) 205px;
-      }
       aside {
         padding: 8px;
       }
@@ -187,6 +184,12 @@
       flex: 1;
       min-height: 0;
       grid-template-columns: minmax(0, 1fr) 310px;
+    }
+    /* After the 310px rule, so narrow screens keep the canvas usable. */
+    @media (max-width: 700px) {
+      main {
+        grid-template-columns: minmax(0, 1fr) 205px;
+      }
     }
     #selection-tools {
       display: flex;
