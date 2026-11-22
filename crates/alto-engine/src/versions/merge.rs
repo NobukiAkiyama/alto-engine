@@ -336,6 +336,94 @@ mod structure_tests {
     use alto_doc::{DocumentMeta, Node, Op};
 
     #[test]
+    fn branch_and_stash_resolve_opposite_reparenting() {
+        for stash in [false, true] {
+            let mut e = Engine::new();
+            let h = e.create_document(DocumentMeta::srgb_u8(16, 16)).unwrap();
+            let root = e.document(h).unwrap().root;
+            let a = Node::group("A");
+            let b = Node::group("B");
+            let (aid, bid) = (a.id, b.id);
+            e.transact(
+                h,
+                "groups",
+                vec![
+                    Op::InsertNode {
+                        node: a,
+                        parent: root,
+                        index: 0,
+                    },
+                    Op::InsertNode {
+                        node: b,
+                        parent: root,
+                        index: 1,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+            e.commit(h, "base", 0, None, false).unwrap();
+            if !stash {
+                e.create_branch(h, "feature", None, true).unwrap();
+            }
+            let rev = e.document(h).unwrap().revision;
+            e.transact(
+                h,
+                "move A",
+                vec![Op::MoveNode {
+                    id: aid,
+                    parent: bid,
+                    index: 0,
+                }],
+                rev,
+            )
+            .unwrap();
+            let stash_entry = if stash {
+                Some(e.stash(h, "move A", 1, None).unwrap())
+            } else {
+                e.commit(h, "feature", 1, None, false).unwrap();
+                e.checkout(h, "main").unwrap();
+                None
+            };
+            let rev = e.document(h).unwrap().revision;
+            e.transact(
+                h,
+                "move B",
+                vec![Op::MoveNode {
+                    id: bid,
+                    parent: aid,
+                    index: 0,
+                }],
+                rev,
+            )
+            .unwrap();
+            e.commit(h, "ours", 2, None, false).unwrap();
+            let plan = if let Some(entry) = stash_entry {
+                e.stash_apply(h, entry.commit, false).unwrap().unwrap()
+            } else {
+                e.prepare_merge(h, "feature").unwrap()
+            };
+            assert_eq!(plan.conflicts.len(), 1);
+            assert_eq!(plan.conflicts[0].kind, "structure");
+            e.finish_merge(
+                h,
+                &plan.token,
+                vec![MergeResolution {
+                    conflict_id: plan.conflicts[0].id.clone(),
+                    choice: "theirs".into(),
+                    value: None,
+                }],
+                "merge",
+                3,
+                None,
+            )
+            .unwrap();
+            assert_eq!(e.document(h).unwrap().node(aid).unwrap().parent, Some(bid));
+            e.document(h).unwrap().validate_graph().unwrap();
+        }
+    }
+
+    #[test]
     fn opposing_reparents_offer_repair_without_losing_other_fields() {
         let mut engine = Engine::new();
         let h = engine
