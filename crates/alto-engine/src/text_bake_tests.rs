@@ -702,6 +702,33 @@ fn text_bake_skips_a_layer_moved_into_a_removed_group() {
 }
 
 #[test]
+fn a_restored_subtree_with_cyclic_children_fails_instead_of_hanging() {
+    let (mut e, d, _, _) = document();
+    let root = e.document(d).unwrap().root;
+    let (mut a, mut b, mut c) = (Node::group("A"), Node::group("B"), Node::group("C"));
+    let set = |n: &mut Node, parent, kids: Vec<NodeId>| {
+        n.parent = Some(parent);
+        if let NodeKind::Group { children, .. } = &mut n.kind {
+            *children = kids;
+        }
+    };
+    let (ai, bi, ci) = (a.id, b.id, c.id);
+    set(&mut a, ci, vec![bi]);
+    set(&mut b, ai, vec![ai]);
+    set(&mut c, root, vec![]);
+    let rev = e.document(d).unwrap().revision;
+    let ops = vec![
+        Op::RestoreSubtree {
+            nodes: vec![a, b, c],
+            parent: root,
+            index: 0,
+        },
+        Op::RemoveNode { id: ai },
+    ];
+    assert!(e.transact(d, "cycle", ops, rev).is_err());
+}
+
+#[test]
 fn text_bake_on_restore() {
     let (mut e, d, latin, jp) = document();
     let id = insert(&mut e, d, texts(latin, jp).remove(1).1);

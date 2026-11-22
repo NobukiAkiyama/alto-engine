@@ -391,8 +391,13 @@ impl Engine {
                 Op::MoveNode { id, parent, .. } => tree.link(*id, *parent),
                 Op::RemoveNode { id } => {
                     tree.unlink(*id);
+                    // Links come from ops not yet validated; a cycle must not hang here.
+                    let mut seen = std::collections::BTreeSet::new();
                     let mut stack = vec![*id];
                     while let Some(n) = stack.pop() {
+                        if !seen.insert(n) {
+                            continue;
+                        }
                         written.insert(n);
                         if let Some(children) = tree.children.get(&n) {
                             stack.extend(children.iter().copied());
