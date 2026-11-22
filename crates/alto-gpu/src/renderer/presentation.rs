@@ -137,13 +137,14 @@ impl Presentation {
                 && s.generation == self.generation
                 && s.surface == self.surface
         });
+        let displayed_pending = displayed.map_or(1, |s| s.pending);
         let has = displayed.is_some_and(|s| s.surface == self.surface);
         DisplayReport {
             phase: if !has {
                 0
             } else if !current {
                 1
-            } else if self.pending > 0 {
+            } else if displayed_pending > 0 {
                 2
             } else {
                 3
@@ -159,7 +160,7 @@ impl Presentation {
                     .active
                     .as_ref()
                     .is_some_and(|a| a.generation != self.generation),
-            interaction_ready: current && self.pending == 0 && !in_flight,
+            interaction_ready: current && displayed_pending == 0 && !in_flight,
             presented: displayed.map_or(Viewport::default(), |s| s.view),
             has_presented: has,
             presented_generation: displayed.map_or(0, |s| s.generation),
@@ -250,5 +251,16 @@ mod tests {
         p.published();
         assert!(!p.report(false).stale);
         assert!(p.report(false).interaction_ready);
+    }
+
+    #[test]
+    fn pending_display_cannot_become_interactive_when_work_finishes_late() {
+        let mut p = Presentation::default();
+        p.pending = 1;
+        p.published();
+        p.pending = 0;
+        let report = p.report(false);
+        assert_eq!(report.phase, 2);
+        assert!(!report.interaction_ready);
     }
 }
