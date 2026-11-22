@@ -771,6 +771,43 @@ fn v3_clipped_adjustment_keeps_base_coverage() {
 }
 
 #[test]
+fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
+    let blur = REffectKind::GaussianBlur {
+        radius: 1.0,
+        radius_q8: 256,
+    };
+    let (mut document, store) = v3_square_under(v3_adjustment(blur.clone(), RFeatures::default()));
+    for _ in 1..12 {
+        let index = document.nodes.len();
+        document
+            .nodes
+            .push(v3_adjustment(blur.clone(), RFeatures::default()));
+        let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+            unreachable!()
+        };
+        children.push(index);
+    }
+    let mut reference = document.clone();
+    let effect = REffect {
+        kind: blur,
+        selection: None,
+    };
+    reference.nodes[1].features.effects = vec![effect; 12];
+    reference.nodes[1].effects = 12;
+    let RContent::Group { children, .. } = &mut reference.nodes[0].content else {
+        unreachable!()
+    };
+    children.truncate(1);
+    if let Some(actual) = v3_test_try_render(&document, &store, (0, 0, 0)) {
+        let actual = actual.expect("adjacent backdrop blurs should fit in the command budget");
+        let expected = v3_test_try_render(&reference, &store, (0, 0, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn v3_backdrop_blur_matches_the_layer_blur() {
     let blur = REffectKind::GaussianBlur {
         radius: 8.0,

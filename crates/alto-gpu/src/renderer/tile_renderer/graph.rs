@@ -13,7 +13,11 @@ impl Context<'_> {
         let mut base_background = None;
         let mut base_node: Option<RNode> = None;
         let mut base_position = 0;
+        let mut skip_until = 0;
         for (position, &index) in children.iter().enumerate() {
+            if position < skip_until {
+                continue;
+            }
             let node = self.scene.nodes[index].clone();
             if !node.visible {
                 if !node.features.clip {
@@ -25,6 +29,33 @@ impl Context<'_> {
             if let RContent::Adjustment(effect) = &node.content {
                 let mut stack = vec![effect.clone()];
                 stack.extend(node.features.effects.clone());
+                // Adjacent full-strength adjustments with the same transform
+                // are one effect stack. Planning them together shares each
+                // sibling prefix over the halo needed by later effects.
+                let plain = |n: &RNode| {
+                    n.visible
+                        && n.opacity == 1.0
+                        && n.blend == RenderBlend::Normal
+                        && !n.features.clip
+                        && n.features.mask.is_none()
+                        && n.features.vector_mask.is_none()
+                        && n.features.clip_path.is_none()
+                        && n.transform == node.transform
+                };
+                if plain(&node) {
+                    for (offset, &next) in children[position + 1..].iter().enumerate() {
+                        let n = &self.scene.nodes[next];
+                        if !plain(n) {
+                            break;
+                        }
+                        let RContent::Adjustment(next_effect) = &n.content else {
+                            break;
+                        };
+                        stack.push(next_effect.clone());
+                        stack.extend(n.features.effects.clone());
+                        skip_until = position + 2 + offset;
+                    }
+                }
                 // A backdrop blur needs extra input from the same siblings. The caller renders that halo below.
                 let input = if node.features.clip {
                     let Some(base) = base else {
