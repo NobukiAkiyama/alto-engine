@@ -221,6 +221,16 @@ impl Engine {
         expected: Option<&str>,
     ) -> Result<GcReport, EngineError> {
         let session = alto_store::folder::lock(dir)?;
+        self.gc_session(h, &session, dry_run, expected)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn gc_session(
+        &mut self,
+        h: DocHandle,
+        session: &impl GcFolder,
+        dry_run: bool,
+        expected: Option<&str>,
+    ) -> Result<GcReport, EngineError> {
         let stored = session.read()?;
         let plan = self.prepare_gc(h, &stored, dry_run)?;
         if expected.is_some_and(|s| s != plan.report.baseline) {
@@ -234,12 +244,26 @@ impl Engine {
         let record = serde_json::json!({"phase":"prepared","baseline":plan.report.baseline,"remove":plan.remove});
         session
             .write_gc_record(&serde_json::to_vec(&record).map_err(|e| invalid(e.to_string()))?)?;
-        let publication = session.write(&plan.entries, Some(ContentHash::of(old)));
         let next = &plan.entries["manifest.json"];
-        if session.read()?.get("manifest.json") == Some(next) {
-            self.adopt_gc(h, next)?;
-        }
-        let publication = publication?;
+        // A confirmed publication is adopted before anything else can fail, so the
+        // open document never stays a generation behind its folder. A failed write
+        // may still have published; readback settles that, and deletion waits for a
+        // run whose publication and adoption are both confirmed.
+        let publication = match session.write(&plan.entries, Some(ContentHash::of(old))) {
+            Ok(publication) => {
+                self.adopt_gc(h, next)?;
+                publication
+            }
+            Err(e) => {
+                if session
+                    .read()
+                    .is_ok_and(|now| now.get("manifest.json") == Some(next))
+                {
+                    self.adopt_gc(h, next)?;
+                }
+                return Err(e.into());
+            }
+        };
         for (path_index, path) in plan.remove.iter().enumerate() {
             session.delete_immutable(path).map_err(|e| {
                 fail(
@@ -285,6 +309,37 @@ impl Engine {
         let mut report = plan.report;
         report.dry_run = false;
         Ok((bytes, report))
+    }
+}
+/// The locked folder operations a GC uses, so tests can fail one of them.
+#[cfg(not(target_arch = "wasm32"))]
+trait GcFolder {
+    fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError>;
+    fn write(
+        &self,
+        entries: &BTreeMap<String, Vec<u8>>,
+        expected: Option<ContentHash>,
+    ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError>;
+    fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError>;
+    fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError>;
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl GcFolder for alto_store::folder::LockedFolder {
+    fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError> {
+        alto_store::folder::LockedFolder::read(self)
+    }
+    fn write(
+        &self,
+        entries: &BTreeMap<String, Vec<u8>>,
+        expected: Option<ContentHash>,
+    ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError> {
+        alto_store::folder::LockedFolder::write(self, entries, expected)
+    }
+    fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError> {
+        alto_store::folder::LockedFolder::write_gc_record(self, record)
+    }
+    fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError> {
+        alto_store::folder::LockedFolder::delete_immutable(self, path)
     }
 }
 #[cfg(test)]
@@ -405,6 +460,90 @@ mod tests {
             e.gc_folder(h, &dir, true, None).unwrap().by_kind["commits"].removed,
             0
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// A locked folder whose reads fail once a manifest has been written, or whose
+    /// writes publish and then report a failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct Flaky {
+        folder: alto_store::folder::LockedFolder,
+        written: std::cell::Cell<bool>,
+        fail_read_after_write: bool,
+        fail_write_after_publishing: bool,
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    impl GcFolder for Flaky {
+        fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError> {
+            if self.fail_read_after_write && self.written.get() {
+                return Err(alto_store::StoreError::Io("read failed".into()));
+            }
+            self.folder.read()
+        }
+        fn write(
+            &self,
+            entries: &BTreeMap<String, Vec<u8>>,
+            expected: Option<ContentHash>,
+        ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError> {
+            let report = self.folder.write(entries, expected)?;
+            self.written.set(true);
+            if self.fail_write_after_publishing {
+                return Err(alto_store::StoreError::Io("write result lost".into()));
+            }
+            Ok(report)
+        }
+        fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError> {
+            self.folder.write_gc_record(record)
+        }
+        fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError> {
+            self.folder.delete_immutable(path)
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flaky(dir: &std::path::Path, read: bool, write: bool) -> Flaky {
+        Flaky {
+            folder: alto_store::folder::lock(dir).unwrap(),
+            written: false.into(),
+            fail_read_after_write: read,
+            fail_write_after_publishing: write,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_published_gc_is_adopted_even_when_the_readback_fails() {
+        let (mut e, h, removed) = setup();
+        let dir = std::env::temp_dir().join(format!("alto-gc-{}", NodeId::new().0));
+        alto_store::folder::write(&dir, &e.folder_entries(h).unwrap(), None).unwrap();
+        let session = flaky(&dir, true, false);
+        assert!(e.gc_session(h, &session, false, None).is_err());
+        drop(session);
+        // The folder holds the new generation, and so does the open document.
+        let mut f = Engine::new();
+        let (d, _) = f
+            .open_entries(alto_store::folder::read(&dir).unwrap())
+            .unwrap();
+        assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        // Publication and adoption were confirmed, so the sweep ran; only the final
+        // check could not read. A retry passes the manifest comparison.
+        assert!(!dir.join(alto_store::commit_path(&removed)).exists());
+        let report = e.gc_folder(h, &dir, false, None).unwrap();
+        assert_eq!(report.by_kind["commits"].removed, 0);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_ambiguous_write_is_reconciled_by_readback_and_deletes_nothing() {
+        let (mut e, h, removed) = setup();
+        let dir = std::env::temp_dir().join(format!("alto-gc-{}", NodeId::new().0));
+        alto_store::folder::write(&dir, &e.folder_entries(h).unwrap(), None).unwrap();
+        let session = flaky(&dir, false, true);
+        assert!(e.gc_session(h, &session, false, None).is_err());
+        drop(session);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        assert!(dir.join(alto_store::commit_path(&removed)).exists());
+        e.gc_folder(h, &dir, false, None).unwrap();
+        assert!(!dir.join(alto_store::commit_path(&removed)).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
