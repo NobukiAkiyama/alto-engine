@@ -363,3 +363,22 @@ fn gradient_is_premultiplied_and_empty_image_bounds_survive() {
     };
     assert_eq!(bounds, b);
 }
+#[test]
+fn a_prepared_edit_from_another_engine_leaves_this_engines_stage() {
+    let (mut a, ha, ida) = setup();
+    let (mut b, hb, idb) = setup();
+    let rotate = |node| ImageEdit::Rotate {
+        node,
+        quarter_turns: 1,
+    };
+    let from_a = a.prepare_image_edit(ha, rotate(ida)).unwrap();
+    let from_b = b.prepare_image_edit(hb, rotate(idb)).unwrap();
+    // Both engines numbered their first document and stage alike.
+    assert_eq!((ha, from_a.stage), (hb, from_b.stage));
+    let before = b.snapshot(hb).unwrap();
+    let error = b.apply_image_edit(hb, from_a, "image.rotate").unwrap_err();
+    assert!(error.to_string().starts_with("CONFLICT"), "{error}");
+    assert!(b.snapshot(hb).unwrap() == before);
+    let result = b.apply_image_edit(hb, from_b, "image.rotate").unwrap();
+    assert!(!result.no_op);
+}

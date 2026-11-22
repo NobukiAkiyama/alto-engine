@@ -63,7 +63,12 @@ pub enum EngineError {
     Tile(#[from] alto_raster::TileError),
 }
 
+/// Gives each engine its own identity; handles and stage numbers repeat across engines.
+static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct Engine {
+    /// Distinguishes this engine's prepared edits from another engine's.
+    id: u64,
     documents: BTreeMap<DocHandle, Editor>,
     max_undo: usize,
     next_handle: u64,
@@ -99,6 +104,7 @@ impl Engine {
     }
     pub fn new() -> Self {
         Self {
+            id: NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             documents: BTreeMap::new(),
             max_undo: 100,
             next_handle: 1,
