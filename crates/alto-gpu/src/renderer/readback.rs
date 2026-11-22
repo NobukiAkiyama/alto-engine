@@ -191,6 +191,7 @@ impl StrokeReadback {
                 return Err(e);
             }
         };
+        self.failed = true;
         let batch = PendingBatch {
             tiles: self.remaining.by_ref().take(count).collect(),
             governor: self.governor.clone(),
@@ -277,6 +278,7 @@ impl StrokeReadback {
                 "stroke cancelled before commit".into(),
             ));
         }
+        self.failed = false;
         Ok(Some(out))
     }
     fn retire_tile(&self, tile: StrokeTile) {
@@ -367,6 +369,11 @@ impl Pool {
         use std::{future::Future, task::Poll};
         self.mapped.store(bytes, Ordering::Release);
         self.batches.fetch_add(1, Ordering::AcqRel);
+        let mut cleanup = MapCleanup {
+            pool: self,
+            control,
+            active: true,
+        };
         let (tx, rx) = futures_channel::oneshot::channel();
         self.buffer
             .slice(..bytes)
@@ -397,11 +404,8 @@ impl Pool {
             })
         })
         .await;
-        if let Some(c) = control {
-            c.1.lock().unwrap().take();
-        }
-        if result.is_err() {
-            self.unmap();
+        if result.is_ok() {
+            cleanup.complete();
         }
         result
     }
@@ -412,6 +416,30 @@ impl Pool {
         if self.mapped.swap(0, Ordering::AcqRel) != 0 {
             self.buffer.unmap();
         }
+    }
+}
+struct MapCleanup<'a> {
+    pool: &'a Pool,
+    control: Option<&'a FinishControl>,
+    active: bool,
+}
+impl MapCleanup<'_> {
+    fn complete(&mut self) {
+        self.clear_waker();
+        self.active = false;
+    }
+    fn clear_waker(&self) {
+        if let Some(c) = self.control {
+            c.1.lock().unwrap().take();
+        }
+    }
+}
+impl Drop for MapCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.pool.unmap();
+        }
+        self.clear_waker();
     }
 }
 impl Renderer {
