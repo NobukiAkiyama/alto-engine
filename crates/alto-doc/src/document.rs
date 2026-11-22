@@ -138,6 +138,7 @@ impl Document {
             | Op::SetVector { id, .. }
             | Op::SetVectorMask { id, .. }
             | Op::SetClipPath { id, .. }
+            | Op::SetTextBake { id, .. }
             | Op::SetText { id, .. } => editable(self, *id),
             Op::RemoveNode { id } => {
                 editable(self, *id)?;
@@ -512,6 +513,16 @@ impl Document {
                     id,
                     content: std::mem::replace(old, content),
                     bake: std::mem::replace(old_bake, bake),
+                }
+            }
+            Op::SetTextBake { id, bake } => {
+                let NodeKind::Text { bake: old, .. } = &mut self.node_mut(id)?.kind else {
+                    return Err(DocError::Invalid("Target must be text".into()));
+                };
+                change.nodes.insert(id);
+                Op::SetTextBake {
+                    id,
+                    bake: std::mem::replace(old, bake),
                 }
             }
             Op::SetSelection { selection } => {

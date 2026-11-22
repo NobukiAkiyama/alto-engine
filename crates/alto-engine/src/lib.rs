@@ -399,7 +399,7 @@ impl Engine {
             .documents
             .get_mut(&handle)
             .ok_or(EngineError::NotFound(handle))?
-            .transact(intent, ops, base_revision)?;
+            .transact_with_derived_bakes(intent, ops, base_revision)?;
         if self.document(handle)?.revision != old_revision {
             self.invalidate_merge(handle);
         }
@@ -415,6 +415,21 @@ impl Engine {
         handle: DocHandle,
         mut ops: Vec<Op>,
     ) -> Result<Vec<Op>, EngineError> {
+        // A received derived bake is accepted only for a node that this same
+        // transaction really needs to re-bake. Never let it bypass a lock as
+        // an independent user-authored edit.
+        let mut supplied = BTreeMap::new();
+        ops.retain(|op| {
+            if let Op::SetTextBake { id, bake } = op {
+                supplied.entry(*id).or_insert_with(Vec::new).push(*bake);
+                false
+            } else {
+                true
+            }
+        });
+        if supplied.values().any(|values| values.len() != 1) {
+            return Err(DocError::Invalid("duplicate derived text bake".into()).into());
+        }
         let doc = &self
             .documents
             .get(&handle)
@@ -422,6 +437,16 @@ impl Engine {
             .doc;
         for bytes in self.bake_ops(doc, &mut ops) {
             self.put_blob(bytes);
+        }
+        for op in &mut ops {
+            if let Op::SetTextBake { id, bake } = op
+                && let Some(value) = supplied.remove(id)
+            {
+                *bake = value[0];
+            }
+        }
+        if !supplied.is_empty() {
+            return Err(DocError::Invalid("unexpected derived text bake".into()).into());
         }
         Ok(ops)
     }
@@ -1087,6 +1112,11 @@ fn op_hashes(op: &Op, h: &mut std::collections::BTreeSet<ContentHash>) {
             }
         }
         Op::SetAdjustment { adjustment, .. } => selection::effect_hashes(adjustment, h),
+        Op::SetTextBake {
+            bake: Some(hash), ..
+        } => {
+            h.insert(*hash);
+        }
         Op::SetText {
             bake: Some(bake), ..
         } => {

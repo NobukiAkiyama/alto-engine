@@ -432,7 +432,9 @@ impl Engine {
                         None => assets.remove(id),
                     };
                 }
-                Op::SetText { id, .. } | Op::ReplaceNode { id, .. } => {
+                Op::SetText { id, .. }
+                | Op::SetTextBake { id, .. }
+                | Op::ReplaceNode { id, .. } => {
                     written.insert(*id);
                 }
                 Op::InsertNode { node, .. } => {
@@ -496,9 +498,8 @@ impl Engine {
             }
             let mut slot = None;
             bake(content, &mut slot);
-            ops.push(Op::SetText {
+            ops.push(Op::SetTextBake {
                 id: node.id,
-                content: content.clone(),
                 bake: slot,
             });
         }

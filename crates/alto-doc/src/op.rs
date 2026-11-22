@@ -97,6 +97,11 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bake: Option<ContentHash>,
     },
+    /// Derived data produced by the engine when a font asset changes.
+    SetTextBake {
+        id: NodeId,
+        bake: Option<ContentHash>,
+    },
     SetSelection {
         selection: Option<TileMap>,
     },
@@ -150,6 +155,7 @@ impl Op {
             | Op::SetVectorMask { id, .. }
             | Op::SetClipPath { id, .. }
             | Op::SetText { id, .. }
+            | Op::SetTextBake { id, .. }
             | Op::ReplaceNode { id, .. } => Some(*id),
             Op::SetMask { layer, .. } | Op::SetTiles { layer, .. } => Some(*layer),
             Op::SetSelection { .. } | Op::SetAsset { .. } | Op::SetMeta { .. } => None,

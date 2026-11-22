@@ -336,6 +336,91 @@ fn rule_bakes_one_shared_outline() {
 }
 
 #[test]
+fn font_replacement_rebakes_locked_text_and_remains_undoable() {
+    let (mut engine, doc, latin, jp) = document();
+    let content = texts(latin, jp).remove(0).1;
+    let id = insert(&mut engine, doc, content.clone());
+    let before = bake_of(&engine, doc, id).unwrap();
+    let rev = engine.document(doc).unwrap().revision;
+    engine
+        .transact(
+            doc,
+            "lock",
+            vec![Op::SetProps {
+                id,
+                patch: alto_doc::PropPatch {
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            }],
+            rev,
+        )
+        .unwrap();
+    let checkpoint = engine.save_package(doc).unwrap();
+    let jp_record = engine.document(doc).unwrap().assets[&jp].clone();
+    let mut replacement = engine.document(doc).unwrap().assets[&latin].clone();
+    replacement.hash = jp_record.hash;
+    replacement.byte_len = jp_record.byte_len;
+    let ops = engine
+        .bake_text_ops(
+            doc,
+            vec![Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            }],
+        )
+        .unwrap();
+    let rev = engine.document(doc).unwrap().revision;
+    engine
+        .transact(doc, "font.replace", ops.clone(), rev)
+        .unwrap();
+    let after = bake_of(&engine, doc, id).unwrap();
+    assert_ne!(before, after);
+    let journal = engine
+        .journal_record(doc, JournalKind::Transact, "font.replace", &ops)
+        .unwrap();
+    let mut recovered = Engine::new();
+    let (recovered_doc, _) = recovered.open_package(&checkpoint).unwrap();
+    assert_eq!(
+        recovered.replay_record(recovered_doc, &journal).unwrap(),
+        Replayed::Applied
+    );
+    assert_eq!(bake_of(&recovered, recovered_doc, id), Some(after));
+    engine.undo(doc).unwrap();
+    assert_eq!(bake_of(&engine, doc, id), Some(before));
+    engine.redo(doc).unwrap();
+    assert_eq!(bake_of(&engine, doc, id), Some(after));
+    let rev = engine.document(doc).unwrap().revision;
+    assert!(
+        engine
+            .transact(
+                doc,
+                "text.edit",
+                vec![Op::SetText {
+                    id,
+                    content: Box::new(content),
+                    bake: None
+                }],
+                rev
+            )
+            .is_err()
+    );
+    assert!(
+        engine
+            .transact(
+                doc,
+                "fake.bake",
+                vec![Op::SetTextBake {
+                    id,
+                    bake: Some(before)
+                }],
+                rev
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn text_bake_follows_font_replacement_in_the_same_transaction() {
     let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(0).1;
