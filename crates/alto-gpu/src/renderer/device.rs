@@ -1,7 +1,22 @@
 //! Creating the renderer on a device, and its settings and lifecycle.
 use super::*;
 
+fn checked_surface_extent(max: u32, width: u32, height: u32) -> Result<(u32, u32)> {
+    let width = width.max(1);
+    let height = height.max(1);
+    if width > max || height > max {
+        return Err(RenderError::GpuUnsupported(format!(
+            "surface extent {width}x{height} exceeds device limit {max}"
+        )));
+    }
+    Ok((width, height))
+}
+
 impl Renderer {
+    fn surface_extent(&self, width: u32, height: u32) -> Result<(u32, u32)> {
+        checked_surface_extent(self.device.limits().max_texture_dimension_2d, width, height)
+    }
+
     pub fn take_gpu_wait_requested(&mut self) -> bool {
         let requested = std::mem::take(&mut self.gpu_wait_requested);
         if requested {
@@ -70,8 +85,13 @@ impl Renderer {
         let readback = readback::Pool::new(&device, &governor).await?;
         let config = match &surface {
             Some(surface) => {
+                let (width, height) = checked_surface_extent(
+                    device.limits().max_texture_dimension_2d,
+                    width,
+                    height,
+                )?;
                 let mut config = surface
-                    .get_default_config(&adapter, width.max(1), height.max(1))
+                    .get_default_config(&adapter, width, height)
                     .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
                 if let Some(f) = surface
                     .get_capabilities(&adapter)
@@ -296,16 +316,18 @@ impl Renderer {
             uniform: None,
         })
     }
-    pub fn resize(&mut self, w: u32, h: u32) {
-        if self.config.width != w.max(1) || self.config.height != h.max(1) {
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<()> {
+        let (width, height) = self.surface_extent(w, h)?;
+        if self.config.width != width || self.config.height != height {
             self.cancel_prefetch();
             self.presentation.resized();
-            self.config.width = w.max(1);
-            self.config.height = h.max(1);
+            self.config.width = width;
+            self.config.height = height;
             if let Some(surface) = &self.surface {
                 surface.configure(&self.device, &self.config);
             }
         }
+        Ok(())
     }
     pub fn vector_stats(&self) -> (u64, u64, usize, u64) {
         self.vector.as_ref().map_or((0, 0, 0, 0), |v| {

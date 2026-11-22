@@ -437,10 +437,11 @@ impl Runtime {
         self.refresh()?;
         self.patch_view(&edited)
     }
-    pub fn resize(&mut self, w: u32, h: u32) {
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<(), JsValue> {
+        self.renderer.resize(w, h).map_err(error)?;
         self.canvas.set_width(w.max(1));
         self.canvas.set_height(h.max(1));
-        self.renderer.resize(w, h);
+        Ok(())
     }
     #[wasm_bindgen(js_name=setViewVersion)]
     pub fn set_view_version(&mut self, version: u32) {
