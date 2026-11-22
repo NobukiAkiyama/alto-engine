@@ -961,6 +961,7 @@ fn v3_remaining_adjustment_effects_render_on_metal() {
         (
             REffectKind::Curves {
                 points: vec![(0.0, 1.0), (1.0, 0.0)],
+                channels: [true; 3],
             },
             [255, 0, 0, 255],
             [0, 255, 255, 255],
@@ -1030,6 +1031,44 @@ fn v3_remaining_adjustment_effects_render_on_metal() {
                 );
             }
             assert_eq!(&image[(50 * 256 + 50) * 4..][..4], &[0, 0, 0, 0]);
+        }
+    }
+}
+
+#[test]
+fn v3_curves_map_only_their_channel_on_metal() {
+    let invert = |channels| REffectKind::Curves {
+        points: vec![(0.0, 1.0), (1.0, 0.0)],
+        channels,
+    };
+    let color = [255, 128, 0, 255];
+    for (channels, expected) in [
+        ([true, false, false], [0, 128, 0, 255]),
+        ([false, true, false], [255, 127, 0, 255]),
+        ([false, false, true], [255, 128, 255, 255]),
+        ([true; 3], [0, 127, 255, 255]),
+    ] {
+        for adjustment in [true, false] {
+            let kind = invert(channels);
+            let top = if adjustment {
+                v3_adjustment(kind.clone(), RFeatures::default())
+            } else {
+                scene(RContent::Tiles(Vec::new()), RFeatures::default())
+                    .nodes
+                    .remove(0)
+            };
+            let (mut document, store) = v3_colored_square_under(top, color);
+            if !adjustment {
+                document.nodes[1].features.effects.push(REffect {
+                    kind,
+                    selection: None,
+                });
+            }
+            let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+                return;
+            };
+            let pixel: [u8; 4] = image[(100 * 256 + 100) * 4..][..4].try_into().unwrap();
+            assert_eq!(pixel, expected, "{channels:?} adjustment={adjustment}");
         }
     }
 }

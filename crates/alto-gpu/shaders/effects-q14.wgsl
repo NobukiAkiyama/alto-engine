@@ -174,9 +174,11 @@ fn curve_point_q14(i: u32) -> vec2i {
   let pair=c.grid[6u+i/2u];
   return select(pair.xy,pair.zw,(i&1u)==1u);
 }
-fn curves_q14(v: vec4i, count: u32) -> vec4i {
+// `channels` bit i: the curve maps color channel i; the others keep their values.
+fn curves_q14(v: vec4i, count: u32, channels: u32) -> vec4i {
   let s=straight_q(v);var out=v;
   for(var channel=0u;channel<3u;channel++){
+    if (channels>>channel&1u)==0u {continue;}
     let x=s[channel];var y=x;
     for(var i=0u;i+1u<count;i++){
       let a=curve_point_q14(i);let b=curve_point_q14(i+1u);
@@ -431,7 +433,7 @@ fn resample_stage(ix: vec2i) -> vec4i {
   for(var i=0u;i<4u;i++){out[i]=div_q(before[i]*(Q14_ONE-k)+after[i]*k,Q14_ONE);}
  }
  else if c.info.x==30u{out=invert_q14(texel_a(ix));}
- else if c.info.x==31u{out=curves_q14(texel_a(ix),u32(settings.x));}
+ else if c.info.x==31u{out=curves_q14(texel_a(ix),u32(settings.x),u32(settings.y));}
  else if c.info.x==32u{out=levels_q14(texel_a(ix));}
  else if c.info.x==33u{out=hue_saturation_q14(texel_a(ix));}
  else if c.info.x==34u{out=high_pass_q14(texel_a(ix),texel_b(ix));}

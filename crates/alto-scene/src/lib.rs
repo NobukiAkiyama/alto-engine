@@ -115,6 +115,9 @@ pub enum REffectKind {
     },
     Curves {
         points: Vec<(f32, f32)>,
+        /// The color channels the curve maps, red, green and blue; the others keep
+        /// their values. A master curve maps all three.
+        channels: [bool; 3],
     },
     HueSaturation {
         hue: f32,

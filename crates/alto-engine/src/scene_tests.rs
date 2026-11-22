@@ -87,3 +87,52 @@ fn overlay_reaches_the_renderer_and_levels_bump_the_format() {
     assert_eq!(value["meta"]["render_version"], 3);
     engine.open_snapshot(&snapshot).unwrap();
 }
+
+#[test]
+fn a_curves_effect_carries_its_channel_to_the_scene() {
+    use alto_doc::{CurveChannel, CurvePoint};
+    let mut engine = Engine::new();
+    let handle = engine
+        .create_document(DocumentMeta::srgb_u8(32, 32))
+        .unwrap();
+    let id = layer(&mut engine, handle);
+    for (channel, channels) in [
+        (CurveChannel::Master, [true; 3]),
+        (CurveChannel::Red, [true, false, false]),
+        (CurveChannel::Green, [false, true, false]),
+        (CurveChannel::Blue, [false, false, true]),
+    ] {
+        let revision = engine.document(handle).unwrap().revision;
+        engine
+            .transact(
+                handle,
+                "curves",
+                vec![Op::SetProps {
+                    id,
+                    patch: PropPatch {
+                        effects: Some(vec![alto_doc::Effect::Curves {
+                            channel,
+                            points: vec![
+                                CurvePoint { x: 0.0, y: 1.0 },
+                                CurvePoint { x: 1.0, y: 0.0 },
+                            ],
+                            selection: None,
+                            extra: Default::default(),
+                        }]),
+                        ..PropPatch::default()
+                    },
+                }],
+                revision,
+            )
+            .unwrap();
+        let scene = engine.render_scene(handle).unwrap();
+        assert_eq!(
+            scene.nodes[1].features.effects[0].kind,
+            alto_scene::REffectKind::Curves {
+                points: vec![(0.0, 1.0), (1.0, 0.0)],
+                channels,
+            },
+            "{channel:?}"
+        );
+    }
+}

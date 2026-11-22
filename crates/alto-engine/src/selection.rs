@@ -87,8 +87,16 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             out_black: f(*out_black),
             out_white: f(*out_white),
         },
-        alto_doc::Effect::Curves { points, .. } => REffectKind::Curves {
+        alto_doc::Effect::Curves {
+            points, channel, ..
+        } => REffectKind::Curves {
             points: points.iter().map(|p| (f(p.x), f(p.y))).collect(),
+            channels: match channel {
+                alto_doc::CurveChannel::Master => [true; 3],
+                alto_doc::CurveChannel::Red => [true, false, false],
+                alto_doc::CurveChannel::Green => [false, true, false],
+                alto_doc::CurveChannel::Blue => [false, false, true],
+            },
         },
         alto_doc::Effect::HueSaturation {
             hue,
