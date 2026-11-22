@@ -145,6 +145,10 @@ pub struct VectorResources {
     dense: Option<dense::Dense>,
     // The current encoder may still refer to dense scratch.
     dense_pending: bool,
+    /// Dense scratch released after its last submission, with a flag set when
+    /// that submitted work completes. The GPU still holds those bytes until
+    /// then, so allocation checks charge them.
+    reclaiming: Vec<(u64, Arc<std::sync::atomic::AtomicBool>)>,
     /// The dense pipelines were built (first use, or again after a budget retire)
     /// since the renderer last asked.
     pipelines_built: bool,
@@ -387,6 +391,7 @@ impl VectorResources {
             format,
             dense: None,
             dense_pending: false,
+            reclaiming: Vec::new(),
             pipelines_built: false,
             geometry: g,
             pooled_geometry,
@@ -444,10 +449,19 @@ impl VectorResources {
             governor.submitted(&queue);
         }
     }
+    /// Dense scratch bytes the GPU may still hold after their release.
+    fn reclaiming_bytes(&self) -> u64 {
+        self.reclaiming
+            .iter()
+            .filter(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(bytes, _)| bytes)
+            .sum()
+    }
     fn check_allocation(&self, additional: u64, budget: u64) -> Result<()> {
         if self
             .bytes()
             .saturating_add(self.retired.bytes().total())
+            .saturating_add(self.reclaiming_bytes())
             .saturating_add(additional)
             > budget
         {
@@ -553,6 +567,8 @@ impl VectorResources {
         use_atlas: bool,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let px_per_unit = max_scale([world[0], world[1], world[2], world[3]]) / scale;
         let mut vector: Vec<&StyledPath> = vec![];
@@ -743,6 +759,8 @@ impl VectorResources {
         budget: u64,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
@@ -761,10 +779,20 @@ impl VectorResources {
             if self.dense_pending {
                 dense.retire(&mut self.retired);
             } else {
+                // No command in the current encoder reads it. Release it now
+                // and charge its bytes until the submitted work completes, so
+                // a retry after completion fits without another submission.
+                let bytes = dense.bytes();
                 let mut retired = super::Retired::new(self.governor.clone());
                 dense.retire(&mut retired);
                 retired.release();
                 self.governor.submitted(queue);
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = done.clone();
+                queue.on_submitted_work_done(move || {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                });
+                self.reclaiming.push((bytes, done));
             }
         }
         let fixed_bytes = regular_fixed + self.dense.as_ref().map_or(0, |d| d.bytes());
@@ -1196,6 +1224,7 @@ impl VectorResources {
         }
         let coverage = self.coverage.as_ref().unwrap();
         let fixed = self.retired.bytes().total()
+            + self.reclaiming_bytes()
             + self.mesh_bytes()
             + w as u64 * h as u64 * 5
             + self.atlas.as_ref().map_or(0, |a| {
@@ -1419,11 +1448,12 @@ mod dense_selection_tests {
         resources.after_submit();
         resources.set_mode(VectorMode::Legacy);
         let mut encoder = device.create_command_encoder(&Default::default());
-        resources
-            .render(
+        let render_second = |resources: &mut VectorResources,
+                             encoder: &mut wgpu::CommandEncoder| {
+            resources.render(
                 &device,
                 &queue,
-                &mut encoder,
+                encoder,
                 &target,
                 &[&second],
                 world,
@@ -1431,7 +1461,17 @@ mod dense_selection_tests {
                 2,
                 1024 * 1024,
             )
-            .unwrap();
+        };
+        // The released scratch stays charged until its submitted work completes,
+        // then a retry fits without another submission.
+        assert!(matches!(
+            render_second(&mut resources, &mut encoder),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(resources.reclaiming_bytes() > 1024 * 1024);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        render_second(&mut resources, &mut encoder).unwrap();
+        assert_eq!(resources.reclaiming_bytes(), 0);
         queue.submit(Some(encoder.finish()));
         resources.after_submit();
         resources.set_mode(VectorMode::Dense);
