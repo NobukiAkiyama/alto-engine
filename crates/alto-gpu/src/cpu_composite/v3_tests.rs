@@ -787,23 +787,46 @@ fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
         };
         children.push(index);
     }
+    if let Some(actual) = v3_test_try_render(&document, &store, (0, 0, 0)) {
+        actual.expect("twelve backdrop blurs should fit the command budget");
+    }
+    // Invisible nodes prevent grouping while leaving the backdrop unchanged.
+    // Three adjustments keep the old recursive path small enough to compare.
     let mut reference = document.clone();
-    let effect = REffect {
-        kind: blur,
-        selection: None,
+    let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+        unreachable!()
     };
-    reference.nodes[1].features.effects = vec![effect; 12];
-    reference.nodes[1].effects = 12;
+    children.truncate(4);
+    reference.nodes = document.nodes.clone();
+    let mut indices = vec![1];
+    for index in 2..=4 {
+        if index > 2 {
+            let mut invisible = v3_adjustment(blur.clone(), RFeatures::default());
+            invisible.visible = false;
+            indices.push(reference.nodes.len());
+            reference.nodes.push(invisible);
+        }
+        indices.push(index);
+    }
     let RContent::Group { children, .. } = &mut reference.nodes[0].content else {
         unreachable!()
     };
-    children.truncate(1);
-    if let Some(actual) = v3_test_try_render(&document, &store, (0, 0, 0)) {
-        let actual = actual.expect("adjacent backdrop blurs should fit in the command budget");
-        let expected = v3_test_try_render(&reference, &store, (0, 0, 0))
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual, expected);
+    *children = indices;
+    for version in [1, 2, 3] {
+        document.render_version = version;
+        reference.render_version = version;
+        for tile in [(0, 0, 0), (-4, 5, 5)] {
+            if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+                let actual = actual.unwrap();
+                let expected = v3_test_try_render(&reference, &store, tile)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    actual == expected,
+                    "render version {version}, tile {tile:?}"
+                );
+            }
+        }
     }
 }
 
