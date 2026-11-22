@@ -21,6 +21,7 @@ pub enum FillRule {
 
 /// `NMAX`: the most segments one curve is flattened into.
 pub const CURVE_LIMIT: u32 = 4096;
+const EVEN_ODD_GROUP_ROWS: usize = 32;
 
 /// Why a path has no coverage bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1081,36 +1082,46 @@ fn rasterize_normalized(
             }
         }
         FillRule::EvenOdd => {
-            let mut sink = EvenOdd {
-                window,
-                crossings: vec![vec![]; height * 16],
-            };
-            flatten(&commands, curve_limit, window, skip, true, &mut sink)?;
-            let mut tally = vec![0u32; len];
-            for (index, xs) in sink.crossings.iter_mut().enumerate() {
-                let row = index / 16;
-                xs.sort_unstable();
-                // A skipped curve right of the window drops crossings at or
-                // beyond XR; the last open interval then ends at XR.
-                if xs.len() % 2 == 1 {
-                    xs.push((xr - xl) as u32);
-                }
-                for &[x0, x1] in xs.as_chunks::<2>().0 {
-                    let (left, right) = (i64::from(x0) + xl, i64::from(x1) + xl);
-                    if left >= right {
-                        continue;
+            for group_start in (0..height).step_by(EVEN_ODD_GROUP_ROWS) {
+                let group_rows = (height - group_start).min(EVEN_ODD_GROUP_ROWS);
+                let group_window = Window {
+                    yt: yt + group_start as i64 * 256,
+                    yb: yt + (group_start + group_rows) as i64 * 256,
+                    height: group_rows,
+                    ..window
+                };
+                let mut sink = EvenOdd {
+                    window: group_window,
+                    crossings: vec![vec![]; group_rows * 16],
+                };
+                flatten(&commands, curve_limit, group_window, skip, true, &mut sink)?;
+                let mut tally = vec![0u32; group_rows * width];
+                for (index, xs) in sink.crossings.iter_mut().enumerate() {
+                    let row = index / 16;
+                    xs.sort_unstable();
+                    // A skipped curve right of the window drops crossings at or
+                    // beyond XR; the last open interval then ends at XR.
+                    if xs.len() % 2 == 1 {
+                        xs.push((xr - xl) as u32);
                     }
-                    let first = left.div_euclid(256);
-                    let last = (right - 1).div_euclid(256);
-                    for col in first..=last {
-                        let cell_left = col * 256;
-                        let overlap = right.min(cell_left + 256) - left.max(cell_left);
-                        tally[row * width + (col - lx) as usize] += overlap as u32;
+                    for &[x0, x1] in xs.as_chunks::<2>().0 {
+                        let (left, right) = (i64::from(x0) + xl, i64::from(x1) + xl);
+                        if left >= right {
+                            continue;
+                        }
+                        let first = left.div_euclid(256);
+                        let last = (right - 1).div_euclid(256);
+                        for col in first..=last {
+                            let cell_left = col * 256;
+                            let overlap = right.min(cell_left + 256) - left.max(cell_left);
+                            tally[row * width + (col - lx) as usize] += overlap as u32;
+                        }
                     }
                 }
-            }
-            for (byte, t) in bytes.iter_mut().zip(tally) {
-                *byte = coverage_byte(u128::from(t) * 32);
+                let offset = group_start * width;
+                for (byte, t) in bytes[offset..offset + tally.len()].iter_mut().zip(tally) {
+                    *byte = coverage_byte(u128::from(t) * 32);
+                }
             }
             Some([0, 0, width, height])
         }
