@@ -11,7 +11,7 @@ window.runBehindResize = async (options) => {
   const host = document.getElementById("host");
   const canvas = document.getElementById("canvas");
   const events = [];
-  let resize, stop, lostAt = null;
+  let resize, stop, lostAt = null, failure = null;
   const onEvent = (event) => { events.push(event); if (event.t === "lost") lostAt = event.atMs; };
   // Calibrate at the real size, not the 300x150 default.
   const [low, high, tall] = options.big ? [1400, 1800, 1000] : [700, 1100, 500];
@@ -21,11 +21,18 @@ window.runBehindResize = async (options) => {
     const worker = new Worker("./behind-resize-worker.js", { type: "module" });
     const offscreen = canvas.transferControlToOffscreen();
     const replies = [];
+    // A module that fails to load reports an `error` event, not a reply.
+    const fail = (error) => { if (failure === null) { failure = error; worker.terminate(); } return failure; };
     worker.onmessage = ({ data }) => { if (data.t === "lost" || data.t === "validation") onEvent(data); else replies.push(data); };
-    const next = async (kind) => {
+    worker.onerror = (event) => { event.preventDefault(); fail(Error("worker failed: " + (event.message || "module did not load"))); };
+    worker.onmessageerror = () => fail(Error("worker reply could not be deserialized"));
+    const next = async (kind, timeoutMs = 60000) => {
+      const deadline = performance.now() + timeoutMs;
       for (;;) {
         const i = replies.findIndex((r) => r.t === kind || r.t === "error");
-        if (i >= 0) { const r = replies.splice(i, 1)[0]; if (r.t === "error") throw Error(r.message); return r; }
+        if (i >= 0) { const r = replies.splice(i, 1)[0]; if (r.t === "error") throw fail(Error(r.message)); return r; }
+        if (failure !== null) throw failure;
+        if (performance.now() > deadline) throw fail(Error(`no "${kind}" reply from the worker within ${timeoutMs} ms`));
         await new Promise((r) => setTimeout(r, 10));
       }
     };
@@ -47,7 +54,7 @@ window.runBehindResize = async (options) => {
   // Sweep between `low` and `high` px wide in 60 px steps every 40 ms, pausing 300 ms at each end.
   const started = performance.now();
   let width = (low + high) / 2, step = 60;
-  while (performance.now() - started < options.seconds * 1000 && lostAt === null) {
+  while (performance.now() - started < options.seconds * 1000 && lostAt === null && failure === null) {
     width += step;
     if (width >= high || width <= low) { step = -step; await new Promise((r) => setTimeout(r, 300)); }
     host.style.width = width + "px";
