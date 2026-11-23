@@ -81,7 +81,11 @@ pub(super) fn cold_warm_cases() -> Vec<ColdWarmCase> {
             (0..3)
                 .flat_map(|y| (0..3).map(move |x| [x, y]))
                 .map(|k| {
-                    let seed = if k == [1, 1] { center } else { 20 + k[0] + 3 * k[1] };
+                    let seed = if k == [1, 1] {
+                        center
+                    } else {
+                        20 + k[0] + 3 * k[1]
+                    };
                     (k, TileSpec::Raster(seed))
                 })
                 .collect::<Vec<_>>()

@@ -254,7 +254,10 @@ impl Renderer {
                     step_start = slice_start;
                     let step = self.advance_tile_job(&mut job, scene, store, false)?;
                     if step != JobStep::Progress
-                        || self.decoder.as_ref().is_some_and(|d| !d.in_flight.is_empty())
+                        || self
+                            .decoder
+                            .as_ref()
+                            .is_some_and(|d| !d.in_flight.is_empty())
                         || now() - start >= budget_ms
                     {
                         break step;
