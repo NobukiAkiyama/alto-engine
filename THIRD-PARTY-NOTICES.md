@@ -20,5 +20,7 @@
 
 `tests/fonts/AltoTestJP.otf` は Noto Sans JP（Noto Sans CJK）、`tests/fonts/AltoTestLatin.ttf` は Noto Sans の Regular をサブセット化したものです。いずれも SIL Open Font License 1.1 で、ライセンス本文を `tests/fonts/OFL-NotoSansCJK.txt`・`tests/fonts/OFL-NotoSans.txt` に同梱しています。収録文字は `tests/fonts/subset-text.txt` と基本ラテン・かな・記号です。`verification/sample-m78.alto` はこれらを埋め込んでいます。
 
+`tests/fonts/AltoTestVariable.ttf` は [Google Fonts の Noto Sans 可変版](https://github.com/google/fonts/tree/2984c575fdce412ee02b2baaba67672b9a9434d8/ofl/notosans) を空白と `ABab` にサブセット化し、幅を100に固定して太さの軸を残した試験用フォントです。フォント名を Alto Test Variable に変更しています。ライセンス本文は `tests/fonts/OFL-NotoSansVariable.txt` に同梱しています。
+
 - [Noto CJK](https://github.com/notofonts/noto-cjk)
 - [Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)

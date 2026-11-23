@@ -34,6 +34,26 @@ export async function runM6Tests(engine,log){
    await doc.vectors.set(layer,[edited]);const after=await unstable(engine).readTile(0,0);assert(!same(before,after),'edit did not change GPU pixels');await doc.undo();assert(same(before,await unstable(engine).readTile(0,0)),'path Undo pixels');assert(paths===JSON.stringify(doc.getSnapshot().nodes.get(layer).paths),'path Undo data');await doc.redo();assert(same(after,await unstable(engine).readTile(0,0)),'path Redo pixels');
    await doc.transact('shear',tx=>tx.setTransform(layer,[1,.1,.25,.8,20,10]));await frame(engine);assert((await at(engine,220,270))[1]>0,'transformed vector');await doc.undo();assert(same(after,await unstable(engine).readTile(0,0)),'transform Undo');
  });
+ await test('dashed stroke pixels, phase, format 7 and ZIP roundtrip', async () => {
+   doc = await engine.createDocument({ width: 256, height: 256 });
+   const path = await styled(engine, 'M40 64 H120', {
+     fill: null,
+     stroke: { color: [1, 0, 0, 1], width: 8, dash: { pattern: [10, 5] } },
+   });
+   await doc.transact('dashed stroke', tx => { layer = tx.addVector([path]); });
+   assert(doc.getSnapshot().meta.format_version === 7, 'dashed stroke requires format 7');
+   const coverage = async () => unstable(engine).readTile(0, 0);
+   let tile = await coverage();
+   assert(pixel(tile, 45, 64)[3] === 255 && pixel(tile, 52, 64)[3] === 0, 'dashed stroke coverage');
+   const shifted = { ...path, stroke: { ...path.stroke, dash: { pattern: [10, 5], offset: 3 } } };
+   await doc.vectors.set(layer, [shifted]);
+   tile = await coverage();
+   assert(pixel(tile, 48, 64)[3] === 0 && pixel(tile, 53, 64)[3] === 255, 'shifted dash phase');
+   const bytes = await testing(engine).saveBytes();
+   doc = await engine.open(new Blob([bytes]));
+   assert(doc.getSnapshot().nodes.get(layer).paths[0].stroke.dash.offset === 3, 'dash offset roundtrip');
+   assert(same(tile, await coverage()), 'dashed stroke ZIP pixels');
+ });
  await test('vector masks / feather / raster mask intersection / canonical raster unchanged',async()=>{
    doc=await engine.createDocument({width:512,height:512});const canvas=new OffscreenCanvas(512,512),c=canvas.getContext('2d');c.fillStyle='blue';c.fillRect(0,0,512,512);const asset=await engine.assets.importImage(await canvas.convertToBlob());await doc.transact('raster',tx=>layer=tx.addRasterFromAsset(asset));const original=JSON.stringify(await doc.nodeTiles(layer));
    const path=await engine.vectors.parseSvg('M128 64 H384 V448 H128 Z');await doc.vectors.setMask(layer,{path,feather:0});assert((await at(engine,200,200))[3]===255,'vector mask interior');assert((await at(engine,64,200))[3]===0,'vector mask exterior');

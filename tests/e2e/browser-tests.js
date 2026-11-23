@@ -109,7 +109,7 @@ async function decodeFixture(engine) {
   };
   return { doc, cold };
 }
-export async function runTests(engine, benchmark, log) {
+export async function runTests(engine, benchmark, log, { decodeFaultInjection = false } = {}) {
   const results = [];
   let activeTest = null;
   async function test(name, fn) {
@@ -127,6 +127,35 @@ export async function runTests(engine, benchmark, log) {
       await benches(engine, log, results);
       return;
     }
+    await test("wasm decode rejects truncated batches and 32-bit length overflow", async () => {
+      const { default: init, decodeBatch } = await import("../../packages/alto-sdk/dist/pkg/alto_decode.js");
+      await init();
+      const overflow = new Uint8Array(4 + 38 + 38);
+      const view = new DataView(overflow.buffer);
+      view.setUint32(0, 2, true);
+      view.setUint32(38, 0xffffffff, true);
+      assert(decodeBatch(overflow).length === 0, "overflowed batch was not rejected");
+      const truncated = new Uint8Array(4 + 38);
+      new DataView(truncated.buffer).setUint32(0, 2, true);
+      assert(decodeBatch(truncated).length === 0, "truncated batch was not rejected");
+      const empty = decodeBatch(new Uint8Array(4));
+      assert(empty.length === 4 && new DataView(empty.buffer, empty.byteOffset, 4).getUint32(0, true) === 0,
+        "empty valid batch was rejected");
+      const worker = new Worker(new URL("../../packages/alto-sdk/dist/decode-worker.js", import.meta.url), { type: "module" });
+      try {
+        const reply = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(Error("decode worker timeout")), 15000);
+          worker.onerror = (event) => { clearTimeout(timer); reject(Error(event.message)); };
+          worker.onmessage = ({ data }) => {
+            if (data.ready) worker.postMessage({ id: 7, batch: overflow.buffer });
+            else { clearTimeout(timer); resolve(data); }
+          };
+        });
+        assert(reply.id === 7 && reply.error === "invalid decode request frame", "worker did not report malformed batch");
+      } finally {
+        worker.terminate();
+      }
+    });
     let doc, lower, upper, assetRed, assetBlue;
     await test("queue-ordered reuse and destroy preserve earlier copies without a CPU fence", async () => {
       const adapter=await navigator.gpu.requestAdapter(), device=await adapter.requestDevice();
@@ -418,6 +447,58 @@ export async function runTests(engine, benchmark, log) {
       }
       await testing(engine).request("enablePrefetch");
     });
+    if (decodeFaultInjection) {
+      await test("malformed decode requests stop the pool and retry every tile inline", async () => {
+        const toggle = async (enabled) => {
+          const result = await fetch(`/__alto-test/decode-fault?enabled=${enabled ? 1 : 0}`, { cache: "no-store" });
+          assert(result.ok, "decode fault injection unavailable");
+        };
+        const startPool = async () => {
+          for (let i = 0; i < 100; i++) {
+            if (await testing(engine).request("setDecodeWorkers", { enabled: true })) return;
+            await delay(20);
+          }
+          throw Error("decode worker pool did not start");
+        };
+        await startPool();
+        let cold;
+        ({ doc, cold } = await decodeFixture(engine));
+        let off;
+        let injected = false;
+        let poolStopped = false;
+        try {
+          // Disabling the pool retains Workers. Stop it before changing the script
+          // so the replacement Workers load the fault-injected version.
+          assert((await testing(engine).request("stallDecodeWorkers")) > 0, "no existing decode workers");
+          await cold(true, { keepPool: true });
+          const inline = await cold(false);
+          injected = true;
+          await toggle(true);
+          await startPool();
+          off = unstable(engine).onDiagnostic((event) => {
+            if (String(event?.message).includes("invalid decode request frame")) poolStopped = true;
+          });
+          const recovered = await cold(true, { keepPool: true });
+          assert(poolStopped, "no diagnostic for the malformed decode request");
+          recovered.tiles.forEach((tile, i) => assert(same(tile, inline.tiles[i]), `tile ${i} differs after invalid batch`));
+        } finally {
+          off?.();
+          try {
+            if (injected) await toggle(false);
+          } finally {
+            try {
+              if (injected && !poolStopped && await testing(engine).request("stallDecodeWorkers"))
+                await cold(true, { keepPool: true });
+              await startPool();
+            } finally {
+              await testing(engine).request("enablePrefetch");
+            }
+          }
+        }
+      });
+    } else {
+      log("SKIP malformed decode request injection: requires the browser verification server");
+    }
     await test("full display cache can yield and replace tiles without orphaning slots", async () => {
       doc = await engine.createDocument({ width: 300, height: 300 });
       const asset = await image(engine, "rgba(40,120,210,.6)", 300, 300);
@@ -452,6 +533,345 @@ export async function runTests(engine, benchmark, log) {
       assert(frame.gpu.overviewReady===1,"overview was evicted");
       assert(same(before,await unstable(engine).readTileLevel(2,0,0)),"overview pixels changed");
     });
+    await test("elliptical brush rotates with its angle and a round brush stays unchanged", async () => {
+      const draw = async (angle, roundness) => {
+        doc = await engine.createDocument({ width: 256, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const color = [0, 0, 0, 1];
+        const s = doc.tools.begin("brush", { layer, tip: { size: 64, angle, roundness }, color });
+        s.input({ x: 128.5, y: 128.5, pressure: 1 });
+        await s.end();
+        const painted = await unstable(engine).readTile(0, 0);
+        const reference = new Uint8Array(await testing(engine).request("cpuReference", {
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle, roundness },
+          color,
+          samples: [128.5, 128.5, 1, 0, 0, 0],
+        }));
+        assert(painted.every((v, i) => Math.abs(v - reference[i]) <= 2), "CPU/GPU brush shape mismatch");
+        return painted;
+      };
+      const horizontal = await draw(0, 0.4);
+      const vertical = await draw(90, 0.4);
+      for (const offset of [16, 20, 24]) {
+        assert(pixel(horizontal, 128 + offset, 128)[3] > 200 && pixel(horizontal, 128, 128 + offset)[3] === 0,
+          "zero degrees should extend along the horizontal axis");
+        assert(pixel(vertical, 128, 128 + offset)[3] > 200 && pixel(vertical, 128 + offset, 128)[3] === 0,
+          "ninety degrees should extend along the vertical axis");
+      }
+      assert(same(await draw(0, 1), await draw(45, 1)), "a circular brush changed when rotated");
+    });
+    await test("elliptical brush crosses a tile boundary and follows the layer's rotation", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const dab = async (x, y, angle) => {
+        const s = doc.tools.begin("brush", { layer, tip: { size: 64, angle, roundness: 0.4 }, color: [0, 0, 0, 1] });
+        s.input({ x, y, pressure: 1 });
+        await s.end();
+      };
+      await dab(250.5, 128.5, 90);
+      for (const tileX of [0, 1]) {
+        const gpu = await unstable(engine).readTile(tileX, 0);
+        const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+          config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle: 90, roundness: 0.4 },
+          color: [0, 0, 0, 1],
+          samples: [250.5 - tileX * 256, 128.5, 1, 0, 0, 0],
+        }));
+        assert(pixel(gpu, tileX === 0 ? 255 : 0, 128)[3] > 200, `brush missed tile ${tileX}`);
+        assert(gpu.every((v, i) => Math.abs(v - cpu[i]) <= 2), `CPU/GPU brush mismatch in tile ${tileX}`);
+      }
+      await doc.undo();
+      await doc.transact("rotate layer", tx => tx.setTransform(layer, {
+        x: 256, y: 0, scaleX: 1, scaleY: 1, rotation: Math.PI / 2,
+      }));
+      // Layer center (64.5, 64.5) maps to document center (191.5, 64.5).
+      await dab(191.5, 64.5, 0);
+      const rotated = await unstable(engine).readTile(0, 0);
+      assert(pixel(rotated, 191, 84)[3] > 200 && pixel(rotated, 211, 64)[3] === 0,
+        "the brush's local horizontal axis did not rotate with the layer");
+    });
+    await test("pen tilt rotates an elliptical dab while round pixels stay identical", async () => {
+      const draw = async (tiltY, roundness) => {
+        doc = await engine.createDocument({ width: 256, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const s = doc.tools.begin("brush", {
+          layer, tip: { size: 64, roundness }, dynamics: { angleFromTilt: true },
+        });
+        s.input({ x: 128.5, y: 128.5, tiltY });
+        await s.end();
+        return unstable(engine).readTile(0, 0);
+      };
+      const horizontal = await draw(0, 0.4);
+      const vertical = await draw(45, 0.4);
+      assert(pixel(horizontal, 148, 128)[3] > 200 && pixel(horizontal, 128, 148)[3] === 0,
+        "the default tip was not horizontal");
+      assert(pixel(vertical, 128, 148)[3] > 200 && pixel(vertical, 148, 128)[3] === 0,
+        "pen tilt did not rotate the tip");
+      assert(same(await draw(0, 1), await draw(45, 1)), "pen tilt changed a round tip");
+    });
+    await test("pressure-driven opacity and speed-driven flow match the CPU reference", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const opacity = { input: "pressure", points: [[0, 0], [1, 1]] };
+      const flow = { input: "speed", points: [[0, 0.5], [1, 1]] };
+      const color = [0.2, 0.4, 0.8, 1];
+      const s = doc.tools.begin("brush", {
+        layer, tip: { size: 20, spacing: 1 }, color, dynamics: { size: null, opacity, flow },
+      });
+      s.input({ x: 40.5, y: 128.5, pressure: 0.5, time: 0 });
+      s.input({ x: 120.5, y: 128.5, pressure: 1, time: 20 });
+      await s.end();
+      const gpu = await unstable(engine).readTile(0, 0);
+      const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+        config: {
+          size: 20, hardness: 0.8, spacing: 1, opacity: 1, flow: 1,
+          dynamics: { size: { input: "pressure", points: [[0, 1], [1, 1]] }, opacity, flow },
+        },
+        color, samples: [40.5, 128.5, 0.5, 0, 0, 0, 120.5, 128.5, 1, 0, 0, 20],
+      }));
+      assert(Math.abs(pixel(gpu, 40, 128)[3] - 64) <= 2, "opacity and flow did not multiply");
+      assert(pixel(gpu, 47, 128)[3] > 40, "null size did not disable pressure scaling");
+      assert(pixel(gpu, 120, 128)[3] > 245, "faster strokes did not reach full flow");
+      assert(gpu.every((v, i) => Math.abs(v - cpu[i]) <= 2), "CPU/GPU dynamics mismatch");
+    });
+    await test("an invalid curve is refused before the stroke starts", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const empty = await unstable(engine).readTile(0, 0);
+      // The two distinct JS input positions round to the same Rust f32 value.
+      const size = { input: "pressure", points: [[0, 0], [0.5, 0.5], [0.500000001, 0.6], [1, 1]] };
+      let sdkError;
+      try { doc.tools.begin("brush", { layer, dynamics: { size } }); }
+      catch (e) { sdkError = e; }
+      assert(sdkError?.code === "INVALID_ARGUMENT" && /brush curve/.test(sdkError.message),
+        "the SDK did not reject the invalid curve");
+      // Bypass the SDK to check that WASM independently validates both values and shape.
+      const beginRaw = dynamics => testing(engine).request("beginBrush", {
+        layer,
+        config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, dynamics },
+        color: [0, 0, 0, 1], erase: false, mask: false,
+      });
+      for (const [dynamics, message] of [[{ size }, /brush curve/], [{ angleFromTilt: true }, /brush config/]]) {
+        await beginRaw(dynamics).then(
+          () => { throw new Error("invalid wire config started a stroke"); },
+          e => assert(e.code === "INVALID_ARGUMENT" && message.test(e.message), String(e)),
+        );
+      }
+      const s = doc.tools.begin("brush", { layer, tip: { size: 0 } });
+      s.input({ x: 128.5, y: 128.5 });
+      await s.end().then(
+        () => { throw new Error("an invalid brush size started a stroke"); },
+        e => assert(e.code === "INVALID_ARGUMENT" && /brush size/.test(e.message), String(e)),
+      );
+      assert(same(empty, await unstable(engine).readTile(0, 0)), "an invalid curve painted pixels");
+      const valid = doc.tools.begin("brush", { layer });
+      valid.input({ x: 128.5, y: 128.5 });
+      await valid.end();
+      assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
+        "an invalid curve prevented the next valid stroke");
+    });
+    await test("a reusable image tip stamps rotated coverage and saves as ordinary tiles", async () => {
+      const c = new OffscreenCanvas(32, 16);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(5, 2, 4, 12);
+      ctx.fillRect(5, 11, 22, 3);
+      ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, 1, 1);
+      const imported = await engine.assets.importBrushTip(await c.convertToBlob());
+      assert(imported.width === 32 && imported.height === 16 && imported.pixels[0] === 27 &&
+        imported.pixels[1] === 0 && imported.pixels[11 * 32 + 26] === 255, "tip coverage conversion");
+      // A caller can pass an R8 subarray and retain its backing buffer across strokes.
+      const backing = new Uint8Array(imported.pixels.length + 2);
+      backing.set(imported.pixels, 1);
+      const image = { ...imported, pixels: backing.subarray(1, -1) };
+      const color = [0, 0, 0, 1];
+      const draw = async (angle) => {
+        doc = await engine.createDocument({ width: 512, height: 256 });
+        let layer;
+        await doc.transact("layer", tx => { layer = tx.addRaster(); });
+        const tool = doc.tools.begin("brush", { layer, color, tip: { size: 64, angle, image } });
+        tool.input({ x: 250.5, y: 128.5 });
+        await tool.end();
+        const tiles = [];
+        for (const tileX of [0, 1]) {
+          const gpu = await unstable(engine).readTile(tileX, 0);
+          const cpu = new Uint8Array(await testing(engine).request("cpuReference", {
+            config: { size: 64, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1, angle, roundness: 1 },
+            tipImage: { width: image.width, height: image.height, pixels: image.pixels.slice().buffer },
+            color,
+            samples: [250.5 - tileX * 256, 128.5, 1, 0, 0, 0],
+          }));
+          assert(close(gpu, cpu), `tile ${tileX} differs from the CPU tip reference at ${angle}°`);
+          tiles.push(gpu);
+        }
+        return tiles;
+      };
+      const straight = await draw(0);
+      assert(pixel(straight[1], 8, 138)[3] > 200, "image tip did not cross the tile boundary");
+      const rotated = await draw(90);
+      assert(pixel(rotated[0], 240, 142)[3] > 200 && pixel(rotated[1], 8, 138)[3] === 0,
+        "image did not rotate with roundness 1");
+      assert(same(image.pixels, imported.pixels), "beginBrush changed the reusable image");
+      const saved = await testing(engine).saveBytes();
+      doc = await engine.open(new Blob([saved]));
+      assert(doc.getSnapshot().assets.length === 0, "a stroke kept its brush tip as a document asset");
+      for (const tileX of [0, 1]) {
+        assert(same(rotated[tileX], await unstable(engine).readTile(tileX, 0)), "reopen changed tipped pixels");
+      }
+    });
+    await test("invalid image tips cannot start a stroke", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      for (const [width, height, length] of [[8, 16, 128], [2048, 16, 32768], [32, 16, 511]]) {
+        let code;
+        try {
+          doc.tools.begin("brush", { layer, tip: { image: { width, height, pixels: new Uint8Array(length) } } });
+        } catch (e) { code = e.code; }
+        assert(code === "INVALID_ARGUMENT", "SDK accepted an invalid image tip");
+        await testing(engine).request("beginBrush", {
+          layer, color: [0, 0, 0, 1], erase: false, mask: false,
+          config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+          tipImage: { width, height, pixels: new ArrayBuffer(length) },
+        }).then(
+          () => { throw Error("the Worker accepted an invalid image tip"); },
+          e => assert(e.code === "INVALID_ARGUMENT" && /brush tip/.test(e.message), String(e)),
+        );
+      }
+      const small = new OffscreenCanvas(8, 16);
+      small.getContext("2d").fillRect(0, 0, 8, 16);
+      await engine.assets.importBrushTip(await small.convertToBlob()).then(
+        () => { throw Error("the importer accepted an undersized image"); },
+        e => assert(e.code === "INVALID_ARGUMENT", String(e)),
+      );
+      assert(await doc.snapshotHash() === before, "invalid image tip changed the document");
+      const tool = doc.tools.begin("brush", { layer });
+      await tool.cancel();
+    });
+    await test("GPU loss cancels an image-tip stroke and the same tip works after recovery", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      const image = { width: 16, height: 16, pixels: new Uint8Array(256).fill(255) };
+      const start = () => doc.tools.begin("brush", { layer, tip: { image } });
+      const tool = start();
+      tool.input({ x: 128.5, y: 128.5 });
+      await tool.flush();
+      await gpuRestored(engine, () => testing(engine).destroyGpu());
+      await tool.end().then(
+        () => { throw Error("device loss committed an open tipped stroke"); },
+        e => assert(e.code === "GPU_LOST", String(e)),
+      );
+      assert(await doc.snapshotHash() === before, "device loss changed the document");
+      const retry = start();
+      retry.input({ x: 128.5, y: 128.5 });
+      await retry.end();
+      assert(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] === 255,
+        "the same tip did not draw after recovery");
+    });
+    await test("brush texture stays fixed across strokes and follows the layer", async () => {
+      const c = new OffscreenCanvas(17, 16);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 1, 16);
+      const pattern = await engine.assets.importBrushTexture(await c.convertToBlob());
+      assert(pattern.width === 17 && pattern.pixels[0] === 255 && pattern.pixels[1] === 0, "brush texture conversion");
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const color = [0, 0, 0, 1];
+      const paint = async (x, texture, image) => {
+        const tool = doc.tools.begin("brush", { layer, tip: { size: 80, texture, image }, color });
+        tool.input({ x, y: 128.5 });
+        await tool.end();
+        return unstable(engine).readTile(0, 0);
+      };
+      const texture = { image: pattern };
+      const first = await paint(128.5, texture);
+      const second = await paint(135.5, texture);
+      const reference = new Uint8Array(await testing(engine).request("cpuReference", {
+        config: { size: 80, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+        texture: { image: { width: 17, height: 16, pixels: pattern.pixels.slice().buffer }, scale: 1, depth: 1 },
+        color, samples: [128.5, 128.5, 1, 0, 0, 0],
+      }));
+      assert(close(first, reference), "CPU and GPU paper grain differ");
+      for (const pixels of [first, second]) {
+        assert(pixel(pixels, 119, 128)[3] === 255 && pixel(pixels, 120, 128)[3] === 0, "paper grain shifted or filled");
+      }
+      await doc.transact("translate layer", tx => tx.setTransform(layer, { x: 5, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }));
+      const moved = await paint(133.5, texture);
+      assert(pixel(moved, 124, 128)[3] === 255 && pixel(moved, 125, 128)[3] === 0,
+        "paper grain did not move with its layer");
+      const tip = { width: 16, height: 16, pixels: new Uint8Array(256).fill(255) };
+      const plain = await paint(133.5, undefined, tip);
+      await doc.undo();
+      const neutral = await paint(133.5, { image: pattern, depth: 0 }, tip);
+      assert(same(plain, neutral), "a zero-depth texture changed image-tip pixels");
+      await doc.undo();
+      const tinted = await paint(133.5, { image: pattern, scale: 0.5, depth: 1 }, tip);
+      assert(Math.abs(pixel(tinted, 108, 95)[3] - 191) <= 2 && pixel(tinted, 110, 95)[3] === 0,
+        "combining tip and texture lost the non-default scale");
+      assert((await settled(engine)).gpu.stroke === 0, "finished brush retained GPU textures");
+      await doc.transact("move layer past the stamp", tx => tx.setTransform(layer, {
+        x: 145, y: 0, scaleX: 1, scaleY: 1, rotation: 0,
+      }));
+      const negative = await paint(128.5, texture);
+      assert(pixel(negative, 128, 128)[3] === 255 && pixel(negative, 129, 128)[3] === 0,
+        "the GPU did not wrap grain at negative layer coordinates");
+    });
+    await test("invalid brush textures cannot start a stroke", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      for (const [scale, depth, length] of [[0.049, 1, 256], [17, 1, 256], [1, -0.01, 256], [1, 1.01, 256], [NaN, 1, 256], [1, 1, 255], [1, 0, 255]]) {
+        const image = { width: 16, height: 16, pixels: new Uint8Array(length) };
+        let code;
+        try {
+          doc.tools.begin("brush", { layer, tip: { texture: { image, scale, depth } } });
+        } catch (error) { code = error.code; }
+        assert(code === "INVALID_ARGUMENT", "the SDK accepted an invalid brush texture");
+        await testing(engine).request("beginBrush", {
+          layer, color: [0, 0, 0, 1], erase: false, mask: false,
+          config: { size: 24, hardness: 0.8, spacing: 0.15, opacity: 1, flow: 1 },
+          texture: { image: { ...image, pixels: image.pixels.buffer }, scale, depth },
+        }).then(
+          () => { throw Error("the Worker accepted an invalid brush texture"); },
+          error => assert(error.code === "INVALID_ARGUMENT" && /brush texture/.test(error.message), String(error)),
+        );
+      }
+      assert(await doc.snapshotHash() === before, "an invalid brush texture changed the document");
+      await doc.tools.begin("brush", { layer }).cancel();
+    });
+    await test("GPU loss cancels a textured brush and the texture can be reused", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      let layer;
+      await doc.transact("layer", tx => { layer = tx.addRaster(); });
+      const before = await doc.snapshotHash();
+      const image = { width: 16, height: 16, pixels: new Uint8Array(256).fill(125) };
+      const start = () => doc.tools.begin("brush", { layer, tip: { texture: { image } } });
+      const tool = start();
+      tool.input({ x: 128.5, y: 128.5 });
+      await tool.flush();
+      await gpuRestored(engine, () => testing(engine).destroyGpu());
+      await tool.end().then(
+        () => { throw Error("device loss committed a textured stroke"); },
+        error => assert(error.code === "GPU_LOST", String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "device loss changed the document");
+      const retry = start();
+      retry.input({ x: 128.5, y: 128.5 });
+      await retry.end();
+      assert(Math.abs(pixel(await unstable(engine).readTile(0, 0), 128, 128)[3] - 125) <= 2,
+        "the textured brush did not draw after recovery");
+    });
     let brushLayer, painted;
     await test("GPU brush / pressure / tile boundary / exact Undo-Redo / eraser", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -467,8 +887,6 @@ export async function runTests(engine, benchmark, log) {
             spacing: 0.1,
             opacity: 1,
             flow: 1,
-            pressure_size: true,
-            pressure_opacity: false,
           },
           color: [0.2, 0.4, 0.8, 1],
           samples: [240, 128, 1, 0, 0, 0, 280, 128, 0.5, 0, 0, 1],
@@ -767,6 +1185,7 @@ export async function runTests(engine, benchmark, log) {
       await doc.transact("restore name", (tx) => tx.setProps(brushLayer, { name }));
     });
     await test("simultaneous Worker restart requests share one recovery", async () => {
+      await doc.durable();
       const hash = (await doc.snapshotHash());
       // A crash test must wait for the journal: the previous test ends with undos and redos.
       await doc.durable();
@@ -985,6 +1404,297 @@ export async function runTests(engine, benchmark, log) {
       }
       const p = pixel(await unstable(engine).readTile(0, 0), 16, 16);
       assert(p[1] > 240 && p[3] === 255, "JPEG/PNG color " + p);
+    });
+    await test("undo limit is validated and persists across document creation and restart", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      for (const steps of [0, 1001, 1.5, NaN]) {
+        let rejected = false;
+        try { await createEngine({ container: document.createElement("div"), undo: { steps } }); }
+        catch (error) { rejected = error.code === "INVALID_ARGUMENT" && error.details?.reason === "undo-steps"; }
+        assert(rejected, `invalid undo limit ${steps} accepted`);
+      }
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const other = await createEngine({ container: document.createElement("div"), undo: { steps: 2 }, storage: { namespace } });
+      try {
+        let d = await other.createDocument({ width: 64, height: 64 });
+        const edit = async () => { for (let i = 0; i < 4; i++) await d.transact("layer", tx => tx.addRaster()); };
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit not applied to new document");
+        await d.undo(); await d.undo();
+        assert(d.getSnapshot().history.undo === 0, "undo did not stop at the configured limit");
+        const exhausted = await d.snapshotHash();
+        await d.undo();
+        assert(await d.snapshotHash() === exhausted, "undo passed the configured limit");
+        await edit();
+        const beforeRestart = await d.snapshotHash();
+        await d.durable();
+        await testing(other).crash();
+        d = other.document;
+        assert(d.getSnapshot().history.undo === 2, "undo history changed during recovery");
+        assert(await d.snapshotHash() === beforeRestart, "document changed during recovery");
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost after restart");
+        const saved = await testing(other).saveBytes();
+        d = await other.open(new Blob([saved]));
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost when opening a package");
+        d = await other.createDocument({ width: 64, height: 64 });
+        await edit();
+        assert(d.getSnapshot().history.undo === 2, "limit lost when replacing document");
+      } finally {
+        await other.dispose();
+        await deleteRecovery(namespace);
+      }
+    });
+    await test("recovery replays every undo before applying a smaller undo limit", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+      let session;
+      try {
+        session = await start(8);
+        let d = await session.createDocument({ width: 64, height: 64 });
+        for (let i = 0; i < 5; i++) await d.transact("layer", tx => tx.addRaster());
+        await d.versions.commit("checkpoint with undo history");
+        await d.durable();
+        for (let i = 0; i < 3; i++) await d.undo();
+        const expected = await d.snapshotHash();
+        await d.durable();
+        const store = await testing(session).recoveryStore();
+        assert(store.records === 3, "expected three undo records after the checkpoint");
+        await session.dispose();
+
+        session = await start(1);
+        await testing(session).holdStorage(true);
+        d = await session.recovery.restore();
+        assert(await d.snapshotHash() === expected, "recovery stopped before the final recorded undo");
+        assert(d.getSnapshot().history.undo === 1, "recovery did not apply the configured undo limit");
+        assert(d.getSnapshot().history.redo === 3, "recovery lost redo history");
+        assert(await testing(session).storageHeld() === "checkpoint", "checkpoint was not queued first");
+        await d.redo();
+        const expectedAfterRedo = await d.snapshotHash();
+        assert(await testing(session).storageHeld() === "checkpoint",
+          "redo bypassed the held checkpoint");
+        await testing(session).holdStorage(false);
+        await d.durable();
+        const migrated = await testing(session).recoveryStore();
+        assert(migrated.latestGeneration > store.latestGeneration && migrated.records === 1,
+          "redo was not appended after checkpointing the new undo limit");
+        await testing(session).crash();
+        d = session.document;
+        assert(await d.snapshotHash() === expectedAfterRedo, "recovery lost an edit recorded under the new limit");
+        assert(d.getSnapshot().history.undo === 1 && d.getSnapshot().history.redo === 2,
+          "recovery with the new limit changed the undo or redo history");
+      } finally {
+        if (session?.status.state === "ready") await testing(session).holdStorage(false).catch(() => {});
+        await session?.dispose();
+        await deleteRecovery(namespace);
+      }
+    });
+    for (const steps of [1, 8]) {
+      await test(`recovery from an older pack checkpoints at undo limit ${steps}`, async () => {
+        const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+        const { namespaceFolder } = await import("../../packages/alto-sdk/dist/storage-core.js");
+        const namespace = `test-undo/${crypto.randomUUID()}`;
+        const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+        let session;
+        let unreadableWorkerURL;
+        let unreadableSetupURL;
+        try {
+          session = await start(8);
+          const d = await session.createDocument({ width: 64, height: 64 });
+          const add = async color => {
+            const asset = await image(session, color, 64, 64);
+            await d.transact("image", tx => tx.addRasterFromAsset(asset));
+            await d.versions.commit(color);
+            await d.durable();
+            return (await testing(session).recoveryStore()).latestGeneration;
+          };
+          const previous = await add("#ff0000");
+          const latest = await add("#0000ff");
+          // The previous checkpoint's journal also contains the committed edits.
+          const expected = await d.snapshotHash();
+          let latestOnly;
+          if (steps === 8) {
+            await d.transact("latest generation only", tx => tx.addRaster());
+            latestOnly = await d.snapshotHash();
+            await d.durable();
+          }
+          await session.dispose();
+
+          const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+          const directory = await root.getDirectoryHandle(namespaceFolder(namespace));
+          const packs = await directory.getDirectoryHandle("packs");
+          await packs.getFileHandle(`${previous}.pack`);
+          if (steps === 8) {
+            // Use the inline storage path in this test Worker to inject a transient OS read error.
+            const workerModule = new URL("../../packages/alto-sdk/dist/worker.js", import.meta.url);
+            unreadableSetupURL = URL.createObjectURL(new Blob([`
+              const RealWorker = self.Worker;
+              self.Worker = class extends RealWorker {
+                constructor(url, options) {
+                  if (String(url).endsWith("/storage-worker.js")) throw new Error("use inline test storage");
+                  super(url, options);
+                }
+              };
+              const read = FileSystemFileHandle.prototype.getFile;
+              FileSystemFileHandle.prototype.getFile = function () {
+                if (this.name === ${JSON.stringify(`${latest}.pack`)})
+                  throw new DOMException("temporary test read failure", "NotReadableError");
+                return read.call(this);
+              };
+            `], { type: "text/javascript" }));
+            unreadableWorkerURL = URL.createObjectURL(new Blob([`
+              import ${JSON.stringify(unreadableSetupURL)};
+              import ${JSON.stringify(workerModule.href)};
+            `], { type: "text/javascript" }));
+            session = await start(steps);
+            testing(session).setWorkerURL(unreadableWorkerURL);
+            let failure;
+            try { await testing(session).crash(); }
+            catch (error) { failure = error; }
+            assert(failure?.code === "STORAGE" && failure.message.includes("NotReadableError"),
+              "transient read failure did not stop recovery: " + failure);
+            testing(session).setWorkerURL(null);
+            await session.retry();
+            assert(await session.document.snapshotHash() === latestOnly, "retry lost the latest confirmed edit");
+            await session.dispose();
+          }
+          await packs.removeEntry(`${latest}.pack`);
+
+          session = await start(steps);
+          const restored = await session.recovery.restore();
+          assert(await restored.snapshotHash() === expected, "recovery lost edits from the older checkpoint and its journal");
+          assert(restored.getSnapshot().warnings.some(w => w.code === "RECOVERED_OLDER_GENERATION"),
+            "older generation warning missing");
+          await restored.durable();
+          assert((await testing(session).recoveryStore()).latestGeneration > latest,
+            "the recovered checkpoint could not be written");
+          await testing(session).crash();
+          assert(await session.document.snapshotHash() === expected, "the new checkpoint did not reopen");
+          assert(!session.document.getSnapshot().warnings.some(w => w.code === "RECOVERED_OLDER_GENERATION"),
+            "the new checkpoint still pointed to the missing pack");
+        } finally {
+          await session?.dispose();
+          if (unreadableWorkerURL) URL.revokeObjectURL(unreadableWorkerURL);
+          if (unreadableSetupURL) URL.revokeObjectURL(unreadableSetupURL);
+          await deleteRecovery(namespace);
+        }
+      });
+    }
+    await test("failed recovery checkpoint leaves the legacy journal recoverable", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = steps => createEngine({ container: document.createElement("div"), undo: { steps }, storage: { namespace } });
+      let session;
+      let faultWorkerURL;
+      try {
+        session = await start(100);
+        let d = await session.createDocument({ width: 64, height: 64 });
+        await d.durable();
+        await testing(session).legacyCheckpoint();
+        for (let i = 0; i < 4; i++) await d.transact("layer", tx => tx.addRaster());
+        for (let i = 0; i < 3; i++) await d.undo();
+        const expected = await d.snapshotHash();
+        await d.durable();
+        await session.dispose();
+
+        session = await start(1);
+        await testing(session).injectStorageFault("beforeCheckpoint");
+        d = await session.recovery.restore();
+        assert(await d.snapshotHash() === expected, "legacy replay changed the document");
+        assert(d.getSnapshot().history.undo === 1 && d.getSnapshot().history.redo === 3,
+          "legacy replay did not retain the expected undo and redo history");
+        let failed = false;
+        try { await d.durable(); } catch (error) { failed = error.code === "STORAGE"; }
+        assert(failed && session.status.state === "storage-failed", "checkpoint failure was not reported");
+        // Re-arm a different fault in the replacement Worker, before its recovery request.
+        const workerModule = new URL("../../packages/alto-sdk/dist/worker.js", import.meta.url);
+        faultWorkerURL = URL.createObjectURL(new Blob([`
+          import ${JSON.stringify(workerModule.href)};
+          const receive = self.onmessage;
+          self.onmessage = event => {
+            if (event.data.t === "recover") {
+              receive({ data: { t: "injectStorageFault", id: -1, position: "beforeCheckpointParts" } });
+            }
+            receive(event);
+          };
+        `], { type: "text/javascript" }));
+        testing(session).setWorkerURL(faultWorkerURL);
+        const interrupted = await session.recovery.recoverAfterStorageFailure();
+        assert(interrupted.document === d && await d.snapshotHash() === expected,
+          "restart lost the recovered document when checkpoint generation failed");
+        assert(session.status.state === "storage-failed" && session.status.error.message.includes("before checkpoint generation"),
+          "restart hid the checkpoint generation failure");
+        testing(session).setWorkerURL(null);
+        const report = await session.recovery.recoverAfterStorageFailure();
+        d = report.document;
+        await d.durable();
+        assert(await d.snapshotHash() === expected, "retry lost edits from the original journal");
+      } finally {
+        await session?.dispose();
+        if (faultWorkerURL) URL.revokeObjectURL(faultWorkerURL);
+        await deleteRecovery(namespace);
+      }
+    });
+    await test("edits after a journal replay mismatch survive the next restart", async () => {
+      const { createEngine, deleteRecovery } = await import("../../packages/alto-sdk/dist/index.js");
+      const { namespaceFolder } = await import("../../packages/alto-sdk/dist/storage-core.js");
+      const namespace = `test-undo/${crypto.randomUUID()}`;
+      const start = () => createEngine({ container: document.createElement("div"), storage: { namespace } });
+      let session;
+      try {
+        session = await start();
+        let d = await session.createDocument({ width: 64, height: 64 });
+        let first, second;
+        await d.transact("layers", tx => { first = tx.addRaster(); second = tx.addRaster(); });
+        await d.versions.commit("base");
+        await d.durable();
+        const rename = (layer, name) => d.transact("rename", tx => tx.setProps(layer, { name }));
+        await rename(first, "retained");
+        const prefix = await d.snapshotHash();
+        await rename(second, "removed from the journal");
+        await rename(first, "depends on the missing edit");
+        await d.durable();
+        const store = await testing(session).recoveryStore();
+        assert(store.records === 3, "expected three records after the checkpoint");
+        await session.dispose();
+
+        // Remove one intact record from the test namespace, leaving the remaining
+        // checksums valid so replay, rather than the journal reader, detects the gap.
+        const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("alto-engine");
+        const directory = await root.getDirectoryHandle(namespaceFolder(namespace));
+        let removed = false;
+        for (const name of ["journal-a.bin", "journal-b.bin"]) {
+          const handle = await directory.getFileHandle(name);
+          const bytes = await (await handle.getFile()).arrayBuffer();
+          const view = new DataView(bytes);
+          if (view.getUint32(8, true) !== store.latestGeneration) continue;
+          const next = at => at + 8 + view.getUint32(at, true);
+          const omitted = next(next(12));
+          const writer = await handle.createWritable();
+          await writer.write(bytes.slice(0, omitted));
+          await writer.write(bytes.slice(next(omitted)));
+          await writer.close();
+          removed = true;
+          break;
+        }
+        assert(removed, "could not find the active journal");
+
+        session = await start();
+        d = await session.recovery.restore();
+        assert(d.getSnapshot().warnings.some(w => w.code === "RECOVERY_DIVERGED"), "missing replay warning");
+        assert(await d.snapshotHash() === prefix, "recovery did not retain the valid prefix");
+        await rename(second, "saved after recovery");
+        const expected = await d.snapshotHash();
+        await d.durable();
+        await testing(session).crash();
+        d = session.document;
+        assert(await d.snapshotHash() === expected, "restart lost the edit saved after recovery");
+      } finally {
+        await session?.dispose();
+        await deleteRecovery(namespace);
+      }
     });
     await test("second engine cannot overwrite the active recovery journal", async () => {
       const { createEngine } = await import("../../packages/alto-sdk/dist/index.js");

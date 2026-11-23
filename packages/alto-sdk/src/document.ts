@@ -1,4 +1,4 @@
-import type { ObjectTarget, CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergeResolution, MergeResult, GcOptions, GcReport } from "./image-types.js";
+import type { ObjectTarget, CanvasEditResult, ImageBounds, ImageColor, ImageFilter, ImageHistogram, ImageSelection, ImageStroke, GradientOptions, ImageEditResult, LayerEditResult, MergePlan, MergeResolution, MergeResult, StashEntry, GcOptions, GcReport } from "./image-types.js";
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
 import { intentRecord, type Intent } from "./intents.js";
@@ -19,8 +19,11 @@ import type {
   ClipPath,
   CommitView,
   Effect,
+  FillRule,
+  LevelsParams,
   NodeId,
   PackageSize,
+  PathData,
   Rect,
   StylePatch,
   StyledPath,
@@ -34,29 +37,113 @@ import type {
   VersionStatus,
 } from "./types.js";
 
+function histogramEnds(bins: readonly number[], transparent: number, clip: number): [number, number] | null {
+  const zero = Math.max(0, bins[0] - transparent);
+  const count = (index: number) => index === 0 ? zero : bins[index];
+  const total = bins.reduce((sum, value) => sum + value, 0) - bins[0] + zero;
+  if (total === 0) return null;
+  const threshold = total * clip;
+  let low = 0;
+  let high = 255;
+  let cumulative = 0;
+  while (low <= high && (cumulative += count(low)) <= threshold) low++;
+  cumulative = 0;
+  while (high >= low && (cumulative += count(high)) <= threshold) high--;
+  return [low, high];
+}
+
 /** `limit` is the engine's `.alto` cap (`MAX_PACKAGE_BYTES`). */
 function packageSizeOf({ bytes, limit }: { bytes: number; limit: number }): PackageSize {
   return { bytes, limit, near: bytes >= limit * 0.8 };
 }
-
-export interface SelectionSpec {
-  kind: "rectangle" | "ellipse" | "lasso" | "all" | "invert" | "clear";
-  mode?: "replace" | "add" | "subtract" | "intersect";
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  feather?: number;
-  /** Lasso points `[x, y]` in document pixels. */
-  points?: [number, number][];
+/** The snapshot a folder's manifest names, or null when it names none readably. */
+function snapshotPath(manifest: Uint8Array): string | null {
+  try {
+    const hash: unknown = JSON.parse(new TextDecoder().decode(manifest)).snapshot;
+    return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? `snapshots/${hash}.json` : null;
+  } catch {
+    return null;
+  }
+}
+/** A folder attached read-only: it was saved since with versions this document lacks. */
+function folderAhead(): AltoError {
+  return new AltoError("CONFLICT", "the folder holds versions this document does not have", { reason: "folder-changed" });
 }
 
+export type SelectionMode = "replace" | "add" | "subtract" | "intersect";
+
+export type SelectionSpec =
+  | {
+      kind: "rectangle" | "ellipse";
+      mode?: SelectionMode;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      feather?: number;
+    }
+  | {
+      kind: "lasso";
+      mode?: SelectionMode;
+      /** Lasso points in document pixels. */
+      points: [number, number][];
+      feather?: number;
+    }
+  | {
+      kind: "path";
+      /** Filled Bézier path in document coordinates. Open subpaths close for filling. */
+      path: PathData;
+      /** Defaults to "non_zero". */
+      fill_rule?: FillRule;
+      /** Feather width in document pixels, from 0 to 64 (default 0). */
+      feather?: number;
+      mode?: SelectionMode;
+    }
+  | { kind: "all" | "invert"; mode?: SelectionMode }
+  | { kind: "clear" }
+  | {
+      kind: "modify";
+      operation: "grow" | "shrink" | "border" | "smooth";
+      /** Integer radius in document pixels, from 1 to 64. */
+      radius: number;
+    }
+  | {
+      kind: "color";
+      /** Raster layer with a translation-only world transform. */
+      layer: NodeId;
+      /** Color components are integers from 0 to 255. Alpha defaults to 255. */
+      r: number;
+      g: number;
+      b: number;
+      a?: number;
+      /** Maximum per-channel difference, an integer from 0 to 255 (default 0). */
+      tolerance?: number;
+      mode?: SelectionMode;
+    }
+  | {
+      kind: "contiguous";
+      /** Raster layer with a translation-only world transform. */
+      layer: NodeId;
+      /** Seed in integer document coordinates. */
+      x: number;
+      y: number;
+      /** Maximum per-channel difference, an integer from 0 to 255 (default 0). */
+      tolerance?: number;
+      mode?: SelectionMode;
+    };
+
 export interface ExportImageOptions {
-  type?: "image/png" | "image/webp";
+  type?: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
   /** Greater than 0 and at most 1 (default 1). */
   scale?: number;
   /** Document pixels; defaults to the whole document. */
   region?: Rect;
+  /** JPEG and WebP quality from 0 to 1 (default 0.92). */
+  quality?: number;
+  /** JPEG background in straight sRGB, each channel from 0 to 1 (default white). */
+  background?: [number, number, number];
+  /** TIFF strip compression (default none). */
+  compression?: "none" | "deflate";
 }
 
 /**
@@ -69,7 +156,11 @@ export class DocumentHandle {
   private readonly store = new SnapshotStore();
   private readonly listeners = new Set<(change: DocumentChange) => void>();
   private tool: ToolSession | null = null;
-  private savedFolder: { provider: ObjectStorageProvider; manifest: string } | null = null;
+  /**
+   * `readOnly`: the folder's manifest names versions this document lacks, so saving this
+   * document's refs there would drop them. Versions are still read from it.
+   */
+  private savedFolder: { provider: ObjectStorageProvider; manifest: string; readOnly?: boolean } | null = null;
   private releaseHold: (() => Promise<void>) | undefined;
 
   /** @internal */
@@ -232,6 +323,13 @@ export class DocumentHandle {
       this.transact(intent, (tx) => tx.setText(id, replaceText(this.textOf(id), start, end, insert))),
     style: (id: NodeId, start: number, end: number, patch: StylePatch) =>
       this.transact("text.style", (tx) => tx.setText(id, applyTextStyle(this.textOf(id), start, end, patch))),
+    /** Enables or disables hanging punctuation in one undoable edit. */
+    setHanging: (id: NodeId, on: boolean) =>
+      this.transact("text.edit", (tx) => {
+        const content = this.textOf(id);
+        content.hanging = on;
+        tx.setText(id, content);
+      }),
     setTateChuYoko: (id: NodeId, start: number, end: number, on = true) =>
       this.transact("text.tate-chu-yoko", (tx) => {
         const c = this.textOf(id);
@@ -276,6 +374,31 @@ export class DocumentHandle {
   };
   /** A layer's non-destructive effects. */
   readonly effects = {
+    /**
+     * Suggests shared RGB levels from a raster layer's stored pixels before effects or masks.
+     * Returns parameters without editing the document. A fully transparent layer returns
+     * identity levels. In a mixed-alpha layer, transparent pixels with stored nonzero
+     * RGB can skew the range, including by undercounting opaque black. The default
+     * clip fraction per tail is 0.001.
+     */
+    autoLevels: async (layer: NodeId, { clip = 0.001 }: { clip?: number } = {}): Promise<LevelsParams> => {
+      if (!Number.isFinite(clip) || clip < 0 || clip > 0.1) {
+        throw new AltoError("INVALID_ARGUMENT", "Levels clip must be between 0 and 0.1");
+      }
+      const { r, g, b, a, pixels } = await this.image.histogram(layer);
+      const ends = a[0] === pixels ? [] : [r, g, b]
+        .map((bins) => histogramEnds(bins, a[0], clip))
+        .filter((ends) => ends !== null);
+      const low = Math.min(...ends.map(([low]) => low));
+      const high = Math.max(...ends.map(([, high]) => high));
+      return {
+        in_black: high > low ? low / 255 : 0,
+        in_white: high > low ? high / 255 : 1,
+        gamma: 1,
+        out_black: 0,
+        out_white: 1,
+      };
+    },
     /** Replaces a layer's effects. With `useSelection` (default) each is limited to the selection. */
     set: (layer: NodeId, effects: Effect[], options: { useSelection?: boolean } = {}) =>
       this.command("setEffects", { layer, effects, useSelection: options.useSelection ?? true }),
@@ -289,9 +412,28 @@ export class DocumentHandle {
   private layerCommand(edit: Record<string, unknown>): Promise<LayerEditResult> {
     return this.edit(async () => { const r = await this.request("layerEdit", { edit }); this.apply(r.state); return r.result; });
   }
-  private historyCommand(command: Record<string, unknown>, target?: ObjectTarget): Promise<MergeResult | null> {
+  private async runHistoryCommand(command: Record<string, unknown>, target?: ObjectTarget) {
     const run = async () => { const r = await this.request("historyCommand", { command }); this.apply(r.state); return r.result; };
-    return this.edit(() => (target ? this.withObjects(target, run) : run()));
+    return target ? this.withObjects(target, run) : run();
+  }
+  private historyCommand(command: Record<string, unknown>, target?: ObjectTarget) {
+    return this.edit(() => this.runHistoryCommand(command, target));
+  }
+  private applyStash(commit: string | undefined, drop: boolean): Promise<MergePlan | null> {
+    return this.edit(async () => {
+      const versions = this.getSnapshot().versions;
+      const stashes = versions.refs.stashes ?? [];
+      const selected = commit ?? stashes[0]?.commit;
+      if (selected === undefined) throw new AltoError("NOT_FOUND", "there is no stash to apply");
+      // The worker reports dirty HEAD and unknown stash errors before checking objects.
+      const shouldLoad = !versions.changed && stashes.some((entry) => entry.commit === selected.toLowerCase());
+      const result = await this.runHistoryCommand(
+        { type: "stash_apply", commit: selected, drop },
+        shouldLoad ? { type: "stash", commit: selected } : undefined,
+      );
+      if (result === null || "conflicts" in result) return result;
+      throw new AltoError("INTERNAL", "stash apply returned an unexpected result");
+    });
   }
   /**
    * @internal Runs `run` with the target's objects in memory, reading any the document left in
@@ -348,8 +490,11 @@ export class DocumentHandle {
     /** Merges a raster into the raster below it. Refused when the result could not look the same. */
     mergeDown: (node: NodeId) => this.layerCommand({ type: "merge_down", node }),
     /**
-     * Bakes a raster's whole-pixel offset, turns a vector layer into a raster on the same node, or
-     * flattens a group of rasters and vectors. A vector must sit at a whole-pixel position at scale 1.
+     * Bakes a raster's whole-pixel offset, rasterizes a vector or text layer on the same node, or
+     * flattens a group of rasters, vectors, and text. A standalone vector can bake its own
+     * transform when its ancestors compose to a whole-pixel translation and its effects
+     * have no saved selections. Text and vectors inside a flattened group still require
+     * whole-pixel placement at scale 1. `missing` counts missing characters in rasterized text.
      */
     rasterize: (node: NodeId) => this.layerCommand({ type: "rasterize", node }),
     histogram: (node: NodeId, range?: ImageBounds): Promise<ImageHistogram> => this.request("imageHistogram", range ? { node, range } : { node }),
@@ -375,19 +520,29 @@ export class DocumentHandle {
     externalObjects: () => this.request("externalObjects"),
     /**
      * Connects the folder holding this document's history, after a page reload recovered the
-     * document without it. Refused if the folder lacks an object the document needs.
+     * document without it, or a thin `.alto` opened without its store. Refused if the folder
+     * holds another document or lacks an object the document needs. A folder saved since with
+     * versions this document lacks attaches read-only: versions are read from it, but saving or
+     * collecting it from this document fails `CONFLICT` (`folder-changed`).
      */
     attachFolder: (provider: ObjectStorageProvider) => this.edit(async () => {
-      const missing = await this.request("missingObjects", { target: { type: "all" } });
       const hold = await provider.holdObjects?.();
       try {
+        const mismatch = await this.checkStore(provider, false, hold);
+        if (mismatch === null) return;
+        if (mismatch === "other-document") throw new AltoError("CONFLICT", "this folder holds another document", { reason: "folder-occupied" });
+        const missing = await this.request("missingObjects", { target: { type: "all" } });
         const load = async (storage: ObjectStorageProvider) => {
           const present = new Set(await storage.list("objects/"));
           if (missing.some((path) => !present.has(path))) throw new AltoError("CONFLICT", "this folder does not hold the document's history", { reason: "folder-occupied" });
-          const manifest = await storage.readRef("manifest.json");
-          return manifest ? sha256Hex(manifest) : "";
+          return storage.readRef("manifest.json");
         };
-        this.setFolder(provider, await (provider.exclusive ? provider.exclusive(load) : load(provider)), hold);
+        const manifest = await (provider.exclusive ? provider.exclusive(load) : load(provider));
+        const hash = manifest ? await sha256Hex(manifest) : "";
+        const contained = !manifest || (await this.request("storeRootsContained", { manifest: manifest.slice().buffer as ArrayBuffer }));
+        // As when the store matched: the warning from opening without it no longer holds.
+        this.apply(await this.request("historyStoreAttached"));
+        this.setFolder(provider, hash, hold, !contained);
       } catch (e) { void hold?.(); throw e; }
     }),
     /** Returns a new compact archive. Does not overwrite an existing file. */
@@ -409,11 +564,31 @@ export class DocumentHandle {
     deleteTag: (name: string) => this.historyCommand({ type: "delete_tag", name }).then(() => {}),
     pin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: true }).then(() => {}),
     unpin: (hash: string) => this.historyCommand({ type: "pin", hash, pin: false }).then(() => {}),
+    /** Saves working changes and restores HEAD. */
+    stash: (message = "Stash", options: { author?: string } = {}): Promise<StashEntry> =>
+      this.edit(async () => {
+        const head = this.getSnapshot().versions.head;
+        const result = await this.runHistoryCommand(
+          { type: "stash", message, created_at: Date.now(), author: options.author ?? null },
+          head ? { type: "commit", hash: head } : undefined,
+        );
+        if (!result || !("commit" in result)) throw new AltoError("INTERNAL", "stash returned no entry");
+        return result;
+      }),
+    /** Lists the saved working changes, newest first. */
+    stashList: (): StashEntry[] => (this.getSnapshot().versions.refs.stashes ?? []).map((entry) => ({ ...entry })),
+    /** Applies a stash, returning a merge plan only when there are conflicts. */
+    stashApply: (commit: string, options: { drop?: boolean } = {}): Promise<MergePlan | null> =>
+      this.applyStash(commit, options.drop ?? false),
+    /** Applies a stash and removes it once the apply succeeds. Defaults to the newest stash. */
+    stashPop: (commit?: string): Promise<MergePlan | null> => this.applyStash(commit, true),
+    /** Removes a stash reference. */
+    stashDrop: (commit: string): Promise<void> => this.historyCommand({ type: "stash_drop", commit }).then(() => {}),
     prepareMerge: (name: string) => this.edit(() => this.withObjects({ type: "merge", name }, () => this.request("prepareMerge", { name }))),
     cancelMerge: () => this.edit(() => this.request("cancelMerge").then(() => {})),
     finishMerge: (token: string, resolutions: MergeResolution[], options: { message?: string; author?: string } = {}) =>
       this.historyCommand({ type: "finish_merge", token, resolutions, message: options.message ?? "Merge", author: options.author ?? null, created_at: Date.now() }, { type: "merge_plan" }).then((r) => {
-        if (!r) throw new AltoError("INTERNAL", "merge returned no result"); return r;
+        if (!r || !("head" in r)) throw new AltoError("INTERNAL", "merge returned no result"); return r;
       }),
     /** Records the current document as a version. Fails when nothing changed unless allowEmpty. */
     commit: (message: string, options: { author?: string; allowEmpty?: boolean } = {}): Promise<CommitView> =>
@@ -444,15 +619,104 @@ export class DocumentHandle {
   };
 
   /**
-   * The document, or a region of it, as a PNG or WebP image: the pixels the canvas
+   * The document, or a region of it, as a PNG, WebP, JPEG or TIFF image: the pixels the canvas
    * shows, at `scale` (greater than 0, at most 1). Allowed while storage has failed.
    * The region is clamped to the document; infinite bounds reach its edge.
-   * A PNG at scale 1, or at 1/2, 1/4, … when the output size equals the pixels read
+   * PNG and TIFF at scale 1, or at 1/2, 1/4, … when the output size equals the pixels read
    * from that pyramid level, holds the displayed pixels exactly as straight alpha;
-   * transparent pixels are (0, 0, 0, 0). Other scales and WebP are resampled or
-   * encoded by the browser.
+   * transparent pixels are (0, 0, 0, 0). Other scales are resampled by the browser.
+   * JPEG composites transparency over the background before resampling.
    */
   async exportImage(options: ExportImageOptions = {}): Promise<Blob> {
+    const type = options.type ?? "image/png";
+    if (type !== "image/png" && type !== "image/webp" && type !== "image/jpeg" && type !== "image/tiff")
+      throw new AltoError("UNSUPPORTED", "image export format");
+    const { quality, background, compression } = options;
+    if (quality !== undefined && ((type !== "image/jpeg" && type !== "image/webp") ||
+        !Number.isFinite(quality) || quality < 0 || quality > 1))
+      throw new AltoError("INVALID_ARGUMENT", "quality applies to JPEG and WebP and must be between 0 and 1", { reason: "quality" });
+    if (background !== undefined && (type !== "image/jpeg" || !Array.isArray(background) ||
+        background.length !== 3 || ![...background].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)))
+      throw new AltoError("INVALID_ARGUMENT", "JPEG background must contain three channels between 0 and 1", { reason: "background" });
+    if (compression !== undefined && (type !== "image/tiff" || (compression !== "none" && compression !== "deflate")))
+      throw new AltoError("INVALID_ARGUMENT", "compression must be none or deflate for TIFF", { reason: "compression" });
+    const { region, scale } = this.exportRegion(options);
+    const request: Args<"exportImage"> = { region, scale, type, quality, compression };
+    if (background !== undefined) request.background = [...background];
+    await this.endTool();
+    return this.request("exportImage", request);
+  }
+  /**
+   * Streams exact display-pyramid pixels as PNG chunks. At most one stream per
+   * engine is active. Validation and opening happen on the first read. Cancel
+   * an unread remainder to release the export.
+   * Editing, replacing the document, or restarting the Worker invalidates the stream.
+   */
+  exportImageStream(options: ExportImageOptions = {}): ReadableStream<Uint8Array<ArrayBuffer>> {
+    let opening: Promise<{ streamId: string }> | undefined;
+    let workerEpoch: number | undefined;
+    let cancelled = false;
+    const close = async () => {
+      if (!opening) return;
+      const opened = await opening.catch(() => undefined);
+      if (opened) {
+        await this.request("exportStreamClose", { streamId: opened.streamId }).catch(() => {});
+      }
+    };
+    const checkCurrent = () => {
+      if (this.closed || (workerEpoch !== undefined && this.core.workerEpoch !== workerEpoch)) {
+        throw new AltoError("CONFLICT", "the document changed during PNG export", { reason: "document-changed" });
+      }
+    };
+    return new ReadableStream<Uint8Array<ArrayBuffer>>({
+      pull: async (controller) => {
+        try {
+          checkCurrent();
+          if (!opening) {
+            if ((options.type ?? "image/png") !== "image/png" || options.quality !== undefined ||
+                options.background !== undefined || options.compression !== undefined) {
+              throw new AltoError("UNSUPPORTED", "streaming image export supports exact PNG only");
+            }
+            await this.endTool();
+            if (cancelled) return;
+            checkCurrent();
+            const { region, scale } = this.exportRegion(options);
+            workerEpoch = this.core.workerEpoch;
+            opening = this.request("exportStreamOpen", { region, scale });
+          }
+          const { streamId } = await opening;
+          while (!cancelled) {
+            checkCurrent();
+            const bytes = await this.request("exportStreamPull", { streamId });
+            if (cancelled) return;
+            checkCurrent();
+            if (bytes === null) {
+              controller.close();
+              return;
+            }
+            if (bytes.length) {
+              controller.enqueue(bytes);
+              return;
+            }
+          }
+        } catch (error) {
+          await close();
+          if (cancelled) return;
+          checkCurrent();
+          if (error instanceof AltoError && error.code === "WORKER_CRASHED") {
+            throw new AltoError("CONFLICT", "the Worker restarted during PNG export", { reason: "document-changed" });
+          }
+          throw error;
+        }
+      },
+      cancel: async () => {
+        cancelled = true;
+        await close();
+      },
+    }, { highWaterMark: 0 });
+  }
+
+  private exportRegion(options: ExportImageOptions): { region: Rect; scale: number } {
     const scale = options.scale ?? 1;
     if (!(scale > 0 && scale <= 1))
       throw new AltoError("INVALID_ARGUMENT", "scale must be greater than 0 and at most 1", { reason: "scale" });
@@ -468,15 +732,23 @@ export class DocumentHandle {
     };
     if (region.x1 <= region.x0 || region.y1 <= region.y0)
       throw new AltoError("INVALID_ARGUMENT", "region is empty or outside the document");
-    await this.endTool();
-    return this.request("exportImage", { region, scale, type: options.type ?? "image/png" });
+    return { region, scale };
   }
+
   /**
    * The document's size against the `.alto` cap now. For a folder opened on demand this
    * reads the objects still in the folder first. The `packageSize` event reports the same
-   * after each `.alto` save and each commit.
+   * after each `.alto` save and each commit. With `history: "external"` it is the size of the
+   * thin `.alto` that `save(target, { history: { folder } })` writes, worked out without
+   * reading anything.
    */
-  packageSize(): Promise<PackageSize> {
+  packageSize(options: { history?: "all" | "external" } = {}): Promise<PackageSize> {
+    if (options.history === "external")
+      return this.edit(async () => {
+        const size = await this.request("packageBytes", { external: true });
+        if (size === null) throw new AltoError("INTERNAL", "thin package size unknown");
+        return packageSizeOf(size);
+      });
     return this.edit(() =>
       this.withObjects({ type: "all" }, async () => {
         const size = await this.request("packageBytes");
@@ -498,9 +770,23 @@ export class DocumentHandle {
    * Writes the document as a `.alto` archive. On success the document is no longer dirty.
    * With `history: "omit"` it writes the working document alone and stays dirty. Use that when
    * history that lives in an unreachable folder would otherwise make the save fail.
+   * With `history: { folder }` it first saves the folder form to `folder`, as `saveFolder`
+   * does, then writes a thin `.alto` holding the working document's objects alone; the
+   * versions' objects stay in `folder`, which the document stays attached to and holds. If
+   * the `.alto` write fails, the folder is already saved and stays attached; the document
+   * stays dirty.
    */
-  async save(target: ArchiveTarget, options: { history?: "all" | "omit" } = {}): Promise<void> {
+  async save(
+    target: ArchiveTarget,
+    options: { history?: "all" | "omit" | { folder: ObjectStorageProvider } } = {},
+  ): Promise<void> {
     await this.endTool();
+    if (typeof options.history === "object" && options.history) {
+      const folder = options.history.folder as ObjectStorageProvider | undefined;
+      if (!folder || typeof folder !== "object")
+        throw new AltoError("INVALID_ARGUMENT", "history.folder must be an object storage provider");
+      return this.saveThin(target, folder);
+    }
     if (options.history === "omit") {
       const bytes = await this.request("saveWithoutHistory");
       await target.write(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream());
@@ -529,10 +815,51 @@ export class DocumentHandle {
       throw e;
     }
   }
+  private async saveThin(target: ArchiveTarget, owner: ObjectStorageProvider): Promise<void> {
+    this.core.emit("saveState", "saving");
+    let token: number | undefined;
+    try {
+      const saved = await this.edit(async () => {
+        const write = () =>
+          owner.exclusive
+            ? owner.exclusive((storage) => this.writeFolder(owner, storage, {}))
+            : this.writeFolder(owner, owner, {});
+        const attached = this.savedFolder?.provider === owner;
+        // Before reading the versions' objects, which a thin .alto opened without its store
+        // cannot: saving into that store is refused as writeFolder would refuse it.
+        const occupied = async (storage: ObjectStorageProvider) => !!(await storage.readRef("manifest.json"));
+        if (!attached && (await (owner.exclusive ? owner.exclusive(occupied) : occupied(owner))))
+          throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
+        // Before the target's lock: reading from another folder takes that folder's lock.
+        const written = attached ? await write() : await this.withObjects({ type: "all" }, write);
+        token = written.token;
+        // The versions now live only in the folder: hold it so GC elsewhere keeps them.
+        await this.adoptFolder(owner, written.manifest, { hold: true });
+        // The store is committed now, whatever happens to the .alto. Inside the queue, so a
+        // version committed during the .alto write is not taken to be in the store.
+        await this.request("markStoreSaved");
+        return {
+          bytes: await this.request("saveThin"),
+          // Advice only: failing to work it out must not fail a save that succeeded.
+          payload: await this.request("packageBytes", { external: true }).catch(() => null),
+        };
+      });
+      await target.write(new Blob([saved.bytes as Uint8Array<ArrayBuffer>]).stream());
+      this.apply(await this.request("saved", { token: token! }));
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      if (saved.payload !== null) this.core.emit("packageSize", packageSizeOf(saved.payload));
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
   private gcFolder(options: GcOptions): Promise<GcReport> {
     return this.edit(async () => {
       const owner = this.savedFolder?.provider;
       if (!owner) throw new AltoError("UNSUPPORTED", "save or open a folder before collecting it");
+      if (this.savedFolder?.readOnly) throw folderAhead();
       const dryRun = options.dryRun ?? true;
       const capabilities = owner.gcCapabilities;
       if (!dryRun && (typeof owner.exclusive !== "function" || capabilities?.exclusive !== true || capabilities.atomicManifest !== true || capabilities.deleteObjects !== true))
@@ -587,7 +914,7 @@ export class DocumentHandle {
       const held = !!this.releaseHold;
       await this.releaseHold?.(); this.releaseHold = undefined;
       try { return await owner.whileNotHeld(collect); }
-      finally { if (held) this.releaseHold = await owner.holdObjects?.(); }
+      finally { if (held) this.keepHold(await owner.holdObjects?.()); }
     });
   }
   /**
@@ -600,18 +927,46 @@ export class DocumentHandle {
   ): Promise<{ written: number; skipped: number; warnings: string[] }> {
     await this.endTool();
     const save = () => (provider.exclusive ? provider.exclusive((storage) => this.saveFolderLocked(provider, storage, options)) : this.saveFolderLocked(provider, provider, options));
-    // Before the target's lock: reading from another folder takes that folder's lock.
-    return this.savedFolder?.provider === provider ? save() : this.edit(() => this.withObjects({ type: "all" }, save));
+    // In the edit queue, so no commit lands between the entries and markFolderSaved. Objects
+    // are read before the target's lock: reading from another folder takes that folder's lock.
+    return this.edit(() => (this.savedFolder?.provider === provider ? save() : this.withObjects({ type: "all" }, save)));
   }
   private async saveFolderLocked(owner: ObjectStorageProvider, provider: ObjectStorageProvider, options: { overwrite?: boolean }): Promise<{ written: number; skipped: number; warnings: string[] }> {
     this.core.emit("saveState", "saving");
     let token: number | undefined;
     try {
+      const written = await this.writeFolder(owner, provider, options);
+      token = written.token;
+      await this.adoptFolder(owner, written.manifest);
+      this.apply(await this.request("saved", { token }));
+      await this.request("markFolderSaved");
+      token = undefined;
+      this.core.emit("saveState", "saved");
+      return written.report;
+    } catch (e) {
+      this.releaseSave(token);
+      this.core.emit("saveState", "error");
+      throw e;
+    }
+  }
+  /**
+   * Writes the folder form to `provider` (the locked view of `owner`) and reads its manifest
+   * back. Returns the save token and the manifest's hash; the caller confirms the save.
+   */
+  private async writeFolder(
+    owner: ObjectStorageProvider,
+    provider: ObjectStorageProvider,
+    options: { overwrite?: boolean },
+  ): Promise<{ report: { written: number; skipped: number; warnings: string[] }; token: number; manifest: string }> {
+    let token: number | undefined;
+    try {
       const current = await provider.readRef("manifest.json");
       const currentHash = current ? await sha256Hex(current) : "";
-      const base = this.savedFolder?.provider === owner ? this.savedFolder.manifest : undefined;
+      const folder = this.savedFolder?.provider === owner ? this.savedFolder : undefined;
+      const base = folder?.manifest;
       if (current && base === undefined && !options.overwrite)
         throw new AltoError("CONFLICT", "the folder holds another document", { reason: "folder-occupied" });
+      if (folder?.readOnly) throw folderAhead();
       if (base !== undefined && base !== currentHash)
         throw new AltoError("CONFLICT", "manifest.json changed elsewhere", { reason: "folder-changed" });
       const saved = await this.request("folderEntries", { keepExternal: base !== undefined });
@@ -629,25 +984,79 @@ export class DocumentHandle {
       const warnings: string[] = [];
       const mirror = entries.get("document.json");
       if (mirror) { try { await provider.writeRef("document.json", mirror); } catch { warnings.push("比較用の文書コピーを更新できませんでした。正本の保存は完了しています。"); } }
-      const movedFolder = this.savedFolder?.provider !== owner;
-      this.savedFolder = { provider: owner, manifest: await sha256Hex(manifest) };
-      if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = await owner.holdObjects?.(); }
-      this.apply(await this.request("saved", { token }));
-      await this.request("markFolderSaved");
-      token = undefined;
-      this.core.emit("saveState", "saved");
-      return { ...report, warnings };
+      return { report: { ...report, warnings }, token, manifest: await sha256Hex(manifest) };
     } catch (e) {
       this.releaseSave(token);
-      this.core.emit("saveState", "error");
       throw e;
     }
   }
-  /** @internal */
-  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>): void {
+  /**
+   * The folder just saved to is now the document's; a hold moves with it. With `hold`, the
+   * document holds the folder afterwards even if it held nothing before.
+   */
+  private async adoptFolder(owner: ObjectStorageProvider, manifest: string, options: { hold?: boolean } = {}): Promise<void> {
+    const movedFolder = this.savedFolder?.provider !== owner;
+    this.savedFolder = { provider: owner, manifest };
+    if (movedFolder && this.releaseHold) { void this.releaseHold(); this.releaseHold = undefined; }
+    else if (!options.hold || this.releaseHold) return;
+    this.keepHold(await owner.holdObjects?.());
+  }
+  /** A hold taken while the document closed is released, not kept: close() already ran. */
+  private keepHold(release: (() => Promise<void>) | undefined): void {
+    if (this.closed) void release?.();
+    else this.releaseHold = release;
+  }
+  /**
+   * @internal Attaches the history store of a thin `.alto` just opened, or warns
+   * `HISTORY_STORE_UNAVAILABLE` and leaves it. A normal `.alto` has nothing in a store.
+   */
+  attachHistoryStore(provider: ObjectStorageProvider): Promise<void> {
+    return this.edit(async () => {
+      if (!(await this.request("historyIsExternal"))) return;
+      // Before the store's lock, in the order GC takes them.
+      const hold = await provider.holdObjects?.();
+      try {
+        if ((await this.checkStore(provider, true, hold)) !== null) void hold?.();
+      } catch (e) { void hold?.(); throw e; }
+    });
+  }
+  /**
+   * Whether `provider` is this document's history store: the same document, with every object
+   * only its versions use. If so it becomes the document's folder, holding it with `hold`.
+   * A store that cannot be read is `"missing"`. With `warn`, a mismatch becomes a warning.
+   */
+  private async checkStore(
+    provider: ObjectStorageProvider,
+    warn: boolean,
+    hold: (() => Promise<void>) | undefined,
+  ): Promise<"missing" | "other-document" | null> {
+    const read = async (storage: ObjectStorageProvider) => {
+      const entries = new Map<string, Uint8Array>();
+      const manifest = await storage.readRef("manifest.json");
+      if (manifest) {
+        entries.set("manifest.json", manifest);
+        const snapshot = snapshotPath(manifest);
+        const bytes = snapshot ? await storage.getObject(snapshot) : null;
+        if (snapshot && bytes) entries.set(snapshot, bytes);
+      }
+      return { entries, objects: await storage.list("objects/"), manifest: manifest ? await sha256Hex(manifest) : "" };
+    };
+    // The hold keeps GC from removing objects between this read and the check.
+    const found = await (provider.exclusive ? provider.exclusive(read) : read(provider)).catch(() => ({
+      entries: new Map<string, Uint8Array>(), objects: [] as string[], manifest: "",
+    }));
+    const framed = frameEntries(found.entries);
+    const r = await this.request("checkHistoryStore", { bytes: framed.buffer as ArrayBuffer, objects: found.objects, warn }, [framed.buffer]);
+    this.apply(r.state);
+    if (r.mismatch === null) this.setFolder(provider, found.manifest, hold, !r.contained);
+    return r.mismatch;
+  }
+  /** @internal With `readOnly`, versions are read from the folder but nothing is saved there. */
+  setFolder(provider: ObjectStorageProvider, manifest: string, releaseHold?: () => Promise<void>, readOnly = false): void {
+    if (this.closed) { void releaseHold?.(); return; }
     void this.releaseHold?.();
     this.releaseHold = releaseHold;
-    this.savedFolder = { provider, manifest };
+    this.savedFolder = readOnly ? { provider, manifest, readOnly } : { provider, manifest };
   }
   /** A cancelled or failed save no longer needs the Worker's copy of the package. */
   private releaseSave(token: number | undefined) {

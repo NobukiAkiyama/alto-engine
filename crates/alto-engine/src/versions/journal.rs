@@ -31,7 +31,7 @@ impl Engine {
             crate::tx_hashes(tx, &mut hashes);
         }
         let digest = self.version_state_digest(h)?;
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         self.staged_tiles.insert(stage, hashes.clone());
         Ok(VersionCheckpoint {
             doc,
@@ -47,8 +47,9 @@ impl Engine {
     }
     pub fn rollback_version_state(&mut self, h: DocHandle, state: VersionCheckpoint) {
         let mut editor = alto_doc::Editor::new(state.doc);
+        editor.set_max_undo(self.max_undo);
         editor.restore_history(state.history);
-        self.documents.insert(h, editor);
+        self.install_editor(h, editor);
         self.versions.insert(h, state.versions);
         self.release_staged_tiles(state.stage);
     }
@@ -151,6 +152,7 @@ impl Engine {
             .collect::<Vec<_>>();
         alto_store::decode_entries(entries.clone())?;
         let mut temp = Engine::new();
+        temp.set_max_undo(self.max_undo)?;
         let (other, w) = temp.open_recovery_entries(entries, &BTreeSet::new())?;
         if !w.is_empty()
             || header["after"].as_str() != Some(temp.version_state_digest(other)?.hex().as_str())
@@ -171,7 +173,7 @@ impl Engine {
         let mut editor = temp.documents.remove(&other).unwrap();
         editor.doc.revision = revision;
         let versions = temp.versions.remove(&other).unwrap();
-        self.documents.insert(h, editor);
+        self.install_editor(h, editor);
         self.versions.insert(h, versions);
         self.maintain();
         Ok(crate::Replayed::Applied)

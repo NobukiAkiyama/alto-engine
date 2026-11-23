@@ -60,6 +60,19 @@ enum HistoryCommand {
     AdoptGc {
         manifest: String,
     },
+    Stash {
+        message: String,
+        created_at: i64,
+        author: Option<String>,
+    },
+    StashApply {
+        commit: String,
+        #[serde(default)]
+        drop: bool,
+    },
+    StashDrop {
+        commit: String,
+    },
     FinishMerge {
         token: String,
         resolutions: Vec<alto_engine::versions::MergeResolution>,
@@ -132,12 +145,23 @@ impl Runtime {
         }
         let edit: alto_engine::canvas::LayerEdit = parse_edit(request)?;
         let intent = edit.intent();
-        let p = self
-            .engine
-            .prepare_layer_edit(self.doc, edit, &|paths, world, window| {
+        let rasterizers = alto_engine::canvas::Rasterizers {
+            vector: &|paths, world, window| {
                 alto_gpu::raster_q8::vector_pixels_q14(paths, world, window)
                     .map_err(|_| "the vector is outside the renderer's coordinate range".into())
-            })
+            },
+            text_extent: &|bake, world| {
+                alto_gpu::glyph_q8::text_extent(bake, world)
+                    .map_err(|_| "the text is outside the renderer's coordinate range".into())
+            },
+            text: &|bake, world, window| {
+                alto_gpu::glyph_q8::text_pixels_q14(bake, world, window)
+                    .map_err(|_| "the text is outside the renderer's coordinate range".into())
+            },
+        };
+        let p = self
+            .engine
+            .prepare_layer_edit(self.doc, edit, rasterizers)
             .map_err(error)?;
         self.apply_prepared(intent, p)
     }
@@ -324,6 +348,28 @@ impl Runtime {
                 HistoryCommand::AdoptGc { manifest } => {
                     self.engine
                         .adopt_gc(self.doc, manifest.as_bytes())
+                        .map_err(error)?;
+                    Value::Null
+                }
+                HistoryCommand::Stash {
+                    message,
+                    created_at,
+                    author,
+                } => serde_json::to_value(
+                    self.engine
+                        .stash(self.doc, &message, created_at, author)
+                        .map_err(error)?,
+                )
+                .map_err(error)?,
+                HistoryCommand::StashApply { commit, drop } => serde_json::to_value(
+                    self.engine
+                        .stash_apply(self.doc, hash(&commit)?, drop)
+                        .map_err(error)?,
+                )
+                .map_err(error)?,
+                HistoryCommand::StashDrop { commit } => {
+                    self.engine
+                        .stash_drop(self.doc, hash(&commit)?)
                         .map_err(error)?;
                     Value::Null
                 }

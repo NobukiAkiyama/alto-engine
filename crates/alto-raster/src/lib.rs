@@ -189,6 +189,18 @@ pub struct ObjectStore {
     cold: HashMap<ContentHash, Arc<StoredTile>>,
 }
 impl ObjectStore {
+    /// Reuses an existing parked tile without replacing its data or verification state.
+    pub fn promote(&mut self, hash: &ContentHash) -> bool {
+        if let Some(tile) = self.cold.remove(hash) {
+            self.tiles.insert(*hash, tile);
+        }
+        self.tiles.contains_key(hash)
+    }
+    /// Removes only the specified objects, including parked copies.
+    pub fn remove_all(&mut self, hashes: &BTreeSet<ContentHash>) {
+        self.tiles.retain(|h, _| !hashes.contains(h));
+        self.cold.retain(|h, _| !hashes.contains(h));
+    }
     pub fn retain(&mut self, keep: &BTreeSet<ContentHash>) {
         self.tiles.retain(|h, _| keep.contains(h));
         self.cold.retain(|h, _| keep.contains(h));

@@ -530,6 +530,7 @@ impl Builder {
                         cap: s.cap,
                         join: s.join,
                         miter_limit: s.miter,
+                        dash: None,
                     }
                 });
                 let paths = vec![StyledPath {

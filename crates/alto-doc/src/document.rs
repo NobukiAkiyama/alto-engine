@@ -138,6 +138,7 @@ impl Document {
             | Op::SetVector { id, .. }
             | Op::SetVectorMask { id, .. }
             | Op::SetClipPath { id, .. }
+            | Op::SetTextBake { id, .. }
             | Op::SetText { id, .. } => editable(self, *id),
             Op::RemoveNode { id } => {
                 editable(self, *id)?;
@@ -514,6 +515,16 @@ impl Document {
                     bake: std::mem::replace(old_bake, bake),
                 }
             }
+            Op::SetTextBake { id, bake } => {
+                let NodeKind::Text { bake: old, .. } = &mut self.node_mut(id)?.kind else {
+                    return Err(DocError::Invalid("Target must be text".into()));
+                };
+                change.nodes.insert(id);
+                Op::SetTextBake {
+                    id,
+                    bake: std::mem::replace(old, bake),
+                }
+            }
             Op::SetSelection { selection } => {
                 if let Some(m) = &selection {
                     validate_mask(m)?;
@@ -567,6 +578,46 @@ impl Document {
         };
         Ok((inverse, change))
     }
+    /// The oldest format that supports all semantics used by this document.
+    pub fn required_format(&self) -> u32 {
+        if self.has_format_eight_effects() {
+            FORMAT_VERSION
+        } else if self.nodes.values().any(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Vector { paths }
+                    if paths.iter().any(|path| path.stroke.as_ref().is_some_and(|s| s.dash.is_some()))
+            )
+        }) {
+            DASH_FORMAT
+        } else if self.nodes.values().any(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Text { content, .. }
+                    if content.hanging
+                        || !content.style.underline.is_none()
+                        || content.style.italic_skew != 0.0
+                        || content.spans.iter().any(|span| {
+                            span.style.underline.is_some() || span.style.italic_skew.is_some()
+                        })
+            )
+        }) {
+            TEXT_FORMAT
+        } else {
+            BASE_FORMAT
+        }
+    }
+
+    fn has_format_eight_effects(&self) -> bool {
+        self.nodes.values().any(|node| {
+            node.props.effects.iter().any(Effect::requires_format_eight)
+                || matches!(
+                    &node.kind,
+                    NodeKind::Adjustment { adjustment } if adjustment.requires_format_eight()
+                )
+        })
+    }
+
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, DocError> {
         let mut ordered = Vec::new();
         fn walk(doc: &Document, id: NodeId, out: &mut Vec<Node>) -> Result<(), DocError> {
@@ -581,7 +632,10 @@ impl Document {
         }
         walk(self, self.root, &mut ordered)?;
         let snapshot = Snapshot {
-            meta: self.meta.clone(),
+            meta: DocumentMeta {
+                format_version: self.required_format(),
+                ..self.meta.clone()
+            },
             root: self.root,
             nodes: ordered,
             assets: self.assets.values().cloned().collect(),
@@ -620,6 +674,11 @@ impl Document {
         };
         if doc.assets.len() != asset_count {
             return Err(DocError::Invalid("Duplicate asset ID".into()));
+        }
+        if doc.meta.format_version < FORMAT_VERSION && doc.has_format_eight_effects() {
+            return Err(DocError::Unsupported(format!(
+                "document effects require format {FORMAT_VERSION}"
+            )));
         }
         doc.validate_graph()?;
         Ok(doc)
@@ -754,7 +813,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn only_render_version_three_and_format_five_load() {
+    fn unsupported_render_and_document_versions_are_rejected() {
         let bytes = Document::new(DocumentMeta::srgb_u8(8, 8))
             .unwrap()
             .snapshot_bytes()
@@ -788,7 +847,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn render_version_three_saves_format_five_and_reloads() {
+    fn format_5_documents_still_save_as_5() {
         let doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
         let bytes = doc.snapshot_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -798,5 +857,81 @@ mod compatibility_tests {
         assert_eq!(loaded.meta.render_version, alto_core::RENDER_VERSION_EXACT);
         assert_eq!(loaded.meta.format_version, 5);
         assert_eq!(loaded.snapshot_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn italic_skew_requires_format_6() {
+        let mut doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let mut content = TextContent {
+            text: "A".into(),
+            ..Default::default()
+        };
+        content.style.italic_skew = 12.0;
+        let mut node = Node::text("Text", content);
+        node.parent = Some(doc.root);
+        let id = node.id;
+        doc.nodes.insert(id, node);
+        if let NodeKind::Group { children, .. } = &mut doc.nodes.get_mut(&doc.root).unwrap().kind {
+            children.push(id);
+        }
+        let assert_format_6 = |doc: &Document| {
+            assert_eq!(doc.required_format(), TEXT_FORMAT);
+            let restored = Document::from_snapshot_bytes(&doc.snapshot_bytes().unwrap()).unwrap();
+            assert_eq!(restored.meta.format_version, TEXT_FORMAT);
+            assert_eq!(restored.node(id).unwrap().kind, doc.node(id).unwrap().kind);
+        };
+        assert_format_6(&doc);
+
+        let NodeKind::Text { content, .. } = &mut doc.nodes.get_mut(&id).unwrap().kind else {
+            unreachable!();
+        };
+        content.style.italic_skew = 0.0;
+        content.spans.push(alto_text::TextSpan {
+            start: 0,
+            end: 1,
+            style: alto_text::StylePatch {
+                italic_skew: Some(0.0),
+                ..Default::default()
+            },
+        });
+        assert_format_6(&doc);
+    }
+
+    #[test]
+    fn underline_requires_format_6() {
+        let mut doc = Document::new(DocumentMeta::srgb_u8(8, 8)).unwrap();
+        let mut content = TextContent {
+            text: "underlined".into(),
+            ..Default::default()
+        };
+        content.style.underline.kind = alto_text::UnderlineKind::Solid;
+        let node = Node::text("Text", content);
+        let id = node.id;
+        doc.nodes.insert(id, node);
+        if let NodeKind::Group { children, .. } = &mut doc.nodes.get_mut(&doc.root).unwrap().kind {
+            children.push(id);
+        }
+        assert_eq!(doc.required_format(), TEXT_FORMAT);
+        let snapshot_format = |doc: &Document| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&doc.snapshot_bytes().unwrap()).unwrap();
+            value["meta"]["format_version"].as_u64().unwrap() as u32
+        };
+        assert_eq!(snapshot_format(&doc), TEXT_FORMAT);
+
+        let NodeKind::Text { content, .. } = &mut doc.nodes.get_mut(&id).unwrap().kind else {
+            unreachable!();
+        };
+        content.style.underline.kind = alto_text::UnderlineKind::None;
+        content.spans.push(alto_text::TextSpan {
+            start: 0,
+            end: 1,
+            style: alto_text::StylePatch {
+                underline: Some(alto_text::Underline::default()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(doc.required_format(), TEXT_FORMAT);
+        assert_eq!(snapshot_format(&doc), TEXT_FORMAT);
     }
 }

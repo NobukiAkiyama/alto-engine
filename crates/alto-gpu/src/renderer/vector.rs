@@ -49,6 +49,14 @@ struct GlyphInstance {
     src: [u32; 2],
     color: [f32; 4],
 }
+enum TextPath<'a> {
+    Borrowed(&'a StyledPath),
+    Owned(StyledPath),
+}
+enum TextBatch<'a> {
+    Vector(Vec<TextPath<'a>>),
+    Atlas(Vec<GlyphInstance>),
+}
 struct Atlas {
     alloc: GlyphAtlas,
     texture: wgpu::Texture,
@@ -143,6 +151,12 @@ pub struct VectorResources {
     last_queue: Option<wgpu::Queue>,
     format: wgpu::TextureFormat,
     dense: Option<dense::Dense>,
+    // The current encoder may still refer to dense scratch.
+    dense_pending: bool,
+    /// Dense scratch released after its last submission, with a flag set when
+    /// that submitted work completes. The GPU still holds those bytes until
+    /// then, so allocation checks charge them.
+    reclaiming: Vec<(u64, Arc<std::sync::atomic::AtomicBool>)>,
     /// The dense pipelines were built (first use, or again after a budget retire)
     /// since the renderer last asked.
     pipelines_built: bool,
@@ -384,6 +398,8 @@ impl VectorResources {
             last_queue: None,
             format,
             dense: None,
+            dense_pending: false,
+            reclaiming: Vec::new(),
             pipelines_built: false,
             geometry: g,
             pooled_geometry,
@@ -420,6 +436,7 @@ impl VectorResources {
     }
     /// Called only after submitting every command encoded with this resource set.
     pub fn after_submit(&mut self) {
+        self.dense_pending = false;
         self.uniforms.reset();
         if let Some(dense) = &mut self.dense {
             dense.uniforms.reset();
@@ -440,10 +457,19 @@ impl VectorResources {
             governor.submitted(&queue);
         }
     }
+    /// Dense scratch bytes the GPU may still hold after their release.
+    fn reclaiming_bytes(&self) -> u64 {
+        self.reclaiming
+            .iter()
+            .filter(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(bytes, _)| bytes)
+            .sum()
+    }
     fn check_allocation(&self, additional: u64, budget: u64) -> Result<()> {
         if self
             .bytes()
             .saturating_add(self.retired.bytes().total())
+            .saturating_add(self.reclaiming_bytes())
             .saturating_add(additional)
             > budget
         {
@@ -469,10 +495,28 @@ impl VectorResources {
         frame: u64,
         budget: u64,
     ) -> Result<()> {
+        self.render_legacy_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_legacy_with_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        paths: &[&StyledPath],
+        world: [f64; 6],
+        roi: [f64; 5],
+        frame: u64,
+        budget: u64,
+        clear: bool,
+    ) -> Result<()> {
         let mode = self.mode;
         self.mode = VectorMode::Legacy;
-        let result = self.render(
-            device, queue, encoder, target, paths, world, roi, frame, budget,
+        let result = self.render_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, clear,
         );
         self.mode = mode;
         result
@@ -531,6 +575,83 @@ impl VectorResources {
         }
         s
     }
+    #[allow(clippy::too_many_arguments)]
+    fn render_glyph_batch(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        instances: &[GlyphInstance],
+        width: u32,
+        height: u32,
+        budget: u64,
+        clear: bool,
+    ) -> Result<()> {
+        let atlas = self
+            .atlas
+            .as_ref()
+            .ok_or(RenderError::Internal("glyph atlas missing".into()))?;
+        self.check_allocation(
+            16 + (instances.len().max(1) * std::mem::size_of::<GlyphInstance>()) as u64,
+            budget,
+        )?;
+        let uniform = buffer(
+            &self.governor,
+            device,
+            queue,
+            "glyph atlas config",
+            &[[width as f32, height as f32, 0.0, 0.0]],
+            wgpu::BufferUsages::UNIFORM,
+        )?;
+        let glyphs = buffer(
+            &self.governor,
+            device,
+            queue,
+            "glyph instances",
+            instances,
+            wgpu::BufferUsages::VERTEX,
+        )?;
+        self.retired.buffer(&uniform);
+        self.retired.buffer(&glyphs);
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glyph atlas"),
+            layout: &self.glyph.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas.view),
+                },
+            ],
+        });
+        let view = target.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("paint glyph atlas"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.glyph);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.set_vertex_buffer(0, glyphs.slice(..));
+        pass.draw(0..6, 0..instances.len() as u32);
+        Ok(())
+    }
     /// Text: runs whose em is below `ATLAS_MAX_EM_PX` output pixels on this level copy
     /// glyph coverage from the atlas; the rest (and glyphs the atlas cannot hold) take
     /// the vector path.
@@ -549,15 +670,21 @@ impl VectorResources {
         use_atlas: bool,
     ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let px_per_unit = max_scale([world[0], world[1], world[2], world[3]]) / scale;
-        let mut vector: Vec<&StyledPath> = vec![];
-        let mut fallback = vec![];
-        let mut instances: Vec<GlyphInstance> = vec![];
+        let mut batches = Vec::new();
         for run in runs {
             let em_px = run.em * px_per_unit;
             if !use_atlas || !em_px.is_finite() || em_px >= ATLAS_MAX_EM_PX {
-                vector.extend(run.paths.iter());
+                if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                    paths.extend(run.paths.iter().map(TextPath::Borrowed));
+                } else {
+                    batches.push(TextBatch::Vector(
+                        run.paths.iter().map(TextPath::Borrowed).collect(),
+                    ));
+                }
                 self.glyph_stats.vector_runs += 1;
                 continue;
             }
@@ -607,7 +734,11 @@ impl VectorResources {
                     (t[5] - y) / scale,
                 ];
                 let Some(p) = place(&g.outline, m) else {
-                    fallback.push(g.to_path());
+                    if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                        paths.push(TextPath::Owned(g.to_path()));
+                    } else {
+                        batches.push(TextBatch::Vector(vec![TextPath::Owned(g.to_path())]));
+                    }
                     continue;
                 };
                 if p.dst[0] >= w as i64
@@ -647,81 +778,57 @@ impl VectorResources {
                             r
                         }
                         None => {
-                            fallback.push(g.to_path());
+                            if let Some(TextBatch::Vector(paths)) = batches.last_mut() {
+                                paths.push(TextPath::Owned(g.to_path()));
+                            } else {
+                                batches.push(TextBatch::Vector(vec![TextPath::Owned(g.to_path())]));
+                            }
                             continue;
                         }
                     },
                 };
-                instances.push(GlyphInstance {
+                let instance = GlyphInstance {
                     dst: [p.dst[0] as i32, p.dst[1] as i32, p.w as i32, p.h as i32],
                     src: [rect.x, rect.y],
                     color: g.color,
-                });
+                };
+                if let Some(TextBatch::Atlas(instances)) = batches.last_mut() {
+                    instances.push(instance);
+                } else {
+                    batches.push(TextBatch::Atlas(vec![instance]));
+                }
             }
         }
-        self.glyph_stats.atlas_glyphs += instances.len() as u64;
-        self.glyph_stats.fallback_glyphs += fallback.len() as u64;
-        vector.extend(fallback.iter());
-        self.render_legacy(
-            device, queue, encoder, target, &vector, world, roi, frame, budget,
-        )?;
-        let Some(atlas) = self.atlas.as_ref().filter(|_| !instances.is_empty()) else {
-            return Ok(());
-        };
-        self.check_allocation(
-            16 + (instances.len().max(1) * std::mem::size_of::<GlyphInstance>()) as u64,
-            budget,
-        )?;
-        let uniform = buffer(
-            &self.governor,
-            device,
-            queue,
-            "glyph atlas config",
-            &[[w as f32, h as f32, 0.0, 0.0]],
-            wgpu::BufferUsages::UNIFORM,
-        )?;
-        let glyphs = buffer(
-            &self.governor,
-            device,
-            queue,
-            "glyph instances",
-            &instances,
-            wgpu::BufferUsages::VERTEX,
-        )?;
-        self.retired.buffer(&uniform);
-        self.retired.buffer(&glyphs);
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("glyph atlas"),
-            layout: &self.glyph.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
-                },
-            ],
-        });
-        let view = target.create_view(&Default::default());
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("paint glyph atlas"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.glyph);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.set_vertex_buffer(0, glyphs.slice(..));
-        pass.draw(0..6, 0..instances.len() as u32);
+        let mut clear = true;
+        for batch in batches {
+            match batch {
+                TextBatch::Vector(paths) => {
+                    let fallback_count = paths
+                        .iter()
+                        .filter(|path| matches!(path, TextPath::Owned(_)))
+                        .count();
+                    let refs: Vec<_> = paths
+                        .iter()
+                        .map(|path| match path {
+                            TextPath::Borrowed(path) => *path,
+                            TextPath::Owned(path) => path,
+                        })
+                        .collect();
+                    self.render_legacy_with_load(
+                        device, queue, encoder, target, &refs, world, roi, frame, budget, clear,
+                    )?;
+                    self.glyph_stats.fallback_glyphs += fallback_count as u64;
+                }
+                TextBatch::Atlas(instances) => {
+                    self.render_glyph_batch(
+                        device, queue, encoder, target, &instances, w as u32, h as u32, budget,
+                        clear,
+                    )?;
+                    self.glyph_stats.atlas_glyphs += instances.len() as u64;
+                }
+            }
+            clear = false;
+        }
         Ok(())
     }
     /// ROI is [origin x, origin y, document pixels per output pixel, width, height].
@@ -738,7 +845,27 @@ impl VectorResources {
         frame: u64,
         budget: u64,
     ) -> Result<()> {
+        self.render_with_load(
+            device, queue, encoder, target, paths, world, roi, frame, budget, true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Texture,
+        paths: &[&StyledPath],
+        world: [f64; 6],
+        roi: [f64; 5],
+        frame: u64,
+        budget: u64,
+        clear: bool,
+    ) -> Result<()> {
         self.last_queue = Some(queue.clone());
+        self.reclaiming
+            .retain(|(_, done)| !done.load(std::sync::atomic::Ordering::Acquire));
         let [x, y, scale, w, h] = roi;
         let (w, h) = (w as u32, h as u32);
         let coverage_bytes = w as u64 * h as u64 * 5;
@@ -754,7 +881,24 @@ impl VectorResources {
                 > budget
             && let Some(dense) = self.dense.take()
         {
-            dense.retire(&mut self.retired);
+            if self.dense_pending {
+                dense.retire(&mut self.retired);
+            } else {
+                // No command in the current encoder reads it. Release it now
+                // and charge its bytes until the submitted work completes, so
+                // a retry after completion fits without another submission.
+                let bytes = dense.bytes();
+                let mut retired = super::Retired::new(self.governor.clone());
+                dense.retire(&mut retired);
+                retired.release();
+                self.governor.submitted(queue);
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = done.clone();
+                queue.on_submitted_work_done(move || {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                });
+                self.reclaiming.push((bytes, done));
+            }
         }
         let fixed_bytes = regular_fixed + self.dense.as_ref().map_or(0, |d| d.bytes());
         let mesh_limit = 32 * 1024 * 1024u64;
@@ -922,7 +1066,7 @@ impl VectorResources {
         let multi = coverage.multi_view.clone();
         let resolved = coverage.resolved_view.clone();
         let target = target.create_view(&Default::default());
-        {
+        if clear {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear vector content"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1185,6 +1329,7 @@ impl VectorResources {
         }
         let coverage = self.coverage.as_ref().unwrap();
         let fixed = self.retired.bytes().total()
+            + self.reclaiming_bytes()
             + self.mesh_bytes()
             + w as u64 * h as u64 * 5
             + self.atlas.as_ref().map_or(0, |a| {
@@ -1203,6 +1348,7 @@ impl VectorResources {
             || (self.mode == VectorMode::Batched
                 && dense_candidate(paths.len(), plan.groups.len()));
         if use_dense && !draws.is_empty() && dense::Dense::supported(device) {
+            self.dense_pending = true;
             self.pipelines_built |= self.dense.is_none();
             let dense = self
                 .dense
@@ -1321,7 +1467,7 @@ impl VectorResources {
 
 #[cfg(test)]
 mod dense_selection_tests {
-    use super::dense_candidate;
+    use super::*;
     #[test]
     fn dense_selection_leaves_sparse_and_small_calls_on_the_disjoint_path() {
         assert!(!dense_candidate(100, 1));
@@ -1330,5 +1476,143 @@ mod dense_selection_tests {
         assert!(dense_candidate(8, 8));
         assert!(dense_candidate(11, 11));
         assert!(dense_candidate(100, 80));
+    }
+
+    #[test]
+    fn submitted_dense_scratch_can_be_reclaimed_for_small_budget() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
+            Ok(adapter) => adapter,
+            Err(err)
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("dense scratch test skipped: {err}");
+                return;
+            }
+            Err(err) => panic!("dense scratch test could not find an adapter: {err}"),
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        if !VectorResources::supports_dense(&device) {
+            return;
+        }
+        let mut resources =
+            VectorResources::new_standalone(&device, wgpu::TextureFormat::Rgba16Float);
+        resources.set_mode(VectorMode::Dense);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let path = |x| StyledPath {
+            data: alto_vector::PathData {
+                commands: vec![
+                    alto_vector::PathCommand::Move { x, y: 0.0 },
+                    alto_vector::PathCommand::Line {
+                        x: x + 10.0,
+                        y: 0.0,
+                    },
+                    alto_vector::PathCommand::Line { x, y: 10.0 },
+                    alto_vector::PathCommand::Close,
+                ],
+            },
+            fill: Some([1.0, 0.0, 0.0, 1.0]),
+            stroke: None,
+            fill_rule: alto_vector::FillRule::NonZero,
+        };
+        let first = path(0.0);
+        let second = path(1.0);
+        let world = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let roi = [0.0, 0.0, 1.0, 256.0, 256.0];
+        let mut encoder = device.create_command_encoder(&Default::default());
+        resources
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&first],
+                world,
+                roi,
+                1,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+        assert!(resources.dense.as_ref().unwrap().bytes() > 1024 * 1024);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.set_mode(VectorMode::Legacy);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let render_second = |resources: &mut VectorResources,
+                             encoder: &mut wgpu::CommandEncoder| {
+            resources.render(
+                &device,
+                &queue,
+                encoder,
+                &target,
+                &[&second],
+                world,
+                roi,
+                2,
+                1024 * 1024,
+            )
+        };
+        // The released scratch stays charged until its submitted work completes,
+        // then a retry fits without another submission.
+        assert!(matches!(
+            render_second(&mut resources, &mut encoder),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(resources.reclaiming_bytes() > 1024 * 1024);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        render_second(&mut resources, &mut encoder).unwrap();
+        assert_eq!(resources.reclaiming_bytes(), 0);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.set_mode(VectorMode::Dense);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        resources
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&first],
+                world,
+                roi,
+                3,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+        resources.set_mode(VectorMode::Legacy);
+        let third = path(2.0);
+        assert!(matches!(
+            resources.render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target,
+                &[&third],
+                world,
+                roi,
+                4,
+                1024 * 1024
+            ),
+            Err(RenderError::Budget(_))
+        ));
+        assert!(resources.retired.bytes().total() > 1024 * 1024);
+        queue.submit(Some(encoder.finish()));
+        resources.after_submit();
+        resources.destroy_after_submit();
     }
 }

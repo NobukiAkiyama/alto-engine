@@ -2,7 +2,7 @@
 // CPU reference. A mismatch names the first pixel and the number of pixels that differ.
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
-import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
+import { alphaMeasureCases, assertDistinctAlphaLayers, colorAdjustGradient, colorAdjustGrid, featheredRectangle, decodeTextBake, fnv64, renderBlurV3, renderHighPassV3, renderUnsharpMaskV3, renderMotionBlurV3, renderNoiseV3, pcg32, hueSinCosQ14, renderCase, renderTextV3, renderVectorV3, renderPyramidCase, renderColorAdjustV3, renderM5V3, isV3IntegerCase, sceneGap, solid } from "./cpu-composite.js";
 
 const BLENDS = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color_dodge", "color_burn",
@@ -892,6 +892,30 @@ export async function runParityTests(engine, log) {
           "text-v3-latin": (l) => ({ text: "Alto 0.25 px/em", style: style([l], 37.5) }),
           "text-v3-vertical": (l, j) => ({ text: "吾輩は猫である。\n第12回", style: style([l, j], 40), writing_mode: "vertical_rl", frame: { kind: "area", width: 300, height: 400 } }),
           "text-v3-placeholder": () => ({ text: "A B", style: style([], 24) }),
+          "text-v3-hanging": (l, j) => ({ text: "あい。う", style: style([j], 40), frame: { kind: "area", width: 100, height: 200 }, hanging: true }),
+          "text-v3-underline": (l) => ({
+            text: "Underline",
+            style: { ...style([l], 37.5), underline: { kind: "solid" } },
+          }),
+          "text-v3-underline-vertical": (l, j) => ({
+            text: "縦書き",
+            style: { ...style([j], 40), underline: { kind: "solid" } },
+            writing_mode: "vertical_rl",
+          }),
+          "text-v3-skew": (l) => ({
+            text: "Alto",
+            style: { ...style([l], 37.5), italic_skew: 13.2 },
+          }),
+          "text-v3-skew-vertical": (l, j) => ({
+            text: "吾A12回",
+            style: { ...style([l, j], 40), italic_skew: -24.75 },
+            writing_mode: "vertical_rl",
+          }),
+          "text-v3-vertical-rtl": (l, j) => ({
+            text: "吾אבג猫",
+            style: style([l, j], 40),
+            writing_mode: "vertical_rl",
+          }),
         };
         assert(want.size === Object.keys(texts).length, `fixture has ${want.size} rows`);
         const failures = [];
@@ -1038,6 +1062,104 @@ export async function runParityTests(engine, log) {
           const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 1, x: 0, y: 0, fresh: true }));
           assert(same(cold, warm), `${name} cold level 1 differs from warm: ${diff(warm, cold)}`);
           return formatMeasure(row);
+        });
+      }
+    }
+    // Rebuild the filtered plane from source pixels, including the neighbors of
+    // every requested tile, and verify the real layer and adjustment paths.
+    {
+      const seam = solid(512, 512, [0, 0, 0, 0]);
+      for (let y = 224; y < 288; y++) for (let x = 220; x < 292; x++) {
+        seam.pixels.set(x < 256 ? [240, 64, 32, 200] : [50, y < 256 ? 100 : 220, 250, 255], (y * 512 + x) * 4);
+      }
+      const feather = 64;
+      const selection = { kind: "rectangle", x: 40.25, y: 40.75, width: 176.25, height: 175.25, feather };
+      const mask = { bytes: featheredRectangle([40.25, 40.75, 216.5, 216], feather) };
+      const gradient = colorAdjustGradient();
+      await test("pcg32_matches_known_vectors", async () => {
+        for (const [input, expected] of [[0, 129708002], [1, 2831084092], [0xffffffff, 3861530882], [1234567, 3336649100]]) {
+          assert(pcg32(input) === expected, `pcg32(${input}) = ${pcg32(input)}, expected ${expected}`);
+        }
+      });
+      await test("hue_sincos_q14_reference_matches_the_shader_on_all_angles", async () => {
+        const bytes = new Uint8Array(5761 * 8);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0, angle = -11796480; angle <= 11796480; index++, angle += 4096) {
+          const [cos, sin] = hueSinCosQ14(angle);
+          view.setInt32(index * 8, cos, true);
+          view.setInt32(index * 8 + 4, sin, true);
+        }
+        assert(fnv64(bytes) === "34dc80985aabbfab", `Rust/GPU CORDIC table differs: ${fnv64(bytes)}`);
+      });
+      for (let angle = -11796480; angle <= 11796480; angle += 4096) {
+        const [cos, sin] = hueSinCosQ14(angle);
+        assert(cos >= -16384 && cos <= 16384 && sin >= -16384 && sin <= 16384,
+          `hue_sincos out of range at ${angle}: ${cos},${sin}`);
+      }
+      const cases = [
+        { name: "effect-high-pass-flat", image: solid(256, 256, [72, 231, 17, 128]), radius: 0.5 },
+        { name: "effect-high-pass", image: gradient, radius: 8 },
+        { name: "effect-high-pass-seam", image: seam, radius: 12, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-high-pass-selected", image: gradient, radius: 8, selection, mask },
+        { name: "effect-high-pass-adjustment", image: gradient, radius: 8, adjustment: true },
+        { name: "effect-unsharp", image: gradient, radius: 8, amount: 0.501953125, threshold: 0 },
+        { name: "effect-unsharp-threshold", image: gradient, radius: 8, amount: 2, threshold: 17 },
+        { name: "effect-unsharp-tile-seam", image: seam, radius: 12, amount: 2.5, threshold: 0, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-unsharp-selected", image: gradient, radius: 8, amount: 1.75, threshold: 12, selection, mask },
+        { name: "effect-unsharp-adjustment", image: gradient, radius: 8, amount: 1.25, threshold: 8, adjustment: true },
+        { name: "effect-unsharp-zero-amount", image: gradient, radius: 64, amount: 0, threshold: 0 },
+        { name: "effect-unsharp-zero-radius", image: gradient, radius: 0, amount: 5, threshold: 0 },
+        { name: "effect-motion-blur", image: gradient, angle: 0, distance: 12 },
+        { name: "effect-motion-blur-45", image: gradient, angle: 45, distance: 12 },
+        { name: "effect-motion-blur-90", image: gradient, angle: 90, distance: 12 },
+        { name: "effect-motion-blur-neg135", image: gradient, angle: -135, distance: 12 },
+        { name: "effect-motion-blur-tile-seam", image: seam, angle: 45, distance: 16, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+        { name: "effect-motion-blur-selected", image: gradient, angle: 90, distance: 8, selection, mask },
+        { name: "effect-motion-blur-adjustment", image: gradient, angle: -45, distance: 10, adjustment: true },
+        { name: "effect-motion-blur-zero", image: gradient, angle: 0, distance: 0 },
+        { name: "effect-noise", kind: "noise", image: gradient, amount: 0.35, seed: 0x12345678, monochrome: true },
+        { name: "effect-noise-color", kind: "noise", image: gradient, amount: 0.65, seed: 0xdeadbeef, monochrome: false },
+        { name: "effect-noise-selected", kind: "noise", image: gradient, amount: 0.45, seed: 77, monochrome: false, selection, mask },
+        { name: "effect-noise-adjustment", kind: "noise", image: gradient, amount: 0.25, seed: 91, monochrome: true, adjustment: true },
+        { name: "effect-noise-tile-seam", kind: "noise", image: seam, amount: 0.5, seed: 0xffffffff, monochrome: false, tiles: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+      ];
+      for (const { name, kind, image, radius, amount, threshold, angle, distance, seed, monochrome, tiles, selection, mask, adjustment } of cases) {
+        await test(name, async () => {
+          const doc = await engine.createDocument({ width: image.w, height: image.h });
+          const asset = await imported(engine, image);
+          const noise = kind === "noise";
+          const unsharp = amount !== undefined && !noise;
+          const motion = angle !== undefined;
+          const effect = noise ? { type: "noise", amount, seed, monochrome }
+            : motion ? { type: "motion_blur", angle, distance }
+            : unsharp ? { type: "unsharp_mask", radius, amount, threshold } : { type: "high_pass", radius };
+          let layer;
+          await doc.transact("raster", (tx) => { layer = tx.addRasterFromAsset(asset); });
+          if (selection) await doc.selection.apply(selection);
+          if (adjustment) await doc.transact("adjustment", (tx) => { tx.addAdjustment(effect); });
+          else await doc.effects.set(layer, [effect]);
+          const renderPath = sceneGap(doc.getSnapshot());
+          assert(renderPath === "v3-m5-integer", `scene gap ${renderPath}`);
+          for (const [tx, ty] of tiles ?? [[0, 0]]) {
+            const key = tiles ? `${name} (${tx}, ${ty})` : name;
+            const canvas = [image.w, image.h];
+            const cpu = noise
+              ? renderNoiseV3(image, effect, [tx, ty], canvas, 0, selection, mask)
+              : unsharp
+              ? renderUnsharpMaskV3(image, effect, [tx, ty], canvas, mask)
+              : motion ? renderMotionBlurV3(image, effect, [tx, ty], canvas, mask)
+                : renderHighPassV3(image, radius, [tx, ty], canvas, mask);
+            const gpu = await gpuTile(engine, { level: 0, tx, ty });
+            const row = {
+              ...measureRow({ name: key, nodes: [], level: 0, tx, ty }, cpu, gpu),
+              renderPath, enforced: true, status: same(cpu, gpu) ? "exact" : "mismatch",
+            };
+            compositeV3.push(row);
+            assert(same(cpu, gpu), `${key}: ${formatMeasure(row)}`);
+            assertV3Locked(key, cpu, gpu);
+            const cold = new Uint8Array(await testing(engine).request("readTileLevel", { level: 0, x: tx, y: ty, fresh: true }));
+            assert(same(cpu, cold), `${key} cold: ${diff(cpu, cold)}`);
+          }
         });
       }
     }

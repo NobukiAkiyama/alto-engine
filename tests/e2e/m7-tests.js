@@ -62,6 +62,19 @@ export async function runM7Tests(engine, log) {
       try { await doc.transact("remove font", (tx) => { tx.ops.push({ type: "set_asset", id: jp.id, record: null }); tx.setText(id, vertical("縦", [jp.id])); }); } catch { refused = true; }
       assert(refused, "font removed while in use");
     });
+    await test("variable font import reports the selected face's axis range", async () => {
+      const response = await fetch("../../tests/fonts/AltoTestVariable.ttf");
+      assert(response.ok, "missing variable font fixture");
+      const font = await engine.assets.importFont(await response.blob());
+      try {
+        const [weight] = font.info.axes ?? [];
+        assert(font.info.axes?.length === 1 && weight.tag === "wght", "unexpected axis list");
+        assert(weight.min === 100 && weight.default === 400 && weight.max === 900, "wrong weight range");
+        assert(latin.info.axes === undefined && jp.info.axes === undefined, "static faces reported axes");
+      } finally {
+        await engine.assets.releaseImport(font);
+      }
+    });
     await test("vertical kuten / touten / brackets / long vowel sit where Japanese typesetting puts them", async () => {
       await setup(512, 900);
       // Column x 50..200 (centre 125), cells of 100 px from y = 50.
@@ -79,6 +92,22 @@ export async function runM7Tests(engine, log) {
       const h = (await ink(engine, 300, 50, 400, 200)).box;
       assert(h && h[0] < 345 && h[1] > 100, "horizontal 。 control: " + h);
       metrics.punctuation = { kuten, touten, open, bar, horizontalKuten: h };
+    });
+    await test("hanging punctuation extends bounds and toggles in one text edit", async () => {
+      await setup();
+      await addText(vertical("あい。う", [jp.id], {
+        writing_mode: "horizontal_tb",
+        frame: { kind: "area", width: 250, height: 400 },
+      }));
+      const off = await doc.text.info(id);
+      await doc.text.setHanging(id, true);
+      const on = await doc.text.info(id);
+      assert(off.lines[0].end === 1 && on.lines[0].end === 3 && on.lines[1].start === 3, "hanging line break");
+      assert(off.bounds[2] === 250 && on.bounds[2] === 300, "hanging bounds");
+      assert(doc.getSnapshot().meta.format_version === 6, "hanging requires format 6");
+      await doc.text.setHanging(id, false);
+      assert((await doc.text.info(id)).lines[0].end === off.lines[0].end, "disabled hanging");
+      assert(doc.getSnapshot().meta.format_version === 5, "disabling hanging returns to format 5");
     });
     await test("tate-chu-yoko: automatic digits, explicit ranges compressed to one em, three digits rotate", async () => {
       await setup(768, 768);
@@ -117,6 +146,15 @@ export async function runM7Tests(engine, log) {
       await doc.text.set(id, { ...liga, style: { ...liga.style, features: [{ tag: "liga", value: 0 }] } });
       assert((await doc.text.info(id)).glyphs === 2, "liga=0");
       metrics.features = { plain, palt, fwid };
+    });
+    await test("vertical RTL reads upward and hit testing follows the caret", async () => {
+      await setup();
+      await addText(vertical("אבג", [latin.id, jp.id]));
+      const start = await doc.text.caret(id, 0);
+      const end = await doc.text.caret(id, 3);
+      assert(start.a[1] > end.a[1], "the first character should start at the bottom of the run");
+      assert(await doc.text.hitTest(id, ...start.a) === 0, "hit at the bottom");
+      assert(await doc.text.hitTest(id, ...end.a) === 3, "hit at the top");
     });
     await test("selection: hit test / caret / rectangles / motion through layer transforms and surrogate pairs", async () => {
       await setup(1024, 768);
@@ -158,6 +196,31 @@ export async function runM7Tests(engine, log) {
       try { await doc.text.set(id, { ...doc.getSnapshot().nodes.get(id).content, spans: [{ start: 3, end: 1, style: {} }] }); } catch { failed = true; }
       assert(failed, "invalid span accepted");
     });
+    await test("underline style bakes and renders a rule below horizontal text", async () => {
+      await setup();
+      await addText({ text: "AB", style: { fonts: [latin.id], size: 100, line_height: 1.5 }, writing_mode: "horizontal_tb" }, 50, 50);
+      const before = await ink(engine, 40, 40, 300, 250);
+      await doc.text.style(id, 0, 2, { underline: { kind: "solid" } });
+      await frame(engine);
+      const after = await ink(engine, 40, 40, 300, 250);
+      const span = doc.getSnapshot().nodes.get(id).content.spans[0];
+      assert(span.style.underline.kind === "solid", "underline style not retained");
+      assert(after.box && before.box && after.box[3] > before.box[3], `underline did not extend ink below text: ${before.box} -> ${after.box}`);
+    });
+    await test("synthetic italic changes rendered text and zero clears it", async () => {
+      await setup();
+      await addText({ text: "AB", style: { fonts: [latin.id], size: 100 } }, 50, 50);
+      const before = await unstable(engine).readTile(0, 0);
+      await doc.text.style(id, 0, 2, { italic_skew: 20 });
+      const skewed = await unstable(engine).readTile(0, 0);
+      assert(!same(before, skewed), "italic skew did not change pixels");
+      const content = doc.getSnapshot().nodes.get(id).content;
+      assert(content.spans[0].style.italic_skew === 20, "span skew not retained");
+      await doc.text.set(id, { ...content, style: { ...content.style, italic_skew: 20 }, spans: [] });
+      assert(same(skewed, await unstable(engine).readTile(0, 0)), "base style skew differs from a full span");
+      await doc.text.style(id, 0, 2, { italic_skew: 0 });
+      assert(same(before, await unstable(engine).readTile(0, 0)), "zero did not clear inherited skew");
+    });
     await test("zoomed text keeps exact outlines (levels -4 .. 2)", async () => {
       await setup();
       await addText(vertical("永", [jp.id]), 200, 50);
@@ -183,8 +246,26 @@ export async function runM7Tests(engine, log) {
       await testing(engine).crash();
       doc = engine.document;
       assert(saved === (await doc.snapshotHash()) && same(after, await unstable(engine).readTile(0, 0)), "journal");
-      await testing(engine).destroyGpu();
-      await new Promise((resolve, reject) => { const off = unstable(engine).onGpu((g) => { if (g !== "restored") return; off(); resolve(); }); setTimeout(() => reject(Error("GPU recovery timeout")), 15000); });
+      const gpu = unstable(engine);
+      let restored = false, finished = false, timer, off;
+      const recovery = new Promise((resolve, reject) => {
+        off = gpu.onGpu((event) => {
+          if (event === "restored") { restored = true; resolve(); }
+        });
+        timer = setTimeout(() => reject(Error("GPU recovery timeout")), 15000);
+      });
+      const driveRecovery = async () => {
+        await testing(engine).destroyGpu();
+        // Hidden pages may not dispatch animation frames. Drive the same
+        // recovery path through waitFrame while the device-loss callback arrives.
+        while (!restored && !finished) {
+          try { await gpu.settle(); }
+          catch (error) { if (error.code !== "GPU_LOST") throw error; }
+          if (!restored && !finished) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      };
+      try { await Promise.race([recovery, driveRecovery()]); }
+      finally { finished = true; clearTimeout(timer); off(); }
       assert(same(after, await unstable(engine).readTile(0, 0)), "GPU rebuild");
       await frame(engine);
     });

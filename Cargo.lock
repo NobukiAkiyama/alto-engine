@@ -53,6 +53,7 @@ name = "alto-engine"
 version = "0.4.0"
 dependencies = [
  "alto-core",
+ "alto-decode",
  "alto-doc",
  "alto-raster",
  "alto-scene",
@@ -124,6 +125,7 @@ name = "alto-store"
 version = "0.4.0"
 dependencies = [
  "alto-core",
+ "alto-doc",
  "lz4_flex",
  "serde",
  "serde_json",
@@ -170,6 +172,7 @@ dependencies = [
  "alto-gpu",
  "alto-raster",
  "alto-scene",
+ "alto-store",
  "alto-vector",
  "futures-channel",
  "js-sys",

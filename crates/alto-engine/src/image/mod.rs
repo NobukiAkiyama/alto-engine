@@ -170,6 +170,8 @@ pub struct ImageEditResult {
     pub no_op: bool,
 }
 pub struct PreparedImageEdit {
+    /// The engine that prepared the edit and owns its stage.
+    engine: u64,
     document: DocHandle,
     pub stage: u64,
     pub revision: u64,
@@ -287,7 +289,7 @@ impl Engine {
         h: DocHandle,
         edit: ImageEdit,
     ) -> Result<PreparedImageEdit, EngineError> {
-        let stage = self.begin_tile_stage();
+        let stage = self.begin_tile_stage_for(h);
         let result = self.prepare_image_inner(h, edit, stage);
         if result.is_err() {
             self.release_staged_tiles(stage);
@@ -300,6 +302,14 @@ impl Engine {
         prepared: PreparedImageEdit,
         intent: &str,
     ) -> Result<ImageEditResult, EngineError> {
+        // Stage numbers are this engine's own: another engine's edit must not
+        // release the stage that happens to share its number here.
+        if prepared.engine != self.id {
+            return Err(err(
+                "CONFLICT",
+                "prepared image edit belongs to another engine",
+            ));
+        }
         if prepared.document != h {
             self.release_staged_tiles(prepared.stage);
             return Err(err(
@@ -487,6 +497,7 @@ impl Engine {
             };
         if unchanged_geometry || transparent {
             return Ok(PreparedImageEdit {
+                engine: self.id,
                 document: h,
                 stage,
                 revision,
@@ -738,6 +749,7 @@ impl Engine {
             vec![Op::ReplaceNode { id, node }]
         };
         Ok(PreparedImageEdit {
+            engine: self.id,
             document: h,
             stage,
             revision,

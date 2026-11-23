@@ -2,13 +2,19 @@
 //! tate-chu-yoko), rustybuzz shaping, UAX #14 line breaking with Japanese kinsoku,
 //! bidi reordering, alignment and glyph placement in node coordinates.
 use crate::font::{FontData, FontSet};
-use crate::model::{Color, TextAlign, TextContent, TextFrame, TextStyle, Utf16Index, WritingMode};
+use crate::model::{
+    Color, TextAlign, TextContent, TextFrame, TextStyle, UnderlineKind, Utf16Index, WritingMode,
+};
 use crate::orient::{Orientation, VerticalFallback, auto_tcy_char, orientation, vertical_fallback};
 use alto_core::AssetId;
 use rustybuzz::ttf_parser::Tag;
 use serde::Serialize;
 use std::{collections::HashMap, str::FromStr};
 use unicode_segmentation::UnicodeSegmentation;
+
+pub const UNDERLINE_POSITION_EM: f64 = 0.12;
+pub const UNDERLINE_THICKNESS_EM: f64 = 0.05;
+pub const VERTICAL_RULE_GAP_EM: f64 = 0.1;
 
 /// A glyph reference. `font: None` is a placeholder box drawn when no font is available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -26,6 +32,13 @@ pub struct PlacedGlyph {
     pub cluster: usize,
     /// Font size in node units (the em the renderer measures on screen).
     pub size: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PlacedRule {
+    /// Rectangle in node coordinates [x0, y0, x1, y1].
+    pub rect: [f64; 4],
+    pub color: Color,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -60,6 +73,7 @@ pub struct TextLayout {
     pub lines: Vec<LineBox>,
     pub clusters: Vec<ClusterBox>,
     pub glyphs: Vec<PlacedGlyph>,
+    pub rules: Vec<PlacedRule>,
     pub bounds: [f64; 4],
     /// UTF-16 offsets of characters that no font in the fallback chain could render.
     pub missing: Vec<u32>,
@@ -244,30 +258,45 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 .first()
                 .is_some_and(|p| p.level.is_rtl());
         // Greedy line breaking at UAX #14 opportunities.
-        let mut lines: Vec<std::ops::Range<usize>> = vec![];
+        let mut lines = vec![];
         let mut start = 0;
         while start < clusters.len() {
             let mut width = 0.0;
             let mut end = clusters.len();
             let mut last_break = None;
+            let mut hanging = false;
             for (i, c) in clusters.iter().enumerate().skip(start) {
                 if i > start && c.allow_break {
                     last_break = Some(i);
                 }
                 if i > start && !c.space && width + c.advance > avail + 1e-9 {
-                    end = last_break.unwrap_or(i);
+                    if content.hanging
+                        && width <= avail + 1e-9
+                        && can_hang(&para[c.start..c.end])
+                        // Use the normal kinsoku break for an overflowing second mark.
+                        && !can_hang(&para[clusters[i - 1].start..clusters[i - 1].end])
+                        && !clusters
+                            .get(i + 1)
+                            .and_then(|next| para[next.start..next.end].chars().next())
+                            .is_some_and(no_line_start)
+                    {
+                        hanging = true;
+                        end = i + 1;
+                    } else {
+                        end = last_break.unwrap_or(i);
+                    }
                     break;
                 }
                 width += c.advance;
             }
-            lines.push(start..end);
+            lines.push((start..end, hanging));
             start = end;
         }
         if lines.is_empty() {
-            lines.push(0..0);
+            lines.push((0..0, false));
         }
         let last_line = lines.len() - 1;
-        for (li, range) in lines.into_iter().enumerate() {
+        for (li, (range, hanging)) in lines.into_iter().enumerate() {
             let line_clusters = &clusters[range.clone()];
             let base_style = &it.styles[line_clusters
                 .first()
@@ -335,7 +364,13 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                     level -= 1;
                 }
             }
-            let measured: f64 = line_clusters[..line_clusters.len() - trailing]
+            let measured_end = if hanging {
+                let aligned = &line_clusters[..line_clusters.len() - 1];
+                aligned.len() - aligned.iter().rev().take_while(|c| c.space).count()
+            } else {
+                line_clusters.len() - trailing
+            };
+            let measured: f64 = line_clusters[..measured_end]
                 .iter()
                 .map(|c| c.advance)
                 .sum();
@@ -357,7 +392,8 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 TextAlign::Center => (room - measured) / 2.0,
                 TextAlign::End => room - measured,
             };
-            let gaps = line_clusters.len().saturating_sub(trailing + 1);
+            let gaps = measured_end.saturating_sub(1);
+            let mut remaining = measured_end;
             let extra = if align == TextAlign::Justify && gaps > 0 && room > measured {
                 (room - measured) / gaps as f64
             } else {
@@ -365,9 +401,11 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
             };
             let line_index = out.lines.len();
             let mut visual = vec![];
+            let mut inline_by_cluster = vec![[0.0; 2]; line_clusters.len()];
             let inline_start = pen;
             for (k, &ci) in order.iter().enumerate() {
                 let c = &line_clusters[ci];
+                inline_by_cluster[ci] = [pen, pen + c.advance];
                 let id = out.clusters.len();
                 visual.push(id);
                 out.clusters.push(ClusterBox {
@@ -379,10 +417,99 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
                 });
                 place(&mut out, &it, c, pen, baseline, id, fonts);
                 pen += c.advance;
-                if k + 1 < order.len() && ci < line_clusters.len() - trailing {
-                    pen += extra;
+                if ci < measured_end {
+                    remaining -= 1;
+                    let has_gap = if hanging {
+                        remaining > 0
+                    } else {
+                        k + 1 < order.len()
+                    };
+                    if has_gap {
+                        pen += extra;
+                    }
                 }
             }
+            let trailing_spaces = line_clusters.iter().rev().take_while(|c| c.space).count();
+            let keep_until = line_clusters.len().saturating_sub(trailing_spaces);
+            let mut run: Option<(usize, usize, f64, f64)> = None;
+            let rule_metrics = |style: &TextStyle, c: &Cluster| {
+                let font = c.font.and_then(|id| fonts.get(&id));
+                let (position, thickness) =
+                    font.map_or((UNDERLINE_POSITION_EM, UNDERLINE_THICKNESS_EM), |f| {
+                        f.underline.map_or(
+                            (UNDERLINE_POSITION_EM, UNDERLINE_THICKNESS_EM),
+                            |(p, t)| {
+                                let thickness = t.abs() / f.upem;
+                                (
+                                    -p / f.upem,
+                                    if thickness > 0.0 {
+                                        thickness
+                                    } else {
+                                        UNDERLINE_THICKNESS_EM
+                                    },
+                                )
+                            },
+                        )
+                    });
+                (
+                    style.underline.position.map_or(position, f64::from) * style.size as f64,
+                    style.underline.thickness.map_or(thickness, f64::from) * style.size as f64,
+                )
+            };
+            let flush = |out: &mut TextLayout, run: Option<(usize, usize, f64, f64)>| {
+                if let Some((style_i, ci, a, b)) = run {
+                    let c = &line_clusters[ci];
+                    let style = &it.styles[style_i];
+                    let (position, thickness) = rule_metrics(style, c);
+                    let rect = if vertical {
+                        let x = baseline
+                            + style.size as f64 / 2.0
+                            + VERTICAL_RULE_GAP_EM * style.size as f64;
+                        [x, a.min(b), x + thickness, a.max(b)]
+                    } else {
+                        [
+                            a.min(b),
+                            baseline + position - thickness / 2.0,
+                            a.max(b),
+                            baseline + position + thickness / 2.0,
+                        ]
+                    };
+                    out.rules.push(PlacedRule {
+                        rect,
+                        color: style.underline.color.unwrap_or(style.color),
+                    });
+                }
+            };
+            for &ci in &order {
+                let c = &line_clusters[ci];
+                let style = &it.styles[c.style];
+                if style.underline.kind != UnderlineKind::Solid || (ci >= keep_until && c.space) {
+                    flush(&mut out, run.take());
+                    continue;
+                }
+                let bounds = inline_by_cluster[ci];
+                match run {
+                    Some((style_i, prev_ci, a, b))
+                        if it.styles[style_i].underline == style.underline
+                            && (it.styles[style_i].size - style.size).abs() < f32::EPSILON
+                            && it.styles[style_i]
+                                .underline
+                                .color
+                                .unwrap_or(it.styles[style_i].color)
+                                == style.underline.color.unwrap_or(style.color)
+                            && rule_metrics(&it.styles[style_i], &line_clusters[prev_ci])
+                                == rule_metrics(style, c)
+                            && bounds[0].min(bounds[1]) >= b.max(a) - 1e-6 =>
+                    {
+                        run = Some((style_i, ci, a.min(bounds[0]), b.max(bounds[1])));
+                    }
+                    other => {
+                        flush(&mut out, other);
+                        run = Some((c.style, ci, bounds[0], bounds[1]));
+                    }
+                }
+            }
+            flush(&mut out, run);
             let (ls, le) = if line_clusters.is_empty() {
                 let u = index.utf16(base);
                 (u, u)
@@ -426,6 +553,14 @@ pub fn layout(content: &TextContent, fonts: &FontSet) -> TextLayout {
             b[3].max(r[3]),
         ];
     }
+    for rule in &out.rules {
+        b = [
+            b[0].min(rule.rect[0]),
+            b[1].min(rule.rect[1]),
+            b[2].max(rule.rect[2]),
+            b[3].max(rule.rect[3]),
+        ];
+    }
     if let TextFrame::Area { width, height } = content.frame {
         b = [
             b[0].min(0.0),
@@ -449,15 +584,8 @@ fn shape_paragraph(it: &mut Itemizer, base: usize, para: &str, vertical: bool) -
     if para.is_empty() {
         return vec![];
     }
-    let levels: Vec<u8> = if vertical {
-        vec![0; para.len()]
-    } else {
-        unicode_bidi::BidiInfo::new(para, None)
-            .levels
-            .iter()
-            .map(|l| l.number())
-            .collect()
-    };
+    let paragraph_level = vertical.then(unicode_bidi::Level::ltr);
+    let bidi = unicode_bidi::BidiInfo::new(para, paragraph_level);
     let mut breaks = vec![false; para.len() + 1];
     for (i, _) in unicode_linebreak::linebreaks(para) {
         breaks[i] = true;
@@ -505,7 +633,10 @@ fn shape_paragraph(it: &mut Itemizer, base: usize, para: &str, vertical: bool) -
         let key = Key {
             style,
             font,
-            level: levels[g0],
+            level: match mode {
+                Mode::Upright | Mode::Tcy(_) => 0,
+                Mode::Horizontal | Mode::Sideways => bidi.levels[g0].number(),
+            },
             mode,
         };
         match runs.last_mut() {
@@ -705,8 +836,13 @@ fn place(
     }
     let s = font.map_or(size / 1000.0, |f| size / f.upem);
     let (asc, desc) = font.map_or((880.0, 120.0), |f| (f.ascent, f.descent));
+    let skew = if style.italic_skew == 0.0 {
+        0.0
+    } else {
+        f64::from(style.italic_skew).to_radians().tan()
+    };
     for p in &c.pieces {
-        let transform = match (p.glyph.font, c.mode) {
+        let mut transform = match (p.glyph.font, c.mode) {
             // Placeholder boxes are 1000-unit squares sitting on the baseline / in the cell.
             (None, Mode::Horizontal) => [s * k, 0.0, 0.0, -s, pen, baseline + desc * s],
             (None, _) => [s, 0.0, 0.0, -s, baseline - size / 2.0, pen + size],
@@ -762,6 +898,22 @@ fn place(
                 ]
             }
         };
+        if skew != 0.0 {
+            let [a, b, c_axis, d, e, f] = &mut transform;
+            match c.mode {
+                Mode::Upright => {
+                    // Shear along the column, keeping its baseline fixed.
+                    *b += skew * *a;
+                    *d += skew * *c_axis;
+                    *f += skew * (*e - baseline);
+                }
+                Mode::Horizontal | Mode::Sideways | Mode::Tcy(_) => {
+                    // Shear in font space, before rotating a sideways glyph.
+                    *c_axis += skew * *a;
+                    *d += skew * *b;
+                }
+            }
+        }
         out.glyphs.push(PlacedGlyph {
             glyph: p.glyph,
             transform,
@@ -770,6 +922,10 @@ fn place(
             size,
         });
     }
+}
+
+fn can_hang(cluster: &str) -> bool {
+    matches!(cluster, "、" | "。" | "，" | "．")
 }
 
 /// 行頭禁則: characters that must not start a line.

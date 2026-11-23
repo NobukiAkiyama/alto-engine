@@ -18,6 +18,7 @@ alto-doc = { path = "../crates/alto-doc" }
 alto-engine = { path = "../crates/alto-engine" }
 alto-text = { path = "../crates/alto-text" }
 alto-vector = { path = "../crates/alto-vector" }
+alto-decode = { path = "../crates/alto-decode" }
 
 [workspace]
 members = ["."]
@@ -76,6 +77,20 @@ bench = false
 [[bin]]
 name = "journal"
 path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "folder"
+path = "fuzz_targets/folder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
 test = false
 doc = false
 bench = false

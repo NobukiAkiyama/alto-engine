@@ -12,6 +12,8 @@ fn bucket(n: u32) -> u32 {
 use crate::{REffect, REffectKind, RMask, RNode};
 use alto_vector::{FillRule, StyledPath};
 mod graph;
+#[cfg(test)]
+mod graph_reference;
 mod paint;
 mod params;
 #[cfg(test)]
@@ -109,6 +111,31 @@ impl RoiQ {
                 .h
                 .checked_add(2 * y)
                 .ok_or_else(|| RenderError::InvalidArgument("v3 ROI height overflow".into()))?,
+            ..self
+        })
+    }
+    fn grow(self, radius_q8: u32) -> Result<Self> {
+        let (taps, _) = self.taps(radius_q8)?;
+        self.expand(taps, taps)
+    }
+    fn union(self, other: Self) -> Result<Self> {
+        debug_assert_eq!(self.level, other.level);
+        let axis = |a: i64, aw: u32, b: i64, bw: u32| -> Option<(i64, u32)> {
+            let low = a.min(b);
+            let high = a
+                .checked_add(i64::from(aw))?
+                .max(b.checked_add(i64::from(bw))?);
+            Some((low, u32::try_from(high.checked_sub(low)?).ok()?))
+        };
+        let (ox, w) = axis(self.ox, self.w, other.ox, other.w)
+            .ok_or_else(|| RenderError::InvalidArgument("v3 stack ROI width".into()))?;
+        let (oy, h) = axis(self.oy, self.h, other.oy, other.h)
+            .ok_or_else(|| RenderError::InvalidArgument("v3 stack ROI height".into()))?;
+        Ok(Self {
+            ox,
+            oy,
+            w,
+            h,
             ..self
         })
     }
@@ -478,11 +505,32 @@ enum StackInput<'a> {
         world: WorldTransform,
         depth: usize,
     },
+    /// The recursive walk's sibling prefix, rendered again for each request.
+    #[cfg(test)]
     Siblings {
         children: &'a [usize],
         world: WorldTransform,
         depth: usize,
     },
+    /// A planned sibling prefix by sampling scale (`graph::Requests`).
+    Planes(&'a BTreeMap<u32, Target>),
+}
+#[cfg(test)]
+thread_local! {
+    /// Routes sibling walks through `graph_reference` on this thread.
+    static REFERENCE_SIBLINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Counts `raw_node` renders on this thread.
+    static RAW_NODE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Runs `f` with the recursive sibling walk on or off and returns its result
+/// with the number of node renders it made.
+#[cfg(test)]
+pub(crate) fn with_sibling_walk<T>(reference: bool, f: impl FnOnce() -> T) -> (T, usize) {
+    let previous = REFERENCE_SIBLINGS.replace(reference);
+    let renders = RAW_NODE_RENDERS.replace(0);
+    let result = f();
+    REFERENCE_SIBLINGS.set(previous);
+    (result, RAW_NODE_RENDERS.replace(renders))
 }
 struct Context<'a> {
     r: &'a mut Renderer,
@@ -492,6 +540,7 @@ struct Context<'a> {
     encoder: wgpu::CommandEncoder,
     pinned: HashSet<u32>,
     previews: HashMap<ContentHash, wgpu::Texture>,
+    pending: &'a mut HashMap<ContentHash, PendingPreview>,
     overrides: BTreeMap<(NodeId, TileKey), ContentHash>,
     mask_preview: bool,
 }
@@ -524,13 +573,7 @@ impl Renderer {
         let mut overrides = BTreeMap::new();
         if let Some(stroke) = &self.stroke {
             for (k, t) in &stroke.tiles {
-                let hash = ContentHash::of(
-                    format!(
-                        "preview:{:?}:{},{}:{}",
-                        stroke.layer, k.tx, k.ty, stroke.epoch
-                    )
-                    .as_bytes(),
-                );
+                let hash = preview_hash(stroke.layer, *k, stroke.preview_id, stroke.epoch);
                 previews.insert(hash, t.output.clone());
                 overrides.insert((stroke.layer, *k), hash);
             }
@@ -540,6 +583,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("M5 display tile"),
             });
+        let mut pending = HashMap::new();
         let result = (|| {
             let mask_preview = self.stroke.as_ref().is_some_and(|s| s.mask);
             let mut cx = Context {
@@ -550,6 +594,7 @@ impl Renderer {
                 encoder,
                 pinned: HashSet::new(),
                 previews,
+                pending: &mut pending,
                 overrides,
                 mask_preview,
             };
@@ -629,6 +674,7 @@ impl Renderer {
                 pass.dispatch_workgroups(16, 16, 1);
             }
             cx.r.queue.submit(Some(cx.encoder.finish()));
+            cx.r.publish_pending_previews(cx.pending);
             cx.r.release_retired();
             if let Some(vector) = &mut cx.r.vector {
                 vector.after_submit();
@@ -636,6 +682,7 @@ impl Renderer {
             Ok(())
         })();
         if result.is_err() {
+            self.discard_pending_previews(&pending);
             self.queue.submit(std::iter::empty());
             if let Some(vector) = &mut self.vector {
                 self.retired.take(&mut vector.retired);

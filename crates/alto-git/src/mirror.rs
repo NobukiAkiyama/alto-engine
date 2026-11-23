@@ -284,16 +284,17 @@ fn own_files(
 /// imported, and Git refs are the current mapping. The commit that was the Alto head names
 /// the references inside its ancestry, so a checked-out tree stays a valid package. Any
 /// other commit opens detached, because naming a branch there would go stale.
-fn mirror_manifest(p: &Opened, h: &ContentHash, c: &Commit) -> Vec<u8> {
+fn mirror_manifest(p: &Opened, h: &ContentHash, c: &Commit, document_format: u32) -> Vec<u8> {
     if p.package.head != Some(*h) {
-        return alto_store::manifest_bytes(c.snapshot, Some(*h));
+        return alto_store::manifest_bytes(c.snapshot, Some(*h), document_format);
     }
     let inside = ancestors(p, *h);
     let mut view = p.package.refs.clone();
     view.branches.retain(|_, b| inside.contains(&b.head));
     view.tags.retain(|_, t| inside.contains(t));
     view.pinned.retain(|t| inside.contains(t));
-    alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), view)
+    view.stashes.clear();
+    alto_store::manifest_bytes_with_refs(c.snapshot, Some(*h), document_format, view, None)
 }
 
 fn tree_files(root: &Path, commit: &str, prefix: &str) -> Result<BTreeSet<String>> {
@@ -1060,7 +1061,12 @@ fn commit_stream(
                 .ok_or_else(|| format!("{path} がフォルダにありません"))?;
             files.push((path, data.clone()));
         }
-        files.push(("manifest.json".into(), mirror_manifest(p, h, c)));
+        let document_format =
+            alto_store::snapshot_document_format(&snap_bytes).map_err(|e| e.to_string())?;
+        files.push((
+            "manifest.json".into(),
+            mirror_manifest(p, h, c, document_format),
+        ));
         files.push(("document.json".into(), snap_bytes));
         files.push((
             ".gitattributes".into(),

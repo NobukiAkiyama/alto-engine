@@ -13,6 +13,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "alto-decode"
+version = "0.4.0"
+dependencies = [
+ "alto-core",
+ "alto-raster",
+ "lz4_flex",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "alto-doc"
 version = "0.4.0"
 dependencies = [
@@ -49,6 +59,7 @@ name = "alto-fuzz"
 version = "0.0.0"
 dependencies = [
  "alto-core",
+ "alto-decode",
  "alto-doc",
  "alto-engine",
  "alto-store",
@@ -79,6 +90,7 @@ name = "alto-store"
 version = "0.4.0"
 dependencies = [
  "alto-core",
+ "alto-doc",
  "lz4_flex",
  "serde",
  "serde_json",

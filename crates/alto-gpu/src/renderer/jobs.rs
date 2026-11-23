@@ -111,7 +111,7 @@ impl TileJob {
                                         let Some(inv) = inverse(child_world.legacy()?) else {
                                             continue;
                                         };
-                                        let (min, max) = bounds_through(inv, self.region);
+                                        let (min, max) = legacy_bounds(inv, self.region);
                                         (
                                             (min[0] / 256.0).floor() as i32,
                                             (min[1] / 256.0).floor() as i32,
@@ -119,18 +119,11 @@ impl TileJob {
                                             (max[1] / 256.0).ceil() as i32,
                                         )
                                     };
-                                let mut opaque = x1 > x0
-                                    && y1 > y0
-                                    && (x1 - x0) as i64 * (y1 - y0) as i64 <= 1024;
-                                for x in x0..x1 {
-                                    for y in y0..y1 {
-                                        let k = TileKey { tx: x, ty: y };
-                                        opaque &= ts
-                                            .binary_search_by_key(&k, |t| t.key)
-                                            .ok()
-                                            .is_some_and(|j| store.is_opaque(&ts[j].hash));
-                                    }
-                                }
+                                let opaque = opaque_footprint([x0, y0, x1, y1], |k| {
+                                    ts.binary_search_by_key(&k, |t| t.key)
+                                        .ok()
+                                        .is_some_and(|j| store.is_opaque(&ts[j].hash))
+                                });
                                 if opaque {
                                     start = i;
                                     break;
@@ -163,7 +156,7 @@ impl TileJob {
                                 let Some(inv) = inverse(world) else {
                                     return Ok(());
                                 };
-                                let (min, max) = bounds_through(inv, self.region);
+                                let (min, max) = legacy_bounds(inv, self.region);
                                 (inv, min, max, None)
                             }
                         };
@@ -430,9 +423,6 @@ impl Renderer {
         prefetch: bool,
     ) -> Result<JobStep> {
         let now = self.clock;
-        if let Some(hash) = self.decoder.as_mut().and_then(|d| d.failed.take()) {
-            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
-        }
         if !job.planned {
             let start = now();
             loop {
@@ -455,6 +445,19 @@ impl Renderer {
                 return Ok(JobStep::Blocked);
             }
             return Ok(JobStep::Progress);
+        }
+        let failed = self.decoder.as_ref().and_then(|decoder| {
+            decoder
+                .failed
+                .iter()
+                .find(|hash| job.unique.contains(hash))
+                .copied()
+        });
+        if let Some(hash) = failed {
+            if let Some(decoder) = self.decoder.as_mut() {
+                decoder.failed.remove(&hash);
+            }
+            return Err(RenderError::CorruptData(format!("corrupt object {hash}")));
         }
         if job.unique.len() > self.atlas_slots.len() {
             return Ok(JobStep::Blocked);
@@ -504,8 +507,14 @@ impl Renderer {
                 let hash = job.unique[job.cursor];
                 if !job.missing.contains(&hash) && !self.atlas_map.contains_key(&hash) {
                     let input_start = now();
-                    let (slot, cost) =
-                        self.upload_timed(hash, store, &mut pinned, &mut encoder, &HashMap::new())?;
+                    let (slot, cost) = self.upload_timed(
+                        hash,
+                        store,
+                        &mut pinned,
+                        &mut encoder,
+                        &HashMap::new(),
+                        &mut HashMap::new(),
+                    )?;
                     if prefetch {
                         let s = &mut self.prefetch_stats;
                         s.max_input_ms = s.max_input_ms.max(now() - input_start);
@@ -579,6 +588,7 @@ impl Renderer {
             entries,
             encoder,
             prefetch,
+            &HashMap::new(),
         )?;
         if prefetch {
             self.prefetch_stats.max_submit_ms =

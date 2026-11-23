@@ -55,9 +55,10 @@ impl OutlineBuilder for Collect {
     }
 }
 
-type Outlines = HashMap<(AssetId, u16), Arc<GlyphOutline>>;
+/// By asset, face and glyph: the faces of a collection share an asset's file.
+type Outlines = HashMap<(AssetId, u32, u16), Arc<GlyphOutline>>;
 
-fn key(font: Option<AssetId>, glyph: u16) -> u64 {
+fn key(font: Option<(AssetId, u32)>, glyph: u16) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (font, glyph).hash(&mut h);
     h.finish()
@@ -110,11 +111,12 @@ impl OutlineCache {
                 })
                 .clone();
         };
+        let face_index = fonts.get(&font).map_or(0, |f| f.face_index);
         if let Some(hit) = self
             .map
             .lock()
             .ok()
-            .and_then(|m| m.get(&(font, g.glyph)).cloned())
+            .and_then(|m| m.get(&(font, face_index, g.glyph)).cloned())
         {
             return hit;
         }
@@ -136,7 +138,7 @@ impl OutlineCache {
             c.cmds.push(PathCommand::Close);
         }
         let raw = Arc::new(GlyphOutline::new(
-            key(Some(font), g.glyph),
+            key(Some((font, face_index)), g.glyph),
             upem,
             PathData { commands: c.cmds },
         ));
@@ -144,7 +146,7 @@ impl OutlineCache {
             if m.len() > 65536 {
                 m.clear();
             }
-            m.insert((font, g.glyph), raw.clone());
+            m.insert((font, face_index, g.glyph), raw.clone());
         }
         raw
     }

@@ -60,6 +60,43 @@ fn black() -> Color {
     [0.0, 0.0, 0.0, 1.0]
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderlineKind {
+    #[default]
+    None,
+    Solid,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Underline {
+    #[serde(default)]
+    pub kind: UnderlineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    /// Offset in em, positive down. `None` uses the font's metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<f32>,
+    /// Thickness in em. `None` uses the font's metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f32>,
+}
+impl Underline {
+    pub fn is_none(&self) -> bool {
+        self.kind == UnderlineKind::None
+    }
+    fn validate(&self) -> bool {
+        self.color.as_ref().is_none_or(color_ok)
+            && self
+                .position
+                .is_none_or(|v| v.is_finite() && (-1.0..=1.0).contains(&v))
+            && self
+                .thickness
+                .is_none_or(|v| v.is_finite() && (0.005..=0.5).contains(&v))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextStyle {
@@ -84,6 +121,11 @@ pub struct TextStyle {
     /// BCP 47 language tag. "ja" selects Japanese locl forms.
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Underline::is_none")]
+    pub underline: Underline,
+    /// Synthetic italic angle in degrees, from -30 to 30.
+    #[serde(default, skip_serializing_if = "zero")]
+    pub italic_skew: f32,
 }
 impl Default for TextStyle {
     fn default() -> Self {
@@ -96,6 +138,8 @@ impl Default for TextStyle {
             scale: 1.0,
             features: vec![],
             language: Some("ja".into()),
+            underline: Underline::default(),
+            italic_skew: 0.0,
         }
     }
 }
@@ -118,6 +162,10 @@ pub struct StylePatch {
     pub features: Option<Vec<FontFeature>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<Underline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic_skew: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,6 +203,9 @@ pub struct TextContent {
     pub writing_mode: WritingMode,
     #[serde(default)]
     pub align: TextAlign,
+    /// Allow one overflowing Japanese punctuation cluster at the end of an area line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hanging: bool,
     /// Explicit tate-chu-yoko (horizontal-in-vertical) ranges.
     #[serde(default)]
     pub tcy: Vec<TextRange>,
@@ -171,6 +222,7 @@ impl Default for TextContent {
             frame: TextFrame::Point,
             writing_mode: WritingMode::HorizontalTb,
             align: TextAlign::Start,
+            hanging: false,
             tcy: vec![],
             auto_tcy: auto_tcy(),
         }
@@ -231,6 +283,14 @@ fn language_ok(l: &Option<String>) -> Result<(), TextError> {
     Ok(())
 }
 
+fn zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+fn skew_ok(value: f32) -> bool {
+    (-30.0..=30.0).contains(&value)
+}
+
 impl TextStyle {
     pub fn validate(&self) -> Result<(), TextError> {
         fonts_ok(&self.fonts)?;
@@ -242,6 +302,8 @@ impl TextStyle {
             || !(0.5..=10.0).contains(&self.line_height)
             || !spacing_ok(self.letter_spacing)
             || !scale_ok(self.scale)
+            || !self.underline.validate()
+            || !skew_ok(self.italic_skew)
         {
             return Err(invalid("style values out of range"));
         }
@@ -270,6 +332,12 @@ impl TextStyle {
         if let Some(v) = &p.language {
             s.language = Some(v.clone());
         }
+        if let Some(v) = &p.underline {
+            s.underline = v.clone();
+        }
+        if let Some(v) = p.italic_skew {
+            s.italic_skew = v;
+        }
         s
     }
 }
@@ -286,6 +354,8 @@ impl StylePatch {
             || self.color.as_ref().is_some_and(|c| !color_ok(c))
             || self.letter_spacing.is_some_and(|v| !spacing_ok(v))
             || self.scale.is_some_and(|v| !scale_ok(v))
+            || self.underline.as_ref().is_some_and(|v| !v.validate())
+            || self.italic_skew.is_some_and(|v| !skew_ok(v))
         {
             return Err(invalid("span style values out of range"));
         }
@@ -490,6 +560,29 @@ mod tests {
         assert!(c.validate().is_err());
     }
     #[test]
+    fn skew_out_of_range_is_refused() {
+        for (angle, valid) in [
+            (-30.0, true),
+            (30.0, true),
+            (-30.01, false),
+            (30.01, false),
+            (f32::INFINITY, false),
+            (f32::NAN, false),
+        ] {
+            let base = TextStyle {
+                italic_skew: angle,
+                ..Default::default()
+            };
+            let patch = StylePatch {
+                italic_skew: Some(angle),
+                ..Default::default()
+            };
+            assert_eq!(base.validate().is_ok(), valid, "base angle {angle}");
+            assert_eq!(patch.validate().is_ok(), valid, "span angle {angle}");
+        }
+    }
+
+    #[test]
     fn replace_range_moves_spans() {
         let mut c = TextContent {
             text: "あいうえお".into(),
@@ -517,4 +610,20 @@ mod tests {
         c.replace_range(2, 6, "").unwrap();
         assert!(c.spans.is_empty());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn new_text_fields_serialize_as_before() {
+    let legacy = r#"{"text":"あ。","style":{"fonts":[],"size":40.0,"color":[0.0,0.0,0.0,1.0],"line_height":1.2,"letter_spacing":0.0,"scale":1.0,"features":[],"language":null},"spans":[],"frame":{"kind":"point"},"writing_mode":"horizontal_tb","align":"start","tcy":[],"auto_tcy":2}"#;
+    let mut content: TextContent = serde_json::from_str(legacy).unwrap();
+    assert!(!content.hanging);
+    assert_eq!(serde_json::to_string(&content).unwrap(), legacy);
+    content.hanging = true;
+    let encoded = serde_json::to_value(&content).unwrap();
+    assert_eq!(encoded["hanging"], true);
+    assert_eq!(
+        serde_json::from_value::<TextContent>(encoded).unwrap(),
+        content
+    );
 }

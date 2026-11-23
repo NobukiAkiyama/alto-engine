@@ -103,13 +103,29 @@ impl Context<'_> {
             .skip(1)
             .find(|(_, p)| p.w == w && p.h == h && p.lease.strong_count() == 0)
             .map(|(i, _)| i);
+        let over_budget = reuse.is_none()
+            && self.r.gpu_bytes().budget_used + u64::from(w) * u64::from(h) * 8
+                > self.r.budget_bytes;
+        let reuse = if over_budget {
+            // A cleared, idle larger bucket can hold a smaller logical ROI.
+            // All effects read and write through logical sizes, and the encoder
+            // orders this new use after earlier reads of the same allocation.
+            self.resources
+                .pool
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, p)| p.w >= w && p.h >= h && p.lease.strong_count() == 0)
+                .min_by_key(|(_, p)| u64::from(p.w) * u64::from(p.h))
+                .map(|(i, _)| i)
+        } else {
+            reuse
+        };
         let index = if let Some(index) = reuse {
             self.resources.reuses += 1;
             index
         } else {
-            let need = w as u64 * h as u64 * 8;
-            let used = self.r.gpu_bytes().budget_used;
-            if used + need > self.r.budget_bytes {
+            if over_budget {
                 // No premature destroy: unsubmitted targets are retained until the
                 // encoder is submitted or discarded, and still count in the ledger.
                 return Err(RenderError::Budget(
@@ -333,6 +349,7 @@ impl Context<'_> {
                 &mut self.pinned,
                 &mut self.encoder,
                 &self.previews,
+                self.pending,
             )?;
             entries.push(Entry {
                 xy: [key.tx, key.ty],

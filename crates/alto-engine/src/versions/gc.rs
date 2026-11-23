@@ -25,7 +25,7 @@ pub struct GcPlan {
 }
 impl VersionStore {
     pub(super) fn root_commits(&self) -> BTreeSet<ContentHash> {
-        let mut roots: BTreeSet<_> = self.refs.roots().chain(self.head).collect();
+        let mut roots: BTreeSet<_> = self.refs.all_roots().chain(self.head).collect();
         if let Some(plan) = &self.merge {
             roots.extend(plan.roots());
         }
@@ -51,7 +51,7 @@ impl Engine {
             .ok_or_else(|| fail("CORRUPT_DATA", "missing manifest"))?;
         let manifest: Manifest = serde_json::from_slice(manifest_bytes)
             .map_err(|e| fail("CORRUPT_DATA", e.to_string()))?;
-        if manifest.format != 2 || manifest.document_format != 5 {
+        if !manifest.is_full() || !alto_doc::SUPPORTED_FORMATS.contains(&manifest.document_format) {
             return Err(fail("UNSUPPORTED", "GC package format"));
         }
         let baseline = alto_store::sha256_hex(manifest_bytes);
@@ -104,8 +104,10 @@ impl Engine {
         for tx in history.undo.iter().chain(&history.redo) {
             crate::tx_hashes(tx, &mut direct_objects);
         }
-        for stage in self.staged_tiles.values() {
-            direct_objects.extend(stage.iter().copied());
+        for (id, stage) in &self.staged_tiles {
+            if self.stage_documents.get(id) == Some(&h) {
+                direct_objects.extend(stage.iter().copied());
+            }
         }
         hashes.extend(direct_objects.iter().copied());
         let mut objects = BTreeMap::new();
@@ -141,6 +143,7 @@ impl Engine {
                 .collect(),
             head: s.head,
             refs,
+            external: None,
         };
         let entries = alto_store::folder_entries(&parts)?;
         let mut by_kind = BTreeMap::<String, GcCounts>::new();
@@ -194,8 +197,8 @@ impl Engine {
             .gc_generation
             .checked_add(1)
             .ok_or_else(|| fail("RESOURCE_LIMIT", "generation overflow"))?;
-        if manifest.format != 2
-            || manifest.document_format != 5
+        if !manifest.is_full()
+            || !alto_doc::SUPPORTED_FORMATS.contains(&manifest.document_format)
             || manifest.head != s.head
             || manifest.refs != refs
             || manifest.snapshot != ContentHash::of(&self.snapshot(h)?)
@@ -218,6 +221,16 @@ impl Engine {
         expected: Option<&str>,
     ) -> Result<GcReport, EngineError> {
         let session = alto_store::folder::lock(dir)?;
+        self.gc_session(h, &session, dry_run, expected)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn gc_session(
+        &mut self,
+        h: DocHandle,
+        session: &impl GcFolder,
+        dry_run: bool,
+        expected: Option<&str>,
+    ) -> Result<GcReport, EngineError> {
         let stored = session.read()?;
         let plan = self.prepare_gc(h, &stored, dry_run)?;
         if expected.is_some_and(|s| s != plan.report.baseline) {
@@ -231,12 +244,26 @@ impl Engine {
         let record = serde_json::json!({"phase":"prepared","baseline":plan.report.baseline,"remove":plan.remove});
         session
             .write_gc_record(&serde_json::to_vec(&record).map_err(|e| invalid(e.to_string()))?)?;
-        let publication = session.write(&plan.entries, Some(ContentHash::of(old)));
         let next = &plan.entries["manifest.json"];
-        if session.read()?.get("manifest.json") == Some(next) {
-            self.adopt_gc(h, next)?;
-        }
-        let publication = publication?;
+        // A confirmed publication is adopted before anything else can fail, so the
+        // open document never stays a generation behind its folder. A failed write
+        // may still have published; readback settles that, and deletion waits for a
+        // run whose publication and adoption are both confirmed.
+        let publication = match session.write(&plan.entries, Some(ContentHash::of(old))) {
+            Ok(publication) => {
+                self.adopt_gc(h, next)?;
+                publication
+            }
+            Err(e) => {
+                if session
+                    .read()
+                    .is_ok_and(|now| now.get("manifest.json") == Some(next))
+                {
+                    self.adopt_gc(h, next)?;
+                }
+                return Err(e.into());
+            }
+        };
         for (path_index, path) in plan.remove.iter().enumerate() {
             session.delete_immutable(path).map_err(|e| {
                 fail(
@@ -284,6 +311,37 @@ impl Engine {
         Ok((bytes, report))
     }
 }
+/// The locked folder operations a GC uses, so tests can fail one of them.
+#[cfg(not(target_arch = "wasm32"))]
+trait GcFolder {
+    fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError>;
+    fn write(
+        &self,
+        entries: &BTreeMap<String, Vec<u8>>,
+        expected: Option<ContentHash>,
+    ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError>;
+    fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError>;
+    fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError>;
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl GcFolder for alto_store::folder::LockedFolder {
+    fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError> {
+        alto_store::folder::LockedFolder::read(self)
+    }
+    fn write(
+        &self,
+        entries: &BTreeMap<String, Vec<u8>>,
+        expected: Option<ContentHash>,
+    ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError> {
+        alto_store::folder::LockedFolder::write(self, entries, expected)
+    }
+    fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError> {
+        alto_store::folder::LockedFolder::write_gc_record(self, record)
+    }
+    fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError> {
+        alto_store::folder::LockedFolder::delete_immutable(self, path)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +383,34 @@ mod tests {
         e.checkout(h, "main").unwrap();
         e.delete_branch(h, "discard", true).unwrap();
         (e, h, removed)
+    }
+    #[test]
+    fn gc_only_marks_stages_owned_by_its_document() {
+        let (mut engine, b, _) = setup();
+        let stored = engine.folder_entries(b).unwrap();
+        let a = engine
+            .create_document(DocumentMeta::srgb_u8(16, 16))
+            .unwrap();
+        let missing = ContentHash::of(b"an external tile belonging to document A");
+        let stage_a = engine.begin_tile_stage_for(a);
+        engine
+            .staged_tiles
+            .get_mut(&stage_a)
+            .unwrap()
+            .insert(missing);
+        assert!(engine.prepare_gc(b, &stored, true).is_ok());
+        let stage_b = engine.begin_tile_stage_for(b);
+        engine
+            .staged_tiles
+            .get_mut(&stage_b)
+            .unwrap()
+            .insert(missing);
+        assert!(
+            matches!(engine.prepare_gc(b, &stored, true), Err(EngineError::MissingTile(hash)) if hash == missing)
+        );
+        engine.release_staged_tiles(stage_a);
+        engine.release_staged_tiles(stage_b);
+        assert!(engine.stage_documents.is_empty());
     }
     #[test]
     fn archive_gc_keeps_all_references_and_rejects_corrupt_garbage() {
@@ -374,6 +460,90 @@ mod tests {
             e.gc_folder(h, &dir, true, None).unwrap().by_kind["commits"].removed,
             0
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// A locked folder whose reads fail once a manifest has been written, or whose
+    /// writes publish and then report a failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct Flaky {
+        folder: alto_store::folder::LockedFolder,
+        written: std::cell::Cell<bool>,
+        fail_read_after_write: bool,
+        fail_write_after_publishing: bool,
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    impl GcFolder for Flaky {
+        fn read(&self) -> Result<BTreeMap<String, Vec<u8>>, alto_store::StoreError> {
+            if self.fail_read_after_write && self.written.get() {
+                return Err(alto_store::StoreError::Io("read failed".into()));
+            }
+            self.folder.read()
+        }
+        fn write(
+            &self,
+            entries: &BTreeMap<String, Vec<u8>>,
+            expected: Option<ContentHash>,
+        ) -> Result<alto_store::folder::FolderReport, alto_store::StoreError> {
+            let report = self.folder.write(entries, expected)?;
+            self.written.set(true);
+            if self.fail_write_after_publishing {
+                return Err(alto_store::StoreError::Io("write result lost".into()));
+            }
+            Ok(report)
+        }
+        fn write_gc_record(&self, record: &[u8]) -> Result<(), alto_store::StoreError> {
+            self.folder.write_gc_record(record)
+        }
+        fn delete_immutable(&self, path: &str) -> Result<(), alto_store::StoreError> {
+            self.folder.delete_immutable(path)
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flaky(dir: &std::path::Path, read: bool, write: bool) -> Flaky {
+        Flaky {
+            folder: alto_store::folder::lock(dir).unwrap(),
+            written: false.into(),
+            fail_read_after_write: read,
+            fail_write_after_publishing: write,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_published_gc_is_adopted_even_when_the_readback_fails() {
+        let (mut e, h, removed) = setup();
+        let dir = std::env::temp_dir().join(format!("alto-gc-{}", NodeId::new().0));
+        alto_store::folder::write(&dir, &e.folder_entries(h).unwrap(), None).unwrap();
+        let session = flaky(&dir, true, false);
+        assert!(e.gc_session(h, &session, false, None).is_err());
+        drop(session);
+        // The folder holds the new generation, and so does the open document.
+        let mut f = Engine::new();
+        let (d, _) = f
+            .open_entries(alto_store::folder::read(&dir).unwrap())
+            .unwrap();
+        assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        // Publication and adoption were confirmed, so the sweep ran; only the final
+        // check could not read. A retry passes the manifest comparison.
+        assert!(!dir.join(alto_store::commit_path(&removed)).exists());
+        let report = e.gc_folder(h, &dir, false, None).unwrap();
+        assert_eq!(report.by_kind["commits"].removed, 0);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_ambiguous_write_is_reconciled_by_readback_and_deletes_nothing() {
+        let (mut e, h, removed) = setup();
+        let dir = std::env::temp_dir().join(format!("alto-gc-{}", NodeId::new().0));
+        alto_store::folder::write(&dir, &e.folder_entries(h).unwrap(), None).unwrap();
+        let session = flaky(&dir, false, true);
+        assert!(e.gc_session(h, &session, false, None).is_err());
+        drop(session);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        assert!(dir.join(alto_store::commit_path(&removed)).exists());
+        e.gc_folder(h, &dir, false, None).unwrap();
+        assert!(!dir.join(alto_store::commit_path(&removed)).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -463,6 +633,15 @@ impl Engine {
         expected: Option<&str>,
     ) -> Result<GcReport, EngineError> {
         let target = alto_store::archive::lock(path)?;
+        self.gc_archive_session(h, &target, dry_run, expected)
+    }
+    fn gc_archive_session(
+        &mut self,
+        h: DocHandle,
+        target: &impl GcArchive,
+        dry_run: bool,
+        expected: Option<&str>,
+    ) -> Result<GcReport, EngineError> {
         let original = target.read()?.ok_or_else(|| fail("NOT_FOUND", "archive"))?;
         let stored = alto_store::read_entries(&original)?;
         let plan = self.prepare_gc(h, &stored, dry_run)?;
@@ -483,12 +662,34 @@ impl Engine {
         if !warnings.is_empty() {
             return Err(fail("CORRUPT_DATA", "archive roots failed validation"));
         }
-        let publication = target.replace(&bytes, &alto_store::sha256_hex(&original));
-        if target.read()?.as_deref() == Some(bytes.as_slice()) {
-            self.adopt_gc(h, &manifest)?;
+        // As for a folder: adopt a confirmed replacement at once, and let readback
+        // settle only a replacement that reported a failure.
+        if let Err(e) = target.replace(&bytes, &alto_store::sha256_hex(&original)) {
+            if target
+                .read()
+                .is_ok_and(|now| now.as_deref() == Some(bytes.as_slice()))
+            {
+                self.adopt_gc(h, &manifest)?;
+            }
+            return Err(e.into());
         }
-        publication?;
+        self.adopt_gc(h, &manifest)?;
         Ok(plan.report)
+    }
+}
+/// The locked archive operations a GC uses, so tests can fail one of them.
+#[cfg(not(target_arch = "wasm32"))]
+trait GcArchive {
+    fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError>;
+    fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError>;
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl GcArchive for alto_store::archive::LockedArchive {
+    fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError> {
+        alto_store::archive::LockedArchive::read(self)
+    }
+    fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError> {
+        alto_store::archive::LockedArchive::replace(self, bytes, expected)
     }
 }
 
@@ -518,6 +719,47 @@ mod archive_tests {
         assert_eq!(f.version_status(d).unwrap().head, Some(c.hash));
         assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
         assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// A locked archive whose reads fail once it has been replaced.
+    struct FlakyArchive {
+        archive: alto_store::archive::LockedArchive,
+        replaced: std::cell::Cell<bool>,
+    }
+    impl GcArchive for FlakyArchive {
+        fn read(&self) -> Result<Option<Vec<u8>>, alto_store::StoreError> {
+            if self.replaced.get() {
+                return Err(alto_store::StoreError::Io("read failed".into()));
+            }
+            self.archive.read()
+        }
+        fn replace(&self, bytes: &[u8], expected: &str) -> Result<(), alto_store::StoreError> {
+            self.archive.replace(bytes, expected)?;
+            self.replaced.set(true);
+            Ok(())
+        }
+    }
+    #[test]
+    fn a_replaced_archive_is_adopted_even_when_the_readback_fails() {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(16, 16)).unwrap();
+        e.commit(h, "first", 1, None, false).unwrap();
+        let dir = std::env::temp_dir().join(format!("alto-archive-gc-{}", NodeId::new().0));
+        let path = dir.join("image.alto");
+        let archive = alto_store::archive::lock(&path).unwrap();
+        archive.replace(&e.save_package(h).unwrap(), "").unwrap();
+        let flaky = FlakyArchive {
+            archive,
+            replaced: false.into(),
+        };
+        e.gc_archive_session(h, &flaky, false, None).unwrap();
+        drop(flaky);
+        let mut f = Engine::new();
+        let (d, _) = f.open_package(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(f.version_refs(d).unwrap().gc_generation, 1);
+        assert_eq!(e.version_refs(h).unwrap().gc_generation, 1);
+        // A retry passes the manifest comparison.
+        e.gc_archive_file(h, &path, false, None).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

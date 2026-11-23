@@ -1136,6 +1136,167 @@ export function renderBlurV3(image, radii, tile = [0, 0], canvas = [256, 256]) {
   return out;
 }
 
+/** A level-0 high-pass tile. The two separable blur passes need a source halo
+ * equal to the kernel's radius, including neighbor tiles across tile seams. */
+export function renderHighPassV3(image, radius, tile = [0, 0], canvas = [256, 256], selection) {
+  return renderDifferenceV3(image, radius, tile, canvas, selection, (input, low) => {
+    const high = cqStraight(input).map((value, channel) => {
+      const straight = value - low[channel] + CQ / 2n;
+      return cqMul(cqClamp(straight), input[3]);
+    });
+    return [...high, input[3]];
+  });
+}
+
+const CORDIC_ATAN_DEG_Q16 = [2949120, 1740967, 919879, 466945, 234379, 117304, 58666, 29335,
+  14668, 7334, 3667, 1833, 917, 458, 229, 115];
+
+/** Integer port of `hue_sincos_q14` from effects-q14.wgsl. */
+export function hueSinCosQ14(angle) {
+  if (angle === 0) return [Q14_ONE, 0];
+  if (angle === 5898240) return [0, Q14_ONE];
+  if (angle === -5898240) return [0, -Q14_ONE];
+  if (angle === 11796480 || angle === -11796480) return [-Q14_ONE, 0];
+  let z = angle, x = 9949, y = 0;
+  if (z > 5898240) { z -= 11796480; x = -x; y = -y; }
+  if (z < -5898240) { z += 11796480; x = -x; y = -y; }
+  for (let i = 0; i < 16; i++) {
+    const stepX = y >> i, stepY = x >> i;
+    if (z >= 0) { x -= stepX; y += stepY; z -= CORDIC_ATAN_DEG_Q16[i]; }
+    else { x += stepX; y -= stepY; z += CORDIC_ATAN_DEG_Q16[i]; }
+  }
+  return [Math.min(Q14_ONE, Math.max(-Q14_ONE, x)), Math.min(Q14_ONE, Math.max(-Q14_ONE, y))];
+}
+
+/** Independent level-0 CPU reference for one integer motion-blur tile. */
+export function renderMotionBlurV3(image, { angle, distance }, tile = [0, 0], canvas = [256, 256], selection) {
+  const angleQ16 = Number(qFromF64Bits(f64Bits(angle), 16));
+  const distanceQ8 = Number(qFromF64Bits(f64Bits(distance), 8));
+  const halfQ8 = Math.floor((distanceQ8 + 1) / 2);
+  const radius = Math.ceil(halfQ8 / 256);
+  const spacingQ8 = radius ? Math.floor((halfQ8 + Math.floor(radius / 2)) / radius) : 0;
+  const [cos, sin] = hueSinCosQ14(angleQ16);
+  const step = [(cos * spacingQ8 + 128) >> 8, (sin * spacingQ8 + 128) >> 8];
+  const origin = tile.map((index) => index * 256);
+  const frame = { origin, scale: 1 };
+  const out = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const dx = origin[0] + x, dy = origin[1] + y;
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1]) continue;
+    const sum = [0, 0, 0, 0];
+    for (let i = -radius; i <= radius; i++) {
+      const sx = dx + ((i * step[0] + 8192) >> 14);
+      const sy = dy + ((i * step[1] + 8192) >> 14);
+      if (sx < 0 || sy < 0 || sx >= image.w || sy >= image.h) continue;
+      const offset = (sy * image.w + sx) * 4;
+      const q = ingressQ14(image.pixels.subarray(offset, offset + 4));
+      for (let c = 0; c < 4; c++) sum[c] += Number(q[c]);
+    }
+    const taps = radius * 2 + 1;
+    const filtered = sum.map((value) => BigInt(Math.floor((value + Math.floor(taps / 2)) / taps)));
+    const inputOffset = (dy * image.w + dx) * 4;
+    const original = ingressQ14(image.pixels.subarray(inputOffset, inputOffset + 4)).map(BigInt);
+    const result = selection
+      ? maskSelectQ14(original, filtered, maskCoverage(selection, x, y, frame))
+      : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
+/** The FX-3 PCG output permutation; JavaScript arithmetic wraps to u32. */
+export function pcg32(value) {
+  const v = value >>> 0;
+  const state = (Math.imul(v, 747796405) + 2891336453) >>> 0;
+  const word = Math.imul(((state >>> ((state >>> 28) + 4)) ^ state) >>> 0, 277803737) >>> 0;
+  return ((word >>> 22) ^ word) >>> 0;
+}
+
+function noiseDeltaQ14(hash, amountQ14) {
+  const centered = 2 * (hash >>> 16) - 65535;
+  return Math.floor((centered * amountQ14 + 32768) / 65536);
+}
+
+/** Independent level-zero / zoom-in reference for FX-3's document-pixel noise. */
+export function renderNoiseV3(image, { amount = 0.1, seed = 0, monochrome = true }, tile = [0, 0], canvas = [image.w, image.h], level = 0, selection, mask) {
+  const amountQ14 = Number(qFromF64Bits(f64Bits(amount), 14));
+  const shift = Math.max(0, -level);
+  const out = new Uint8Array(256 * 256 * 4);
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    const gx = tile[0] * 256 + x, gy = tile[1] * 256 + y;
+    const dx = Math.floor(gx / (2 ** shift)), dy = Math.floor(gy / (2 ** shift));
+    if (dx < 0 || dy < 0 || dx >= canvas[0] || dy >= canvas[1] || dx >= image.w || dy >= image.h) continue;
+    const sourceOffset = (dy * image.w + dx) * 4;
+    const input = ingressQ14(image.pixels.subarray(sourceOffset, sourceOffset + 4)).map(BigInt);
+    let filtered = input;
+    if (amountQ14 !== 0 && input[3] !== 0n) {
+      const h = pcg32((dx >>> 0) ^ pcg32((dy >>> 0) ^ (seed >>> 0)));
+      const src = cqStraight(input);
+      filtered = [0n, 0n, 0n, input[3]];
+      for (let channel = 0; channel < 3; channel++) {
+        const sample = monochrome ? h : pcg32(h ^ (channel + 1));
+        const value = BigInt(Math.max(0, Math.min(16384, Number(src[channel]) + noiseDeltaQ14(sample, amountQ14))));
+        filtered[channel] = cqMul(value, input[3]);
+      }
+    }
+    const result = selection
+      ? maskSelectQ14(input, filtered, maskCoverage(mask, gx, gy, { origin: [tile[0] * 256, tile[1] * 256], scale: 2 ** level }))
+      : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
+/** Q14 unsharp mask over the Gaussian-smoothed straight channels. The
+ * threshold comparison is per channel, including equality. */
+export function renderUnsharpMaskV3(image, { radius, amount, threshold }, tile = [0, 0], canvas = [256, 256], selection) {
+  const strength = qFromF64Bits(f64Bits(amount), 8);
+  const cutoff = BigInt(byteQ14(threshold));
+  return renderDifferenceV3(image, strength === 0n ? 0 : radius, tile, canvas, selection, (input, low) => {
+    if (strength === 0n || radius === 0) return input;
+    const sharp = cqStraight(input).map((value, channel) => {
+      const d = value - low[channel];
+      if (d >= -cutoff && d <= cutoff) return input[channel];
+      // BigInt's right shift floors, including for negative differences.
+      return cqMul(cqClamp(value + ((strength * d + 128n) >> 8n)), input[3]);
+    });
+    return [...sharp, input[3]];
+  });
+}
+
+function renderDifferenceV3(image, radius, tile, canvas, selection, combine) {
+  const rho = blurRadiusQ8(radius);
+  const halo = Math.ceil(rho / 256);
+  const span = 256 + 2 * halo;
+  const origin = tile.map((index) => index * 256);
+  const source = new Array(span * span);
+  for (let y = 0; y < span; y++) for (let x = 0; x < span; x++) {
+    const dx = origin[0] + x - halo, dy = origin[1] + y - halo;
+    const offset = (dy * image.w + dx) * 4;
+    source[y * span + x] = (dx >= 0 && dy >= 0 && dx < image.w && dy < image.h)
+      ? ingressQ14(image.pixels.subarray(offset, offset + 4))
+      : [0, 0, 0, 0];
+  }
+  let blurred = source;
+  if (halo > 0) {
+    const weights = blurKernelQ16(halo, rho);
+    const horizontal = blurPassQ14(source, span, span, weights, false);
+    blurred = blurPassQ14(horizontal, span, span, weights, true);
+  }
+  const out = new Uint8Array(256 * 256 * 4);
+  const frame = { origin, scale: 1 };
+  for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+    if (origin[0] + x < 0 || origin[1] + y < 0 || origin[0] + x >= canvas[0] || origin[1] + y >= canvas[1]) continue;
+    const index = (y + halo) * span + x + halo;
+    const input = source[index].map(BigInt);
+    const low = cqStraight(blurred[index].map(BigInt));
+    const filtered = combine(input, low);
+    const result = selection ? maskSelectQ14(input, filtered, maskCoverage(selection, x, y, frame)) : filtered;
+    out.set(resolveQ14(result), (y * 256 + x) * 4);
+  }
+  return out;
+}
+
 // Render version 3 vector fill (doc/design/2026-10-28-v3-integer-vector-fill.md),
 // written independently of `raster_q8.rs`: Q8 points from the f64 bits through
 // the Q32 world, a sparse-cell nonzero integration, 16 even-odd sub-scanlines,
@@ -1608,7 +1769,7 @@ export function fnv64(bytes) {
 const GAP_ORDER = ["mask", "vector mask", "clip path", "clip", "effects", "vector", "text", "adjustment", "unsupported"];
 
 // Every document effect has an integer v3 stage; selections use mode 22.
-const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
+const isIntegerEffect = (effect) => ["color_adjust", "gaussian_blur", "high_pass", "unsharp_mask", "motion_blur", "noise", "levels", "hue_saturation", "invert", "curves"].includes(effect?.type);
 /**
  * Why a document is outside the plain composite.wgsl path, or null when it is on it.
  * Render version 3 has exactly three classes, mirroring Rust `renderer::v3_gap`:

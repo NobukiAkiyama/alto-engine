@@ -69,6 +69,63 @@ fn width() -> f32 {
 fn miter() -> f32 {
     4.0
 }
+pub const MAX_DASH_ELEMENTS: usize = 16;
+pub const MAX_DASHES_PER_PATH: usize = 4096;
+pub const MAX_DASHES_PER_LAYER: usize = 16384;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dash {
+    pub pattern: Vec<f32>,
+    #[serde(default)]
+    pub offset: f32,
+}
+impl Dash {
+    pub fn validate(&self) -> Result<()> {
+        if self.pattern.is_empty() || self.pattern.len() > MAX_DASH_ELEMENTS {
+            return Err(invalid("dash pattern length must be 1..=16"));
+        }
+        let mut all_zero = true;
+        for &elem in &self.pattern {
+            if !elem.is_finite() || !(0.0..=1_048_576.0).contains(&elem) {
+                return Err(invalid(
+                    "dash pattern elements must be finite and within 0..=1048576",
+                ));
+            }
+            if elem > 0.0 {
+                all_zero = false;
+            }
+        }
+        if all_zero {
+            return Err(invalid("dash pattern must not be all zeros"));
+        }
+        let period = self.period();
+        if period < 1.0 / 64.0 {
+            return Err(invalid("dash period must be >= 1/64"));
+        }
+        if !self.offset.is_finite() || !(-1_048_576.0..=1_048_576.0).contains(&self.offset) {
+            return Err(invalid("dash offset must be finite and within +/-1048576"));
+        }
+        Ok(())
+    }
+
+    pub fn period(&self) -> f64 {
+        let sum: f64 = self.pattern.iter().map(|&x| x as f64).sum();
+        if self.pattern.len() % 2 == 1 {
+            sum * 2.0
+        } else {
+            sum
+        }
+    }
+
+    pub fn on_count(&self) -> usize {
+        if self.pattern.len() % 2 == 1 {
+            self.pattern.len()
+        } else {
+            self.pattern.len() / 2
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stroke {
@@ -81,6 +138,8 @@ pub struct Stroke {
     pub join: LineJoin,
     #[serde(default = "miter")]
     pub miter_limit: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<Dash>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -259,25 +318,145 @@ impl PathData {
         [r.x0, r.y0, r.x1, r.y1]
     }
 }
+
+// The renderer rounds each pattern element at a precision between Q8 and Q32.
+// Use the shortest period and largest edge allowance across those precisions.
+fn dash_budget(dash: &Dash) -> Result<(f64, usize)> {
+    let on_count = dash.on_count();
+    let pattern = || dash.pattern.iter().copied().cycle().take(on_count * 2);
+    let offset = f64::from(dash.offset);
+    let mut period = dash.period();
+    let mut extra = usize::from(offset.rem_euclid(period) > 0.0)
+        + pattern().step_by(2).filter(|&value| value == 0.0).count();
+    for bits in 8..=32 {
+        let scale = (1u64 << bits) as f64;
+        // Promoting a binary32 value to binary64 is exact, so this rounding
+        // agrees with the renderer's integer binary32 quantizer.
+        let quantize = |value: f64| {
+            alto_core::q_from_f64_bits(value.to_bits(), bits).ok_or_else(|| invalid("dash range"))
+        };
+        let phase = quantize(offset)?;
+        let mut exact = phase as f64 == offset * scale;
+        let mut cycle = 0;
+        let mut zero_ons = 0;
+        for (index, value) in pattern().enumerate() {
+            let value = f64::from(value);
+            let q = quantize(value)?;
+            exact &= q as f64 == value * scale;
+            cycle += q;
+            zero_ons += usize::from(index.is_multiple_of(2) && q == 0);
+        }
+        // If all lengths vanish at this precision, the renderer uses Q10.
+        if cycle > 0 {
+            period = period.min(cycle as f64 / scale);
+            extra = extra.max(usize::from(phase.rem_euclid(cycle) > 0) + zero_ons);
+        }
+        if exact {
+            break;
+        }
+    }
+    Ok((period, extra))
+}
+
+// Each Move resets the phase. Short subpaths cannot share one period's allowance.
+fn dash_count(path: &PathData, dash: &Dash) -> Result<usize> {
+    let (period, extra) = dash_budget(dash)?;
+    let on_count = dash.on_count();
+    Ok(path
+        .commands
+        .chunk_by(|_, next| !matches!(next, PathCommand::Move { .. }))
+        .map(control_polygon_length)
+        .filter(|length| *length > 0.0)
+        .map(|length| {
+            ((length / period).ceil() as usize)
+                .saturating_mul(on_count)
+                .saturating_add(extra)
+        })
+        .fold(0, usize::saturating_add))
+}
+
+fn control_polygon_length(commands: &[PathCommand]) -> f64 {
+    let Some((PathCommand::Move { x, y }, rest)) = commands.split_first() else {
+        return 0.0;
+    };
+    let start = (*x, *y);
+    // Coordinates on the Q8 grid are exact at every supported precision.
+    // Any other coordinate can move by at most half a Q8 unit.
+    let snap_error = |(x, y): (f64, f64)| {
+        let axes = u8::from((x * 256.0).fract() != 0.0) + u8::from((y * 256.0).fract() != 0.0);
+        f64::from(axes).sqrt() / 512.0
+    };
+    let mut previous = start;
+    let mut previous_error = snap_error(start);
+    let mut length = 0.0;
+    let mut visit = |point: (f64, f64)| {
+        if point != previous {
+            let x = point.0 - previous.0;
+            let y = point.1 - previous.1;
+            let error = snap_error(point);
+            length += (x * x + y * y).sqrt() + previous_error + error;
+            previous = point;
+            previous_error = error;
+        }
+    };
+    for command in rest {
+        match *command {
+            PathCommand::Move { .. } => {}
+            PathCommand::Line { x, y } => visit((x, y)),
+            PathCommand::Quad { cx, cy, x, y } => {
+                visit((cx, cy));
+                visit((x, y));
+            }
+            PathCommand::Cubic {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                visit((c1x, c1y));
+                visit((c2x, c2y));
+                visit((x, y));
+            }
+            PathCommand::Close => visit(start),
+        }
+    }
+    length
+}
+
 fn color(c: Color) -> bool {
     c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
 }
 impl StyledPath {
     pub fn validate(&self) -> Result<()> {
+        self.validated_dash_count().map(|_| ())
+    }
+
+    fn validated_dash_count(&self) -> Result<usize> {
         self.data.validate()?;
         if self.fill.is_some_and(|c| !color(c)) {
             return Err(invalid("fill color"));
         }
-        if let Some(s) = &self.stroke
-            && (!color(s.color)
+        if let Some(s) = &self.stroke {
+            if !color(s.color)
                 || !s.width.is_finite()
                 || !(0.0..=4096.0).contains(&s.width)
                 || !s.miter_limit.is_finite()
-                || !(1.0..=64.0).contains(&s.miter_limit))
-        {
-            return Err(invalid("stroke style"));
+                || !(1.0..=64.0).contains(&s.miter_limit)
+            {
+                return Err(invalid("stroke style"));
+            }
+            if let Some(dash) = &s.dash {
+                dash.validate()?;
+                let count = dash_count(&self.data, dash)?;
+                if count > MAX_DASHES_PER_PATH {
+                    return Err(invalid("dash count"));
+                }
+                return Ok(count);
+            }
         }
-        Ok(())
+        Ok(0)
     }
     pub fn fingerprint(&self) -> ContentHash {
         ContentHash::of(&serde_json::to_vec(self).expect("validated vector serializes"))
@@ -287,8 +466,12 @@ pub fn validate_paths(paths: &[StyledPath]) -> Result<()> {
     if paths.len() > 128 || paths.iter().map(|p| p.data.commands.len()).sum::<usize>() > 16384 {
         return Err(invalid("at most 128 paths / 16384 commands per layer"));
     }
-    for p in paths {
-        p.validate()?;
+    let mut total_dashes = 0;
+    for path in paths {
+        total_dashes += path.validated_dash_count()?;
+        if total_dashes > MAX_DASHES_PER_LAYER {
+            return Err(invalid("dash count"));
+        }
     }
     Ok(())
 }
@@ -396,6 +579,11 @@ impl VectorRasterizer for LyonRasterizer {
 impl LyonRasterizer {
     pub fn tessellate(&mut self, p: &StyledPath, tolerance: f32) -> Result<Vec<Mesh>> {
         p.validate()?;
+        if let Some(s) = &p.stroke
+            && s.dash.is_some()
+        {
+            return Err(invalid("dashed strokes are not supported by lyon"));
+        }
         if !tolerance.is_finite() || tolerance <= 0.0 {
             return Err(invalid("tolerance"));
         }
@@ -632,6 +820,7 @@ mod tests {
                 cap: LineCap::Round,
                 join: LineJoin::Round,
                 miter_limit: 4.,
+                dash: None,
             }),
             fill_rule: FillRule::EvenOdd,
         };
@@ -643,5 +832,310 @@ mod tests {
         for m in b {
             assert!(m.indices.iter().all(|i| (*i as usize) < m.vertices.len()));
         }
+    }
+
+    #[test]
+    fn no_dash_serializes_the_same_bytes() {
+        let p = StyledPath {
+            data: PathData {
+                commands: vec![
+                    PathCommand::Move { x: 0.0, y: 0.0 },
+                    PathCommand::Line { x: 10.0, y: 10.0 },
+                ],
+            },
+            fill: None,
+            stroke: Some(Stroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.0,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                miter_limit: 4.0,
+                dash: None,
+            }),
+            fill_rule: FillRule::NonZero,
+        };
+        p.validate().unwrap();
+        let serialized = serde_json::to_string(&p).unwrap();
+        assert!(!serialized.contains("dash"));
+        let json_legacy = r#"{"data":{"commands":[{"op":"move","x":0.0,"y":0.0},{"op":"line","x":10.0,"y":10.0}]},"fill":null,"stroke":{"color":[0.0,0.0,0.0,1.0],"width":1.0,"cap":"butt","join":"miter","miter_limit":4.0},"fill_rule":"non_zero"}"#;
+        assert_eq!(serialized, json_legacy);
+        assert_eq!(p.fingerprint(), ContentHash::of(json_legacy.as_bytes()));
+    }
+
+    #[test]
+    fn dash_roundtrips_through_json() {
+        let dash = Dash {
+            pattern: vec![5.0, 2.0],
+            offset: 1.0,
+        };
+        let p = StyledPath {
+            data: PathData {
+                commands: vec![
+                    PathCommand::Move { x: 0.0, y: 0.0 },
+                    PathCommand::Line { x: 100.0, y: 0.0 },
+                ],
+            },
+            fill: None,
+            stroke: Some(Stroke {
+                color: [1.0, 0.0, 0.0, 1.0],
+                width: 2.0,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                miter_limit: 4.0,
+                dash: Some(dash),
+            }),
+            fill_rule: FillRule::NonZero,
+        };
+        p.validate().unwrap();
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"dash\":"));
+        let deserialized: StyledPath = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, deserialized);
+
+        // default offset is 0.0 when omitted
+        let json_no_offset = r#"{"pattern":[10.0,5.0]}"#;
+        let d: Dash = serde_json::from_str(json_no_offset).unwrap();
+        assert_eq!(d.offset, 0.0);
+        assert_eq!(d.pattern, vec![10.0, 5.0]);
+    }
+
+    #[test]
+    fn all_zero_pattern_is_refused() {
+        let d = Dash {
+            pattern: vec![0.0, 0.0],
+            offset: 0.0,
+        };
+        assert!(d.validate().is_err());
+        let d_single = Dash {
+            pattern: vec![0.0],
+            offset: 0.0,
+        };
+        assert!(d_single.validate().is_err());
+    }
+
+    #[test]
+    fn dash_pattern_longer_than_16_is_refused() {
+        let d_16 = Dash {
+            pattern: vec![1.0; 16],
+            offset: 0.0,
+        };
+        assert!(d_16.validate().is_ok());
+
+        let d_17 = Dash {
+            pattern: vec![1.0; 17],
+            offset: 0.0,
+        };
+        assert!(d_17.validate().is_err());
+
+        let d_empty = Dash {
+            pattern: vec![],
+            offset: 0.0,
+        };
+        assert!(d_empty.validate().is_err());
+    }
+
+    #[test]
+    fn negative_dash_length_is_refused() {
+        let d_neg = Dash {
+            pattern: vec![10.0, -2.0],
+            offset: 0.0,
+        };
+        assert!(d_neg.validate().is_err());
+
+        let d_nan = Dash {
+            pattern: vec![f32::NAN],
+            offset: 0.0,
+        };
+        assert!(d_nan.validate().is_err());
+
+        let d_inf = Dash {
+            pattern: vec![f32::INFINITY],
+            offset: 0.0,
+        };
+        assert!(d_inf.validate().is_err());
+
+        let d_too_large = Dash {
+            pattern: vec![1_048_577.0],
+            offset: 0.0,
+        };
+        assert!(d_too_large.validate().is_err());
+
+        // negative offset is valid within +/-1048576
+        let d_neg_offset = Dash {
+            pattern: vec![10.0, 5.0],
+            offset: -100.0,
+        };
+        assert!(d_neg_offset.validate().is_ok());
+
+        let d_offset_too_large = Dash {
+            pattern: vec![10.0, 5.0],
+            offset: 1_048_577.0,
+        };
+        assert!(d_offset_too_large.validate().is_err());
+
+        let d_offset_too_negative = Dash {
+            pattern: vec![10.0, 5.0],
+            offset: -1_048_577.0,
+        };
+        assert!(d_offset_too_negative.validate().is_err());
+    }
+
+    #[test]
+    fn dash_past_the_count_limit_is_refused() {
+        // Path limit: MAX_DASHES_PER_PATH = 4096
+        // Line length = 8192.0, pattern = [1.0, 1.0] -> period = 2.0, on_count = 1
+        // ceil(8192 / 2) * 1 = 4096 -> OK
+        let make_path = |len: f64| StyledPath {
+            data: PathData {
+                commands: vec![
+                    PathCommand::Move { x: 0.0, y: 0.0 },
+                    PathCommand::Line { x: len, y: 0.0 },
+                ],
+            },
+            fill: None,
+            stroke: Some(Stroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.0,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                miter_limit: 4.0,
+                dash: Some(Dash {
+                    pattern: vec![1.0, 1.0],
+                    offset: 0.0,
+                }),
+            }),
+            fill_rule: FillRule::NonZero,
+        };
+
+        let p_exact = make_path(8192.0);
+        assert!(p_exact.validate().is_ok());
+
+        let p_over = make_path(8192.1);
+        assert!(p_over.validate().is_err());
+
+        // Half-away rounding expands this line by one Q8 unit. The rounded
+        // line would start a 4097th dash even though its original length is 8192.
+        let mut snapped = make_path(8192.0);
+        snapped.data.commands = vec![
+            PathCommand::Move {
+                x: -1.0 / 512.0,
+                y: 0.0,
+            },
+            PathCommand::Line {
+                x: 8192.0 - 1.0 / 512.0,
+                y: 0.0,
+            },
+        ];
+        assert_eq!(snapped.validate().unwrap_err().0, "dash count");
+
+        // Layer limit: MAX_DASHES_PER_LAYER = 16384
+        // 4 paths of 4000 dashes = 16000 <= 16384 -> OK
+        let p4000 = make_path(8000.0);
+        let paths_ok = vec![p4000.clone(), p4000.clone(), p4000.clone(), p4000.clone()];
+        assert!(validate_paths(&paths_ok).is_ok());
+
+        // 5 paths of 4000 dashes = 20000 > 16384 -> Err
+        let paths_over = vec![
+            p4000.clone(),
+            p4000.clone(),
+            p4000.clone(),
+            p4000.clone(),
+            p4000,
+        ];
+        assert!(validate_paths(&paths_over).is_err());
+
+        // Restarting the phase at Move consumes a full dash for each short
+        // subpath, even though their total length is only 250.5 units.
+        let mut restarted = make_path(6400.0);
+        for _ in 0..501 {
+            restarted.data.commands.extend([
+                PathCommand::Move { x: 0.0, y: 0.0 },
+                PathCommand::Line { x: 0.5, y: 0.0 },
+            ]);
+        }
+        assert!(restarted.validate().is_ok());
+        assert!(validate_paths(&vec![restarted; 5]).is_err());
+    }
+
+    #[test]
+    fn dash_budget_accounts_for_rounding_at_render_precision() {
+        let mut dots = vec![0.4 / 256.0; 15];
+        dots.push(1.0 / 256.0);
+        for (length, pattern) in [
+            (64.5, vec![0.0079, 0.0079]),
+            (47.65, vec![1.49 / 256.0; 16]),
+            (13.8, dots),
+        ] {
+            let dash = Dash {
+                pattern,
+                offset: 0.0,
+            };
+            dash.validate().unwrap();
+            assert!(
+                (length / dash.period()).ceil() as usize * dash.on_count() <= MAX_DASHES_PER_PATH
+            );
+            let data = PathData {
+                commands: vec![
+                    PathCommand::Move { x: 0.0, y: 0.0 },
+                    PathCommand::Line { x: length, y: 0.0 },
+                ],
+            };
+            let path = StyledPath {
+                data,
+                fill: None,
+                stroke: Some(Stroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    miter_limit: 4.0,
+                    dash: Some(dash),
+                }),
+                fill_rule: FillRule::NonZero,
+            };
+            assert_eq!(path.validate().unwrap_err().0, "dash count");
+        }
+    }
+
+    #[test]
+    fn odd_pattern_validates_as_its_double() {
+        // pattern with length 1: element is 1/128 (< 1/64)
+        // Doubled period = 2 * (1/128) = 1/64 >= 1/64, so it validates.
+        let d_odd = Dash {
+            pattern: vec![1.0 / 128.0],
+            offset: 0.0,
+        };
+        assert_eq!(d_odd.period(), 1.0 / 64.0);
+        assert_eq!(d_odd.on_count(), 1);
+        assert!(d_odd.validate().is_ok());
+
+        // But 1/256 doubled is 1/128 < 1/64, so it is refused.
+        let d_too_small = Dash {
+            pattern: vec![1.0 / 256.0],
+            offset: 0.0,
+        };
+        assert!(d_too_small.validate().is_err());
+    }
+
+    #[test]
+    fn lyon_rejects_dashed_stroke() {
+        let p = StyledPath {
+            data: PathData::from_svg("M 0 0 L 10 10").unwrap(),
+            fill: None,
+            stroke: Some(Stroke {
+                color: [0., 0., 0., 1.],
+                width: 1.,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                miter_limit: 4.,
+                dash: Some(Dash {
+                    pattern: vec![5., 5.],
+                    offset: 0.,
+                }),
+            }),
+            fill_rule: FillRule::NonZero,
+        };
+        let mut r = LyonRasterizer::default();
+        assert!(r.tessellate(&p, 1.0).is_err());
     }
 }

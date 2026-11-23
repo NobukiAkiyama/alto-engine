@@ -5,7 +5,7 @@ use crate::text::BAKER_VERSION;
 use alto_core::text_bake::{BakeCommand, PLACEHOLDER_FONT, TextBake};
 use alto_core::{AssetId, NodeId};
 use alto_doc::Node;
-use alto_text::{TextContent, TextFrame, TextStyle, WritingMode};
+use alto_text::{TextContent, TextFrame, TextStyle, Underline, UnderlineKind, WritingMode};
 
 const JP: &[u8] = include_bytes!("../../../tests/fonts/AltoTestJP.otf");
 const LATIN: &[u8] = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
@@ -65,6 +65,84 @@ fn texts(latin: AssetId, jp: AssetId) -> Vec<(&'static str, TextContent)> {
             TextContent {
                 text: "A B".into(),
                 style: style(vec![], 24.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-hanging",
+            TextContent {
+                text: "あい。う".into(),
+                style: style(vec![jp], 40.0),
+                frame: TextFrame::Area {
+                    width: 100.0,
+                    height: 200.0,
+                },
+                hanging: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline",
+            TextContent {
+                text: "Underline".into(),
+                style: TextStyle {
+                    fonts: vec![latin],
+                    size: 37.5,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-underline-vertical",
+            TextContent {
+                text: "縦書き".into(),
+                style: TextStyle {
+                    fonts: vec![jp],
+                    size: 40.0,
+                    underline: Underline {
+                        kind: UnderlineKind::Solid,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-skew",
+            TextContent {
+                text: "Alto".into(),
+                style: TextStyle {
+                    italic_skew: 13.2,
+                    ..style(vec![latin], 37.5)
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-skew-vertical",
+            TextContent {
+                text: "吾A12回".into(),
+                style: TextStyle {
+                    italic_skew: -24.75,
+                    ..style(vec![latin, jp], 40.0)
+                },
+                writing_mode: WritingMode::VerticalRl,
+                ..Default::default()
+            },
+        ),
+        (
+            "text-v3-vertical-rtl",
+            TextContent {
+                text: "吾אבג猫".into(),
+                style: style(vec![latin, jp], 40.0),
+                writing_mode: WritingMode::VerticalRl,
                 ..Default::default()
             },
         ),
@@ -225,6 +303,124 @@ fn text_bake_roundtrip_and_validation() {
 }
 
 #[test]
+fn rule_bakes_one_shared_outline() {
+    let (mut e, d, latin, _) = document();
+    let content = TextContent {
+        text: "ABCD".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            underline: Underline {
+                kind: UnderlineKind::Solid,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let id = insert(&mut e, d, content);
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    let rules: Vec<_> = bake
+        .outlines
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.glyph == 0xFF02)
+        .collect();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        bake.glyphs
+            .iter()
+            .filter(|g| g.outline == rules[0].0 as u32)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn font_replacement_rebakes_locked_text_and_remains_undoable() {
+    let (mut engine, doc, latin, jp) = document();
+    let content = texts(latin, jp).remove(0).1;
+    let id = insert(&mut engine, doc, content.clone());
+    let before = bake_of(&engine, doc, id).unwrap();
+    let rev = engine.document(doc).unwrap().revision;
+    engine
+        .transact(
+            doc,
+            "lock",
+            vec![Op::SetProps {
+                id,
+                patch: alto_doc::PropPatch {
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            }],
+            rev,
+        )
+        .unwrap();
+    let checkpoint = engine.save_package(doc).unwrap();
+    let jp_record = engine.document(doc).unwrap().assets[&jp].clone();
+    let mut replacement = engine.document(doc).unwrap().assets[&latin].clone();
+    replacement.hash = jp_record.hash;
+    replacement.byte_len = jp_record.byte_len;
+    let ops = engine
+        .bake_text_ops(
+            doc,
+            vec![Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            }],
+        )
+        .unwrap();
+    let rev = engine.document(doc).unwrap().revision;
+    engine
+        .transact(doc, "font.replace", ops.clone(), rev)
+        .unwrap();
+    let after = bake_of(&engine, doc, id).unwrap();
+    assert_ne!(before, after);
+    let journal = engine
+        .journal_record(doc, JournalKind::Transact, "font.replace", &ops)
+        .unwrap();
+    let mut recovered = Engine::new();
+    let (recovered_doc, _) = recovered.open_package(&checkpoint).unwrap();
+    assert_eq!(
+        recovered.replay_record(recovered_doc, &journal).unwrap(),
+        Replayed::Applied
+    );
+    assert_eq!(bake_of(&recovered, recovered_doc, id), Some(after));
+    engine.undo(doc).unwrap();
+    assert_eq!(bake_of(&engine, doc, id), Some(before));
+    engine.redo(doc).unwrap();
+    assert_eq!(bake_of(&engine, doc, id), Some(after));
+    let rev = engine.document(doc).unwrap().revision;
+    assert!(
+        engine
+            .transact(
+                doc,
+                "text.edit",
+                vec![Op::SetText {
+                    id,
+                    content: Box::new(content),
+                    bake: None
+                }],
+                rev
+            )
+            .is_err()
+    );
+    assert!(
+        engine
+            .transact(
+                doc,
+                "fake.bake",
+                vec![Op::SetTextBake {
+                    id,
+                    bake: Some(before)
+                }],
+                rev
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn text_bake_follows_font_replacement_in_the_same_transaction() {
     let (mut e, d, latin, jp) = document();
     let content = texts(latin, jp).remove(0).1;
@@ -282,6 +478,35 @@ fn text_bake_keeps_a_received_bake() {
     )
     .unwrap();
     assert_eq!(bake_of(&e, d, id), Some(hash));
+}
+
+#[test]
+fn skew_zero_bakes_the_same_bytes() {
+    let (mut engine, doc, latin, _) = document();
+    let mut content = TextContent {
+        text: "Alto".into(),
+        style: TextStyle {
+            fonts: vec![latin],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let plain = insert(&mut engine, doc, content.clone());
+    content.style.italic_skew = -0.0;
+    let zero = insert(&mut engine, doc, content.clone());
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, zero));
+
+    content.style.italic_skew = 18.0;
+    content.spans.push(alto_text::TextSpan {
+        start: 0,
+        end: 4,
+        style: alto_text::StylePatch {
+            italic_skew: Some(0.0),
+            ..Default::default()
+        },
+    });
+    let reset = insert(&mut engine, doc, content);
+    assert_eq!(bake_of(&engine, doc, plain), bake_of(&engine, doc, reset));
 }
 
 #[test]
@@ -379,6 +604,130 @@ fn text_bake_skips_nodes_the_transaction_removes() {
     assert!(e.document(d).unwrap().node(id).is_err());
 }
 
+/// A group at the root, and a text layer inside it or beside it.
+fn grouped(e: &mut Engine, d: DocHandle, content: TextContent, inside: bool) -> (NodeId, NodeId) {
+    let group = Node::group("G");
+    let g = group.id;
+    let root = e.document(d).unwrap().root;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "group",
+        vec![Op::InsertNode {
+            node: group,
+            parent: root,
+            index: 0,
+        }],
+        rev,
+    )
+    .unwrap();
+    let id = insert(e, d, content);
+    if inside {
+        let rev = e.document(d).unwrap().revision;
+        e.transact(
+            d,
+            "into group",
+            vec![Op::MoveNode {
+                id,
+                parent: g,
+                index: 0,
+            }],
+            rev,
+        )
+        .unwrap();
+    }
+    (g, id)
+}
+
+#[test]
+fn text_bake_follows_a_layer_moved_out_of_a_removed_group() {
+    let (mut e, d, latin, jp) = document();
+    let (g, id) = grouped(&mut e, d, texts(latin, jp).remove(0).1, true);
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let (root, rev) = {
+        let doc = e.document(d).unwrap();
+        (doc.root, doc.revision)
+    };
+    e.transact(
+        d,
+        "replace, move out, delete group",
+        vec![
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+            Op::MoveNode {
+                id,
+                parent: root,
+                index: 0,
+            },
+            Op::RemoveNode { id: g },
+        ],
+        rev,
+    )
+    .unwrap();
+    let bake = decoded(&e, bake_of(&e, d, id).unwrap());
+    assert_eq!(
+        bake.fonts[0].hash.to_string(),
+        JP_BLAKE3,
+        "the bake is stale"
+    );
+}
+
+#[test]
+fn text_bake_skips_a_layer_moved_into_a_removed_group() {
+    let (mut e, d, latin, jp) = document();
+    let (g, id) = grouped(&mut e, d, texts(latin, jp).remove(0).1, false);
+    let replacement = latin_as_jp(&e, d, latin, jp);
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "replace, move in, delete group",
+        vec![
+            Op::SetAsset {
+                id: latin,
+                record: Some(replacement),
+            },
+            Op::MoveNode {
+                id,
+                parent: g,
+                index: 0,
+            },
+            Op::RemoveNode { id: g },
+        ],
+        rev,
+    )
+    .expect("no re-bake is added for a removed node");
+    assert!(e.document(d).unwrap().node(id).is_err());
+}
+
+#[test]
+fn a_restored_subtree_with_cyclic_children_fails_instead_of_hanging() {
+    let (mut e, d, _, _) = document();
+    let root = e.document(d).unwrap().root;
+    let (mut a, mut b, mut c) = (Node::group("A"), Node::group("B"), Node::group("C"));
+    let set = |n: &mut Node, parent, kids: Vec<NodeId>| {
+        n.parent = Some(parent);
+        if let NodeKind::Group { children, .. } = &mut n.kind {
+            *children = kids;
+        }
+    };
+    let (ai, bi, ci) = (a.id, b.id, c.id);
+    set(&mut a, ci, vec![bi]);
+    set(&mut b, ai, vec![ai]);
+    set(&mut c, root, vec![]);
+    let rev = e.document(d).unwrap().revision;
+    let ops = vec![
+        Op::RestoreSubtree {
+            nodes: vec![a, b, c],
+            parent: root,
+            index: 0,
+        },
+        Op::RemoveNode { id: ai },
+    ];
+    assert!(e.transact(d, "cycle", ops, rev).is_err());
+}
+
 #[test]
 fn text_bake_on_restore() {
     let (mut e, d, latin, jp) = document();
@@ -422,4 +771,204 @@ fn render_scenes_carry_the_bake() {
     };
     assert_eq!(bake.hash, hash);
     assert_eq!(*bake.bytes, e.blobs[&hash]);
+}
+
+#[test]
+fn new_format_document_saves_and_reopens() {
+    let (mut e, d, _, jp) = document();
+    let id = insert(
+        &mut e,
+        d,
+        TextContent {
+            text: "あい。う".into(),
+            style: TextStyle {
+                fonts: vec![jp],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    e.commit(d, "before hanging", 1, None, false).unwrap();
+    let mut content = match &e.document(d).unwrap().node(id).unwrap().kind {
+        NodeKind::Text { content, .. } => content.clone(),
+        _ => unreachable!(),
+    };
+    content.hanging = true;
+    content.frame = TextFrame::Area {
+        width: 80.0,
+        height: 200.0,
+    };
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "text.edit",
+        vec![Op::SetText {
+            id,
+            content,
+            bake: None,
+        }],
+        rev,
+    )
+    .unwrap();
+    e.commit(d, "hanging", 2, None, false).unwrap();
+    let old_objects = e.version_only_objects(d).unwrap();
+    assert!(!old_objects.is_empty());
+    let check_manifest = |entries: &std::collections::BTreeMap<String, Vec<u8>>, format| {
+        let m: alto_store::Manifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+        assert_eq!(m.format, format);
+        assert_eq!(m.document_format, 6);
+    };
+    let mut fresh = Engine::new();
+    let bytes = e.save_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&bytes).unwrap(), 2);
+    let package = fresh.open_package(&bytes).unwrap();
+    let folder = e.folder_entries(d).unwrap();
+    check_manifest(&folder, 2);
+    let plan = e.prepare_gc(d, &folder, false).unwrap();
+    check_manifest(&plan.entries, 2);
+    let folder = fresh.open_entries(folder).unwrap();
+    let thin = e.save_thin_package(d).unwrap();
+    check_manifest(&alto_store::read_entries(&thin).unwrap(), 3);
+    let mut thin_engine = Engine::new();
+    let thin = thin_engine.open_package(&thin).unwrap();
+    assert_eq!(thin_engine.external_objects(thin.0).unwrap(), old_objects);
+    for (reopened, (h, warnings)) in [(&fresh, package), (&fresh, folder), (&thin_engine, thin)] {
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reopened.document(h).unwrap().meta.format_version, 6);
+        assert_eq!(reopened.text_info(h, id).unwrap().lines[0].end, 3);
+        assert_eq!(
+            reopened.text_bake(h, id).unwrap(),
+            e.text_bake(d, id).unwrap()
+        );
+        assert!(!reopened.version_status(h).unwrap().changed);
+    }
+}
+
+/// A two-face collection: face 0 is the Latin test font, face 1 the Japanese one.
+fn collection() -> Vec<u8> {
+    let faces = [LATIN, JP];
+    let mut offsets = vec![];
+    let mut at = 12 + 4 * faces.len();
+    for face in faces {
+        offsets.push(at);
+        at += face.len().div_ceil(4) * 4;
+    }
+    let mut out = b"ttcf\0\x01\0\0".to_vec();
+    out.extend((faces.len() as u32).to_be_bytes());
+    for o in &offsets {
+        out.extend((*o as u32).to_be_bytes());
+    }
+    for (face, base) in faces.iter().zip(&offsets) {
+        let mut sfnt = face.to_vec();
+        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        for i in 0..tables {
+            let p = 12 + i * 16 + 8;
+            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + *base as u32;
+            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        sfnt.resize(face.len().div_ceil(4) * 4, 0);
+        out.extend(sfnt);
+    }
+    out
+}
+
+fn info_json(e: &Engine, d: DocHandle, id: NodeId) -> String {
+    serde_json::to_string(&e.text_info(d, id).unwrap()).unwrap()
+}
+
+#[test]
+fn switching_the_face_of_a_collection_refreshes_the_layout() {
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(1024, 768)).unwrap();
+    let font = e.import_font(collection(), 0).unwrap().record;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "font",
+        vec![Op::SetAsset {
+            id: font.id,
+            record: Some(font.clone()),
+        }],
+        rev,
+    )
+    .unwrap();
+    let id = insert(
+        &mut e,
+        d,
+        TextContent {
+            text: "AAAA".into(),
+            style: TextStyle {
+                fonts: vec![font.id],
+                size: 40.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let face0 = info_json(&e, d, id);
+    let mut second = font.clone();
+    let alto_doc::AssetKind::Font { face_index, .. } = &mut second.kind else {
+        panic!()
+    };
+    *face_index = 1;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "face",
+        vec![Op::SetAsset {
+            id: font.id,
+            record: Some(second),
+        }],
+        rev,
+    )
+    .unwrap();
+    // A fresh engine lays the same document out from scratch.
+    let mut fresh = Engine::new();
+    fresh.import_font(collection(), 0).unwrap();
+    let r = fresh.open_snapshot(&e.snapshot(d).unwrap()).unwrap();
+    let face1 = info_json(&fresh, r, id);
+    assert_ne!(
+        face0, face1,
+        "the faces lay out alike; the test needs them to differ"
+    );
+    assert_eq!(info_json(&e, d, id), face1);
+    // The glyph outlines follow the face too, not only the layout.
+    let paths = |e: &Engine, d: DocHandle| {
+        let doc = e.document(d).unwrap();
+        let NodeKind::Text { content, .. } = &doc.node(id).unwrap().kind else {
+            panic!()
+        };
+        format!("{:?}", e.text_entry(doc, content).paths)
+    };
+    assert_eq!(paths(&e, d), paths(&fresh, r));
+}
+
+#[test]
+fn a_layout_made_before_the_font_arrives_is_not_kept() {
+    let (mut e, d, latin, jp) = document();
+    let content = texts(latin, jp).remove(0).1;
+    let id = insert(&mut e, d, content.clone());
+    let mut fresh = Engine::new();
+    let r = fresh.open_snapshot(&e.snapshot(d).unwrap()).unwrap();
+    let missing = info_json(&fresh, r, id);
+    fresh.import_font(LATIN.to_vec(), 0).unwrap();
+    fresh.import_font(JP.to_vec(), 0).unwrap();
+    assert_ne!(missing, info_json(&e, d, id));
+    assert_eq!(info_json(&fresh, r, id), info_json(&e, d, id));
+    // An edit after the bytes arrive bakes with the font, not a placeholder.
+    let rev = fresh.document(r).unwrap().revision;
+    fresh
+        .transact(
+            r,
+            "edit",
+            vec![Op::SetText {
+                id,
+                content: Box::new(content),
+                bake: None,
+            }],
+            rev,
+        )
+        .unwrap();
+    let bake = decoded(&fresh, bake_of(&fresh, r, id).unwrap());
+    assert_eq!(bake.fonts[0].hash.to_string(), LATIN_BLAKE3);
 }

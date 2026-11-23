@@ -1,7 +1,22 @@
 //! Creating the renderer on a device, and its settings and lifecycle.
 use super::*;
 
+fn checked_surface_extent(max: u32, width: u32, height: u32) -> Result<(u32, u32)> {
+    let width = width.max(1);
+    let height = height.max(1);
+    if width > max || height > max {
+        return Err(RenderError::GpuUnsupported(format!(
+            "surface extent {width}x{height} exceeds device limit {max}"
+        )));
+    }
+    Ok((width, height))
+}
+
 impl Renderer {
+    fn surface_extent(&self, width: u32, height: u32) -> Result<(u32, u32)> {
+        checked_surface_extent(self.device.limits().max_texture_dimension_2d, width, height)
+    }
+
     pub fn take_gpu_wait_requested(&mut self) -> bool {
         let requested = std::mem::take(&mut self.gpu_wait_requested);
         if requested {
@@ -50,13 +65,19 @@ impl Renderer {
             max_texture_array_layers: slots.max(display_layers),
             ..Default::default()
         };
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features,
                 required_limits: limits,
                 ..Default::default()
             })
             .await
             .map_err(|e| RenderError::Internal(e.to_string()))?;
+        let gpu_timestamp_period = required_features
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| queue.get_timestamp_period())
+            .filter(|period| period.is_finite() && *period > 0.0);
         let governor = Governor::new(
             budget_mb as u64 * 1048576,
             readback::capacity(budget_mb as u64 * 1048576),
@@ -64,8 +85,13 @@ impl Renderer {
         let readback = readback::Pool::new(&device, &governor).await?;
         let config = match &surface {
             Some(surface) => {
+                let (width, height) = checked_surface_extent(
+                    device.limits().max_texture_dimension_2d,
+                    width,
+                    height,
+                )?;
                 let mut config = surface
-                    .get_default_config(&adapter, width.max(1), height.max(1))
+                    .get_default_config(&adapter, width, height)
                     .ok_or(RenderError::GpuUnsupported("no surface format".into()))?;
                 if let Some(f) = surface
                     .get_capabilities(&adapter)
@@ -268,6 +294,7 @@ impl Renderer {
             lost,
             lost_detail,
             frame: 0,
+            next_preview_id: 0,
             stroke: None,
             adapter_name: adapter.get_info().name,
             budget_bytes: budget_mb as u64 * 1048576,
@@ -283,20 +310,24 @@ impl Renderer {
             presentation: Default::default(),
             clock: || 0.0,
             profile: RenderProfile::default(),
+            gpu_timestamp_period,
+            gpu_timestamps: None,
             uniform_pyramid: true,
             uniform: None,
         })
     }
-    pub fn resize(&mut self, w: u32, h: u32) {
-        if self.config.width != w.max(1) || self.config.height != h.max(1) {
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<()> {
+        let (width, height) = self.surface_extent(w, h)?;
+        if self.config.width != width || self.config.height != height {
             self.cancel_prefetch();
             self.presentation.resized();
-            self.config.width = w.max(1);
-            self.config.height = h.max(1);
+            self.config.width = width;
+            self.config.height = height;
             if let Some(surface) = &self.surface {
                 surface.configure(&self.device, &self.config);
             }
         }
+        Ok(())
     }
     pub fn vector_stats(&self) -> (u64, u64, usize, u64) {
         self.vector.as_ref().map_or((0, 0, 0, 0), |v| {
@@ -364,7 +395,7 @@ impl Renderer {
         }
         let expected = 256 * 256 * object.format.bytes_per_pixel();
         if pixels.len() != expected {
-            d.failed = Some(hash);
+            d.failed.insert(hash);
             return Ok(());
         }
         // Inputs the waiting jobs already have must stay until those jobs compose.
@@ -418,7 +449,7 @@ impl Renderer {
     pub fn decode_failed(&mut self, hash: ContentHash) {
         if let Some(d) = self.decoder.as_mut() {
             d.in_flight.remove(&hash);
-            d.failed = Some(hash);
+            d.failed.insert(hash);
         }
     }
     /// Inputs decoded on other threads so far.

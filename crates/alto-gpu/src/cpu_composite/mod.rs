@@ -36,9 +36,11 @@ use alto_scene::{
 use alto_vector::{ClipPath, FillRule, PathData, VectorMask};
 use bytemuck::{Pod, Zeroable};
 use std::path::PathBuf;
+mod backdrop_tests;
 mod cases;
 mod color_adjust;
 mod composite;
+mod effect_reference;
 mod gpu;
 mod gpu_parity_tests;
 mod known_value_tests;

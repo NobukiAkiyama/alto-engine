@@ -1,9 +1,13 @@
 #![cfg(target_arch = "wasm32")]
+mod tiff;
+
 use alto_core::{Affine2, AssetId, ContentHash, FixedAffine, NodeId, PixelFormat, TileKey};
 use alto_doc::{AssetKind, AssetRecord, DocumentMeta, NodeKind, Op, TileChange};
 use alto_engine::{DocHandle, Engine, JournalKind};
 use alto_gpu::renderer::{FinishControl, Renderer, Viewport};
-use alto_raster::{BrushConfig, StrokeSample, StrokeSampler, TileData, TileMap};
+use alto_raster::{
+    BrushConfig, BrushImage, BrushPattern, StrokeSample, StrokeSampler, TileData, TileMap,
+};
 use alto_scene::RenderScene;
 use serde::Deserialize;
 use serde_json::json;
@@ -126,6 +130,35 @@ fn node_view(node: &alto_doc::Node) -> Result<serde_json::Value, JsValue> {
 fn error(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
+fn brush_sampler(config: &str) -> Result<StrokeSampler, JsValue> {
+    let config: BrushConfig = serde_json::from_str(config)
+        .map_err(|e| error(format_args!("INVALID_ARGUMENT: brush config: {e}")))?;
+    StrokeSampler::new(config).map_err(error)
+}
+fn brush_image(width: u32, height: u32, pixels: &[u8]) -> Result<Option<BrushImage>, JsValue> {
+    if width == 0 && height == 0 && pixels.is_empty() {
+        return Ok(None);
+    }
+    BrushImage::new(width, height, pixels)
+        .map(Some)
+        .map_err(error)
+}
+fn brush_pattern(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    scale: f32,
+    depth: f32,
+) -> Result<Option<BrushPattern>, JsValue> {
+    if width == 0 && height == 0 && pixels.is_empty() {
+        return Ok(None);
+    }
+    let image = BrushImage::new(width, height, pixels)
+        .map_err(|_| error("INVALID_ARGUMENT: brush texture image"))?;
+    BrushPattern::new(image, scale, depth)
+        .map(Some)
+        .map_err(error)
+}
 fn clock() -> f64 {
     js_sys::global()
         .unchecked_into::<web_sys::WorkerGlobalScope>()
@@ -161,7 +194,7 @@ pub struct Runtime {
     budget: u32,
     warnings: Vec<alto_engine::Warning>,
     /// Objects already in the OPFS recovery store. Checkpoints skip their bytes.
-    /// The store deletes objects only at startup, so this set only grows.
+    /// Recovery and pack collection can invalidate entries in this set.
     stored_objects: std::collections::BTreeSet<ContentHash>,
     /// The Worker decodes job inputs in its decode pool. Kept across GPU recovery.
     decode_workers: bool,
@@ -170,7 +203,21 @@ pub struct Runtime {
 impl Runtime {
     #[wasm_bindgen(js_name=protocolVersion)]
     pub fn protocol_version(&self) -> u32 {
-        8
+        18
+    }
+    /// A cheap token that detects both document edits and live render changes.
+    #[wasm_bindgen(js_name=exportSceneVersion)]
+    pub fn export_scene_version(&self) -> Result<String, JsValue> {
+        let revision = self.engine.document(self.doc).map_err(error)?.revision;
+        let display = self.renderer.display_report();
+        Ok(format!(
+            "{revision}:{}:{}",
+            display.generation, display.device_epoch
+        ))
+    }
+    #[wasm_bindgen(js_name=setMaxUndo)]
+    pub fn set_max_undo(&mut self, steps: u32) -> Result<(), JsValue> {
+        self.engine.set_max_undo(steps as usize).map_err(error)
     }
     #[wasm_bindgen(js_name=create)]
     pub async fn create(canvas: web_sys::OffscreenCanvas, budget: u32) -> Result<Runtime, JsValue> {
@@ -223,7 +270,7 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: canvas must be 1..65536 pixels"));
         }
         self.renderer.cancel_stroke();
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let meta = match render_version {
             None | Some(3) => DocumentMeta::srgb_u8(w, h),
             _ => return Err(error("INVALID_ARGUMENT: render version must be 3")),
@@ -390,10 +437,11 @@ impl Runtime {
         self.refresh()?;
         self.patch_view(&edited)
     }
-    pub fn resize(&mut self, w: u32, h: u32) {
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<(), JsValue> {
+        self.renderer.resize(w, h).map_err(error)?;
         self.canvas.set_width(w.max(1));
         self.canvas.set_height(h.max(1));
-        self.renderer.resize(w, h);
+        Ok(())
     }
     #[wasm_bindgen(js_name=setViewVersion)]
     pub fn set_view_version(&mut self, version: u32) {
@@ -636,7 +684,21 @@ impl Runtime {
     pub fn set_profiling(&mut self, enabled: bool) {
         self.renderer.set_profiling(enabled);
     }
+    #[wasm_bindgen(js_name=setGpuTimestamps)]
+    pub fn set_gpu_timestamps(&mut self, enabled: bool) {
+        self.renderer.set_gpu_timestamps(enabled);
+    }
+    #[wasm_bindgen(js_name=takeGpuTimestamps)]
+    pub fn take_gpu_timestamps(&mut self) -> Result<String, JsValue> {
+        let samples = self.renderer.take_gpu_timestamps().map(|samples| {
+            samples.into_iter().map(|sample| {
+                json!({"x": sample.x, "y": sample.y, "level": sample.level, "ns": sample.ns})
+            }).collect::<Vec<_>>()
+        });
+        serde_json::to_string(&samples).map_err(error)
+    }
     #[wasm_bindgen(js_name=beginBrush)]
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_brush(
         &mut self,
         layer: &str,
@@ -644,6 +706,14 @@ impl Runtime {
         color: &[f32],
         erase: bool,
         mask: bool,
+        tip_width: u32,
+        tip_height: u32,
+        tip_pixels: &[u8],
+        pattern_width: u32,
+        pattern_height: u32,
+        pattern_pixels: &[u8],
+        pattern_scale: f32,
+        pattern_depth: f32,
     ) -> Result<(), JsValue> {
         if self.sampler.is_some()
             || color.len() != 4
@@ -652,19 +722,16 @@ impl Runtime {
             return Err(error("INVALID_ARGUMENT: brush state/color"));
         }
         let id: NodeId = serde_json::from_str(&format!("\"{layer}\"")).map_err(error)?;
-        let mut cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
-        if ![cfg.size, cfg.hardness, cfg.spacing, cfg.opacity, cfg.flow]
-            .iter()
-            .all(|v| v.is_finite())
-            || cfg.size <= 0.0
-            || cfg.size > 2048.0
-        {
-            return Err(error("INVALID_ARGUMENT: brush size"));
-        }
-        cfg.hardness = cfg.hardness.clamp(0.0, 0.999);
-        cfg.spacing = cfg.spacing.clamp(0.01, 1.0);
-        cfg.flow = cfg.flow.clamp(0.0, 1.0);
-        cfg.opacity = cfg.opacity.clamp(0.0, 1.0);
+        let tip = brush_image(tip_width, tip_height, tip_pixels)?;
+        let pattern = brush_pattern(
+            pattern_width,
+            pattern_height,
+            pattern_pixels,
+            pattern_scale,
+            pattern_depth,
+        )?;
+        let sampler = brush_sampler(config)?;
+        let cfg = sampler.config();
         let doc = self.engine.document(self.doc).map_err(error)?;
         if (!mask && !matches!(doc.node(id).map_err(error)?.kind, NodeKind::Raster { .. }))
             || (mask && doc.node(id).map_err(error)?.props.mask.is_none())
@@ -742,9 +809,11 @@ impl Runtime {
                 mask,
                 world,
                 fixed_world,
+                tip,
+                pattern,
             )
             .map_err(error)?;
-        self.sampler = Some(StrokeSampler::new(cfg));
+        self.sampler = Some(sampler);
         self.layer = Some(id);
         Ok(())
     }
@@ -806,7 +875,7 @@ impl Runtime {
             .begin_finish_stroke(control.clone())
             .map_err(error)?;
         let mut changes = vec![];
-        let staged = self.engine.begin_tile_stage();
+        let staged = self.engine.begin_tile_stage_for(self.doc);
         let result = async {
             while let Some(batch) = reader.next_batch().await? {
                 for (key, before, tile) in batch {
@@ -943,7 +1012,10 @@ impl Runtime {
             return Err(error("CONFLICT: finish tool first"));
         }
         let v = serde_json::from_str(spec).map_err(error)?;
-        let ops = self.engine.selection_ops(self.doc, &v).map_err(error)?;
+        let ops = self
+            .engine
+            .selection_ops_with_path(self.doc, &v, &selection::rasterize_path)
+            .map_err(error)?;
         self.command("selection.set", ops)
     }
     #[wasm_bindgen(js_name=selectionOutline)]
@@ -1091,19 +1163,33 @@ impl Runtime {
         .map_err(error)
     }
     /// Only called by the journal worker after verifying the checkpoint digest.
+    /// With `timed`, returns the verify/restore/register milliseconds in `stages`.
     #[wasm_bindgen(js_name=openRecoveryPackage)]
-    pub fn open_recovery_package(&mut self, bytes: &[u8], opaque: &str) -> Result<String, JsValue> {
+    pub fn open_recovery_package(
+        &mut self,
+        bytes: &[u8],
+        opaque: &str,
+        timed: Option<bool>,
+    ) -> Result<String, JsValue> {
         let opaque: std::collections::BTreeSet<ContentHash> =
             serde_json::from_str(opaque).map_err(error)?;
-        let mut engine = Engine::new();
-        let (doc, warnings) = engine
-            .open_recovery_package(bytes, &opaque)
+        let mut engine = self.fresh_engine()?;
+        let timed = timed.unwrap_or(false);
+        let clock = &clock as &dyn Fn() -> f64;
+        let (doc, warnings, stages) = engine
+            .open_recovery_package_with_clock(bytes, &opaque, timed.then_some(clock))
             .map_err(error)?;
-        self.install(engine, doc, warnings)
+        if timed {
+            // The recovery caller reads only the stages; skip building the full view.
+            self.adopt_engine(engine, doc, warnings)?;
+            serde_json::to_string(&json!({ "stages": stages })).map_err(error)
+        } else {
+            self.install(engine, doc, warnings)
+        }
     }
     #[wasm_bindgen(js_name=openPackage)]
     pub fn open_package(&mut self, bytes: &[u8]) -> Result<String, JsValue> {
-        let mut engine = Engine::new();
+        let mut engine = self.fresh_engine()?;
         let (doc, warnings) = engine.open_package(bytes).map_err(error)?;
         self.install(engine, doc, warnings)
     }
@@ -1261,12 +1347,29 @@ impl Runtime {
     }
 }
 impl Runtime {
+    pub(crate) fn fresh_engine(&self) -> Result<Engine, JsValue> {
+        let mut engine = Engine::new();
+        engine.set_max_undo(self.engine.max_undo()).map_err(error)?;
+        Ok(engine)
+    }
+
     pub(crate) fn install(
         &mut self,
         engine: Engine,
         doc: DocHandle,
         warnings: Vec<alto_engine::Warning>,
     ) -> Result<String, JsValue> {
+        self.adopt_engine(engine, doc, warnings)?;
+        self.view()
+    }
+    /// Takes the opened engine and document into the Runtime without building the
+    /// view JSON. Timed recovery returns only its stages, so the view is wasted there.
+    pub(crate) fn adopt_engine(
+        &mut self,
+        engine: Engine,
+        doc: DocHandle,
+        warnings: Vec<alto_engine::Warning>,
+    ) -> Result<(), JsValue> {
         self.renderer.cancel_stroke();
         self.engine = engine;
         self.doc = doc;
@@ -1278,7 +1381,7 @@ impl Runtime {
         let meta = &self.engine.document(doc).map_err(error)?.meta;
         self.viewport.center = [meta.width as f64 / 2.0, meta.height as f64 / 2.0];
         self.reload()?;
-        self.view()
+        Ok(())
     }
     /// Identity of what a save writes: the document content and the version head.
     pub(crate) fn state_hash(&self) -> Result<ContentHash, JsValue> {
@@ -1377,17 +1480,33 @@ impl Runtime {
 #[wasm_bindgen]
 impl Runtime {
     #[wasm_bindgen(js_name=cpuBrushReference)]
+    #[allow(clippy::too_many_arguments)]
     pub fn cpu_brush_reference(
         &self,
         config: &str,
         color: &[f32],
         samples: &[f32],
+        tip_width: u32,
+        tip_height: u32,
+        tip_pixels: &[u8],
+        pattern_width: u32,
+        pattern_height: u32,
+        pattern_pixels: &[u8],
+        pattern_scale: f32,
+        pattern_depth: f32,
     ) -> Result<Vec<u8>, JsValue> {
-        let cfg: BrushConfig = serde_json::from_str(config).map_err(error)?;
         if color.len() != 4 || !samples.len().is_multiple_of(6) {
             return Err(error("INVALID_ARGUMENT: reference input"));
         }
-        let mut s = StrokeSampler::new(cfg);
+        let tip = brush_image(tip_width, tip_height, tip_pixels)?;
+        let pattern = brush_pattern(
+            pattern_width,
+            pattern_height,
+            pattern_pixels,
+            pattern_scale,
+            pattern_depth,
+        )?;
+        let mut s = brush_sampler(config)?;
         let mut dabs = vec![];
         for p in samples.as_chunks::<6>().0 {
             dabs.extend(s.input(StrokeSample {
@@ -1401,9 +1520,11 @@ impl Runtime {
             &vec![0; 262144],
             [0.0, 0.0],
             &dabs,
-            cfg,
+            s.config().clone(),
             [color[0], color[1], color[2], color[3]],
             false,
+            tip.as_ref(),
+            pattern.as_ref(),
         );
         for p in out.as_chunks_mut::<4>().0 {
             for i in 0..3 {
@@ -1415,6 +1536,7 @@ impl Runtime {
 }
 
 mod image_versions;
+mod selection;
 mod text;
 #[cfg(feature = "vello-probe")]
 mod vector_probe;

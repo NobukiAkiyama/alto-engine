@@ -19,22 +19,30 @@ pub(super) fn v3_test_try_render(
     store: &alto_raster::ObjectStore,
     key: (i32, i32, i32),
 ) -> Option<Result<Vec<u8>, crate::RenderError>> {
+    v3_test_try_render_with_budget(document, store, key, 256)
+}
+pub(super) fn v3_test_try_render_with_budget(
+    document: &RenderScene,
+    store: &alto_raster::ObjectStore,
+    key: (i32, i32, i32),
+    budget_mb: u32,
+) -> Option<Result<Vec<u8>, crate::RenderError>> {
     let _gpu_lock = GPU_RENDERER_TEST_LOCK.lock().unwrap();
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12;
     let instance = wgpu::Instance::new(descriptor);
-    let mut renderer = match pollster::block_on(crate::renderer::Renderer::headless(&instance, 256))
-    {
-        Ok(renderer) => renderer,
-        Err(err)
-            if !cfg!(target_os = "macos")
-                && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
-        {
-            eprintln!("v3 vector GPU parity skipped: {err}");
-            return None;
-        }
-        Err(err) => panic!("v3 vector GPU parity could not start: {err}"),
-    };
+    let mut renderer =
+        match pollster::block_on(crate::renderer::Renderer::headless(&instance, budget_mb)) {
+            Ok(renderer) => renderer,
+            Err(err @ crate::RenderError::GpuUnsupported(_))
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("v3 vector GPU parity skipped: {err}");
+                return None;
+            }
+            Err(err) => panic!("v3 vector GPU parity could not start: {err}"),
+        };
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let poller = {
         let (device, done) = (renderer.device.clone(), done.clone());
@@ -122,6 +130,7 @@ pub(super) fn test_stroke(cap: alto_vector::LineCap) -> alto_vector::StyledPath 
             cap,
             join: alto_vector::LineJoin::Miter,
             miter_limit: 4.0,
+            dash: None,
         }),
         fill_rule: FillRule::NonZero,
     }
@@ -193,6 +202,7 @@ fn v3_stroke_paints_after_the_fill() {
         cap: alto_vector::LineCap::Butt,
         join: alto_vector::LineJoin::Miter,
         miter_limit: 4.0,
+        dash: None,
     });
     let mut document = scene(
         RContent::Mesh(std::sync::Arc::new(vec![path])),
@@ -252,6 +262,49 @@ fn v3_curved_stroke_matches_the_integer_reference() {
         return;
     };
     assert_eq!(image, expected);
+}
+
+#[test]
+fn v3_vector_dashed_stroke_matches_the_integer_reference() {
+    let mut path = test_stroke(alto_vector::LineCap::Butt);
+    let stroke = path.stroke.as_mut().unwrap();
+    stroke.dash = Some(alto_vector::Dash {
+        pattern: vec![10.0, 5.0],
+        offset: 0.0,
+    });
+    let color = crate::raster_q8::color_q14(stroke.color).unwrap();
+    for (transform, on, off) in [
+        ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], (45, 64), (52, 64)),
+        ([0.0, 1.5, -2.0, 0.0, 192.0, 0.0], (64, 67), (64, 78)),
+    ] {
+        let world = alto_core::FixedAffine::from_affine(alto_core::Affine2(transform)).unwrap();
+        let coverage = crate::stroke_q8::rasterize_stroke(
+            &path.data,
+            path.stroke.as_ref().unwrap(),
+            world,
+            0,
+            [0, 0, 256, 256],
+        )
+        .unwrap();
+        assert_eq!(coverage[on.1 * 256 + on.0], 255);
+        assert_eq!(coverage[off.1 * 256 + off.0], 0);
+        let expected: Vec<u8> = coverage
+            .into_iter()
+            .flat_map(|k| {
+                crate::raster_q8::source_over_q14([0; 4], color, k)
+                    .map(|v| ((u32::from(v) * 255 + 8192) >> 14) as u8)
+            })
+            .collect();
+        let mut document = scene(
+            RContent::Mesh(std::sync::Arc::new(vec![path.clone()])),
+            RFeatures::default(),
+        );
+        document.render_version = alto_core::RENDER_VERSION_EXACT;
+        document.nodes[0].transform = transform;
+        if let Some(image) = v3_vector_test_render(&document) {
+            assert_eq!(image, expected);
+        }
+    }
 }
 
 #[test]
@@ -718,6 +771,92 @@ fn v3_clipped_adjustment_keeps_base_coverage() {
 }
 
 #[test]
+fn adjacent_backdrop_blurs_match_a_single_effect_stack() {
+    let blur = REffectKind::GaussianBlur {
+        radius: 1.0,
+        radius_q8: 256,
+    };
+    let (mut document, mut store) =
+        v3_square_under(v3_adjustment(blur.clone(), RFeatures::default()));
+    for _ in 1..12 {
+        let index = document.nodes.len();
+        document
+            .nodes
+            .push(v3_adjustment(blur.clone(), RFeatures::default()));
+        let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+            unreachable!()
+        };
+        children.push(index);
+    }
+    for tile in [(0, 0, 0), (-4, 5, 5)] {
+        if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+            actual.expect("twelve backdrop blurs should fit the command budget");
+        }
+    }
+    // Invisible siblings between the adjustments leave the backdrop unchanged,
+    // so both documents must render the same pixels.
+    let mut reference = document.clone();
+    let RContent::Group { children, .. } = &mut document.nodes[0].content else {
+        unreachable!()
+    };
+    children.truncate(4);
+    reference.nodes = document.nodes.clone();
+    let mut indices = vec![1];
+    for index in 2..=4 {
+        if index > 2 {
+            let mut invisible = v3_adjustment(blur.clone(), RFeatures::default());
+            invisible.visible = false;
+            indices.push(reference.nodes.len());
+            reference.nodes.push(invisible);
+        }
+        indices.push(index);
+    }
+    let RContent::Group { children, .. } = &mut reference.nodes[0].content else {
+        unreachable!()
+    };
+    *children = indices;
+    let mask_hash = store.insert_tile(
+        &alto_raster::TileData::new(alto_core::PixelFormat::R8, vec![128; 256 * 256]).unwrap(),
+    );
+    let mask = alto_scene::RMask {
+        tiles: vec![crate::RenderTile {
+            key: alto_core::TileKey { tx: 0, ty: 0 },
+            hash: mask_hash,
+        }],
+        linked: true,
+        transform: super::ident(),
+    };
+    for node in [&mut document.nodes, &mut reference.nodes] {
+        for (index, radius) in [(2, 1.0), (3, 2.0), (4, 4.0)] {
+            let RContent::Adjustment(effect) = &mut node[index].content else {
+                unreachable!()
+            };
+            effect.kind = REffectKind::GaussianBlur {
+                radius,
+                radius_q8: (radius * 256.0) as u32,
+            };
+            effect.selection = Some(mask.clone());
+        }
+    }
+    for version in [1, 2, 3] {
+        document.render_version = version;
+        reference.render_version = version;
+        for tile in [(0, 0, 0), (-4, 5, 5)] {
+            if let Some(actual) = v3_test_try_render(&document, &store, tile) {
+                let actual = actual.unwrap();
+                let expected = v3_test_try_render(&reference, &store, tile)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    actual == expected,
+                    "render version {version}, tile {tile:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn v3_backdrop_blur_matches_the_layer_blur() {
     let blur = REffectKind::GaussianBlur {
         radius: 8.0,
@@ -822,6 +961,7 @@ fn v3_remaining_adjustment_effects_render_on_metal() {
         (
             REffectKind::Curves {
                 points: vec![(0.0, 1.0), (1.0, 0.0)],
+                channels: [true; 3],
             },
             [255, 0, 0, 255],
             [0, 255, 255, 255],
@@ -891,6 +1031,44 @@ fn v3_remaining_adjustment_effects_render_on_metal() {
                 );
             }
             assert_eq!(&image[(50 * 256 + 50) * 4..][..4], &[0, 0, 0, 0]);
+        }
+    }
+}
+
+#[test]
+fn v3_curves_map_only_their_channel_on_metal() {
+    let invert = |channels| REffectKind::Curves {
+        points: vec![(0.0, 1.0), (1.0, 0.0)],
+        channels,
+    };
+    let color = [255, 128, 0, 255];
+    for (channels, expected) in [
+        ([true, false, false], [0, 128, 0, 255]),
+        ([false, true, false], [255, 127, 0, 255]),
+        ([false, false, true], [255, 128, 255, 255]),
+        ([true; 3], [0, 127, 255, 255]),
+    ] {
+        for adjustment in [true, false] {
+            let kind = invert(channels);
+            let top = if adjustment {
+                v3_adjustment(kind.clone(), RFeatures::default())
+            } else {
+                scene(RContent::Tiles(Vec::new()), RFeatures::default())
+                    .nodes
+                    .remove(0)
+            };
+            let (mut document, store) = v3_colored_square_under(top, color);
+            if !adjustment {
+                document.nodes[1].features.effects.push(REffect {
+                    kind,
+                    selection: None,
+                });
+            }
+            let Some(image) = v3_test_render_with(&document, &store, (0, 0, 0)) else {
+                return;
+            };
+            let pixel: [u8; 4] = image[(100 * 256 + 100) * 4..][..4].try_into().unwrap();
+            assert_eq!(pixel, expected, "{channels:?} adjustment={adjustment}");
         }
     }
 }

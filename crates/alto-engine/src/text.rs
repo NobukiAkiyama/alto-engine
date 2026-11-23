@@ -30,6 +30,9 @@ pub struct TextCache {
     outlines: OutlineCache,
 }
 
+const FONT_CACHE_FACES: usize = 64;
+const FONT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportedFont {
     pub record: AssetRecord,
@@ -89,7 +92,9 @@ fn apply(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
 /// The baker's version, recorded in each bake (diagnostic only). Bump it, update
 /// `tests/parity/text-bake.txt` and say why when the same input bakes to other
 /// bytes (a dependency version, a rounding change).
-pub const BAKER_VERSION: u16 = 1;
+/// Version 2 orders sideways RTL runs in vertical text.
+pub const BAKER_VERSION: u16 = 2;
+const SYNTH_RULE: u16 = 0xFF02;
 /// The vector schema's per-path command limit (`placed` in `alto-text`).
 const BAKE_CHUNK: usize = 4000;
 /// Transformed control-point bounds beyond this are skipped (`placed`).
@@ -272,6 +277,48 @@ impl Engine {
                 color: g.color.map(text_color_q14),
             });
         }
+        if !layout.rules.is_empty() {
+            use alto_core::text_bake::BakeCommand as B;
+            let outline = bake.outlines.len() as u32;
+            bake.outlines.push(BakeOutline {
+                font: alto_core::text_bake::PLACEHOLDER_FONT,
+                glyph: SYNTH_RULE,
+                upem: 1000,
+                commands: vec![
+                    B::Move([0, 0]),
+                    B::Line([64_000, 0]),
+                    B::Line([64_000, 64_000]),
+                    B::Line([0, 64_000]),
+                    B::Close,
+                ],
+            });
+            for rule in &layout.rules {
+                let [x0, y0, x1, y1] = rule.rect;
+                if !rule.rect.iter().all(|v| v.is_finite())
+                    || x1 <= x0
+                    || y1 <= y0
+                    || [x0, y0, x1, y1].iter().any(|v| v.abs() > BAKE_LIMIT)
+                {
+                    continue;
+                }
+                let q = |v: f64, bits: i32| (v * 2f64.powi(bits)).round();
+                let m = [
+                    q((x1 - x0) / 1000.0, 24),
+                    0.0,
+                    0.0,
+                    q(-(y1 - y0) / 1000.0, 24),
+                ];
+                if m.iter().any(|v| v.abs() > f64::from(i32::MAX)) {
+                    continue;
+                }
+                bake.glyphs.push(BakeGlyph {
+                    outline,
+                    m: m.map(|v| v as i32),
+                    t: [q(x0, 30) as i64, q(y1, 30) as i64],
+                    color: rule.color.map(text_color_q14),
+                });
+            }
+        }
         bake
     }
 
@@ -300,6 +347,9 @@ impl Engine {
         let mut assets = doc.assets.clone();
         let mut replaced = std::collections::BTreeSet::new();
         let mut written = std::collections::BTreeSet::new();
+        // Group membership as each op leaves it, so a removal takes the subtree it
+        // has at that point in the transaction, not the one it had before.
+        let mut tree = TreeOverlay::new(doc);
         for op in ops.iter() {
             match op {
                 Op::SetMeta { meta } => exact = v3(meta),
@@ -314,18 +364,42 @@ impl Engine {
                         None => assets.remove(id),
                     };
                 }
-                Op::SetText { id, .. } | Op::ReplaceNode { id, .. } => {
+                Op::SetText { id, .. }
+                | Op::SetTextBake { id, .. }
+                | Op::ReplaceNode { id, .. } => {
                     written.insert(*id);
                 }
-                Op::InsertNode { node, .. } => {
+                Op::InsertNode { node, parent, .. } => {
                     written.insert(node.id);
+                    tree.attach(node, *parent);
                 }
-                Op::RestoreSubtree { nodes, .. } => written.extend(nodes.iter().map(|n| n.id)),
+                Op::RestoreSubtree { nodes, parent, .. } => {
+                    written.extend(nodes.iter().map(|n| n.id));
+                    for node in nodes {
+                        tree.children.insert(
+                            node.id,
+                            node.children().map(<[NodeId]>::to_vec).unwrap_or_default(),
+                        );
+                        if let Some(p) = node.parent {
+                            tree.parent.insert(node.id, p);
+                        }
+                    }
+                    if let Some(top) = nodes.last() {
+                        tree.link(top.id, *parent);
+                    }
+                }
+                Op::MoveNode { id, parent, .. } => tree.link(*id, *parent),
                 Op::RemoveNode { id } => {
+                    tree.unlink(*id);
+                    // Links come from ops not yet validated; a cycle must not hang here.
+                    let mut seen = std::collections::BTreeSet::new();
                     let mut stack = vec![*id];
                     while let Some(n) = stack.pop() {
+                        if !seen.insert(n) {
+                            continue;
+                        }
                         written.insert(n);
-                        if let Some(children) = doc.nodes.get(&n).and_then(|n| n.children()) {
+                        if let Some(children) = tree.children.get(&n) {
                             stack.extend(children.iter().copied());
                         }
                     }
@@ -378,9 +452,8 @@ impl Engine {
             }
             let mut slot = None;
             bake(content, &mut slot);
-            ops.push(Op::SetText {
+            ops.push(Op::SetTextBake {
                 id: node.id,
-                content: content.clone(),
                 bake: slot,
             });
         }
@@ -450,11 +523,43 @@ impl Engine {
             };
             let key = (*hash, *face_index);
             let mut fonts = self.text.fonts.borrow_mut();
-            let data = fonts.entry(key).or_insert_with(|| {
-                self.blobs
-                    .get(hash)
-                    .and_then(|b| FontData::new(id, Arc::new(b.clone()), *face_index).ok())
-            });
+            if !fonts.contains_key(&key) {
+                // Missing blobs may arrive later; do not cache their absence.
+                let Some(blob) = self.blobs.get(hash) else {
+                    continue;
+                };
+                let shared = fonts.iter().find_map(|((cached_hash, _), font)| {
+                    (*cached_hash == *hash)
+                        .then_some(font.as_ref())
+                        .flatten()
+                        .map(|font| font.bytes.clone())
+                });
+                let already_cached = shared.is_some();
+                let bytes = shared.unwrap_or_else(|| Arc::new(blob.clone()));
+                let data = FontData::new(id, bytes, *face_index).ok();
+                let mut seen = std::collections::HashSet::new();
+                let used: usize = fonts
+                    .iter()
+                    .filter_map(|((cached_hash, _), font)| {
+                        font.as_ref()
+                            .filter(|_| seen.insert(*cached_hash))
+                            .map(|font| font.bytes.len())
+                    })
+                    .sum();
+                let extra = if already_cached { 0 } else { blob.len() };
+                if fonts.len() >= FONT_CACHE_FACES || used.saturating_add(extra) > FONT_CACHE_BYTES
+                {
+                    fonts.clear();
+                }
+                if blob.len() <= FONT_CACHE_BYTES {
+                    fonts.insert(key, data.clone());
+                }
+                if let Some(data) = data {
+                    set.insert(data);
+                }
+                continue;
+            }
+            let data = fonts.get(&key).expect("cached font");
             if let Some(d) = data {
                 let mut d = d.clone();
                 d.id = id;
@@ -494,10 +599,27 @@ impl Engine {
     }
 
     pub(crate) fn text_entry(&self, doc: &Document, content: &TextContent) -> Arc<TextEntry> {
+        // Hash the full editable content so wrapping options such as hanging punctuation
+        // invalidate layout and selection geometry together.
+        // A collection's faces share one file hash, so the face is part of the key.
         let mut key = serde_json::to_vec(content).unwrap_or_default();
+        // A font whose bytes have not arrived yet lays out without it. Whether the
+        // bytes are present is part of the key too, so that layout is not reused
+        // once they are installed.
         for id in content.font_ids() {
-            if let Some(a) = doc.assets.get(&id) {
-                key.extend_from_slice(&a.hash.0);
+            // Every id adds a part, so one missing record cannot pass for another.
+            let Some(a) = doc.assets.get(&id) else {
+                key.push(b'?');
+                continue;
+            };
+            key.extend_from_slice(&a.hash.0);
+            match a.kind {
+                AssetKind::Font { face_index, .. } => {
+                    key.push(b'F');
+                    key.extend_from_slice(&face_index.to_be_bytes());
+                    key.push(u8::from(self.blobs.contains_key(&a.hash)));
+                }
+                _ => key.push(b'-'),
             }
         }
         let key = ContentHash::of(&key);
@@ -663,5 +785,120 @@ impl Engine {
             }
         }
         Ok(out)
+    }
+}
+
+/// The parent and child links of a document's nodes, updated op by op without
+/// touching the document. Only the links are kept; ops the document would refuse
+/// are refused later by the transaction itself.
+struct TreeOverlay {
+    parent: std::collections::BTreeMap<NodeId, NodeId>,
+    children: std::collections::BTreeMap<NodeId, Vec<NodeId>>,
+}
+impl TreeOverlay {
+    fn new(doc: &Document) -> Self {
+        let mut tree = Self {
+            parent: Default::default(),
+            children: Default::default(),
+        };
+        for node in doc.nodes.values() {
+            if let Some(p) = node.parent {
+                tree.parent.insert(node.id, p);
+            }
+            if let Some(children) = node.children() {
+                tree.children.insert(node.id, children.to_vec());
+            }
+        }
+        tree
+    }
+    fn attach(&mut self, node: &Node, parent: NodeId) {
+        self.children.insert(
+            node.id,
+            node.children().map(<[NodeId]>::to_vec).unwrap_or_default(),
+        );
+        self.link(node.id, parent);
+    }
+    fn unlink(&mut self, id: NodeId) {
+        if let Some(old) = self.parent.remove(&id)
+            && let Some(siblings) = self.children.get_mut(&old)
+        {
+            siblings.retain(|c| *c != id);
+        }
+    }
+    fn link(&mut self, id: NodeId, parent: NodeId) {
+        self.unlink(id);
+        self.parent.insert(id, parent);
+        self.children.entry(parent).or_default().push(id);
+    }
+}
+
+#[cfg(test)]
+mod font_cache_tests {
+    use super::*;
+
+    #[test]
+    fn faces_share_bytes_and_cache_stays_bounded() {
+        let font = include_bytes!("../../../tests/fonts/AltoTestLatin.ttf");
+        // Two face indices point to the same sfnt in a minimal collection.
+        let mut sfnt = font.to_vec();
+        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        for i in 0..tables {
+            let p = 12 + i * 16 + 8;
+            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + 20;
+            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x02\0\0\0\x14\0\0\0\x14".to_vec();
+        collection.extend(sfnt);
+        let mut engine = Engine::new();
+        let hash = ContentHash::of(&collection);
+        engine.blobs.insert(hash, collection);
+        let mut assets = Assets::new();
+        let mut content = TextContent::default();
+        for face_index in 0..2 {
+            let id = AssetId::new();
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            content.style.fonts.push(id);
+        }
+        let fonts = engine.font_set(&assets, &content);
+        assert!(Arc::ptr_eq(
+            &fonts.get(&content.style.fonts[0]).unwrap().bytes,
+            &fonts.get(&content.style.fonts[1]).unwrap().bytes
+        ));
+        for index in 0..(FONT_CACHE_FACES + 5) {
+            let fake_hash = ContentHash::of(&index.to_le_bytes());
+            engine.blobs.insert(fake_hash, font.to_vec());
+            let id = AssetId::new();
+            let mut one = TextContent::default();
+            one.style.fonts.push(id);
+            assets.insert(
+                id,
+                AssetRecord {
+                    id,
+                    hash: fake_hash,
+                    kind: AssetKind::Font {
+                        family: "test".into(),
+                        face_index: 0,
+                        embedding: FontEmbedding::Installable,
+                    },
+                    byte_len: 0,
+                    dims: None,
+                },
+            );
+            engine.font_set(&assets, &one);
+            assert!(engine.text.fonts.borrow().len() <= FONT_CACHE_FACES);
+        }
     }
 }

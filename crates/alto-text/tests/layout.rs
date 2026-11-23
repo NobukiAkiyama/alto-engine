@@ -81,6 +81,170 @@ fn line_texts(c: &TextContent, l: &TextLayout) -> Vec<String> {
 }
 
 #[test]
+fn horizontal_skew_moves_the_top_right() {
+    let f = fixture();
+    let mut c = content("A", vec![f.latin], false);
+    let plain = layout(&c, &f.set).glyphs[0].transform;
+    c.style.italic_skew = 20.0;
+    let skewed = layout(&c, &f.set).glyphs[0].transform;
+    assert!(skewed[2] > 0.0, "positive font y must move right");
+    assert_eq!(
+        [skewed[0], skewed[1], skewed[3], skewed[4], skewed[5]],
+        [plain[0], plain[1], plain[3], plain[4], plain[5]]
+    );
+}
+
+#[test]
+fn vertical_upright_skew_shears_along_the_column() {
+    let f = fixture();
+    let mut c = content("吾A12回", vec![f.latin, f.jp], true);
+    let plain = layout(&c, &f.set);
+    c.style.italic_skew = -20.0;
+    let skewed = layout(&c, &f.set);
+    let skew = (-20.0_f64).to_radians().tan();
+    let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-10, "{a} != {b}");
+
+    // Upright glyphs shear around the column baseline, including the offset.
+    let [a, b, c_axis, d, e, y] = glyphs_of(&plain, 0)[0].transform;
+    let actual = glyphs_of(&skewed, 0)[0].transform;
+    let baseline = plain.lines[0].baseline;
+    assert_eq!([actual[0], actual[2], actual[4]], [a, c_axis, e]);
+    close(actual[1], b + skew * a);
+    close(actual[3], d + skew * c_axis);
+    close(actual[5], y + skew * (e - baseline));
+
+    // Sideways Latin and tate-chu-yoko digits shear before orientation.
+    for offset in [1, 2] {
+        let [a, b, c_axis, d, e, y] = glyphs_of(&plain, offset)[0].transform;
+        let actual = glyphs_of(&skewed, offset)[0].transform;
+        assert_eq!([actual[0], actual[1], actual[4], actual[5]], [a, b, e, y]);
+        close(actual[2], c_axis + skew * a);
+        close(actual[3], d + skew * b);
+        assert_ne!(actual, [a, b, c_axis, d, e, y]);
+    }
+}
+
+#[test]
+fn skew_applies_to_the_span_only() {
+    let f = fixture();
+    let mut c = content("AAA", vec![f.latin], false);
+    c.spans.push(TextSpan {
+        start: 1,
+        end: 2,
+        style: StylePatch {
+            italic_skew: Some(0.0),
+            ..Default::default()
+        },
+    });
+    let plain = layout(&c, &f.set);
+    c.spans[0].style.italic_skew = Some(15.0);
+    let skewed = layout(&c, &f.set);
+    for offset in [0, 2] {
+        assert_eq!(
+            glyphs_of(&plain, offset)[0].transform,
+            glyphs_of(&skewed, offset)[0].transform
+        );
+    }
+    assert!(glyphs_of(&skewed, 1)[0].transform[2] > 0.0);
+}
+
+fn underlined(mut c: TextContent) -> TextContent {
+    c.style.underline = Underline {
+        kind: UnderlineKind::Solid,
+        ..Default::default()
+    };
+    c
+}
+
+#[test]
+fn underline_uses_the_font_metrics() {
+    let f = fixture();
+    let c = underlined(content("AB", vec![f.latin], false));
+    let l = layout(&c, &f.set);
+    let face = ttf_parser::Face::parse(LATIN, 0).unwrap();
+    let m = face.underline_metrics().unwrap();
+    assert_eq!(l.rules.len(), 1);
+    assert!(l.bounds[3] >= l.rules[0].rect[3]);
+    assert!(
+        (l.rules[0].rect[1] - l.lines[0].baseline
+            + m.position as f64 / face.units_per_em() as f64 * 100.0
+            + m.thickness as f64 / face.units_per_em() as f64 * 50.0)
+            .abs()
+            < 1e-6
+    );
+    assert!(
+        (l.rules[0].rect[3]
+            - l.rules[0].rect[1]
+            - m.thickness as f64 / face.units_per_em() as f64 * 100.0)
+            .abs()
+            < 1e-6
+    );
+}
+
+#[test]
+fn underline_falls_back_without_a_post_table() {
+    let mut f = fixture();
+    f.set.fonts.get_mut(&f.latin).unwrap().underline = None;
+    let l = layout(&underlined(content("A", vec![f.latin], false)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!((l.rules[0].rect[3] - l.rules[0].rect[1] - 5.0).abs() < 1e-6);
+}
+
+#[test]
+fn vertical_underline_is_on_the_right() {
+    let f = fixture();
+    let l = layout(&underlined(content("一", vec![f.jp], true)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!(l.rules[0].rect[0] > l.lines[0].baseline + 50.0);
+}
+
+#[test]
+fn underline_splits_at_a_size_change() {
+    let f = fixture();
+    let mut c = underlined(content("AB", vec![f.latin], false));
+    c.spans.push(TextSpan {
+        start: 1,
+        end: 2,
+        style: StylePatch {
+            size: Some(50.0),
+            ..Default::default()
+        },
+    });
+    assert_eq!(layout(&c, &f.set).rules.len(), 2);
+}
+
+#[test]
+fn underline_splits_when_font_metrics_change() {
+    let f = fixture();
+    let c = underlined(content("A吾", vec![f.latin, f.jp], false));
+    assert_eq!(layout(&c, &f.set).rules.len(), 2);
+}
+
+#[test]
+fn underline_skips_trailing_spaces() {
+    let f = fixture();
+    let l = layout(&underlined(content("A  ", vec![f.latin], false)), &f.set);
+    assert_eq!(l.rules.len(), 1);
+    assert!((l.rules[0].rect[2] - l.clusters[0].inline[1]).abs() < 1e-5);
+    assert!(l.rules[0].rect[2] < l.clusters.last().unwrap().inline[1]);
+}
+
+#[test]
+fn justified_underline_spans_inter_cluster_expansion() {
+    let mut c = underlined(content("あいうえ", vec![], false));
+    c.frame = TextFrame::Area {
+        width: 250.0,
+        height: 500.0,
+    };
+    c.align = TextAlign::Justify;
+    let l = layout(&c, &FontSet::default());
+    assert_eq!(l.lines.len(), 2);
+    assert_eq!(l.rules.len(), 2);
+    assert!((l.rules[0].rect[0] - l.lines[0].inline[0]).abs() < 1e-6);
+    assert!((l.rules[0].rect[2] - l.lines[0].inline[1]).abs() < 1e-6);
+}
+
+#[test]
 fn font_inspection_reports_names_and_vertical_support() {
     let jp = inspect(JP, 0).unwrap();
     assert_eq!(jp.family, "Noto Sans JP");
@@ -92,6 +256,32 @@ fn font_inspection_reports_names_and_vertical_support() {
     assert!(!latin.has_vertical_alternates);
     assert!(inspect(b"not a font", 0).is_err());
     assert!(inspect(JP, 1).is_err());
+}
+
+#[test]
+fn font_inspection_reports_variable_weight_axis() {
+    let data = include_bytes!("../../../tests/fonts/AltoTestVariable.ttf");
+    let variable = inspect(data, 0).unwrap();
+    assert_eq!(variable.family, "Alto Test Variable");
+    assert_eq!(
+        variable.axes,
+        [alto_text::FontAxis {
+            tag: "wght".into(),
+            min: 100.0,
+            default: 400.0,
+            max: 900.0,
+        }]
+    );
+    let wire = serde_json::to_value(&variable).unwrap();
+    assert_eq!(wire["axes"][0]["default"], 400.0);
+    let plain = serde_json::to_value(inspect(LATIN, 0).unwrap()).unwrap();
+    assert!(plain.get("axes").is_none());
+    assert!(
+        serde_json::from_value::<alto_text::FontInfo>(plain)
+            .unwrap()
+            .axes
+            .is_empty()
+    );
 }
 
 #[test]
@@ -419,6 +609,58 @@ fn bidi_runs_are_reordered_visually() {
 }
 
 #[test]
+fn vertical_rtl_reorders_sideways_runs_between_upright_clusters() {
+    let f = fixture();
+    let c = content("吾אב猫גד回", vec![f.latin, f.jp], true);
+    let l = layout(&c, &f.set);
+    let cluster = |offset| l.clusters.iter().find(|c| c.start == offset).unwrap();
+    let visual_order = [0, 2, 1, 3, 5, 4, 6];
+    assert!(
+        visual_order
+            .windows(2)
+            .all(|pair| { cluster(pair[0]).inline[0] < cluster(pair[1]).inline[0] })
+    );
+    for offset in visual_order {
+        assert_eq!(cluster(offset).rtl, [1, 2, 4, 5].contains(&offset));
+    }
+    assert!(!l.lines[0].rtl);
+}
+
+#[test]
+fn vertical_tcy_keeps_its_column_position_between_rtl_runs() {
+    let f = fixture();
+    let c = content("אב12גד", vec![f.latin, f.jp], true);
+    let l = layout(&c, &f.set);
+    let mut visual: Vec<_> = l.clusters.iter().collect();
+    visual.sort_by(|a, b| a.inline[0].total_cmp(&b.inline[0]));
+    assert_eq!(
+        visual
+            .iter()
+            .map(|c| (c.start, c.end, c.rtl))
+            .collect::<Vec<_>>(),
+        [
+            (1, 2, true),
+            (0, 1, true),
+            (2, 4, false),
+            (5, 6, true),
+            (4, 5, true)
+        ]
+    );
+}
+
+#[test]
+fn vertical_rtl_caret_and_hit_test_follow_the_reversed_inline_axis() {
+    let f = fixture();
+    let c = content("אבג", vec![f.latin], true);
+    let l = layout(&c, &f.set);
+    let start = caret(&l, &c.text, 0).unwrap();
+    let end = caret(&l, &c.text, 3).unwrap();
+    assert!(start.a[1] > end.a[1]);
+    assert_eq!(hit_test(&l, &c.text, start.a), 0);
+    assert_eq!(hit_test(&l, &c.text, end.a), 3);
+}
+
+#[test]
 fn selection_hit_test_caret_and_rectangles() {
     let f = fixture();
     let c = content("あいう\nえお", vec![f.jp], false);
@@ -488,4 +730,104 @@ fn glyph_paths_cover_cff_and_truetype_outlines() {
     let c = content(&"吾輩は猫である。".repeat(100), vec![f.jp], false);
     let paths = glyph_paths(&layout(&c, &f.set), &f.set, &cache);
     assert!(paths.len() > 1 && paths.iter().all(|p| p.data.commands.len() <= 4000));
+}
+
+fn hanging_content(text: &str, vertical: bool, inline: f64) -> TextContent {
+    let mut c = content(text, vec![], vertical);
+    let (width, height) = if vertical {
+        (500.0, inline)
+    } else {
+        (inline, 500.0)
+    };
+    c.frame = TextFrame::Area { width, height };
+    c.hanging = true;
+    c
+}
+
+#[test]
+fn hanging_keeps_the_period_on_the_line() {
+    for punctuation in ['、', '。', '，', '．'] {
+        // The following space fits, so the punctuation must explicitly end the line.
+        let mut c = hanging_content(&format!("あい{punctuation} う"), false, 250.0);
+        for (align, start) in [
+            (TextAlign::Start, 0.0),
+            (TextAlign::Center, 25.0),
+            (TextAlign::End, 50.0),
+        ] {
+            c.align = align;
+            let l = layout(&c, &FontSet::default());
+            assert_eq!((l.lines[0].end, l.lines[1].start), (3, 3));
+            assert_eq!(l.lines[0].inline, [start, start + 300.0]);
+            assert_eq!(l.bounds[2], start + 300.0);
+        }
+    }
+}
+
+#[test]
+fn hanging_does_not_count_in_justify() {
+    let mut c = hanging_content("あい。う", false, 250.0);
+    c.align = TextAlign::Justify;
+    let l = layout(&c, &FontSet::default());
+    assert_eq!(l.clusters[1].inline, [150.0, 250.0]);
+    assert_eq!(l.clusters[2].inline, [250.0, 350.0]);
+    assert_eq!(l.lines[0].inline, [0.0, 350.0]);
+}
+
+#[test]
+fn hanging_stops_at_one_character() {
+    let mut c = hanging_content("あい。、う", false, 300.0);
+    let fonts = FontSet::default();
+    let on = layout(&c, &fonts);
+    c.hanging = false;
+    let off = layout(&c, &fonts);
+    assert_eq!(on.lines[0].end, 1);
+    assert_eq!(on.lines[0].end, off.lines[0].end);
+}
+
+#[test]
+fn hanging_does_not_start_a_line_with_a_forbidden_character() {
+    let fonts = FontSet::default();
+    for text in ["あい。」", "あい。、"] {
+        let mut c = hanging_content(text, false, 250.0);
+        let on = layout(&c, &fonts);
+        c.hanging = false;
+        let off = layout(&c, &fonts);
+        assert!(
+            on.lines
+                .iter()
+                .map(|line| (line.start, line.end))
+                .eq(off.lines.iter().map(|line| (line.start, line.end))),
+            "hanging changed the line breaks for {text}"
+        );
+        assert_eq!(on.lines[0].end, 1);
+    }
+}
+
+#[test]
+fn vertical_hanging_uses_the_height() {
+    let f = fixture();
+    let mut c = hanging_content("あい。う", true, 250.0);
+    c.style.fonts = vec![f.jp];
+    let l = layout(&c, &f.set);
+    assert_eq!((l.lines[0].end, l.lines[1].start), (3, 3));
+    assert_eq!(l.lines[0].inline, [0.0, 300.0]);
+    assert_eq!(l.bounds[3], 300.0);
+}
+
+#[test]
+fn hanging_off_is_unchanged() {
+    let mut c = hanging_content("あい。う", false, 250.0);
+    c.hanging = false;
+    let fonts = FontSet::default();
+    let l = layout(&c, &fonts);
+    assert_eq!(l.lines[0].end, 1);
+    assert_eq!(l.lines[0].inline, [0.0, 100.0]);
+
+    c.frame = TextFrame::Point;
+    let off = layout(&c, &fonts);
+    c.hanging = true;
+    let on = layout(&c, &fonts);
+    assert_eq!(on.lines[0].inline, off.lines[0].inline);
+    assert_eq!(on.bounds, off.bounds);
+    assert_eq!(on.glyphs.len(), off.glyphs.len());
 }

@@ -1,21 +1,90 @@
 import type { EngineCore } from "./engine.js";
 import { AltoError } from "./errors.js";
-import type { StreamMessage } from "./protocol.js";
+import { validBrushImageSize, validBrushTextureParams, type BrushConfig, type BrushCurve, type StreamMessage, type WireBrushImage } from "./protocol.js";
 import type { Color, NodeId } from "./types.js";
+
+export interface BrushDynamics {
+  /** Defaults to pressure with a 5% floor. Pass null for a constant size. */
+  size?: BrushCurve | null;
+  /** Multiplies dab opacity. Defaults to a constant factor of 1. */
+  opacity?: BrushCurve | null;
+  /** Multiplies dab flow. Defaults to a constant factor of 1. */
+  flow?: BrushCurve | null;
+  /** Adds pen tilt direction to the tip angle. The direction is not adjusted for layer rotation. */
+  angleFromTilt?: boolean;
+}
+
+function wireCurve(curve: BrushCurve): BrushCurve {
+  const { input, points } = curve;
+  if (!["pressure", "speed", "tilt"].includes(input) ||
+      !Array.isArray(points) || points.length < 2 || points.length > 8 ||
+      Array.from(points).some((point, i) => !Array.isArray(point) || point.length !== 2 ||
+        ![point[0], point[1]].every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
+        // The renderer stores curve coordinates as f32.
+        (i > 0 && Math.fround(points[i - 1][0]) >= Math.fround(point[0]))) ||
+      points[0][0] !== 0 || points[points.length - 1][0] !== 1) {
+    throw new AltoError("INVALID_ARGUMENT", "brush curve");
+  }
+  return { input, points: points.map(([x, y]) => [Math.fround(x), Math.fround(y)]) };
+}
+
+function wireDynamics(dynamics: BrushDynamics): BrushConfig["dynamics"] {
+  const { size, opacity, flow, angleFromTilt } = dynamics;
+  return {
+    size: size === null ? { input: "pressure", points: [[0, 1], [1, 1]] } : size && wireCurve(size),
+    opacity: opacity == null ? undefined : wireCurve(opacity),
+    flow: flow == null ? undefined : wireCurve(flow),
+    angle_from_tilt: angleFromTilt,
+  };
+}
+
+/** Reusable R8 coverage image. White is full coverage, black is transparent. */
+export interface BrushImage {
+  width: number;
+  height: number;
+  pixels: Uint8Array;
+}
+
+function validateBrushImage(image: BrushImage, label: string): void {
+  if (!image || !validBrushImageSize(image.width, image.height) ||
+      !(image.pixels instanceof Uint8Array) || image.pixels.length !== image.width * image.height) {
+    throw new AltoError("INVALID_ARGUMENT", label);
+  }
+}
+
+function snapshotBrushImage(image: BrushImage): WireBrushImage {
+  // Transfer a copy of the view so callers can reuse the image on later strokes.
+  return { width: image.width, height: image.height, pixels: new Uint8Array(image.pixels).buffer };
+}
 
 export interface BrushOptions {
   layer: NodeId;
   /** Paint the layer's pixels or its mask. */
   target?: "content" | "mask";
   /** Size in document pixels (default 24), hardness 0–1 (0.8), spacing as a fraction of size (0.15). */
-  tip?: { size?: number; hardness?: number; spacing?: number };
+  tip?: {
+    size?: number;
+    hardness?: number;
+    spacing?: number;
+    /** Rotation in degrees in layer coordinates (default 0). */
+    angle?: number;
+    /** Ratio of short to long radius, clamped to 0.01–1 (default 1). */
+    roundness?: number;
+    /** Coverage image stamped at each dab. Its long side follows the tip size. */
+    image?: BrushImage;
+    /** Repeating grain fixed to the layer, shared by all dabs. */
+    texture?: {
+      image: BrushImage;
+      /** Texture texels per layer pixel, from 0.05 to 16 (default 1). */
+      scale?: number;
+      /** Coverage modulation, from 0 to 1 (default 1). */
+      depth?: number;
+    };
+  };
   color?: Color;
   opacity?: number;
   flow?: number;
-  /** Pen pressure scales the size (default true). */
-  pressureSize?: boolean;
-  /** Pen pressure scales the opacity (default false). */
-  pressureOpacity?: boolean;
+  dynamics?: BrushDynamics;
 }
 
 /** One input sample in document coordinates. */
@@ -57,6 +126,27 @@ export class ToolSession {
     tool: "brush" | "eraser",
     options: BrushOptions,
   ) {
+    const angle = options.tip?.angle ?? 0;
+    const roundness = options.tip?.roundness ?? 1;
+    if (!Number.isFinite(angle)) throw new AltoError("INVALID_ARGUMENT", "brush angle must be finite");
+    if (!Number.isFinite(roundness)) throw new AltoError("INVALID_ARGUMENT", "brush roundness must be finite");
+    const image = options.tip?.image;
+    if (image !== undefined) validateBrushImage(image, "brush tip");
+    const tipImage = image === undefined ? undefined : snapshotBrushImage(image);
+    const grain = options.tip?.texture;
+    let texture;
+    if (grain !== undefined) {
+      if (!grain) throw new AltoError("INVALID_ARGUMENT", "brush texture");
+      const { scale = 1, depth = 1 } = grain;
+      if (!validBrushTextureParams(scale, depth)) {
+        throw new AltoError("INVALID_ARGUMENT", "brush texture scale/depth");
+      }
+      validateBrushImage(grain.image, "brush texture image");
+      if (depth !== 0) texture = { image: snapshotBrushImage(grain.image), scale, depth };
+    }
+    const transfer = [];
+    if (tipImage) transfer.push(tipImage.pixels);
+    if (texture) transfer.push(texture.image.pixels);
     this.ready = host.request("beginBrush", {
       layer: options.layer,
       config: {
@@ -65,13 +155,16 @@ export class ToolSession {
         spacing: options.tip?.spacing ?? 0.15,
         opacity: options.opacity ?? 1,
         flow: options.flow ?? 1,
-        pressure_size: options.pressureSize ?? true,
-        pressure_opacity: options.pressureOpacity ?? false,
+        dynamics: options.dynamics && wireDynamics(options.dynamics),
+        angle,
+        roundness,
       },
       color: options.color ?? [0, 0, 0, 1],
       erase: tool === "eraser",
       mask: options.target === "mask",
-    });
+      tipImage,
+      texture,
+    }, transfer);
     // A stroke that cannot start ends here, and reports once: the frame loop keeps
     // flushing until the session ends.
     this.ready.catch((e) => {
@@ -127,6 +220,7 @@ export class ToolSession {
     this.ending = true;
     try {
       await this.flush();
+      if (this.aborted) throw this.aborted;
       const state = await this.host.request("endBrush");
       this.host.ended(this, state);
     } catch (error) {

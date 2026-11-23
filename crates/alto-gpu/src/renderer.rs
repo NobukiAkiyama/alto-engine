@@ -1,7 +1,7 @@
 //! Worker and native renderer. The document remains CPU-owned; all textures are caches.
 use crate::{RContent, RenderBlend, RenderScene};
 use alto_core::{ContentHash, MAX_ISOLATED_GROUPS, NodeId, Rect, TILE, TileKey};
-use alto_raster::{Dab, TileData, TileStore};
+use alto_raster::{BrushImage, BrushPattern, Dab, TileData, TileStore};
 use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -14,6 +14,8 @@ use std::{
 mod cache;
 mod tile_renderer;
 use cache::overview_level;
+#[cfg(test)]
+pub(crate) use tile_renderer::with_sibling_walk;
 mod memory;
 mod presentation;
 mod readback;
@@ -36,6 +38,7 @@ use pyramid::pyramid_children;
 mod scene;
 mod stroke;
 mod tile_read;
+mod timestamps;
 mod upload;
 
 pub use crate::RenderError;
@@ -49,6 +52,8 @@ const MAX_JOB_RETRIES: u32 = 8;
 const SCRATCH_BYTES: u64 = 512 * 512 * 4;
 const TILE_RGBA_BYTES: u64 = 256 * 256 * 4;
 const MAX_PYRAMID_STEPS_IN_FLIGHT: u32 = 8;
+/// More pyramid work may overlap the GPU while a live stroke needs prompt display feedback.
+const MAX_STROKE_PYRAMID_STEPS_IN_FLIGHT: u32 = 64;
 /// Jobs that need at most this many inputs decode them inline even with a pool.
 const INLINE_DECODE_MAX: usize = 8;
 
@@ -305,7 +310,7 @@ struct TileJob {
 struct Decoder {
     queued: std::collections::VecDeque<ContentHash>,
     in_flight: HashMap<ContentHash, Arc<alto_raster::StoredTile>>,
-    failed: Option<ContentHash>,
+    failed: HashSet<ContentHash>,
     decoded: u64,
 }
 impl Decoder {
@@ -327,6 +332,9 @@ struct AtlasSlot {
     hash: ContentHash,
     used: u64,
 }
+struct PendingPreview {
+    slot: u32,
+}
 struct Cached {
     slot: u32,
     used: u64,
@@ -341,12 +349,19 @@ pub struct StrokeTile {
 }
 
 pub struct GpuStroke {
+    tip: Option<BrushImage>,
+    tip_texture: Option<wgpu::Texture>,
+    pattern: Option<BrushPattern>,
+    pattern_texture: Option<wgpu::Texture>,
     pub layer: NodeId,
     pub tiles: BTreeMap<TileKey, StrokeTile>,
     pub color: [f32; 4],
     pub hardness: f32,
     pub opacity: f32,
     pub erase: bool,
+    /// Unique for this renderer's lifetime; preview atlas hashes must not alias
+    /// tiles left behind by an earlier stroke on the same layer.
+    pub preview_id: u64,
     pub epoch: u64,
     pub mask: bool,
     /// Layer to document transform, so damage is tracked in display coordinates.
@@ -356,6 +371,31 @@ pub struct GpuStroke {
     pub fixed_world: Option<alto_core::FixedAffine>,
     /// Document pixels this stroke has shown so far.
     pub damage: Option<Rect>,
+}
+
+fn preview_hash(layer: NodeId, key: TileKey, preview_id: u64, epoch: u64) -> ContentHash {
+    ContentHash::of(
+        format!(
+            "preview:{layer:?}:{},{}:{preview_id}:{epoch}",
+            key.tx, key.ty
+        )
+        .as_bytes(),
+    )
+}
+
+#[cfg(test)]
+mod preview_hash_tests {
+    use super::*;
+
+    #[test]
+    fn preview_hash_is_unique_across_strokes_on_the_same_tile() {
+        let layer = NodeId::new();
+        let key = TileKey { tx: 3, ty: -2 };
+        assert_ne!(
+            preview_hash(layer, key, 1, 0),
+            preview_hash(layer, key, 2, 0)
+        );
+    }
 }
 
 pub struct Renderer {
@@ -420,6 +460,7 @@ pub struct Renderer {
     /// The reason and message the device was lost with, for error reports.
     lost_detail: Arc<std::sync::Mutex<String>>,
     frame: u64,
+    next_preview_id: u64,
     pub stroke: Option<GpuStroke>,
     pub adapter_name: String,
     budget_bytes: u64,
@@ -438,6 +479,10 @@ pub struct Renderer {
     /// Monotonic milliseconds. Fixed for the renderer's lifetime; see `set_clock`.
     clock: fn() -> f64,
     profile: RenderProfile,
+    /// The adapter exposes timestamp queries; only then are they requested.
+    gpu_timestamp_period: Option<f32>,
+    /// Present once diagnostics first enable timestamps.
+    gpu_timestamps: Option<timestamps::GpuTimestamps>,
     /// Build v3 subtrees away from every edge from one leaf (`uniform`).
     uniform_pyramid: bool,
     uniform: Option<uniform::Memo>,

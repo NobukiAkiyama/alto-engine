@@ -42,15 +42,18 @@ impl Commit {
     pub fn hash(&self) -> ContentHash {
         ContentHash::of(&self.bytes())
     }
-    pub fn validate(&self) -> Result<(), String> {
-        if self.message.chars().count() > MAX_MESSAGE
-            || self
-                .message
+    pub fn validate_message(message: &str) -> Result<(), String> {
+        if message.chars().count() > MAX_MESSAGE
+            || message
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
             return Err("commit message must be at most 4096 printable characters".into());
         }
+        Ok(())
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        Self::validate_message(&self.message)?;
         if self.format != 2
             || self.parents.len() > 2
             || self.intents.len() > 4096
@@ -135,6 +138,8 @@ pub enum ContentDetail {
     Vector {
         paths: [usize; 2],
         commands: [usize; 2],
+        #[serde(default)]
+        style: bool,
     },
     /// `text` holds excerpts (24 characters at most), before and after, when the text changed.
     Text {
@@ -143,6 +148,8 @@ pub enum ContentDetail {
         writing_mode: Option<alto_text::WritingMode>,
         frame: bool,
         tate_chu_yoko: bool,
+        #[serde(default)]
+        hanging: bool,
     },
     Adjustment,
     Unsupported,
@@ -358,6 +365,11 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
             ContentDetail::Vector {
                 paths: [x.len(), y.len()],
                 commands: [cmds(x), cmds(y)],
+                style: x.iter().zip(y).any(|(before, after)| {
+                    before.fill != after.fill
+                        || before.stroke != after.stroke
+                        || before.fill_rule != after.fill_rule
+                }),
             }
         }
         (NodeKind::Text { content: x, .. }, NodeKind::Text { content: y, .. }) if x != y => {
@@ -367,6 +379,7 @@ fn content_change(a: &Node, b: &Node) -> Option<DiffItem> {
                 writing_mode: (x.writing_mode != y.writing_mode).then_some(y.writing_mode),
                 frame: x.frame != y.frame || x.align != y.align,
                 tate_chu_yoko: x.tcy != y.tcy || x.auto_tcy != y.auto_tcy,
+                hanging: x.hanging != y.hanging,
             }
         }
         (NodeKind::Adjustment { adjustment: x }, NodeKind::Adjustment { adjustment: y })
@@ -1020,6 +1033,7 @@ mod tests {
             let n = m.nodes.get_mut(&it).unwrap();
             if let NodeKind::Text { content, .. } = &mut n.kind {
                 content.text = "吾輩は犬である".into();
+                content.hanging = true;
                 content.writing_mode = alto_text::WritingMode::VerticalRl;
             }
             m
@@ -1031,6 +1045,7 @@ mod tests {
                 DiffItem::ContentChanged {
                     detail: ContentDetail::Text {
                         text: Some([from, to]),
+                        hanging: true,
                         writing_mode: Some(WritingMode::VerticalRl),
                         style: false,
                         ..

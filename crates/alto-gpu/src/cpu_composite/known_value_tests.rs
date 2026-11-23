@@ -592,6 +592,7 @@ fn plain_scene_gaps_are_explicit() {
             cap: Default::default(),
             join: Default::default(),
             miter_limit: 4.0,
+            dash: None,
         }),
         fill_rule: FillRule::NonZero,
     }]));

@@ -1,4 +1,4 @@
-import { PROTOCOL, type Args, type FrameStats, type RecoveryInfo, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
+import { DEFAULT_UNDO_STEPS, MAX_UNDO_STEPS, PROTOCOL, validBrushImageSize, validBrushTextureParams, type Args, type FrameStats, type RecoveryInfo, type RecoveryStages, type RequestMessage, type StreamMessage, type WireError } from "./protocol.js";
 import type { StorageMessage } from "./storage-core.js";
 // MessageChannel yields to Worker messages without nested timer clamping.
 const yieldTask = () => new Promise<void>((resolve) => {
@@ -12,6 +12,9 @@ import init, { Runtime } from "./pkg/alto_wasm.js";
 import { NO_STREAK, PRESENT_DEFER_LIMIT, countsDeferredWait, nextDeferredStreak } from "./present-budget.js";
 import { createStorageSession } from "./storage-session.js";
 import { encodePng } from "./png.js";
+import { exportGrid, PngExport, readExportPixels } from "./png-export.js";
+import { compositeOverBackground, lossyQuality } from "./jpeg.js";
+import { tiffBlob, tiffStrips, tiffStripsJson, type TiffCompression } from "./tiff.js";
 /**
  * Waits for the frame in flight on the GPU, when a frame was held back for it. The
  * timer bounds the wait: a lost device may never settle its queue, and the next
@@ -73,7 +76,7 @@ interface Candidate {
 }
 interface CandidateContents {
   base: Uint8Array;
-  metadata: { format: number; opaque: string[]; dirty?: boolean } | null;
+  metadata: { format: number; opaque: string[]; dirty?: boolean; undoSteps?: number } | null;
   records: Uint8Array[];
 }
 interface Write {
@@ -103,7 +106,7 @@ let diagnosticTickMs: number[] | null = null;
 let partialAppend: "header" | "payload" | "crc" | null = null;
 let partialAppendDone = false;
 let partialAppendWaiters: (() => void)[] = [];
-let injectedStorageFault: "beforeAppend" | "afterAppend" | null = null;
+let injectedStorageFault: Args<"injectStorageFault">["position"] | null = null;
 // Test hook: the next checkpoint ends after its pack ("pack"), after a torn journal
 // write ("journal") or after a complete one whose reply is never taken ("flushed").
 let checkpointStop: "pack" | "journal" | "flushed" | null = null;
@@ -118,9 +121,10 @@ const readableAfterFailure = new Set<string>([
   "emergencyExport", "save", "view", "waitFrame", "readTile", "readTileLevel",
   "selectionOutline", "textInfo", "textHitTest", "textCaret",
   "textSelection", "textNavigate", "versionLog", "versionDiff",
-  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage",
+  "vectorStats", "vectorPathSvg", "releaseSave", "snapshotHash", "nodeTiles", "exportImage", "exportStreamOpen", "exportStreamPull", "exportStreamClose",
   "missingObjects", "provideObjects", "releaseObjects", "externalObjects", "saveWithoutHistory",
-  "packageBytes",
+  "packageBytes", "historyIsExternal", "checkHistoryStore", "storeRootsContained",
+  "historyStoreAttached", "recoveryStages", "setGpuTimestampProfiling", "gpuTileTimestamps",
 ]);
 let storageFailure: WireError | null = null;
 // False when the page started without a recovery journal: nothing is written.
@@ -128,13 +132,20 @@ let journaling = true;
 // A document epoch belongs to its SDK handle, not to this Worker's lifetime.
 let documentEpoch = 0;
 let recoveryPending = false;
+let recoveryStages: RecoveryStages | null = null;
+let gpuTimestamps = false;
+type RecoveryFrame = { start: number | null; waiting: boolean };
+let recoveryFrame: RecoveryFrame | null = null;
+let undoSteps: Args<"init">["undoSteps"];
 function checkDocument(epoch: number | undefined) {
   if (epoch !== undefined && epoch !== documentEpoch)
     throw Error("CONFLICT: document-closed: the request belongs to a replaced document");
 }
 function adoptDocument(epoch: number | undefined) {
+  void closePngExport();
   documentEpoch = epoch ?? documentEpoch + 1;
   recoveryPending = false;
+  recoveryFrame = null;
 }
 /**
  * A WASM trap (release builds abort on a Rust panic) can leave the Runtime borrowed
@@ -256,6 +267,10 @@ function startDecoders() {
         const sent = decoder.pending.get(data.id);
         // An answer to a batch this pool no longer waits for is dropped.
         if (!sent || !decoders.includes(decoder)) return;
+        if (data.error) {
+          stopDecoders(String(data.error));
+          return;
+        }
         clearTimeout(sent.timer);
         decoder.pending.delete(data.id);
         decodedResults.push(data.out);
@@ -452,11 +467,15 @@ function queueCheckpoint() {
 }
 async function write(w: Write) {
   if (w.kind === "checkpoint") {
+    if (injectedStorageFault === "beforeCheckpoint") {
+      injectedStorageFault = null;
+      throw Error("STORAGE: injected failure before checkpoint");
+    }
     // The stop stays armed while the write runs, so checkpointStopped() waits for it.
     const stop = checkpointStop;
     await io(
       "checkpoint",
-      { entries: w.bytes.buffer as ArrayBuffer, dirty: !!w.dirty, ...(stop && stop !== "flushed" ? { stop } : {}) },
+      { entries: w.bytes.buffer as ArrayBuffer, dirty: !!w.dirty, undoSteps, ...(stop && stop !== "flushed" ? { stop } : {}) },
       [w.bytes.buffer],
     );
     if (stop) {
@@ -506,6 +525,7 @@ async function pump() {
       return;
     }
     durableSeq = w.seq!;
+    if (w.kind === "checkpoint") postMessage({ t: "checkpointStored" });
     if (w.kind === "append") {
       journaledBytes += size;
       journaledRecords++;
@@ -544,6 +564,10 @@ async function collectPacks() {
 // is built through checkpointParts(), which hands these over first.
 let collectedObjects: string[] = [];
 function checkpointParts() {
+  if (injectedStorageFault === "beforeCheckpointParts") {
+    injectedStorageFault = null;
+    throw Error("STORAGE: injected failure before checkpoint generation");
+  }
   if (collectedObjects.length) {
     runtime.forgetStoredObjectPaths(JSON.stringify(collectedObjects));
     collectedObjects = [];
@@ -619,6 +643,7 @@ function decodeFrame(numbers: Float64Array): FrameStats {
  * the cap before the request that is supposed to observe it.
  */
 function takeFrame(budget: number, stick: boolean): FrameStats {
+  if (recoveryFrame?.start === null) recoveryFrame.start = performance.now();
   const frame = decodeFrame(runtime.tick(budget));
   (frame as FrameStats & { gpuWait?: boolean }).gpuWait = runtime.takeGpuWaitRequested();
   if (stick && forceDeferred) {
@@ -627,6 +652,11 @@ function takeFrame(budget: number, stick: boolean): FrameStats {
     frame.composed = 0;
   }
   return frame;
+}
+function finishRecoveryFrame(frame: RecoveryFrame) {
+  if (recoveryFrame !== frame || frame.start === null || !recoveryStages) return;
+  recoveryStages.firstFrame = performance.now() - frame.start;
+  recoveryFrame = null;
 }
 /**
  * Called before the tick's wait, so `lastWaitBusy` is the previous wait's outcome.
@@ -639,6 +669,8 @@ function noteDeferred(frame: FrameStats, where: "wait" | "drain") {
 }
 /** Recreate the device from the document. The next tick draws it again. */
 async function recoverLostGpu() {
+  await closePngExport();
+  if (recoveryFrame) recoveryFrame = { start: null, waiting: false };
   forceDeferred = false;
   deferLimit = PRESENT_DEFER_LIMIT;
   deferredWaits = NO_STREAK;
@@ -646,6 +678,7 @@ async function recoverLostGpu() {
   postMessage({ t: "gpuLost" });
   try {
     await runtime.recoverGpu();
+    runtime.setGpuTimestamps(gpuTimestamps);
     runtime.setViewVersion(viewVersion);
     adapterName = runtime.adapterName();
     postMessage({ t: "gpuRestored" });
@@ -654,63 +687,126 @@ async function recoverLostGpu() {
     postMessage({ t: "error", value: structured(error) });
   }
 }
-/** Display tiles read back per GPU round trip. */
-// Export requests follow the Rust pool capacity; Rust also validates every batch.
+/** Straight-alpha RGBA pixels to TIFF: strips stay in JS, Rust builds the header. */
+async function encodeTiff(
+  pixels: Uint8Array<ArrayBuffer> | Uint8ClampedArray<ArrayBuffer>,
+  width: number,
+  height: number,
+  compression: TiffCompression,
+): Promise<Blob> {
+  const strips = await tiffStrips(pixels, width, height, compression);
+  const header = runtime.tiffHeader(width, height, compression, tiffStripsJson(strips));
+  return tiffBlob(header, strips);
+}
+
+/**
+ * `convertToBlob` quietly falls back to a type it can encode (usually PNG) when the
+ * requested one is unavailable. An export must not hand back another format, so
+ * every canvas encoding goes through here and a fallback becomes UNSUPPORTED.
+ */
+async function canvasBlob(canvas: OffscreenCanvas, type: string, quality?: number): Promise<Blob> {
+  const blob = await canvas.convertToBlob({ type, quality });
+  if (blob.type !== type) throw Error(`UNSUPPORTED: the browser cannot encode ${type}`);
+  return blob;
+}
+
+let pngExport: { id: string; version: string; encoder: PngExport } | undefined;
+
+async function closePngExport(id?: string) {
+  if (!pngExport || (id !== undefined && pngExport.id !== id)) return;
+  const { encoder } = pngExport;
+  pngExport = undefined;
+  await encoder.close();
+}
+
+function readPixels(region: Args<"exportImage">["region"], level: number) {
+  return readExportPixels(region, level, runtime.readbackCapacity(), (l, coords) => runtime.readTiles(l, coords));
+}
+
+async function openPngExport({ region, scale }: Args<"exportStreamOpen">) {
+  if (!(scale > 0 && scale <= 1) || ![region.x0, region.y0, region.x1, region.y1].every(Number.isSafeInteger) ||
+      region.x0 < 0 || region.y0 < 0 || region.x1 > 65536 || region.y1 > 65536 ||
+      region.x0 >= region.x1 || region.y0 >= region.y1) {
+    throw Error("INVALID_ARGUMENT: PNG stream region or scale");
+  }
+  const grid = exportGrid(region, scale);
+  if (!grid.exact) throw Error("UNSUPPORTED: PNG streaming requires an exact display-pyramid match");
+  // At most a band in the GPU handoff and a band in the compressor. Budget
+  // both raw and filtered buffers, the previous row, and bounded tile copies.
+  const stride = grid.width * 4;
+  const bandRows = Math.min(256, grid.height);
+  const tileBatch = Math.max(1, Math.min(64, runtime.readbackCapacity()));
+  const estimate = 2 * bandRows * (stride * 2 + 1) + stride + tileBatch * 262144 * 3;
+  if (estimate > 512 * 1048576) throw Error("INVALID_ARGUMENT: export stream CPU operation exceeds 512 MiB");
+  const version = runtime.exportSceneVersion();
+  if (pngExport?.version === version) throw Error("BUSY: finish or cancel the active image export stream");
+  await closePngExport();
+  const id = crypto.randomUUID();
+  pngExport = { id, version: runtime.exportSceneVersion(), encoder: new PngExport(grid) };
+  return { streamId: id };
+}
+
+async function pullPngExport(id: string) {
+  const current = pngExport;
+  if (!current || current.id !== id)
+    throw Error("CONFLICT: document-changed: the export stream no longer belongs to the active document");
+  try {
+    if (current.version !== runtime.exportSceneVersion())
+      throw Error("CONFLICT: document-changed: the rendered document changed during export");
+    const bytes = await current.encoder.pull(readPixels);
+    if (pngExport !== current || current.version !== runtime.exportSceneVersion())
+      throw Error("CONFLICT: document-changed: the rendered document changed during export");
+    if (bytes === null) await closePngExport(id);
+    return bytes;
+  } catch (error) {
+    await closePngExport(id);
+    throw error;
+  }
+}
+
 /**
  * The document as an image file, from the same display tiles the canvas shows. A
  * reduced export reads the pyramid level at or above its scale: each level halves the
  * tiles to read. Tiles are premultiplied; image files hold straight alpha.
- * A PNG that needs no resampling holds exactly the unpremultiplied tile bytes, so it
- * is encoded here rather than through a canvas, which would premultiply them again.
+ * A PNG or TIFF that needs no resampling holds exactly the unpremultiplied tile bytes,
+ * so it is encoded here rather than through a canvas, which would premultiply them
+ * again. JPEG is opaque: alpha is composited over `background` before any scaling.
  */
-async function exportImage({ region, scale, type }: Args<"exportImage">) {
-  const level = Math.max(0, Math.min(12, Math.floor(Math.log2(1 / scale) + 1e-9)));
-  const f = 2 ** level;
-  const x0 = Math.floor(region.x0 / f), y0 = Math.floor(region.y0 / f);
-  const x1 = Math.ceil(region.x1 / f), y1 = Math.ceil(region.y1 / f);
-  const w = x1 - x0, h = y1 - y0;
+async function exportImage({ region, scale, type, quality, background, compression }: Args<"exportImage">) {
+  const { level, factor: f, x0, y0, x1, y1, width: w, height: h, ow, oh, exact } = exportGrid(region, scale);
   if (w * h > 64_000_000) throw Error("INVALID_ARGUMENT: export exceeds 64M pixels");
-  // Includes the source/output arrays and bounded readback copies; external encoder
-  // allocations are not physical RAM telemetry.
+  const jpeg = type === "image/jpeg";
+  // Includes the source/output arrays, bounded readback copies, and JPEG's opaque
+  // composite; external encoder allocations are not physical RAM telemetry.
   const outputPixels = Math.max(1, Math.round((region.x1 - region.x0) * scale)) * Math.max(1, Math.round((region.y1 - region.y0) * scale));
-  const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3;
+  const requestBytes = (w * h + outputPixels) * 8 + runtime.readbackCapacity() * 262144 * 3 + (jpeg ? w * h * 4 : 0);
   if (requestBytes > 512 * 1048576) throw Error("INVALID_ARGUMENT: export CPU operation exceeds 512 MiB");
-  const pixels = new Uint8ClampedArray(w * h * 4);
-  const tiles: [number, number][] = [];
-  for (let ty = Math.floor(y0 / 256); ty * 256 < y1; ty++)
-    for (let tx = Math.floor(x0 / 256); tx * 256 < x1; tx++) tiles.push([tx, ty]);
-  for (let at = 0; at < tiles.length;) {
-    const count = Math.max(1, runtime.readbackCapacity());
-    const batch = tiles.slice(at, at + count);
-    at += batch.length;
-    const bytes = await runtime.readTiles(level, Int32Array.from(batch.flat()));
-    batch.forEach(([tx, ty], i) => {
-      const tile = bytes.subarray(i * 262144, (i + 1) * 262144);
-      const left = Math.max(x0, tx * 256), right = Math.min(x1, tx * 256 + 256);
-      for (let y = Math.max(y0, ty * 256); y < Math.min(y1, ty * 256 + 256); y++)
-        for (let x = left; x < right; x++) {
-          const s = ((y - ty * 256) * 256 + (x - tx * 256)) * 4, d = ((y - y0) * w + (x - x0)) * 4;
-          const a = tile[s + 3];
-          pixels[d + 3] = a;
-          if (a) for (let c = 0; c < 3; c++) pixels[d + c] = Math.round((tile[s + c] * 255) / a);
-        }
-    });
-  }
-  // The region in level pixels, and the size the caller asked for.
+  const pixels = await readPixels({ x0, y0, x1, y1 }, level);
   const sx = region.x0 / f - x0, sy = region.y0 / f - y0;
   const sw = (region.x1 - region.x0) / f, sh = (region.y1 - region.y0) / f;
-  const ow = Math.max(1, Math.round((region.x1 - region.x0) * scale));
-  const oh = Math.max(1, Math.round((region.y1 - region.y0) * scale));
-  const exact = sx === 0 && sy === 0 && ow === w && oh === h;
+  if (jpeg) compositeOverBackground(pixels, background ?? [1, 1, 1]);
+  const lossy = lossyQuality(type, quality);
   if (exact && type === "image/png") return encodePng(pixels, w, h);
+  if (exact && type === "image/tiff") return encodeTiff(pixels, w, h, compression ?? "none");
   const full = new OffscreenCanvas(w, h);
   full.getContext("2d")!.putImageData(new ImageData(pixels, w, h), 0, 0);
-  if (exact) return full.convertToBlob({ type });
+  if (exact) return canvasBlob(full, type, lossy);
   const out = new OffscreenCanvas(ow, oh);
   const ctx = out.getContext("2d")!;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(full, sx, sy, sw, sh, 0, 0, ow, oh);
-  return out.convertToBlob({ type });
+  // The destination canvas has its own pixels now. Drop the level-sized surface
+  // before the encoder allocates its output.
+  full.width = 0;
+  full.height = 0;
+  if (type === "image/tiff") {
+    const data = ctx.getImageData(0, 0, ow, oh).data;
+    // `getImageData` copied the pixels; release the backing store before Deflate.
+    out.width = 0;
+    out.height = 0;
+    return encodeTiff(data, ow, oh, compression ?? "none");
+  }
+  return canvasBlob(out, type, lossy);
 }
 let savedToken = 0;
 // The state each save wrote, until the page confirms or releases it.
@@ -723,6 +819,26 @@ function rememberSave(entry: { hash: string; revision: number }) {
   while (saves.size > MAX_PENDING_SAVES) saves.delete(saves.keys().next().value!);
   return token;
 }
+function brushImageArgs(image: Args<"beginBrush">["tipImage"], label: string): [number, number, Uint8Array] {
+  if (!image || !validBrushImageSize(image.width, image.height) ||
+      !(image.pixels instanceof ArrayBuffer) || image.pixels.byteLength !== image.width * image.height) {
+    throw new Error(`INVALID_ARGUMENT: ${label}`);
+  }
+  return [image.width, image.height, new Uint8Array(image.pixels)];
+}
+
+function brushTipArgs(image: Args<"beginBrush">["tipImage"]): [number, number, Uint8Array] {
+  return image === undefined ? [0, 0, new Uint8Array()] : brushImageArgs(image, "brush tip");
+}
+
+function brushTextureArgs(texture: Args<"beginBrush">["texture"]): [number, number, Uint8Array, number, number] {
+  if (texture === undefined) return [0, 0, new Uint8Array(), 1, 0];
+  if (!texture || !validBrushTextureParams(texture.scale, texture.depth)) {
+    throw new Error("INVALID_ARGUMENT: brush texture scale/depth");
+  }
+  return [...brushImageArgs(texture.image, "brush texture image"), texture.scale, texture.depth];
+}
+
 async function execute(m: Queued): Promise<unknown> {
   // Check when executed: the request may have waited behind a document replacement.
   checkDocument(m.documentEpoch);
@@ -742,13 +858,17 @@ async function execute(m: Queued): Promise<unknown> {
       await init();
       postMessage({ t: "diagnostic", value: { initPhase: "runtime-create" } });
       runtime = await Runtime.create(canvas, budget);
+      if (runtime.protocolVersion?.() !== PROTOCOL)
+        throw Error("CONFLICT: SDK/WASM version mismatch");
+      gpuTimestamps = m.gpuTimestamps;
+      runtime.setGpuTimestamps(gpuTimestamps);
+      undoSteps = m.undoSteps;
+      runtime.setMaxUndo(undoSteps);
       postMessage({ t: "diagnostic", value: { initPhase: "decoder-start" } });
       finishAbort=runtime.finishAbortHandle();
       frameFields = runtime.frameFields();
       adapterName = runtime.adapterName();
       startDecoders();
-      if (runtime.protocolVersion?.() !== PROTOCOL)
-        throw Error("CONFLICT: SDK/WASM version mismatch");
       journaling = m.journal !== false;
       if (!journaling) {
         postMessage({ t: "diagnostic", value: { initPhase: "ready" } });
@@ -809,6 +929,8 @@ async function execute(m: Queued): Promise<unknown> {
         new Float32Array(m.color),
         m.erase,
         !!m.mask,
+        ...brushTipArgs(m.tipImage),
+        ...brushTextureArgs(m.texture),
       );
       return true;
     case "input":
@@ -893,10 +1015,16 @@ async function execute(m: Queued): Promise<unknown> {
     }
     case "releaseObjects": runtime.releaseObjects(); return true;
     case "markFolderSaved": runtime.markFolderSaved(); return true;
+    case "markStoreSaved": runtime.markStoreSaved(); return true;
     case "externalObjects": return runtime.externalObjects();
+    case "historyIsExternal": return runtime.historyIsExternal();
+    case "checkHistoryStore": return JSON.parse(runtime.checkHistoryStore(new Uint8Array(m.bytes), JSON.stringify(m.objects), m.warn));
+    case "storeRootsContained": return runtime.storeRootsContained(new Uint8Array(m.manifest));
+    case "historyStoreAttached": return JSON.parse(runtime.historyStoreAttached());
     case "saveWithoutHistory": return runtime.saveWithoutHistory();
+    case "saveThin": return runtime.saveThinPackage();
     case "packageBytes": {
-      const bytes = runtime.packageBytes();
+      const bytes = m.external ? runtime.thinPackageBytes() : runtime.packageBytes();
       return bytes === undefined ? null : { bytes, limit: runtime.packageLimit() };
     }
     case "openFolder": {
@@ -1009,7 +1137,9 @@ async function execute(m: Queued): Promise<unknown> {
       // or not; inspect().available is false for a saved one, but it is valid.
       if (documentEpoch !== 0) throw Error("CONFLICT: no-recovery: a document is already open");
       await writesIdle();
+      const candidatesStart = performance.now();
       const candidates = await io<Candidate[]>("loadCandidates");
+      const candidatesMs = performance.now() - candidatesStart;
       if (!candidates.length) {
         const state = await io<StoreState>("inspect");
         recoveryPending = false;
@@ -1017,41 +1147,91 @@ async function execute(m: Queued): Promise<unknown> {
           ? "CORRUPT_DATA: no usable recovery generation"
           : "NOT_FOUND: recovery journal");
       }
-      let recovery: Candidate | null = null;
+      let recovered: {
+        candidate: Candidate;
+        checkpointUndoSteps: number;
+        stages: Pick<RecoveryStages, "load" | "verify" | "restore" | "register" | "replay">;
+      } | null = null;
       let lastError: unknown;
       for (const candidate of candidates) {
+        // Transient storage failures propagate so the caller can retry without replacing a generation.
+        const loadStart = performance.now();
+        const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents | { damaged: string };
+        const load = performance.now() - loadStart;
+        if ("damaged" in full) {
+          lastError = full.damaged;
+          continue;
+        }
+        // Out of memory says nothing about this candidate: it must not select an older generation.
+        const framedRecords = frameRecords(full.records);
         try {
-          // A candidate that cannot be read (a missing object) is skipped like one that
-          // cannot be opened; it does not stop storage.
-          const full = (await journal.request("loadCandidate", { generation: candidate.generation })) as CandidateContents;
-          if (full.metadata && full.metadata.format >= 3)
-            runtime.openRecoveryEntries(full.base, JSON.stringify(full.metadata.opaque));
-          else if (full.metadata)
-            runtime.openRecoveryPackage(full.base, JSON.stringify(full.metadata.opaque));
-          else runtime.openPackage(full.base);
-          runtime.replayRecords(frameRecords(full.records));
+          // Saved undo records can depend on more history than the new session exposes.
+          const savedUndoSteps = full.metadata?.undoSteps ?? DEFAULT_UNDO_STEPS;
+          if (!Number.isInteger(savedUndoSteps) || savedUndoSteps < 1 || savedUndoSteps > MAX_UNDO_STEPS)
+            throw Error("CORRUPT_DATA: invalid checkpoint undo limit");
+          runtime.setMaxUndo(savedUndoSteps);
+          let stages: Pick<RecoveryStages, "verify" | "restore" | "register">;
+          if (full.metadata) {
+            const opaque = JSON.stringify(full.metadata.opaque);
+            const report = full.metadata.format >= 3
+              ? runtime.openRecoveryEntries(full.base, opaque, true)
+              : runtime.openRecoveryPackage(full.base, opaque, true);
+            stages = JSON.parse(report).stages;
+          } else {
+            // Legacy checkpoints use the normal archive path, which returns no breakdown.
+            const start = performance.now();
+            runtime.openPackage(full.base);
+            stages = { verify: 0, restore: performance.now() - start, register: 0 };
+          }
+          const replayStart = performance.now();
+          runtime.replayRecords(framedRecords);
+          const replay = performance.now() - replayStart;
+          runtime.setMaxUndo(undoSteps);
           if (full.metadata?.dirty) runtime.markUnsaved();
-          recovery = candidate;
+          recovered = {
+            candidate,
+            checkpointUndoSteps: savedUndoSteps,
+            stages: { load, verify: stages.verify, restore: stages.restore, register: stages.register, replay },
+          };
           break;
         } catch (error) {
           // A trap is not a damaged candidate: trying the next one would run on a broken Runtime.
           if (error instanceof WebAssembly.RuntimeError) throw error;
+          runtime.setMaxUndo(undoSteps);
           lastError = error;
         }
       }
-      if (!recovery) {
+      if (!recovered) {
         recoveryPending = false;
         throw Error("CORRUPT_DATA: no usable recovery generation: " + lastError);
       }
-      await io("activate", { generation: recovery.generation });
+      const { candidate: recovery, checkpointUndoSteps, stages } = recovered;
+      const activateStart = performance.now();
+      const forgotten = await io<string[]>("activate", { generation: recovery.generation });
+      const activate = performance.now() - activateStart;
+      if (forgotten.length) runtime.forgetStoredObjectPaths(JSON.stringify(forgotten));
       const s = JSON.parse(runtime.view());
       if (recovery.generation !== recovery.latestGeneration)
         s.warnings.push({ code: "RECOVERED_OLDER_GENERATION", details: {} });
       if (recovery.truncated)
         s.warnings.push({ code: "RECOVERED_TRUNCATED", details: {} });
       adoptDocument(m.nextDocumentEpoch);
+      // Rebase before appending to a journal that was replaced or only partly replayed.
+      const diverged = s.warnings.some((warning: { code: string }) => warning.code === "RECOVERY_DIVERGED");
+      if (checkpointUndoSteps !== undoSteps || recovery.generation !== recovery.latestGeneration || diverged) {
+        try {
+          queueCheckpoint();
+        } catch (error) {
+          if (error instanceof WebAssembly.RuntimeError) throw error;
+          freezeStorage(Error("STORAGE: recovery checkpoint failed: " + String((error as Error).message || error)));
+        }
+      }
+      recoveryStages = { candidates: candidatesMs, ...stages, activate, firstFrame: null };
+      recoveryFrame = { start: null, waiting: false };
       return s;
     }
+    case "recoveryStages":
+      return recoveryStages;
     case "validateFrame":
       await runtime.validateFrame();
       return true;
@@ -1060,6 +1240,8 @@ async function execute(m: Queued): Promise<unknown> {
         JSON.stringify(m.config),
         new Float32Array(m.color),
         new Float32Array(m.samples),
+        ...brushTipArgs(m.tipImage),
+        ...brushTextureArgs(m.texture),
       );
     case "recoveryStore": {
       await writesIdle();
@@ -1086,7 +1268,7 @@ async function execute(m: Queued): Promise<unknown> {
     case "looseCheckpoint": {
       await writesIdle();
       const entries = checkpointParts();
-      await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer }, [entries.buffer]);
+      await io("checkpointLoose", { entries: entries.buffer as ArrayBuffer, undoSteps }, [entries.buffer]);
       return true;
     }
     case "legacyCheckpoint": {
@@ -1136,7 +1318,7 @@ async function execute(m: Queued): Promise<unknown> {
       if (heldWrite) return heldWrite;
       return new Promise<Write["kind"]>((resolve, reject) => heldWaiters.push({ resolve, reject }));
     case "injectStorageFault":
-      if (m.position !== "beforeAppend" && m.position !== "afterAppend")
+      if (m.position !== "beforeAppend" && m.position !== "afterAppend" && m.position !== "beforeCheckpoint" && m.position !== "beforeCheckpointParts")
         throw Error("INVALID_ARGUMENT: storage fault position");
       injectedStorageFault = m.position;
       return true;
@@ -1158,6 +1340,13 @@ async function execute(m: Queued): Promise<unknown> {
       return await runtime.readTile(m.x, m.y);
     case "exportImage":
       return exportImage(m);
+    case "exportStreamOpen":
+      return openPngExport(m);
+    case "exportStreamPull":
+      return pullPngExport(m.streamId);
+    case "exportStreamClose":
+      await closePngExport(m.streamId);
+      return true;
     case "destroyGpu":
       runtime.destroyGpu();
       return true;
@@ -1204,6 +1393,12 @@ async function execute(m: Queued): Promise<unknown> {
       profilingEnabled = !!m.enabled;
       if (!profilingEnabled) diagnosticTickMs = null;
       return true;
+    case "setGpuTimestampProfiling":
+      gpuTimestamps = m.enabled;
+      runtime.setGpuTimestamps(gpuTimestamps);
+      return true;
+    case "gpuTileTimestamps":
+      return JSON.parse(runtime.takeGpuTimestamps());
     case "waitFrame": {
       let frame;
       // Ticks this request took; each one returns control to the Worker loop.
@@ -1233,6 +1428,7 @@ async function execute(m: Queued): Promise<unknown> {
         throw error;
       }
       await runtime.gpuIdle();
+      if (recoveryFrame) finishRecoveryFrame(recoveryFrame);
       diagnosticProfiles = null;
       diagnosticTickMs = null;
       frameSettled = true;
@@ -1306,6 +1502,12 @@ async function drain() {
             pumpDecodes();
             if (value.profile && diagnosticProfiles) diagnosticProfiles.push(value.profile);
             frameSettled = value.pending === 0 && !value.presentDeferred;
+            const timing = recoveryFrame;
+            if (frameSettled && timing && !timing.waiting) {
+              timing.waiting = true;
+              // Observe completion without blocking the drain or borrowing the Runtime.
+              void runtime.submittedWorkDone().then(() => finishRecoveryFrame(timing));
+            }
             if (!frameSettled) wantTick = true;
             if (frameSettled) prefetchSpentMs = 0;
             postMessage({ t: "frame", value });

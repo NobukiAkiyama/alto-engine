@@ -41,7 +41,7 @@ impl Renderer {
             },
             Class::Fixed,
         )?;
-        let scratch = memory::create_texture(
+        let scratch = match memory::create_texture(
             &self.governor,
             &self.device,
             &wgpu::TextureDescriptor {
@@ -55,7 +55,14 @@ impl Renderer {
                 view_formats: &[],
             },
             Class::Fixed,
-        )?;
+        ) {
+            Ok(scratch) => scratch,
+            Err(err) => {
+                // No command can reference the replacement cache yet.
+                memory::destroy_texture(&self.governor, &cache, true);
+                return Err(err);
+            }
+        };
         self.reset_render_cache();
         self.cache_view = array_view(&cache);
         let old_cache = std::mem::replace(&mut self.cache, cache);
@@ -195,5 +202,71 @@ impl Renderer {
         if self.prefetch_job.take().is_some() {
             self.prefetch_stats.cancelled += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn failed_format_switch_releases_replacement_cache() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut renderer = match pollster::block_on(Renderer::headless(&instance, 64)) {
+            Ok(renderer) => renderer,
+            Err(RenderError::GpuUnsupported(err))
+                if !cfg!(target_os = "macos")
+                    && std::env::var_os("ALTO_REQUIRE_GPU_PARITY").is_none() =>
+            {
+                eprintln!("format switch test skipped: {err}");
+                return;
+            }
+            Err(err) => panic!("format switch test could not start: {err}"),
+        };
+        let size = renderer.cache.size();
+        let cache_bytes =
+            size.width as u64 * size.height as u64 * size.depth_or_array_layers as u64 * 4;
+        let scratch = renderer.scratch.size();
+        let scratch_bytes =
+            scratch.width as u64 * scratch.height as u64 * scratch.depth_or_array_layers as u64 * 4;
+        let snapshot = renderer.governor.snapshot();
+        let filler_size =
+            snapshot.budget_limit - snapshot.budget_used - cache_bytes - scratch_bytes + 4;
+        let filler = memory::create_buffer(
+            &renderer.governor,
+            &renderer.device,
+            &wgpu::BufferDescriptor {
+                label: None,
+                size: filler_size,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            Class::Effects,
+            false,
+        )
+        .unwrap();
+        let before = renderer.governor.snapshot().budget_used;
+        let scene = RenderScene {
+            canvas: alto_core::IRect {
+                x0: 0,
+                y0: 0,
+                x1: 256,
+                y1: 256,
+            },
+            root: 0,
+            nodes: vec![],
+            render_version: 1,
+        };
+        for _ in 0..2 {
+            assert!(matches!(
+                renderer.prepare_scene(&scene),
+                Err(RenderError::Budget(_))
+            ));
+            assert_eq!(renderer.governor.snapshot().budget_used, before);
+            assert!(renderer.integer_cache);
+        }
+        memory::destroy_buffer(&renderer.governor, &filler, true);
+        renderer.prepare_scene(&scene).unwrap();
+        assert!(!renderer.integer_cache);
     }
 }

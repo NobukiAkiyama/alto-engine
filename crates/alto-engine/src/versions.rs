@@ -4,10 +4,11 @@ mod journal;
 mod lazy;
 pub use journal::VersionCheckpoint;
 pub(crate) use lazy::LazyObjects;
-pub use lazy::ObjectTarget;
+pub use lazy::{ObjectTarget, StoreMismatch};
 mod merge;
 pub use merge::{MergeConflict, MergePlan, MergeResolution, MergeResult, MergeValue};
 mod branches;
+pub use alto_store::MAX_STASHES;
 pub use branches::BranchView;
 // M8: version commits, history, semantic diff, restore, and the package parts that
 // carry history in both the single-file and folder forms.
@@ -18,6 +19,54 @@ use alto_raster::TileStore;
 use alto_store::PackageParts;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Milliseconds a recovery spent in each Rust stage. All zero when the caller
+/// passed no clock, so the ordinary open path reads no time at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct RecoveryStages {
+    pub verify: f64,
+    pub restore: f64,
+    pub register: f64,
+}
+
+/// Splits recovery work into stages using the caller's monotonic clock. A timer
+/// without a clock takes no reading and leaves every stage at zero.
+pub(crate) struct RecoveryTimer<'a> {
+    clock: Option<&'a dyn Fn() -> f64>,
+    last: f64,
+    stages: RecoveryStages,
+}
+
+impl<'a> RecoveryTimer<'a> {
+    pub(crate) fn new(clock: Option<&'a dyn Fn() -> f64>) -> Self {
+        Self {
+            clock,
+            last: clock.map_or(0.0, |clock| clock()),
+            stages: RecoveryStages::default(),
+        }
+    }
+    fn split(&mut self) -> f64 {
+        let Some(clock) = self.clock else {
+            return 0.0;
+        };
+        let now = clock();
+        let elapsed = now - self.last;
+        self.last = now;
+        elapsed
+    }
+    pub(crate) fn split_verify(&mut self) {
+        self.stages.verify += self.split();
+    }
+    pub(crate) fn split_restore(&mut self) {
+        self.stages.restore += self.split();
+    }
+    pub(crate) fn split_register(&mut self) {
+        self.stages.register += self.split();
+    }
+    pub(crate) fn finish(self) -> RecoveryStages {
+        self.stages
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct VersionStore {
@@ -487,6 +536,7 @@ impl Engine {
             commits: store.commit_bytes.clone(),
             head: store.head,
             refs: store.refs.clone(),
+            external: None,
         };
         Ok((parts, hashes))
     }
@@ -568,7 +618,7 @@ impl Engine {
 
     /// Object paths a folder needs, given its manifest, snapshots and commits.
     pub fn folder_plan(entries: BTreeMap<String, Vec<u8>>) -> Result<Vec<String>, EngineError> {
-        let p = alto_store::decode_entries(entries)?;
+        let p = decode_folder(entries)?;
         let mut hashes = doc_hashes(&Document::from_snapshot_bytes(&p.snapshot)?);
         for s in p.snapshots.values() {
             if let Ok(d) = Document::from_snapshot_bytes(s) {
@@ -578,13 +628,48 @@ impl Engine {
         Ok(hashes.iter().map(alto_store::object_path).collect())
     }
 
-    /// Opens either package form from its logical entries.
+    /// Opens a folder from its logical entries.
     pub fn open_entries(
         &mut self,
         entries: BTreeMap<String, Vec<u8>>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        let p = alto_store::decode_entries(entries)?;
-        self.open_decoded_package(p, false, None, None)
+        let mut timer = RecoveryTimer::new(None);
+        self.open_decoded_package(decode_folder(entries)?, false, None, None, &mut timer)
+    }
+
+    /// Opens a .alto from its logical entries. A thin one opens with its versions'
+    /// objects left outside, as listed in `external-objects.json`.
+    pub(crate) fn open_package_entries(
+        &mut self,
+        entries: BTreeMap<String, Vec<u8>>,
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
+        let mut timer = RecoveryTimer::new(None);
+        let mut p = alto_store::decode_entries(entries)?;
+        let Some(external) = p.external.take() else {
+            return self.open_decoded_package(p, false, None, None, &mut timer);
+        };
+        if external.document != Document::from_snapshot_bytes(&p.snapshot)?.root {
+            return Err(branches::fail(
+                "CORRUPT_DATA",
+                "external-objects.json belongs to another document",
+            ));
+        }
+        let (handle, warnings) =
+            self.open_decoded_package(p, false, None, Some(external.objects.clone()), &mut timer)?;
+        if self.version_only_objects(handle)? != external.objects {
+            self.documents.remove(&handle);
+            self.versions.remove(&handle);
+            self.lazy.remove(&handle);
+            self.maintain();
+            return Err(branches::fail(
+                "CORRUPT_DATA",
+                "external-objects.json does not match the versions",
+            ));
+        }
+        if let Some(lazy) = self.lazy.get_mut(&handle) {
+            lazy.external_history = true;
+        }
+        Ok((handle, warnings))
     }
 
     /// Journal-only fast path. The caller must verify the entire checkpoint's
@@ -594,15 +679,53 @@ impl Engine {
         bytes: &[u8],
         opaque: &std::collections::BTreeSet<ContentHash>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
-        self.open_recovery_entries(alto_store::read_entries(bytes)?, opaque)
+        let (handle, warnings, _) = self.open_recovery_package_with_clock(bytes, opaque, None)?;
+        Ok((handle, warnings))
+    }
+
+    /// `open_recovery_package` with the caller's monotonic clock. The stages are
+    /// all zero when `clock` is `None`.
+    pub fn open_recovery_package_with_clock(
+        &mut self,
+        bytes: &[u8],
+        opaque: &std::collections::BTreeSet<ContentHash>,
+        clock: Option<&dyn Fn() -> f64>,
+    ) -> Result<(DocHandle, Vec<Warning>, RecoveryStages), EngineError> {
+        let mut timer = RecoveryTimer::new(clock);
+        let entries = alto_store::read_entries(bytes)?;
+        let (handle, warnings) = self.open_recovery_entries_timed(entries, opaque, &mut timer)?;
+        Ok((handle, warnings, timer.finish()))
     }
 
     /// Journal-only: entries of a checkpoint whose metadata digest the caller verified.
     /// Objects are named by their hash and checked against it on first use.
     pub fn open_recovery_entries(
         &mut self,
+        entries: BTreeMap<String, Vec<u8>>,
+        opaque: &std::collections::BTreeSet<ContentHash>,
+    ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
+        let (handle, warnings, _) = self.open_recovery_entries_with_clock(entries, opaque, None)?;
+        Ok((handle, warnings))
+    }
+
+    /// `open_recovery_entries` with the caller's monotonic clock. The stages are
+    /// all zero when `clock` is `None`.
+    pub fn open_recovery_entries_with_clock(
+        &mut self,
+        entries: BTreeMap<String, Vec<u8>>,
+        opaque: &std::collections::BTreeSet<ContentHash>,
+        clock: Option<&dyn Fn() -> f64>,
+    ) -> Result<(DocHandle, Vec<Warning>, RecoveryStages), EngineError> {
+        let mut timer = RecoveryTimer::new(clock);
+        let (handle, warnings) = self.open_recovery_entries_timed(entries, opaque, &mut timer)?;
+        Ok((handle, warnings, timer.finish()))
+    }
+
+    fn open_recovery_entries_timed(
+        &mut self,
         mut entries: BTreeMap<String, Vec<u8>>,
         opaque: &std::collections::BTreeSet<ContentHash>,
+        timer: &mut RecoveryTimer<'_>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let history = match entries.remove("history.json") {
             Some(bytes) => Some(
@@ -619,7 +742,8 @@ impl Engine {
             None => None,
         };
         let p = alto_store::decode_recovery_entries(entries, opaque)?;
-        self.open_decoded_package(p, true, history, lazy)
+        timer.split_verify();
+        self.open_decoded_package(p, true, history, lazy, timer)
     }
 
     fn open_decoded_package(
@@ -628,6 +752,7 @@ impl Engine {
         deferred_verify: bool,
         history: Option<alto_doc::History>,
         lazy: Option<BTreeSet<ContentHash>>,
+        timer: &mut RecoveryTimer<'_>,
     ) -> Result<(DocHandle, Vec<Warning>), EngineError> {
         let current_doc = Document::from_snapshot_bytes(&p.snapshot)?;
         let current = ContentHash::of(&p.snapshot);
@@ -639,7 +764,7 @@ impl Engine {
             );
         }
         let mut required = BTreeSet::new();
-        let mut stack: Vec<_> = p.refs.roots().chain(p.head).collect();
+        let mut stack: Vec<_> = p.refs.all_roots().chain(p.head).collect();
         while let Some(hash) = stack.pop() {
             if required.insert(hash) {
                 let c = parsed.get(&hash).ok_or_else(|| {
@@ -711,46 +836,86 @@ impl Engine {
         } else {
             BTreeSet::new()
         };
-        let (handle, mut warnings) =
-            self.install_package(p.objects, p.opaque, &p.snapshot, vec![], deferred_verify)?;
-        for hash in &store.retained {
-            if !self.tiles.contains(hash)
-                && !self.blobs.contains_key(hash)
-                && !lazy.as_ref().is_some_and(|known| known.contains(hash))
-            {
-                self.documents.remove(&handle);
-                return Err(branches::fail(
-                    "CORRUPT_DATA",
-                    format!("history object missing: {hash}"),
-                ));
+        // Snapshot and history parsing so far is restore; the object inserts that
+        // follow are register, and the snapshot install after them restores again.
+        timer.split_restore();
+        let new_tiles: BTreeSet<_> = p
+            .objects
+            .iter()
+            .filter_map(|(hash, bytes)| {
+                (matches!(bytes.get(8), Some(1 | 4)) && !self.tiles.reachable(hash))
+                    .then_some(*hash)
+            })
+            .collect();
+        let new_blobs: BTreeSet<_> = p
+            .objects
+            .iter()
+            .filter_map(|(hash, bytes)| {
+                (bytes.get(8) == Some(&0) && !self.blobs.contains_key(hash)).then_some(*hash)
+            })
+            .collect();
+        let installed = (|| -> Result<_, EngineError> {
+            let (handle, warnings) = self.install_package(
+                p.objects,
+                p.opaque,
+                &p.snapshot,
+                vec![],
+                deferred_verify,
+                timer,
+            )?;
+            for hash in &store.retained {
+                if !self.tiles.contains(hash)
+                    && !self.blobs.contains_key(hash)
+                    && !lazy.as_ref().is_some_and(|known| known.contains(hash))
+                {
+                    self.documents.remove(&handle);
+                    return Err(branches::fail(
+                        "CORRUPT_DATA",
+                        format!("history object missing: {hash}"),
+                    ));
+                }
             }
-        }
-        {
-            let validation = (|| -> Result<(), EngineError> {
-                if let Some(selection) = &self.document(handle)?.selection {
-                    self.validate_mask_plane_impl(selection, deferred_verify)?;
-                }
-                for node in self.document(handle)?.nodes.values() {
-                    self.validate_node_content_impl(node, deferred_verify)?;
-                }
-                // With objects left in the folder, a version is checked when they are read.
-                let versions = store.snapshots.values().filter(|_| lazy.is_none());
-                for bytes in versions {
-                    let doc = Document::from_snapshot_bytes(bytes)?;
-                    if let Some(selection) = &doc.selection {
+            {
+                let validation = (|| -> Result<(), EngineError> {
+                    if let Some(selection) = &self.document(handle)?.selection {
                         self.validate_mask_plane_impl(selection, deferred_verify)?;
                     }
-                    for node in doc.nodes.values() {
+                    for node in self.document(handle)?.nodes.values() {
                         self.validate_node_content_impl(node, deferred_verify)?;
                     }
+                    // With objects left in the folder, a version is checked when they are read.
+                    let versions = store.snapshots.values().filter(|_| lazy.is_none());
+                    for bytes in versions {
+                        let doc = Document::from_snapshot_bytes(bytes)?;
+                        if let Some(selection) = &doc.selection {
+                            self.validate_mask_plane_impl(selection, deferred_verify)?;
+                        }
+                        for node in doc.nodes.values() {
+                            self.validate_node_content_impl(node, deferred_verify)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = validation {
+                    self.documents.remove(&handle);
+                    return Err(error);
                 }
-                Ok(())
-            })();
-            if let Err(error) = validation {
-                self.documents.remove(&handle);
+            }
+            Ok((handle, warnings))
+        })();
+        let (handle, mut warnings) = match installed {
+            Ok(result) => result,
+            Err(error) => {
+                self.tiles.remove_all(&new_tiles);
+                self.decoded
+                    .get_mut()
+                    .retain(|hash| !new_tiles.contains(hash));
+                for hash in &new_blobs {
+                    self.blobs.remove(hash);
+                }
                 return Err(error);
             }
-        }
+        };
         warnings.dedup();
         self.versions.insert(handle, store);
         if let Some(known) = lazy {
@@ -759,6 +924,7 @@ impl Engine {
                 LazyObjects {
                     known,
                     pinned: carried,
+                    external_history: false,
                 },
             );
         }
@@ -770,6 +936,21 @@ impl Engine {
         }
         self.backed = true;
         self.maintain();
+        timer.split_restore();
         Ok((handle, warnings))
     }
+}
+
+/// A folder's package. Only a thin .alto leaves objects outside itself.
+pub(crate) fn decode_folder(
+    entries: BTreeMap<String, Vec<u8>>,
+) -> Result<alto_store::Package, EngineError> {
+    let p = alto_store::decode_entries(entries)?;
+    if p.external.is_some() {
+        return Err(branches::fail(
+            "UNSUPPORTED",
+            "a folder holds every object and lists none outside itself",
+        ));
+    }
+    Ok(p)
 }

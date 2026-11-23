@@ -97,6 +97,14 @@ impl Editor {
             log: vec![],
         }
     }
+    /// Change the history depth, discarding the oldest undo entries first.
+    pub fn set_max_undo(&mut self, steps: usize) {
+        self.max_undo = steps;
+        self.trim_undo();
+    }
+    pub fn max_undo(&self) -> usize {
+        self.max_undo
+    }
     /// Identifies the document's content; kept current by every edit, undo and redo.
     pub fn state_digest(&self) -> ContentHash {
         self.digest.value()
@@ -132,12 +140,14 @@ impl Editor {
         &mut self,
         ops: Vec<Op>,
         enforce: bool,
+        derived_bakes: bool,
     ) -> Result<(Vec<AppliedOp>, ChangeSet), DocError> {
         let revision = self.doc.revision;
         let mut applied = Vec::with_capacity(ops.len());
         let mut changes = ChangeSet::default();
         for op in ops {
-            match self.doc.apply(op.clone(), enforce) {
+            let check_lock = enforce && !(derived_bakes && matches!(op, Op::SetTextBake { .. }));
+            match self.doc.apply(op.clone(), check_lock) {
                 Ok((inverse, change)) => {
                     applied.push(AppliedOp { op, inverse });
                     changes.merge(change);
@@ -153,6 +163,12 @@ impl Editor {
             let revert_err = self.revert(&applied).err();
             self.doc.revision = revision;
             return Err(revert_err.unwrap_or(e));
+        }
+        // Keep live metadata and its digest consistent with the saved snapshot.
+        let format = self.doc.required_format();
+        if self.doc.meta.format_version != format {
+            self.doc.meta.format_version = format;
+            changes.meta_changed = true;
         }
         Ok((applied, changes))
     }
@@ -184,7 +200,35 @@ impl Editor {
         if ops.is_empty() {
             return Ok(ChangeSet::default());
         }
-        let (applied, changes) = self.replay(ops, true)?;
+        self.transact_inner(intent, ops, base_revision, false)
+    }
+    /// Engine-only path for validated derived bake operations.
+    #[doc(hidden)]
+    pub fn transact_with_derived_bakes(
+        &mut self,
+        intent: impl Into<Intent>,
+        ops: Vec<Op>,
+        base_revision: u64,
+    ) -> Result<ChangeSet, DocError> {
+        self.transact_inner(intent, ops, base_revision, true)
+    }
+    fn transact_inner(
+        &mut self,
+        intent: impl Into<Intent>,
+        ops: Vec<Op>,
+        base_revision: u64,
+        derived_bakes: bool,
+    ) -> Result<ChangeSet, DocError> {
+        if base_revision != self.doc.revision {
+            return Err(DocError::Conflict {
+                expected: base_revision,
+                actual: self.doc.revision,
+            });
+        }
+        if ops.is_empty() {
+            return Ok(ChangeSet::default());
+        }
+        let (applied, changes) = self.replay(ops, true, derived_bakes)?;
         self.doc.revision += 1;
         self.seq += 1;
         let intent = intent.into();
@@ -197,9 +241,7 @@ impl Editor {
         };
         self.log_tx(&tx, false);
         self.undo.push(tx);
-        if self.undo.len() > self.max_undo {
-            self.undo.remove(0);
-        }
+        self.trim_undo();
         self.redo.clear();
         self.digest.update(&self.doc, &changes);
         Ok(changes)
@@ -214,7 +256,7 @@ impl Editor {
             .rev()
             .map(|item| item.inverse.clone())
             .collect();
-        let (_, changes) = self.replay(inverses, false)?;
+        let (_, changes) = self.replay(inverses, false, false)?;
         self.doc.revision += 1;
         self.undo.pop();
         if self.log.last().is_some_and(|e| e.seq == tx.seq) {
@@ -231,11 +273,12 @@ impl Editor {
             return Ok(None);
         };
         let ops = tx.ops.iter().map(|item| item.op.clone()).collect();
-        let (_, changes) = self.replay(ops, true)?;
+        let (_, changes) = self.replay(ops, true, true)?;
         self.doc.revision += 1;
         self.redo.pop();
         self.log_tx(&tx, false);
         self.undo.push(tx);
+        self.trim_undo();
         self.digest.update(&self.doc, &changes);
         Ok(Some(changes))
     }
@@ -288,10 +331,11 @@ impl Editor {
         self.redo = history.redo;
         self.seq = history.seq;
         self.log = history.log;
-        if self.undo.len() > self.max_undo {
-            let excess = self.undo.len() - self.max_undo;
-            self.undo.drain(..excess);
-        }
+        self.trim_undo();
+    }
+
+    fn trim_undo(&mut self) {
+        self.drop_oldest_undos(self.undo.len().saturating_sub(self.max_undo));
     }
     /// Forgets the most recent redo entry, for an undo that reverted a replayed edit.
     pub fn drop_newest_redo(&mut self) {
@@ -314,6 +358,40 @@ mod tests {
         doc.revision = 0;
         doc
     }
+    #[test]
+    fn configurable_undo_trims_oldest_and_applies_to_future_edits() {
+        let mut e = editor();
+        e.set_max_undo(3);
+        for width in 1..=5 {
+            e.transact(
+                "resize",
+                vec![Op::SetMeta {
+                    meta: DocumentMeta::srgb_u8(width, 10),
+                }],
+                e.doc.revision,
+            )
+            .unwrap();
+        }
+        assert_eq!(e.max_undo(), 3);
+        assert!(e.undo().unwrap().is_some());
+        e.set_max_undo(1);
+        assert!(e.undo().unwrap().is_some());
+        assert!(e.undo().unwrap().is_none());
+        assert!(e.redo().unwrap().is_some());
+        assert!(e.redo().unwrap().is_some());
+        assert_eq!(e.undo_len(), 1);
+        e.transact(
+            "resize",
+            vec![Op::SetMeta {
+                meta: DocumentMeta::srgb_u8(9, 10),
+            }],
+            e.doc.revision,
+        )
+        .unwrap();
+        assert!(e.undo().unwrap().is_some());
+        assert!(e.undo().unwrap().is_none());
+    }
+
     #[test]
     fn incremental_state_digest_matches_a_full_recompute_after_every_edit() {
         let mut e = editor();

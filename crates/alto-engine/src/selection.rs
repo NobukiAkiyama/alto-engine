@@ -1,4 +1,8 @@
 //! Selection and mask commands operate on canonical R8 content, never on GPU caches.
+mod modify;
+mod path;
+pub use path::{PathCoverage, PathCoverageError};
+
 use super::*;
 use alto_core::{Affine2, NodeId, PixelFormat, TileKey};
 use alto_doc::{DocError, NodeKind, PropPatch};
@@ -32,6 +36,43 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
                 .expect("validated Gaussian blur radius"),
         },
+        alto_doc::Effect::HighPass { radius, .. } => REffectKind::HighPass {
+            radius: f(*radius),
+            radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
+                .expect("validated high-pass radius"),
+        },
+        alto_doc::Effect::UnsharpMask {
+            radius,
+            amount,
+            threshold,
+            ..
+        } => REffectKind::UnsharpMask {
+            radius: f(*radius),
+            radius_q8: alto_core::blur::blur_radius_q8_f64(*radius)
+                .expect("validated unsharp-mask radius"),
+            amount_q8: alto_core::q_from_f64_bits(amount.to_bits(), 8)
+                .expect("validated unsharp-mask amount") as u32,
+            threshold_q14: (*threshold as u32 * 16384 + 127) / 255,
+        },
+        alto_doc::Effect::MotionBlur {
+            angle, distance, ..
+        } => REffectKind::MotionBlur {
+            angle_q16: alto_core::q_from_f64_bits(angle.to_bits(), 16)
+                .expect("validated motion-blur angle") as i32,
+            distance_q8: alto_core::q_from_f64_bits(distance.to_bits(), 8)
+                .expect("validated motion-blur distance") as u32,
+        },
+        alto_doc::Effect::Noise {
+            amount,
+            seed,
+            monochrome,
+            ..
+        } => REffectKind::Noise {
+            seed: *seed,
+            amount_q14: alto_core::q_from_f64_bits(amount.to_bits(), 14)
+                .expect("validated noise amount") as u32,
+            monochrome: *monochrome,
+        },
         alto_doc::Effect::Levels {
             in_black,
             in_white,
@@ -46,8 +87,16 @@ pub fn render_effect(effect: &alto_doc::Effect) -> REffect {
             out_black: f(*out_black),
             out_white: f(*out_white),
         },
-        alto_doc::Effect::Curves { points, .. } => REffectKind::Curves {
+        alto_doc::Effect::Curves {
+            points, channel, ..
+        } => REffectKind::Curves {
             points: points.iter().map(|p| (f(p.x), f(p.y))).collect(),
+            channels: match channel {
+                alto_doc::CurveChannel::Master => [true; 3],
+                alto_doc::CurveChannel::Red => [true, false, false],
+                alto_doc::CurveChannel::Green => [false, true, false],
+                alto_doc::CurveChannel::Blue => [false, false, true],
+            },
         },
         alto_doc::Effect::HueSaturation {
             hue,
@@ -161,6 +210,8 @@ impl LayerPixels<'_> {
 const MAX_SELECTION_SOURCE_TILES: usize = 1024;
 /// Selections and masks are stored as at most this many R8 tiles.
 const MAX_SELECTION_TILES: usize = 4096;
+/// Segments in the outline handed to the editor, about 13 bytes each.
+const MAX_OUTLINE_SEGMENTS: usize = 1 << 18;
 
 fn generated_selection(
     engine: &mut Engine,
@@ -172,11 +223,15 @@ fn generated_selection(
     if !["replace", "add", "subtract", "intersect"].contains(&mode) {
         return Err(invalid("Unknown selection combination"));
     }
-    let tolerance = spec["tolerance"].as_u64().unwrap_or(0);
-    if tolerance > 255 {
-        return Err(invalid("Color tolerance must be 0..255"));
-    }
-    let tolerance = tolerance as u8;
+    let byte = |key, default, message| {
+        spec.get(key).map_or(Ok(default), |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| invalid(message))
+        })
+    };
+    let tolerance = byte("tolerance", 0, "Color tolerance must be an integer 0..255")?;
     let layer = spec["layer"]
         .as_str()
         .ok_or_else(|| invalid("Color selection requires a layer"))?;
@@ -218,35 +273,44 @@ fn generated_selection(
     let close = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= tolerance);
     let mut chosen = Coverage::default();
     if kind == "contiguous" {
-        let sx = spec["x"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
-        let sy = spec["y"].as_i64().ok_or_else(|| invalid("Seed required"))? as i32;
+        let seed_coord = |key: &str| {
+            spec[key]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| invalid("Seed must be an integer in i32 range"))
+        };
+        let sx = seed_coord("x")?;
+        let sy = seed_coord("y")?;
         let mut pixels = LayerPixels {
             map: &map,
             engine,
             last: None,
         };
-        let seed = pixels
-            .read(sx - offset.0, sy - offset.1)?
-            .ok_or_else(|| invalid("Seed is outside the layer"))?;
+        let mut read = |x: i32, y: i32| match (x.checked_sub(offset.0), y.checked_sub(offset.1)) {
+            (Some(x), Some(y)) => pixels.read(x, y),
+            _ => Ok(None),
+        };
+        let seed = read(sx, sy)?.ok_or_else(|| invalid("Seed is outside the layer"))?;
         // Scanline fill: each stack entry is one pixel; a whole run is claimed per pop.
         let mut stack = vec![(sx, sy)];
         while let Some((x, y)) = stack.pop() {
             let mut fits = |x: i32, y: i32, chosen: &Coverage| -> Result<bool, EngineError> {
-                Ok(!chosen.get(x, y)
-                    && pixels
-                        .read(x - offset.0, y - offset.1)?
-                        .is_some_and(|c| close(c, seed)))
+                Ok(!chosen.get(x, y) && read(x, y)?.is_some_and(|c| close(c, seed)))
             };
             if !fits(x, y, &chosen)? {
                 continue;
             }
             let mut left = x;
-            while fits(left - 1, y, &chosen)? {
-                left -= 1;
+            while let Some(next) = left.checked_sub(1)
+                && fits(next, y, &chosen)?
+            {
+                left = next;
             }
             let mut right = x;
-            while fits(right + 1, y, &chosen)? {
-                right += 1;
+            while let Some(next) = right.checked_add(1)
+                && fits(next, y, &chosen)?
+            {
+                right = next;
             }
             for px in left..=right {
                 chosen.set(px, y);
@@ -254,7 +318,7 @@ fn generated_selection(
             if chosen.tiles.len() > MAX_SELECTION_TILES {
                 return Err(invalid("Selection/mask exceeds 4096 tiles"));
             }
-            for row in [y - 1, y + 1] {
+            for row in [y.checked_sub(1), y.checked_add(1)].into_iter().flatten() {
                 let mut open = false;
                 for px in left..=right {
                     let ok = fits(px, row, &chosen)?;
@@ -266,19 +330,24 @@ fn generated_selection(
             }
         }
     } else {
+        let message = "Color components must be integers 0..255";
         let target = [
-            spec["r"].as_u64().unwrap_or(0) as u8,
-            spec["g"].as_u64().unwrap_or(0) as u8,
-            spec["b"].as_u64().unwrap_or(0) as u8,
-            spec["a"].as_u64().unwrap_or(255) as u8,
+            byte("r", 0, message)?,
+            byte("g", 0, message)?,
+            byte("b", 0, message)?,
+            byte("a", 255, message)?,
         ];
+        let translate = |tile: i32, pixel: usize, shift: i32| {
+            i32::try_from(i64::from(tile) * 256 + pixel as i64 + i64::from(shift))
+                .map_err(|_| invalid("Selection coordinates are outside i32 range"))
+        };
         for (key, hash) in &map.tiles {
             let tile = engine.require_tile(hash)?;
             for (i, px) in tile.pixels.as_chunks::<4>().0.iter().enumerate() {
                 if close(*px, target) {
                     chosen.set(
-                        key.tx * 256 + (i % 256) as i32 + offset.0,
-                        key.ty * 256 + (i / 256) as i32 + offset.1,
+                        translate(key.tx, i % 256, offset.0)?,
+                        translate(key.ty, i / 256, offset.1)?,
                     );
                 }
             }
@@ -314,7 +383,7 @@ fn generated_selection(
         }
     }
     Ok(vec![Op::SetSelection {
-        selection: (!out.tiles.is_empty()).then_some(out),
+        selection: Some(out),
     }])
 }
 pub fn sample(tiles: &Decoded, x: i32, y: i32) -> u8 {
@@ -370,10 +439,32 @@ fn checked_bounds(b: [f64; 4]) -> Result<[i32; 4], EngineError> {
     }
     Ok(r)
 }
+#[cfg(test)]
+thread_local! {
+    /// Edges `lasso_coverage` has looked at on this thread.
+    static EDGE_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 #[derive(Default, Clone)]
 struct LassoRow {
     intersections: Vec<f64>,
-    edges: Vec<([f64; 2], [f64; 2])>,
+    /// Edges within half the feather of this row, ordered by `LassoEdge::lo`.
+    edges: Vec<LassoEdge>,
+}
+#[derive(Clone, Copy)]
+struct LassoEdge {
+    a: [f64; 2],
+    b: [f64; 2],
+    /// The columns where the edge can lie within half the feather of a pixel.
+    lo: f64,
+    hi: f64,
+}
+/// A left-to-right pass over one row: the edges whose columns have been reached, and
+/// those among them that are still near enough to matter.
+#[derive(Default, Clone)]
+struct LassoSweep {
+    next: usize,
+    near: Vec<usize>,
+    x: f64,
 }
 fn lasso_rows(
     points: &[[f64; 2]],
@@ -401,22 +492,47 @@ fn lasso_rows(
                     .push((b[0] - a[0]) * (py - a[1]) / (b[1] - a[1]) + a[0]);
             }
             if feather > 0.0 {
-                row.edges.push((a, b));
+                row.edges.push(LassoEdge {
+                    a,
+                    b,
+                    lo: a[0].min(b[0]) - feather / 2.0,
+                    hi: a[0].max(b[0]) + feather / 2.0,
+                });
             }
         }
     }
     for row in &mut rows {
         row.intersections.sort_by(f64::total_cmp);
+        row.edges.sort_by(|a, b| a.lo.total_cmp(&b.lo));
     }
     Ok(rows)
 }
-fn lasso_coverage(row: &LassoRow, p: [f64; 2], feather: f64) -> f64 {
+/// Coverage at `p`. Calls for one row must move left to right through `sweep`, so
+/// each pixel visits only the edges whose columns reach it (the work `lasso_rows`
+/// charges), not every edge in the row.
+fn lasso_coverage(row: &LassoRow, sweep: &mut LassoSweep, p: [f64; 2], feather: f64) -> f64 {
     let inside = row.intersections.partition_point(|x| *x < p[0]) % 2 == 1;
     if feather == 0.0 {
         return f64::from(inside);
     }
+    debug_assert!(p[0] >= sweep.x, "lasso pixels go left to right");
+    sweep.x = p[0];
+    while row.edges.get(sweep.next).is_some_and(|e| e.lo <= p[0]) {
+        sweep.near.push(sweep.next);
+        sweep.next += 1;
+    }
     let mut distance = feather / 2.0;
-    for (a, b) in &row.edges {
+    let mut i = 0;
+    while i < sweep.near.len() {
+        #[cfg(test)]
+        EDGE_VISITS.with(|v| v.set(v.get() + 1));
+        let LassoEdge { a, b, hi, .. } = row.edges[sweep.near[i]];
+        // Pixels only move right, so an edge left behind stays behind.
+        if p[0] > hi {
+            sweep.near.swap_remove(i);
+            continue;
+        }
+        i += 1;
         if p[0] < a[0].min(b[0]) - distance || p[0] > a[0].max(b[0]) + distance {
             continue;
         }
@@ -433,6 +549,24 @@ fn lasso_coverage(row: &LassoRow, p: [f64; 2], feather: f64) -> f64 {
     })
     .clamp(0.0, 1.0)
 }
+fn selection_mode(spec: &Value) -> Result<&str, EngineError> {
+    let mode = spec["mode"].as_str().unwrap_or("replace");
+    if ["replace", "add", "subtract", "intersect"].contains(&mode) {
+        Ok(mode)
+    } else {
+        Err(invalid("Unknown selection combination"))
+    }
+}
+
+fn combine_selection(mode: &str, prior: f64, amount: f64) -> f64 {
+    match mode {
+        "add" => prior + amount - prior * amount,
+        "subtract" => prior * (1.0 - amount),
+        "intersect" => prior * amount,
+        _ => amount,
+    }
+}
+
 impl Engine {
     pub fn node_world(&self, h: DocHandle, id: NodeId) -> Result<[f64; 6], EngineError> {
         let doc = self.document(h)?;
@@ -458,16 +592,16 @@ impl Engine {
         let w = doc.meta.width as i32;
         let height = doc.meta.height as i32;
         let kind = spec["kind"].as_str().unwrap_or("rectangle");
+        if kind == "modify" {
+            return modify::modify_selection(self, h, spec);
+        }
         if kind == "clear" {
             return Ok(vec![Op::SetSelection { selection: None }]);
         }
         if kind == "color" || kind == "contiguous" {
             return generated_selection(self, h, spec, kind);
         }
-        let mode = spec["mode"].as_str().unwrap_or("replace");
-        if !["replace", "add", "subtract", "intersect"].contains(&mode) {
-            return Err(invalid("Unknown selection combination"));
-        }
+        let mode = selection_mode(spec)?;
         let previous = doc.selection.clone();
         let old = previous
             .as_ref()
@@ -545,6 +679,8 @@ impl Engine {
         let r = checked_bounds(bounds)?;
         let mut map = empty();
         for ty in r[1]..r[3] {
+            // Tiles go left to right, so each pixel row is swept once across them.
+            let mut sweeps = vec![LassoSweep::default(); 256];
             for tx in r[0]..r[2] {
                 let mut pixels = vec![0; 65536];
                 for iy in 0..256 {
@@ -590,6 +726,7 @@ impl Engine {
                             }
                             _ => lasso_coverage(
                                 &lasso.as_ref().expect("validated lasso")[py as usize],
+                                &mut sweeps[iy as usize],
                                 p,
                                 feather,
                             ),
@@ -597,12 +734,7 @@ impl Engine {
                         let coverage = if kind == "invert" {
                             amount
                         } else {
-                            match mode {
-                                "add" => prior + amount - prior * amount,
-                                "subtract" => prior * (1.0 - amount),
-                                "intersect" => prior * amount,
-                                _ => amount,
-                            }
+                            combine_selection(mode, prior, amount)
                         };
                         pixels[(iy * 256 + ix) as usize] = (coverage * 255.0).round() as u8;
                     }
@@ -709,37 +841,167 @@ impl Engine {
             },
         }])
     }
+    /// The selection's outline as SVG path data. It is exact when it fits in
+    /// `MAX_OUTLINE_SEGMENTS`; otherwise it outlines the blocks of a coarser grid that
+    /// hold a selected pixel, doubling the block until it fits, so it still encloses
+    /// the selection.
     pub fn selection_outline(&self, h: DocHandle) -> Result<String, EngineError> {
         let Some(map) = &self.document(h)?.selection else {
             return Ok(String::new());
         };
-        let decoded = decode(map, self)?;
-        let mut path = String::new();
+        Ok(OutlineGrid::new(&decode(map, self)?).bounded(MAX_OUTLINE_SEGMENTS))
+    }
+}
+
+/// Selected blocks of `scale`×`scale` pixels, kept as `n`×`n` cells per key, one
+/// bit each. At `scale` 256 and above each key holds one cell, and keys merge as it
+/// grows. Coordinates are `i64`: tile keys span the whole `i32` range, and the block
+/// size can outgrow it.
+struct OutlineGrid {
+    scale: i64,
+    n: i64,
+    cells: BTreeMap<TileKey, Vec<u64>>,
+}
+fn bit(cells: &[u64], i: i64) -> bool {
+    cells[(i >> 6) as usize] >> (i & 63) & 1 == 1
+}
+fn set_bit(cells: &mut [u64], i: i64) {
+    cells[(i >> 6) as usize] |= 1 << (i & 63);
+}
+impl OutlineGrid {
+    fn new(decoded: &Decoded) -> Self {
+        let cells = decoded
+            .iter()
+            .map(|(key, tile)| {
+                let mut cells = vec![0; 1024];
+                // Selections are R8; read no more than one tile of bytes regardless.
+                for (i, v) in tile.pixels.iter().take(65536).enumerate() {
+                    if *v >= 128 {
+                        set_bit(&mut cells, i as i64);
+                    }
+                }
+                (*key, cells)
+            })
+            .collect();
+        Self {
+            scale: 1,
+            n: 256,
+            cells,
+        }
+    }
+    fn on(&self, bx: i64, by: i64) -> bool {
+        let (Ok(tx), Ok(ty)) = (
+            i32::try_from(bx.div_euclid(self.n)),
+            i32::try_from(by.div_euclid(self.n)),
+        ) else {
+            return false;
+        };
+        self.cells.get(&TileKey { tx, ty }).is_some_and(|cells| {
+            bit(
+                cells,
+                by.rem_euclid(self.n) * self.n + bx.rem_euclid(self.n),
+            )
+        })
+    }
+    /// The outline, or `None` once it would pass `budget` segments.
+    fn outline(&self, budget: usize) -> Option<String> {
         use std::fmt::Write;
-        for (key, tile) in &decoded {
-            for y in 0..256 {
-                for x in 0..256 {
-                    if tile.pixels[(y * 256 + x) as usize] < 128 {
+        let (s, n) = (self.scale, self.n);
+        let mut path = String::new();
+        let mut segments = 0;
+        let mut segment = |path: &mut String, args: std::fmt::Arguments| {
+            segments += 1;
+            let _ = path.write_fmt(args);
+            segments <= budget
+        };
+        for (key, cells) in &self.cells {
+            for y in 0..n {
+                for x in 0..n {
+                    if !bit(cells, y * n + x) {
                         continue;
                     }
-                    let px = key.tx * 256 + x;
-                    let py = key.ty * 256 + y;
-                    if sample(&decoded, px, py - 1) < 128 {
-                        let _ = write!(path, "M{px},{py}h1");
-                    }
-                    if sample(&decoded, px, py + 1) < 128 {
-                        let _ = write!(path, "M{px},{}h1", py + 1);
-                    }
-                    if sample(&decoded, px - 1, py) < 128 {
-                        let _ = write!(path, "M{px},{py}v1");
-                    }
-                    if sample(&decoded, px + 1, py) < 128 {
-                        let _ = write!(path, "M{},{py}v1", px + 1);
+                    let bx = i64::from(key.tx) * n + x;
+                    let by = i64::from(key.ty) * n + y;
+                    let (px, py) = (bx * s, by * s);
+                    // Neighbours inside this key are read directly.
+                    let at = |dx: i64, dy: i64| {
+                        let (cx, cy) = (x + dx, y + dy);
+                        if (0..n).contains(&cx) && (0..n).contains(&cy) {
+                            bit(cells, cy * n + cx)
+                        } else {
+                            self.on(bx + dx, by + dy)
+                        }
+                    };
+                    if !at(0, -1) && !segment(&mut path, format_args!("M{px},{py}h{s}"))
+                        || !at(0, 1) && !segment(&mut path, format_args!("M{px},{}h{s}", py + s))
+                        || !at(-1, 0) && !segment(&mut path, format_args!("M{px},{py}v{s}"))
+                        || !at(1, 0) && !segment(&mut path, format_args!("M{},{py}v{s}", px + s))
+                    {
+                        return None;
                     }
                 }
             }
         }
-        Ok(path)
+        Some(path)
+    }
+    /// The finest outline within `budget` segments. Coarsening ends at the blocks
+    /// around the origin (at most four, 16 segments), whose outline is returned even
+    /// over a smaller budget.
+    fn bounded(mut self, budget: usize) -> String {
+        loop {
+            if let Some(path) = self.outline(budget) {
+                return path;
+            }
+            let last = self.n == 1
+                && self
+                    .cells
+                    .keys()
+                    .all(|k| (-1..=0).contains(&k.tx) && (-1..=0).contains(&k.ty));
+            if last {
+                return self.outline(usize::MAX).unwrap_or_default();
+            }
+            self = self.coarser();
+        }
+    }
+    /// The grid at twice the block size: a block is selected when any of its four
+    /// halves is.
+    fn coarser(self) -> Self {
+        let mut cells: BTreeMap<TileKey, Vec<u64>> = BTreeMap::new();
+        if self.n > 1 {
+            let n = self.n / 2;
+            for (key, old) in self.cells {
+                let mut new = vec![0; ((n * n + 63) / 64) as usize];
+                for y in 0..self.n {
+                    for x in 0..self.n {
+                        if bit(&old, y * self.n + x) {
+                            set_bit(&mut new, (y / 2) * n + x / 2);
+                        }
+                    }
+                }
+                cells.insert(key, new);
+            }
+            return Self {
+                scale: self.scale * 2,
+                n,
+                cells,
+            };
+        }
+        for (key, old) in self.cells {
+            if bit(&old, 0) {
+                cells.insert(
+                    TileKey {
+                        tx: key.tx.div_euclid(2),
+                        ty: key.ty.div_euclid(2),
+                    },
+                    vec![1],
+                );
+            }
+        }
+        Self {
+            scale: self.scale * 2,
+            n: 1,
+            cells,
+        }
     }
 }
 
@@ -817,6 +1079,53 @@ mod tests {
         };
         assert_eq!((radius_q8(&a), radius_q8(&b)), (0, 1));
         assert_eq!(radius_q8(&blur(64.0)), 16384);
+    }
+
+    #[test]
+    fn unsharp_scene_uses_exact_radius_amount_and_threshold() {
+        let effect = |amount: f64| {
+            render_effect(&alto_doc::Effect::UnsharpMask {
+                radius: 0.5,
+                amount,
+                threshold: 127.0,
+                selection: None,
+                extra: Default::default(),
+            })
+        };
+        let tie = 1.0f64 / 512.0;
+        let below = f64::from_bits(tie.to_bits() - 1);
+        assert_eq!(below as f32, tie as f32);
+        let (a, b) = (effect(below), effect(tie));
+        assert!(matches!(
+            a.kind,
+            REffectKind::UnsharpMask { amount_q8: 0, .. }
+        ));
+        assert_eq!(
+            b.kind,
+            REffectKind::UnsharpMask {
+                radius: 0.5,
+                radius_q8: 128,
+                amount_q8: 1,
+                threshold_q14: 8160,
+            }
+        );
+    }
+
+    #[test]
+    fn motion_blur_scene_quantizes_angle_and_distance() {
+        let effect = alto_doc::Effect::MotionBlur {
+            angle: 45.0,
+            distance: 12.0,
+            selection: None,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            render_effect(&effect).kind,
+            REffectKind::MotionBlur {
+                angle_q16: 45 * 65536,
+                distance_q8: 12 * 256,
+            }
+        );
     }
 
     #[test]
@@ -955,6 +1264,193 @@ mod tests {
             assert!(recovered.tile(&hash).unwrap().is_some());
         }
     }
+    /// The selection `pixel(x, y)` describes, set directly on a `w`×`h` document.
+    fn with_selection(w: u32, h: u32, pixel: impl Fn(i32, i32) -> u8) -> (Engine, DocHandle) {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(w, h)).unwrap();
+        let mut map = empty();
+        for ty in 0..h.div_ceil(256) as i32 {
+            for tx in 0..w.div_ceil(256) as i32 {
+                let pixels = (0..65536)
+                    .map(|i| pixel(tx * 256 + i % 256, ty * 256 + i / 256))
+                    .collect();
+                let hash = e
+                    .put_tile(TileData::new(PixelFormat::R8, pixels).unwrap())
+                    .unwrap();
+                map.tiles.insert(TileKey { tx, ty }, hash);
+            }
+        }
+        commit(
+            &mut e,
+            d,
+            vec![Op::SetSelection {
+                selection: Some(map),
+            }],
+        );
+        (e, d)
+    }
+    /// The exact outline: a unit segment on every side of a selected pixel that
+    /// borders an unselected one.
+    fn exact_outline(w: i32, h: i32, on: impl Fn(i32, i32) -> bool) -> String {
+        let on = |x: i32, y: i32| {
+            x >= 0 && y >= 0 && x < (w + 255) / 256 * 256 && y < (h + 255) / 256 * 256 && on(x, y)
+        };
+        let mut path = String::new();
+        for ty in 0..(h + 255) / 256 {
+            for tx in 0..(w + 255) / 256 {
+                for y in ty * 256..ty * 256 + 256 {
+                    for x in tx * 256..tx * 256 + 256 {
+                        if !on(x, y) {
+                            continue;
+                        }
+                        if !on(x, y - 1) {
+                            path += &format!("M{x},{y}h1");
+                        }
+                        if !on(x, y + 1) {
+                            path += &format!("M{x},{}h1", y + 1);
+                        }
+                        if !on(x - 1, y) {
+                            path += &format!("M{x},{y}v1");
+                        }
+                        if !on(x + 1, y) {
+                            path += &format!("M{},{y}v1", x + 1);
+                        }
+                    }
+                }
+            }
+        }
+        path
+    }
+    #[test]
+    fn a_selection_within_the_budget_keeps_its_exact_outline() {
+        let on = |x: i32, y: i32| {
+            (30..300).contains(&x)
+                && (10..200).contains(&y)
+                && (x - 100) * (x - 100) + (y - 90) * (y - 90) > 900
+        };
+        let (e, d) = with_selection(512, 256, |x, y| if on(x, y) { 255 } else { 0 });
+        assert_eq!(e.selection_outline(d).unwrap(), exact_outline(512, 256, on));
+    }
+    #[test]
+    fn a_checkerboard_selection_outline_stays_within_the_segment_budget() {
+        let (e, d) = with_selection(512, 512, |x, y| if (x + y) % 2 == 0 { 255 } else { 0 });
+        let outline = e.selection_outline(d).unwrap();
+        let segments = outline.matches('M').count();
+        assert!(segments <= MAX_OUTLINE_SEGMENTS, "{segments} segments");
+        // Every 2×2 block holds a selected pixel, so the outline is the border.
+        assert_eq!(segments, 4 * 256);
+        assert!(outline.starts_with("M0,0h2"), "{}", &outline[..40]);
+    }
+    #[test]
+    fn an_outline_of_tiles_at_the_ends_of_the_key_range_does_not_overflow() {
+        let mut decoded = Decoded::new();
+        for (tx, i) in [(i32::MIN, 0), (i32::MAX, 65535)] {
+            let mut pixels = vec![0; 65536];
+            pixels[i] = 255;
+            decoded.insert(
+                TileKey { tx, ty: 0 },
+                Arc::new(TileData::new(PixelFormat::R8, pixels).unwrap()),
+            );
+        }
+        let grid = OutlineGrid::new(&decoded);
+        let exact = grid.outline(8).unwrap();
+        assert!(exact.starts_with("M-549755813888,0h1"), "{exact}");
+        // The two blocks either side of the origin never merge into one.
+        let path = grid.bounded(4);
+        assert_eq!(path.matches('M').count(), 6, "{path}");
+        assert!(path.starts_with("M-549755813888,0h549755813888"), "{path}");
+    }
+    #[test]
+    fn an_outline_coarsens_past_the_tile_size_until_it_fits() {
+        let mut decoded = Decoded::new();
+        for (key, i) in [
+            (TileKey { tx: 0, ty: 0 }, 0),
+            (TileKey { tx: 2, ty: 1 }, 44 * 256 + 188),
+        ] {
+            let mut pixels = vec![0; 65536];
+            pixels[i] = 255;
+            decoded.insert(
+                key,
+                Arc::new(TileData::new(PixelFormat::R8, pixels).unwrap()),
+            );
+        }
+        let grid = OutlineGrid::new(&decoded);
+        assert_eq!(grid.outline(8).unwrap().matches('M').count(), 8);
+        let path = grid.bounded(4);
+        // Both pixels end up in one 1024-pixel block.
+        assert_eq!(path, "M0,0h1024M0,1024h1024M0,0v1024M1024,0v1024");
+    }
+    #[test]
+    fn a_feathered_lasso_visits_only_the_edges_near_each_pixel() {
+        // 1200 nearly vertical edges in a narrow strip, closed by a wide outer
+        // boundary: cheap by the edge estimate, but every row holds every edge.
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(4096, 64)).unwrap();
+        let mut points: Vec<[f64; 2]> = (0..1200)
+            .map(|i| [100.0 + i as f64 * 0.05, if i % 2 == 0 { 0.0 } else { 64.0 }])
+            .collect();
+        points.extend([[4000.0, 64.0], [4000.0, 0.0]]);
+        EDGE_VISITS.with(|v| v.set(0));
+        e.selection_ops(h, &json!({"kind":"lasso","points":points,"feather":2}))
+            .unwrap();
+        let visits = EDGE_VISITS.with(|v| v.get());
+        // Each edge is near about four pixels of each of the 64 rows.
+        assert!(visits < 1_000_000, "{visits} edge visits");
+    }
+    #[test]
+    fn a_feathered_lasso_matches_every_edge_checked() {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(600, 300)).unwrap();
+        let mut seed = 7u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        for feather in [0.5, 3.0, 17.0, 64.0] {
+            let points: Vec<[f64; 2]> = (0..40)
+                .map(|_| [next() * 640.0 - 20.0, next() * 340.0 - 20.0])
+                .collect();
+            let ops = e
+                .selection_ops(
+                    h,
+                    &json!({"kind":"lasso","points":points,"feather":feather}),
+                )
+                .unwrap();
+            let Op::SetSelection {
+                selection: Some(map),
+            } = &ops[0]
+            else {
+                panic!()
+            };
+            let decoded = decode(map, &e).unwrap();
+            let rows = lasso_rows(&points, 300, feather).unwrap();
+            for y in 0..300 {
+                for x in 0..600 {
+                    let p = [x as f64 + 0.5, y as f64 + 0.5];
+                    let row = &rows[y as usize];
+                    let inside = row.intersections.partition_point(|v| *v < p[0]) % 2 == 1;
+                    let mut distance = feather / 2.0;
+                    for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+                        let dx = b[0] - a[0];
+                        let dy = b[1] - a[1];
+                        let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy)
+                            / (dx * dx + dy * dy).max(0.000001))
+                        .clamp(0.0, 1.0);
+                        distance = distance.min((p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy));
+                    }
+                    let amount =
+                        (0.5 + if inside { distance } else { -distance } / feather).clamp(0.0, 1.0);
+                    assert_eq!(
+                        sample(&decoded, x, y),
+                        (amount * 255.0).round() as u8,
+                        "feather {feather} at {x},{y}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn feather_crosses_tile_boundary_for_rectangle_and_lasso() {
         let mut e = Engine::new();
@@ -1011,6 +1507,89 @@ mod tests {
             assert!(e.transact(h, "bad", ops, revision).is_err());
             assert_eq!(before, e.snapshot(h).unwrap());
         }
+    }
+
+    #[test]
+    fn generated_selections_reject_invalid_numbers_without_changing_document() {
+        let (mut e, h, id) = layer_doc(256, 256, |_| Some(vec![255; 262144]));
+        commit(
+            &mut e,
+            h,
+            vec![Op::SetProps {
+                id,
+                patch: PropPatch {
+                    transform: Some(Affine2([1.0, 0.0, 0.0, 1.0, 2.0, 0.0])),
+                    ..Default::default()
+                },
+            }],
+        );
+        let layer = id.0.to_string();
+        let before = e.snapshot(h).unwrap();
+        for spec in [
+            json!({"kind":"color","layer":layer,"r":1.5}),
+            json!({"kind":"color","layer":layer,"r":300}),
+            json!({"kind":"color","layer":layer,"g":-1}),
+            json!({"kind":"color","layer":layer,"b":"255"}),
+            json!({"kind":"color","layer":layer,"a":null}),
+            json!({"kind":"color","layer":layer,"tolerance":1.5}),
+            json!({"kind":"contiguous","layer":layer,"x":2,"y":0,"tolerance":256}),
+            json!({"kind":"contiguous","layer":layer,"x":1.5,"y":0}),
+            json!({"kind":"contiguous","layer":layer,"x":1_000_000_000_000_000_000_i64,"y":0}),
+            json!({"kind":"contiguous","layer":layer,"x":i32::MIN,"y":0}),
+        ] {
+            let err = e.selection_ops(h, &spec).unwrap_err();
+            assert!(
+                err.to_string().starts_with("INVALID_ARGUMENT:"),
+                "{spec}: {err}"
+            );
+            assert_eq!(before, e.snapshot(h).unwrap());
+        }
+    }
+
+    #[test]
+    fn empty_generated_selections_block_fill_until_cleared() {
+        use crate::image::{ImageEdit, SelectionMode};
+        let (mut e, h, id) = layer_doc(256, 256, |_| Some(vec![255; 262144]));
+        let layer = id.0.to_string();
+        let fill = || ImageEdit::Fill {
+            node: id,
+            point: [0.0, 0.0],
+            color: [0.0, 0.0, 0.0, 1.0],
+            tolerance: 0,
+            selection: SelectionMode::Current,
+        };
+        let color = json!({"kind":"color","layer":layer,"r":255,"g":0,"b":0});
+        for spec in [
+            color,
+            json!({"kind":"contiguous","layer":layer,"x":0,"y":0,"mode":"subtract"}),
+        ] {
+            let ops = e.selection_ops(h, &spec).unwrap();
+            commit(&mut e, h, ops);
+            assert!(
+                e.document(h)
+                    .unwrap()
+                    .selection
+                    .as_ref()
+                    .unwrap()
+                    .tiles
+                    .is_empty()
+            );
+            assert!(matches!(
+                e.prepare_image_edit(h, fill()),
+                Err(EngineError::Operation {
+                    code: "EMPTY_SELECTION",
+                    ..
+                })
+            ));
+            let ops = e.selection_ops(h, &json!({"kind":"invert"})).unwrap();
+            commit(&mut e, h, ops);
+            assert_eq!(sample(&selected(&e, h), 255, 255), 255);
+        }
+        let ops = e.selection_ops(h, &json!({"kind":"clear"})).unwrap();
+        commit(&mut e, h, ops);
+        assert!(e.document(h).unwrap().selection.is_none());
+        let prepared = e.prepare_image_edit(h, fill()).unwrap();
+        e.release_staged_tiles(prepared.stage);
     }
 
     #[test]

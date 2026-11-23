@@ -128,6 +128,156 @@ export async function runM5Tests(engine, log) {
       assert((await at(engine, 64, 64))[3] > 200, "intersection");
       await doc.selection.clear();
     });
+    await test("SDK color and contiguous selections follow color boundaries", async () => {
+      doc = await engine.createDocument({ width: 256, height: 256 });
+      const source = await image(engine, 256, 256, ctx => {
+        ctx.fillStyle = "#444";
+        ctx.fillRect(0, 0, 256, 256);
+        ctx.fillStyle = "#ff0000";
+        ctx.fillRect(48, 112, 32, 32);
+        ctx.fillRect(112, 112, 32, 32);
+        ctx.fillStyle = "#fa0000";
+        ctx.fillRect(160, 112, 16, 32);
+      });
+      let sourceLayer, marker;
+      await doc.transact("selection fixture", tx => {
+        sourceLayer = tx.addRasterFromAsset(source);
+        marker = tx.addRaster();
+      });
+      const contiguous = { kind: "contiguous", layer: sourceLayer, x: 64, y: 128 };
+      const color = { kind: "color", layer: sourceLayer, r: 255, g: 0, b: 0 };
+      const marked = async (expected) => {
+        await paint(doc, marker, 128, 128, { color: [0, 1, 0, 1], size: 256 });
+        const tile = await unstable(engine).readTile(0, 0);
+        assert([64, 96, 128, 168].every((x, i) => (pixel(tile, x, 128)[1] === 255) === expected[i]),
+          "selection differs from the requested color coverage");
+        await doc.undo();
+      };
+      await doc.selection.apply(contiguous);
+      assert((await doc.selection.outline()).includes("M"), "contiguous selection has no outline");
+      await marked([true, false, false, false]);
+      await doc.undo();
+      assert(doc.getSnapshot().selection === null, "undo did not restore the absent selection");
+
+      await doc.selection.apply(color);
+      await marked([true, false, true, false]);
+      await doc.selection.apply({ ...color, tolerance: 5 });
+      await marked([true, false, true, true]);
+      await doc.selection.apply({ ...contiguous, mode: "subtract" });
+      await marked([false, false, true, true]);
+
+      await doc.selection.apply({ ...color, r: 0, b: 255 });
+      assert(doc.getSnapshot().selection?.format === "r8" && await doc.selection.outline() === "",
+        "no color match must produce an empty selection");
+      await doc.image.fill(marker, [64, 128], [0, 1, 0, 1]).then(
+        () => { throw Error("fill applied through an empty selection"); },
+        error => assert(error.code === "EMPTY_SELECTION", String(error)),
+      );
+
+      await doc.transact("rotate source", tx => tx.setTransform(sourceLayer, {
+        x: 256, y: 0, scaleX: 1, scaleY: 1, rotation: Math.PI / 2,
+      }));
+      const before = await doc.snapshotHash();
+      await doc.selection.apply(color).then(
+        () => { throw Error("color selection accepted a rotated raster"); },
+        error => assert(error.code === "INVALID_ARGUMENT", String(error)),
+      );
+      assert(await doc.snapshotHash() === before && doc.getSnapshot().selection !== null,
+        "a rejected color selection changed the document");
+    });
+    await test("a path selection matches the vector layer's coverage", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      const path = await engine.vectors.parseSvg(
+        "M100 40 Q230 -20 300 40 C345 70 400 145 358 205 H110 Z " +
+        "M235 100 H275 V160 H235 Z",
+      );
+      let vector;
+      await doc.transact("curve and hole", tx => {
+        vector = tx.addVector([{ data: path, fill: [1, 1, 1, 1], stroke: null, fill_rule: "even_odd" }]);
+      });
+      const alpha = async () => Promise.all([0, 1].map(tx => unstable(engine).readTile(tx, 0)));
+      const rendered = await alpha();
+      assert(pixel(rendered[0], 250, 125)[3] === 0, "vector hole");
+      assert(rendered.every(tile => tile.some((value, i) => i % 4 === 3 && value > 0 && value < 255)),
+        "both tiles should contain antialiased edges");
+      const white = await image(engine, 512, 256, ctx => {
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, 512, 256);
+      });
+      await doc.transact("show mask on white", tx => {
+        tx.setProps(vector, { visible: false });
+        layer = tx.addRasterFromAsset(white);
+      });
+      await doc.selection.apply({ kind: "path", path, fill_rule: "even_odd" });
+      await doc.masks.fromSelection(layer);
+      await doc.selection.clear();
+      const masked = await alpha();
+      for (let tx = 0; tx < masked.length; tx++) {
+        for (let i = 3; i < masked[tx].length; i += 4) {
+          assert(Math.abs(masked[tx][i] - rendered[tx][i]) <= 1,
+            `selection differs from vector coverage on tile ${tx}, pixel ${(i - 3) / 4}`);
+        }
+      }
+      await doc.selection.apply({ kind: "path", path });
+      await doc.masks.fromSelection(layer);
+      await doc.selection.clear();
+      assert((await at(engine, 250, 125))[3] === 255, "non-zero selects the same-winding interior");
+    });
+    await test("a path selection is refused when it is too large", async () => {
+      doc = await engine.createDocument({ width: 32000, height: 32000 });
+      const path = await engine.vectors.parseSvg("M0 0 H32000 V32000 H0 Z");
+      await doc.selection.apply({ kind: "rectangle", width: 10, height: 10 });
+      const before = await doc.snapshotHash();
+      await doc.selection.apply({ kind: "path", path }).then(
+        () => { throw Error("path exceeded its tile limit"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /4096 tiles/.test(error.message), String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "the rejected path changed the selection");
+      const outOfBudget = await engine.vectors.parseSvg("M0 0 C900000 0 -900000 220 20 20 Z");
+      await doc.selection.apply({ kind: "path", path: outOfBudget }).then(
+        () => { throw Error("path exceeded the rasterizer's curve budget"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /Path is too complex/.test(error.message), String(error)),
+      );
+      assert(await doc.snapshotHash() === before, "a rasterizer error changed the selection");
+      await doc.selection.apply({ kind: "path", path: { commands: [] } });
+      assert(doc.getSnapshot().selection?.format === "r8" && await doc.selection.outline() === "",
+        "an empty path must produce an empty selection");
+    });
+    await test("selection modification applies all four operations through the SDK", async () => {
+      doc = await engine.createDocument({ width: 512, height: 256 });
+      await doc.selection.apply({ kind: "modify", operation: "grow", radius: 1 }).then(
+        () => { throw Error("modify accepted an absent selection"); },
+        error => assert(error.code === "INVALID_ARGUMENT", String(error)),
+      );
+      await doc.selection.apply({ kind: "rectangle", x: 250, y: 100, width: 6, height: 20 });
+      const before = doc.getSnapshot().selection;
+      const original = JSON.stringify(before);
+      for (const operation of ["grow", "shrink", "border", "smooth"]) {
+        await doc.selection.apply({ kind: "modify", operation, radius: 4 });
+        const selection = doc.getSnapshot().selection;
+        assert(selection?.format === "r8" && JSON.stringify(selection) !== original, operation + " did not change coverage");
+        if (operation === "shrink") assert(Object.keys(selection.tiles).length === 0, "shrink did not keep an empty selection");
+        if (operation === "grow") assert(selection.tiles["1,0"], "grow did not cross the tile boundary");
+        await doc.undo();
+        assert(JSON.stringify(doc.getSnapshot().selection) === original, operation + " undo did not restore the selection");
+      }
+    });
+    await test("selection grow at radius 64 has a bounded Worker workload", async () => {
+      const measure = async (tiles) => {
+        doc = await engine.createDocument({ width: tiles * 256, height: 256 });
+        await doc.selection.apply({ kind: "rectangle", x: 0, y: 64, width: tiles * 256, height: 128 });
+        await unstable(engine).settle();
+        const start = performance.now();
+        await doc.selection.apply({ kind: "modify", operation: "grow", radius: 64 });
+        return performance.now() - start;
+      };
+      const modify64Ms = await measure(31);
+      await measure(32).then(
+        () => { throw Error("grow exceeded its Worker workload limit"); },
+        error => assert(error.code === "INVALID_ARGUMENT" && /too large/.test(error.message), String(error)),
+      );
+      return { modify64Ms, candidateTiles: 31 };
+    });
     await test("document-space selection restricts GPU brush on a transformed layer", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
       await doc.transact("transformed layer", (tx) => {

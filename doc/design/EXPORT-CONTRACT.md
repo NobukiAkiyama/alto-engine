@@ -17,7 +17,10 @@
 - `scale`：0より大きく1以下。それ以外（NaNを含む）は `INVALID_ARGUMENT`、`reason: "scale"`。
 - `region`：文書の画素座標。省略時は文書全体。各座標がNaNまたは数値でなければ `INVALID_ARGUMENT`、`reason: "region"`。範囲は `x0`・`y0` を切り捨て、`x1`・`y1` を切り上げてから文書に収める。無限大は文書の端になる。収めた結果が空なら `INVALID_ARGUMENT`。
 - 大きさ：読む画素が6,400万を超える場合と、作業メモリが512 MiBを超える場合は `INVALID_ARGUMENT`。部分的な画像は返さない。
-- `type`：`image/png`（既定）または `image/webp`。
+- `type` は `image/png`（既定）、`image/webp`、`image/jpeg`、`image/tiff` のいずれか。形式が未知の場合や、指定した形式でブラウザが符号化できない場合は `UNSUPPORTED`。
+- `quality` は JPEG と WebP で使う0〜1の有限値（既定0.92）。不正な値や他形式での指定は `INVALID_ARGUMENT`、`reason: "quality"`。
+- `background` は JPEG の背景色。straight sRGB の有限値3個を0〜1で指定する（既定は白）。不正な値や他形式での指定は `INVALID_ARGUMENT`、`reason: "background"`。
+- `compression` は TIFF の `"none"`（既定）または `"deflate"`。不正な値や他形式での指定は `INVALID_ARGUMENT`、`reason: "compression"`。
 
 ## 出力の画素
 
@@ -34,8 +37,14 @@
 | PNG、`scale = 1/2^k`、範囲の始点がピラミッド段 `k` の画素に乗り、出力の寸法 `round(範囲 × scale)` が読んだ段の画素数と等しい | 段 `k` の表示タイルについて完全に一致する。範囲の終点が段の画素の途中にあるとき（例：幅99を1/2で書き出す）、最後の列・行はその段の画素をそのまま使うので、範囲外の文書画素を半分含む |
 | PNG、それ以外の倍率 | ブラウザの `drawImage`（`imageSmoothingQuality = "high"`）で縮小する。画素値は保証しない。寸法は `round(範囲 × scale)`（最小1） |
 | WebP | ブラウザが符号化する。寸法と形式だけを保証する |
+| JPEG | 背景色を8bitに丸め、straight sRGB の各チャネルを `round((c × a + bg × (255 − a)) / 255)` で合成する。縮小前に不透明化し、ブラウザが非可逆圧縮する |
+| TIFF | 8bit RGBA、straight alpha（ExtraSamples = 2）、リトルエンディアン。リサンプリングが不要な場合、デコード後の全画素が同条件の PNG と一致する。それ以外はブラウザで縮小するため、画素値は保証しない |
 
-完全一致の場合、PNGはSDKが自前で符号化する（`packages/alto-sdk/src/png.ts`：8bit RGBA、インターレースなし、sRGBチャンク付き）。2026-11-09までは常にcanvasの `convertToBlob` を使っていた。canvasは画素をpremultipliedで持つので、半透明の画素で色が最大1ずれていた（512×256の試験画像で3,584画素）。
+完全一致の場合、PNGはSDKが自前で符号化する（`packages/alto-sdk/src/png.ts`：8bit RGBA、インターレースなし、sRGBチャンク付き）。PNG の Paeth フィルターは最大256行ずつ処理し、帯をまたぐ最初の行には直前の帯の最終行を使う。`exportImage` は全画素の GPU 読み戻しと単一 IDAT の Blob を使う。2026-11-09までは常にcanvasの `convertToBlob` を使っていた。canvasは画素をpremultipliedで持つので、半透明の画素で色が最大1ずれていた（512×256の試験画像で3,584画素）。
+
+`doc.exportImageStream(options)` は、読み戻した表示ピクセルと出力寸法が一致する PNG を `ReadableStream<Uint8Array>` で返す。読み戻しは最大256行ずつで、全画像分の画素配列は作らない。各 IDAT は最大1 MiB。Blob 版の6400万画素制限は適用せず、文書の辺の上限は65536。1エンジンにつき同時に1つだけ開ける。途中で読むのをやめる場合はストリームをキャンセルする。文書の編集・差し替えや Worker の再起動を検出した場合は `CONFLICT`（`document-changed`）で終了する。
+
+TIFF は最大256行ずつの帯で組み立てる。Deflate は帯ごとの zlib ストリームで、無圧縮と同じ画素に戻る。WASM が作るのはヘッダーと帯の表で、画素の符号化とファイルの組み立ては Worker が行う。
 
 ## `pickColor`
 

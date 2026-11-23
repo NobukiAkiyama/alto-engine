@@ -249,16 +249,24 @@ pub fn diff_text(a: &Document, b: &Document) -> String {
 fn describe(detail: &ContentDetail) -> String {
     match detail {
         ContentDetail::Geometry => "image bounds".into(),
-        ContentDetail::Vector { paths, commands } => format!(
-            "パス {}本/{}命令 → {}本/{}命令",
-            paths[0], commands[0], paths[1], commands[1]
-        ),
+        ContentDetail::Vector {
+            paths,
+            commands,
+            style,
+        } => {
+            let suffix = if *style { " · 書式" } else { "" };
+            format!(
+                "パス {}本/{}命令 → {}本/{}命令{suffix}",
+                paths[0], commands[0], paths[1], commands[1]
+            )
+        }
         ContentDetail::Text {
             text,
             style,
             writing_mode,
             frame,
             tate_chu_yoko,
+            hanging,
         } => {
             let mut parts = vec![];
             if let Some([from, to]) = text {
@@ -277,6 +285,9 @@ fn describe(detail: &ContentDetail) -> String {
             }
             if *tate_chu_yoko {
                 parts.push("縦中横".into());
+            }
+            if *hanging {
+                parts.push("ぶら下げ".into());
             }
             parts.join("、")
         }
@@ -488,6 +499,12 @@ pub fn install(repo: &Path, exe: &str) -> Result<()> {
 pub fn export(file: &Path, dir: &Path) -> Result<folder::FolderReport> {
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
     let p = Opened::from_entries(alto_store::read_entries(&bytes).map_err(|e| e.to_string())?)?;
+    if p.package.external.is_some() {
+        return Err(
+            "thin .alto です: 版のオブジェクトは履歴ストアにあるため、フォルダに書き出せません"
+                .into(),
+        );
+    }
     let parts = parts(&p.package);
     let entries = alto_store::folder_entries(&parts).map_err(|e| e.to_string())?;
     let expect = std::fs::read(dir.join("manifest.json"))
@@ -530,5 +547,7 @@ fn parts(p: &Package) -> alto_store::PackageParts {
         commits: p.commits.clone(),
         head: p.head,
         refs: p.refs.clone(),
+        // A thin package's versions reference objects it does not hold.
+        external: p.external.clone(),
     }
 }

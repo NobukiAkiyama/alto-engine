@@ -1,4 +1,4 @@
-import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, PickedColor, SvgImportResult } from "./image-types.js";
+import type { BranchView, CanvasEditResult, ObjectTarget, ImageBounds, ImageEditResult, ImageHistogram, LayerEditResult, MergePlan, MergeResult, StashEntry, PickedColor, SvgImportResult } from "./image-types.js";
 /**
  * @internal The messages between the SDK and its engine Worker, written once. The SDK's
  * `request` and the Worker's `execute` are both checked against `Requests`. Not part
@@ -18,7 +18,9 @@ import type {
   VersionDiff,
 } from "./types.js";
 
-export const PROTOCOL = 8;
+export const PROTOCOL = 18;
+export const DEFAULT_UNDO_STEPS = 100;
+export const MAX_UNDO_STEPS = 1000;
 
 /** Codes the Worker reports; the SDK maps them to `AltoError`. */
 export interface WireError {
@@ -31,14 +33,64 @@ export interface RecoveryInfo {
   latestGeneration: number;
   truncated?: boolean;
 }
+export interface RecoveryStages {
+  candidates: number;
+  load: number;
+  verify: number;
+  restore: number;
+  register: number;
+  replay: number;
+  activate: number;
+  firstFrame: number | null;
+}
+export interface GpuTileTimestamp {
+  x: number;
+  y: number;
+  level: number;
+  /** Estimated GPU elapsed time in nanoseconds, subject to browser rounding. */
+  ns: number;
+}
+/** A piecewise-linear curve with 2–8 points. Input coordinates increase from 0 to 1. */
+export type BrushCurve = {
+  input: "pressure" | "speed" | "tilt";
+  points: [number, number][];
+};
+
+export function validBrushImageSize(width: number, height: number): boolean {
+  return Number.isInteger(width) && Number.isInteger(height) &&
+    width >= 16 && width <= 1024 && height >= 16 && height <= 1024;
+}
+
+export interface WireBrushImage {
+  width: number;
+  height: number;
+  pixels: ArrayBuffer;
+}
+export interface WireBrushTexture {
+  image: WireBrushImage;
+  scale: number;
+  depth: number;
+}
+
+export function validBrushTextureParams(scale: number, depth: number): boolean {
+  return Number.isFinite(scale) && scale >= 0.05 && scale <= 16 &&
+    Number.isFinite(depth) && depth >= 0 && depth <= 1;
+}
+
 export interface BrushConfig {
   size: number;
   hardness: number;
   spacing: number;
   opacity: number;
   flow: number;
-  pressure_size: boolean;
-  pressure_opacity: boolean;
+  dynamics?: {
+    size?: BrushCurve;
+    opacity?: BrushCurve;
+    flow?: BrushCurve;
+    angle_from_tilt?: boolean;
+  };
+  angle: number;
+  roundness: number;
 }
 export interface ImportedFontRecord {
   record: { id: string; hash: string; [field: string]: unknown };
@@ -86,14 +138,14 @@ type Q<A, R> = { args: A; result: R };
 /** Every request: its arguments and what the reply carries. */
 export interface Requests {
   init: Q<
-    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean },
+    { protocol: number; sdk: string; canvas: OffscreenCanvas; budget: number; namespace: string; journal: boolean; undoSteps: number; gpuTimestamps: boolean },
     { protocol: number; recovery: RecoveryInfo }
   >;
   createDocument: Q<{ width: number; height: number; renderVersion?: 3 }, WireState>;
   transact: Q<{ intent: string; label?: string; ops: WireOp[]; baseRevision: number }, WireState>;
   undo: Q<None, WireState>;
   redo: Q<None, WireState>;
-  beginBrush: Q<{ layer: string; config: BrushConfig; color: number[]; erase: boolean; mask: boolean }, true>;
+  beginBrush: Q<{ layer: string; config: BrushConfig; color: number[]; erase: boolean; mask: boolean; tipImage?: WireBrushImage; texture?: WireBrushTexture }, true>;
   endBrush: Q<None, WireState>;
   cancelBrush: Q<None, true>;
   select: Q<{ spec: unknown }, WireState>;
@@ -110,9 +162,23 @@ export interface Requests {
   provideObjects: Q<{ bytes: ArrayBuffer; target: ObjectTarget }, true>;
   releaseObjects: Q<None, true>;
   markFolderSaved: Q<None, true>;
+  /** `markFolderSaved` after a thin save: the versions' objects leave memory for the store. */
+  markStoreSaved: Q<None, true>;
   externalObjects: Q<None, number>;
+  /** True when the document came from a thin .alto, even one with nothing outside. */
+  historyIsExternal: Q<None, boolean>;
+  /** `bytes`: the store's manifest.json and the snapshot it names, framed; `objects`: its object paths. */
+  /** `contained`: every root of the store's manifest is one of the document's versions. */
+  checkHistoryStore: Q<{ bytes: ArrayBuffer; objects: string[]; warn: boolean }, { mismatch: "missing" | "other-document" | null; contained: boolean; state: WireState }>;
+  /** Whether every root of `manifest` (a store's manifest.json) is one of the document's versions. */
+  storeRootsContained: Q<{ manifest: ArrayBuffer }, boolean>;
+  /** A store was attached after all: drops `HISTORY_STORE_UNAVAILABLE`. */
+  historyStoreAttached: Q<None, WireState>;
   saveWithoutHistory: Q<None, Uint8Array>;
-  packageBytes: Q<None, { bytes: number; limit: number } | null>;
+  /** The thin .alto: the working document's objects; versions' objects stay in its folder. */
+  saveThin: Q<None, Uint8Array>;
+  /** `external`: the thin .alto's size, always known. */
+  packageBytes: Q<{ external?: boolean }, { bytes: number; limit: number } | null>;
   importFont: Q<{ bytes: ArrayBuffer; faceIndex: number }, ImportedFontRecord>;
   releaseImport: Q<{ hash: string }, boolean>;
   pruneVersions: Q<None, WireState & { removed?: number }>;
@@ -136,7 +202,7 @@ export interface Requests {
   listBranches: Q<None, BranchView[]>;
   prepareMerge: Q<{ name: string }, MergePlan>;
   cancelMerge: Q<None, true>;
-  historyCommand: Q<{ command: Record<string, unknown> }, { state: WireState; result: MergeResult | null }>;
+  historyCommand: Q<{ command: Record<string, unknown> }, { state: WireState; result: MergeResult | MergePlan | StashEntry | null }>;
   versionLog: Q<{ dag?: boolean; allBranches?: boolean }, CommitView[]>;
   versionDiff: Q<{ from: string; to: string }, VersionDiff>;
   restoreVersion: Q<{ hash: string }, WireState>;
@@ -144,13 +210,24 @@ export interface Requests {
   releaseSave: Q<{ token: number }, boolean>;
   open: Q<{ bytes: ArrayBuffer }, WireState>;
   recover: Q<None, WireState>;
+  recoveryStages: Q<None, RecoveryStages | null>;
   discardRecovery: Q<None, true>;
   /** Answered beside the queue, once the journal holds every edit so far. */
   durable: Q<None, true>;
   view: Q<None, WireState>;
   parseVectorPath: Q<{ svg: string }, PathData>;
   vectorPathSvg: Q<{ data: PathData }, string>;
-  exportImage: Q<{ region: Rect; scale: number; type: string }, Blob>;
+  exportImage: Q<{
+    region: Rect;
+    scale: number;
+    type: "image/png" | "image/webp" | "image/jpeg" | "image/tiff";
+    quality?: number;
+    background?: [number, number, number];
+    compression?: "none" | "deflate";
+  }, Blob>;
+  exportStreamOpen: Q<{ region: Rect; scale: number }, { streamId: string }>;
+  exportStreamPull: Q<{ streamId: string }, Uint8Array<ArrayBuffer> | null>;
+  exportStreamClose: Q<{ streamId: string }, true>;
   injectFinishJournalFailure: Q<None, true>;
   injectReadbackFailure: Q<{ after: number }, true>;
   // Diagnostics (unstable entry point).
@@ -164,12 +241,14 @@ export interface Requests {
   resetRenderCache: Q<{ cpu: boolean }, true>;
   enablePrefetch: Q<None, true>;
   setProfiling: Q<{ enabled: boolean }, true>;
+  setGpuTimestampProfiling: Q<{ enabled: boolean }, true>;
+  gpuTileTimestamps: Q<None, GpuTileTimestamp[] | null>;
   setDecodeWorkers: Q<{ enabled: boolean }, boolean>;
   // Test hooks (testing entry point).
   validateFrame: Q<None, true>;
   /** A text node's render version 3 bake: blake3 and the ALTB bytes in hex, or nulls. */
   textBake: Q<{ node: string }, { hash: string | null; hex: string | null }>;
-  cpuReference: Q<{ config: BrushConfig; color: number[]; samples: number[] }, Uint8Array>;
+  cpuReference: Q<{ config: BrushConfig; color: number[]; samples: number[]; tipImage?: WireBrushImage; texture?: WireBrushTexture }, Uint8Array>;
   stallDecodeWorkers: Q<None, number>;
   destroyGpu: Q<None, true>;
   testPanic: Q<None, true>;
@@ -182,7 +261,7 @@ export interface Requests {
   corruptBothCheckpoints: Q<None, unknown>;
   looseCheckpoint: Q<None, true>;
   legacyCheckpoint: Q<None, true>;
-  injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" }, true>;
+  injectStorageFault: Q<{ position: "beforeAppend" | "afterAppend" | "beforeCheckpoint" | "beforeCheckpointParts" }, true>;
   /** Test hook: journal and checkpoint writes stop before the next one until released. */
   partialAppend: Q<{ position: "header" | "payload" | "crc" }, true>;
   partialAppendHeld: Q<None, true>;
@@ -217,6 +296,7 @@ export type Reply = { t: "reply"; id: number } & ({ ok: true; value: unknown } |
 export type Notice =
   | { t: "patch"; value: WireState }
   | { t: "frame"; value: FrameStats }
+  | { t: "checkpointStored" }
   | { t: "storageFailure"; value: WireError }
   | { t: "diagnostic"; value: Record<string, unknown> }
   | { t: "diagnostic-storage"; value: string }
