@@ -429,10 +429,32 @@ fn checked_bounds(b: [f64; 4]) -> Result<[i32; 4], EngineError> {
     }
     Ok(r)
 }
+#[cfg(test)]
+thread_local! {
+    /// Edges `lasso_coverage` has looked at on this thread.
+    static EDGE_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 #[derive(Default, Clone)]
 struct LassoRow {
     intersections: Vec<f64>,
-    edges: Vec<([f64; 2], [f64; 2])>,
+    /// Edges within half the feather of this row, ordered by `LassoEdge::lo`.
+    edges: Vec<LassoEdge>,
+}
+#[derive(Clone, Copy)]
+struct LassoEdge {
+    a: [f64; 2],
+    b: [f64; 2],
+    /// The columns where the edge can lie within half the feather of a pixel.
+    lo: f64,
+    hi: f64,
+}
+/// A left-to-right pass over one row: the edges whose columns have been reached, and
+/// those among them that are still near enough to matter.
+#[derive(Default, Clone)]
+struct LassoSweep {
+    next: usize,
+    near: Vec<usize>,
+    x: f64,
 }
 fn lasso_rows(
     points: &[[f64; 2]],
@@ -460,22 +482,47 @@ fn lasso_rows(
                     .push((b[0] - a[0]) * (py - a[1]) / (b[1] - a[1]) + a[0]);
             }
             if feather > 0.0 {
-                row.edges.push((a, b));
+                row.edges.push(LassoEdge {
+                    a,
+                    b,
+                    lo: a[0].min(b[0]) - feather / 2.0,
+                    hi: a[0].max(b[0]) + feather / 2.0,
+                });
             }
         }
     }
     for row in &mut rows {
         row.intersections.sort_by(f64::total_cmp);
+        row.edges.sort_by(|a, b| a.lo.total_cmp(&b.lo));
     }
     Ok(rows)
 }
-fn lasso_coverage(row: &LassoRow, p: [f64; 2], feather: f64) -> f64 {
+/// Coverage at `p`. Calls for one row must move left to right through `sweep`, so
+/// each pixel visits only the edges whose columns reach it (the work `lasso_rows`
+/// charges), not every edge in the row.
+fn lasso_coverage(row: &LassoRow, sweep: &mut LassoSweep, p: [f64; 2], feather: f64) -> f64 {
     let inside = row.intersections.partition_point(|x| *x < p[0]) % 2 == 1;
     if feather == 0.0 {
         return f64::from(inside);
     }
+    debug_assert!(p[0] >= sweep.x, "lasso pixels go left to right");
+    sweep.x = p[0];
+    while row.edges.get(sweep.next).is_some_and(|e| e.lo <= p[0]) {
+        sweep.near.push(sweep.next);
+        sweep.next += 1;
+    }
     let mut distance = feather / 2.0;
-    for (a, b) in &row.edges {
+    let mut i = 0;
+    while i < sweep.near.len() {
+        #[cfg(test)]
+        EDGE_VISITS.with(|v| v.set(v.get() + 1));
+        let LassoEdge { a, b, hi, .. } = row.edges[sweep.near[i]];
+        // Pixels only move right, so an edge left behind stays behind.
+        if p[0] > hi {
+            sweep.near.swap_remove(i);
+            continue;
+        }
+        i += 1;
         if p[0] < a[0].min(b[0]) - distance || p[0] > a[0].max(b[0]) + distance {
             continue;
         }
@@ -622,6 +669,8 @@ impl Engine {
         let r = checked_bounds(bounds)?;
         let mut map = empty();
         for ty in r[1]..r[3] {
+            // Tiles go left to right, so each pixel row is swept once across them.
+            let mut sweeps = vec![LassoSweep::default(); 256];
             for tx in r[0]..r[2] {
                 let mut pixels = vec![0; 65536];
                 for iy in 0..256 {
@@ -667,6 +716,7 @@ impl Engine {
                             }
                             _ => lasso_coverage(
                                 &lasso.as_ref().expect("validated lasso")[py as usize],
+                                &mut sweeps[iy as usize],
                                 p,
                                 feather,
                             ),
@@ -1072,6 +1122,77 @@ mod tests {
         assert_eq!(snapshot, recovered.snapshot(r).unwrap());
         for hash in mask_hashes {
             assert!(recovered.tile(&hash).unwrap().is_some());
+        }
+    }
+    #[test]
+    fn a_feathered_lasso_visits_only_the_edges_near_each_pixel() {
+        // 1200 nearly vertical edges in a narrow strip, closed by a wide outer
+        // boundary: cheap by the edge estimate, but every row holds every edge.
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(4096, 64)).unwrap();
+        let mut points: Vec<[f64; 2]> = (0..1200)
+            .map(|i| [100.0 + i as f64 * 0.05, if i % 2 == 0 { 0.0 } else { 64.0 }])
+            .collect();
+        points.extend([[4000.0, 64.0], [4000.0, 0.0]]);
+        EDGE_VISITS.with(|v| v.set(0));
+        e.selection_ops(h, &json!({"kind":"lasso","points":points,"feather":2}))
+            .unwrap();
+        let visits = EDGE_VISITS.with(|v| v.get());
+        // Each edge is near about four pixels of each of the 64 rows.
+        assert!(visits < 1_000_000, "{visits} edge visits");
+    }
+    #[test]
+    fn a_feathered_lasso_matches_every_edge_checked() {
+        let mut e = Engine::new();
+        let h = e.create_document(DocumentMeta::srgb_u8(600, 300)).unwrap();
+        let mut seed = 7u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        for feather in [0.5, 3.0, 17.0, 64.0] {
+            let points: Vec<[f64; 2]> = (0..40)
+                .map(|_| [next() * 640.0 - 20.0, next() * 340.0 - 20.0])
+                .collect();
+            let ops = e
+                .selection_ops(
+                    h,
+                    &json!({"kind":"lasso","points":points,"feather":feather}),
+                )
+                .unwrap();
+            let Op::SetSelection {
+                selection: Some(map),
+            } = &ops[0]
+            else {
+                panic!()
+            };
+            let decoded = decode(map, &e).unwrap();
+            let rows = lasso_rows(&points, 300, feather).unwrap();
+            for y in 0..300 {
+                for x in 0..600 {
+                    let p = [x as f64 + 0.5, y as f64 + 0.5];
+                    let row = &rows[y as usize];
+                    let inside = row.intersections.partition_point(|v| *v < p[0]) % 2 == 1;
+                    let mut distance = feather / 2.0;
+                    for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+                        let dx = b[0] - a[0];
+                        let dy = b[1] - a[1];
+                        let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy)
+                            / (dx * dx + dy * dy).max(0.000001))
+                        .clamp(0.0, 1.0);
+                        distance = distance.min((p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy));
+                    }
+                    let amount =
+                        (0.5 + if inside { distance } else { -distance } / feather).clamp(0.0, 1.0);
+                    assert_eq!(
+                        sample(&decoded, x, y),
+                        (amount * 255.0).round() as u8,
+                        "feather {feather} at {x},{y}"
+                    );
+                }
+            }
         }
     }
     #[test]
