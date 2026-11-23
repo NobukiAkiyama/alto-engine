@@ -85,6 +85,8 @@ pub struct Engine {
     backed: bool,
     /// Documents whose history objects stay in their folder until needed.
     lazy: std::collections::BTreeMap<DocHandle, versions::LazyObjects>,
+    /// History-only objects each document may keep (`MAX_HISTORY_ONLY_OBJECTS`).
+    history_object_limit: usize,
 }
 
 impl Default for Engine {
@@ -115,6 +117,7 @@ impl Engine {
             text: Default::default(),
             backed: false,
             lazy: Default::default(),
+            history_object_limit: MAX_HISTORY_ONLY_OBJECTS,
         }
     }
 
@@ -335,6 +338,20 @@ impl Engine {
         &mut self,
         handle: DocHandle,
         intent: impl Into<alto_doc::Intent>,
+        ops: Vec<Op>,
+        base_revision: u64,
+    ) -> Result<ChangeSet, EngineError> {
+        let changes = self.transact_unmaintained(handle, intent, ops, base_revision)?;
+        self.maintain();
+        self.unpin_referenced();
+        Ok(changes)
+    }
+    /// `transact` without the maintenance that enforces the history budget and drops
+    /// unreachable objects. The caller runs `maintain` once it keeps the result.
+    fn transact_unmaintained(
+        &mut self,
+        handle: DocHandle,
+        intent: impl Into<alto_doc::Intent>,
         mut ops: Vec<Op>,
         base_revision: u64,
     ) -> Result<ChangeSet, EngineError> {
@@ -403,8 +420,6 @@ impl Engine {
         if self.document(handle)?.revision != old_revision {
             self.invalidate_merge(handle);
         }
-        self.maintain();
-        self.unpin_referenced();
         Ok(changes)
     }
     /// `ops` with every render version 3 text op baked and the bake blobs stored
@@ -1002,51 +1017,55 @@ impl Engine {
                 self.install_object(hash, &data)?;
             }
         }
+        // The step is applied without maintenance, so the history budget cannot drop
+        // the entries or objects that reverting it needs. A diverged step restores the
+        // editor as it was, redo stack included; maintenance runs once either way.
+        let rollback = self
+            .documents
+            .get(&h)
+            .ok_or(EngineError::NotFound(h))?
+            .clone();
+        let replayed = self.replay_step(h, &v, ops);
+        let replayed = match replayed {
+            Ok(true) => Ok(Replayed::Applied),
+            Ok(false) | Err(_) => {
+                self.documents.insert(h, rollback);
+                replayed.map(|_| Replayed::Diverged)
+            }
+        };
+        self.maintain();
+        self.unpin_referenced();
+        replayed
+    }
+    /// Applies one replayed step and reports whether it reached its recorded state.
+    fn replay_step(
+        &mut self,
+        h: DocHandle,
+        v: &serde_json::Value,
+        ops: Vec<Op>,
+    ) -> Result<bool, EngineError> {
         let (undo, redo) = self.history_state(h)?;
-        let applied = match v["kind"].as_str() {
-            Some("undo") if undo > 0 => {
-                self.undo(h)?;
-                JournalKind::Undo
-            }
-            Some("redo") if redo > 0 => {
-                self.redo(h)?;
-                JournalKind::Redo
-            }
+        let editor = self.documents.get_mut(&h).ok_or(EngineError::NotFound(h))?;
+        let changed = match v["kind"].as_str() {
+            Some("undo") if undo > 0 => editor.undo()?.is_some(),
+            Some("redo") if redo > 0 => editor.redo()?.is_some(),
             _ => {
                 let revision = self.document(h)?.revision;
                 let intent = alto_doc::Intent {
                     id: v["intent"].as_str().unwrap_or("recovered.edit").into(),
                     label: v["label"].as_str().map(Into::into),
                 };
-                self.transact(h, intent, ops, revision)?;
-                JournalKind::Transact
+                self.transact_unmaintained(h, intent, ops, revision)?;
+                false
             }
         };
+        if changed {
+            self.invalidate_merge(h);
+        }
         let Some(after) = v["after"].as_str() else {
-            return Ok(Replayed::Applied);
+            return Ok(true);
         };
-        if after == self.state_digest(h)?.to_string() {
-            return Ok(Replayed::Applied);
-        }
-        match applied {
-            JournalKind::Undo => {
-                self.redo(h)?;
-            }
-            // Undoing the replayed redo puts the step back on the redo stack.
-            JournalKind::Redo => {
-                self.undo(h)?;
-            }
-            // A transaction cleared the redo stack; undoing it leaves only the
-            // diverged step there, which is not offered for redo.
-            JournalKind::Transact => {
-                self.undo(h)?;
-                self.documents
-                    .get_mut(&h)
-                    .ok_or(EngineError::NotFound(h))?
-                    .drop_newest_redo();
-            }
-        }
-        Ok(Replayed::Diverged)
+        Ok(after == self.state_digest(h)?.to_string())
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1178,13 +1197,14 @@ impl Engine {
         self.imported.insert(h);
     }
     fn maintain(&mut self) {
+        let limit = self.history_object_limit;
         for editor in self.documents.values_mut() {
             let mut current = std::collections::BTreeSet::new();
             for n in editor.doc.nodes.values() {
                 node_hashes(n, &mut current);
             }
             current.extend(editor.doc.assets.values().map(|a| a.hash));
-            let drop = undos_over_budget(editor, &current, MAX_HISTORY_ONLY_OBJECTS);
+            let drop = undos_over_budget(editor, &current, limit);
             editor.drop_oldest_undos(drop);
         }
         let mut current = self.live_hashes();
@@ -1797,6 +1817,157 @@ mod package_tests {
             "the step was not reverted"
         );
         assert_eq!(fresh.history_state(r).unwrap(), (0, 0));
+    }
+
+    /// `good` with a recorded state that replay cannot reach.
+    fn diverged(good: &[u8]) -> Vec<u8> {
+        let mut entries = alto_store::read_entries(good).unwrap();
+        let mut tx: serde_json::Value =
+            serde_json::from_slice(&entries["transaction.json"]).unwrap();
+        tx["after"] = serde_json::json!(ContentHash::of(b"elsewhere"));
+        entries.insert("transaction.json".into(), serde_json::to_vec(&tx).unwrap());
+        alto_store::write_entries(&entries).unwrap()
+    }
+    /// `recover` into an engine whose history may keep only `limit` objects.
+    fn recover_with_limit(
+        checkpoint: RecoveryCheckpoint,
+        record: &[u8],
+        limit: usize,
+    ) -> (Engine, DocHandle, Replayed) {
+        let mut entries = checkpoint.entries;
+        let meta: serde_json::Value =
+            serde_json::from_slice(&entries.remove("checkpoint.json").unwrap()).unwrap();
+        let opaque: std::collections::BTreeSet<ContentHash> =
+            serde_json::from_value(meta["opaque"].clone()).unwrap();
+        let mut fresh = Engine::new();
+        fresh.history_object_limit = limit;
+        let (r, warnings) = fresh.open_recovery_entries(entries, &opaque).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let replayed = fresh.replay_record(r, record).unwrap();
+        (fresh, r, replayed)
+    }
+
+    #[test]
+    fn a_diverged_step_is_reverted_even_when_its_inverse_is_over_the_history_budget() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(512, 256)).unwrap();
+        let root = e.document(d).unwrap().root;
+        let layer = Node::raster("A");
+        let id = layer.id;
+        let mut changes = vec![];
+        for tx in 0..2 {
+            let hash = e
+                .put_tile(TileData::new(PixelFormat::Rgba8, vec![tx as u8 + 1; 262144]).unwrap())
+                .unwrap();
+            changes.push(TileChange {
+                key: TileKey { tx, ty: 0 },
+                before: None,
+                after: Some(hash),
+            });
+        }
+        let ops = vec![
+            Op::InsertNode {
+                node: layer,
+                parent: root,
+                index: 0,
+            },
+            Op::SetTiles { layer: id, changes },
+        ];
+        e.transact(d, "add", ops, 0).unwrap();
+        let checkpoint = e.recovery_checkpoint(d, &Default::default()).unwrap();
+        let before = e.snapshot(d).unwrap();
+        // Deleting the layer leaves its two tiles only in history, over a budget of one.
+        let ops = vec![Op::RemoveNode { id }];
+        e.transact(d, "delete", ops.clone(), 1).unwrap();
+        let bad = diverged(
+            &e.journal_record(d, JournalKind::Transact, "delete", &ops)
+                .unwrap(),
+        );
+        let (mut fresh, r, replayed) = recover_with_limit(checkpoint, &bad, 1);
+        assert_eq!(replayed, Replayed::Diverged);
+        assert!(
+            fresh.snapshot(r).unwrap() == before,
+            "the layer stays deleted"
+        );
+        assert_eq!(fresh.history_state(r).unwrap(), (1, 0));
+        for tx in 0..2 {
+            assert_eq!(
+                fresh
+                    .pick_color(r, id, [tx as f64 * 256.0, 0.0])
+                    .unwrap()
+                    .bytes,
+                [tx as u8 + 1; 4]
+            );
+        }
+        // The undo entry the checkpoint carried still works.
+        fresh.undo(r).unwrap().unwrap();
+        assert!(fresh.document(r).unwrap().node(id).is_err());
+    }
+
+    #[test]
+    fn a_diverged_step_keeps_the_checkpoints_redo() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let root = e.document(d).unwrap().root;
+        let a = Node::raster("A");
+        let a_id = a.id;
+        e.transact(
+            d,
+            "add",
+            vec![Op::InsertNode {
+                node: a,
+                parent: root,
+                index: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        e.undo(d).unwrap().unwrap();
+        let checkpoint = e.recovery_checkpoint(d, &Default::default()).unwrap();
+        let ops = vec![Op::InsertNode {
+            node: Node::raster("B"),
+            parent: root,
+            index: 0,
+        }];
+        let revision = e.document(d).unwrap().revision;
+        e.transact(d, "add", ops.clone(), revision).unwrap();
+        let bad = diverged(
+            &e.journal_record(d, JournalKind::Transact, "add", &ops)
+                .unwrap(),
+        );
+        let (mut fresh, r, replayed) =
+            recover_with_limit(checkpoint, &bad, MAX_HISTORY_ONLY_OBJECTS);
+        assert_eq!(replayed, Replayed::Diverged);
+        assert_eq!(fresh.history_state(r).unwrap(), (0, 1));
+        fresh.redo(r).unwrap().unwrap();
+        assert!(fresh.document(r).unwrap().node(a_id).is_ok());
+    }
+
+    #[test]
+    fn a_matching_step_still_clears_redo() {
+        let mut e = Engine::new();
+        let d = e.create_document(DocumentMeta::srgb_u8(64, 64)).unwrap();
+        let root = e.document(d).unwrap().root;
+        let insert = |name| {
+            vec![Op::InsertNode {
+                node: Node::raster(name),
+                parent: root,
+                index: 0,
+            }]
+        };
+        e.transact(d, "add", insert("A"), 0).unwrap();
+        e.undo(d).unwrap().unwrap();
+        let checkpoint = e.recovery_checkpoint(d, &Default::default()).unwrap();
+        let ops = insert("B");
+        let revision = e.document(d).unwrap().revision;
+        e.transact(d, "add", ops.clone(), revision).unwrap();
+        let good = e
+            .journal_record(d, JournalKind::Transact, "add", &ops)
+            .unwrap();
+        let (fresh, r, replayed) = recover_with_limit(checkpoint, &good, MAX_HISTORY_ONLY_OBJECTS);
+        assert_eq!(replayed, Replayed::Applied);
+        assert_eq!(fresh.history_state(r).unwrap(), (1, 0));
+        assert!(fresh.snapshot(r).unwrap() == e.snapshot(d).unwrap());
     }
 
     #[test]
