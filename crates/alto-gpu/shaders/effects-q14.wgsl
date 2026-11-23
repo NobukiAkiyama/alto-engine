@@ -178,7 +178,7 @@ fn curve_point_q14(i: u32) -> vec2i {
 fn curves_q14(v: vec4i, count: u32, channels: u32) -> vec4i {
   let s=straight_q(v);var out=v;
   for(var channel=0u;channel<3u;channel++){
-    if (channels>>channel&1u)==0u {continue;}
+    if ((channels>>channel)&1u)==0u {continue;}
     let x=s[channel];var y=x;
     for(var i=0u;i+1u<count;i++){
       let a=curve_point_q14(i);let b=curve_point_q14(i+1u);
