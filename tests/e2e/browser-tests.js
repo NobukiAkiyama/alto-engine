@@ -975,7 +975,9 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
           [
             `let pendingWriter; self.onmessage = async ({data}) => {
           try {
-            pendingWriter = await data.file.createWritable();
+            // By name: Safari cannot post a FileSystemFileHandle to a Worker.
+            const file = await (await navigator.storage.getDirectory()).getFileHandle(data.name);
+            pendingWriter = await file.createWritable();
             await pendingWriter.write(new Uint8Array([99, 98, 97, 96]));
             postMessage({ready: true});
           } catch (error) { postMessage({error: String(error)}); }
@@ -999,7 +1001,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
             clearTimeout(timeout);
             reject(error);
           };
-          interruptedWriter.postMessage({ file });
+          interruptedWriter.postMessage({ name: "alto-test-atomic-save.tmp" });
         });
       } finally {
         interruptedWriter.terminate();
@@ -1185,6 +1187,8 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
     await test("simultaneous Worker restart requests share one recovery", async () => {
       await doc.durable();
       const hash = (await doc.snapshotHash());
+      // A crash test must wait for the journal: the previous test ends with undos and redos.
+      await doc.durable();
       const canvas = engine.element;
       const container = canvas.parentElement;
       let nested;
