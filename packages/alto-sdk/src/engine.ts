@@ -318,6 +318,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     if (event.persisted && this.suspended) void this.resume().catch((e) => this.emit("error", e));
   };
   private suspended = false;
+  /** Settles once every engine Worker this engine let go of has been terminated. */
+  private workersStopped: Promise<void> = Promise.resolve();
   /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
   workerURL: URL | string | null;
 
@@ -984,10 +986,16 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     void task.then(clear, clear);
     return task;
   }
+  /** Stops `worker` (see stopWorker); a later start waits for it through `workersStopped`. */
+  private stopWorker(worker: Worker | null): Promise<void> {
+    const stopped = stopWorker(worker);
+    this.workersStopped = Promise.all([this.workersStopped, stopped]).then(() => {});
+    return stopped;
+  }
   private async performRestart(): Promise<void> {
     cancelAnimationFrame(this.raf);
     ++this.workerGeneration;
-    const stopped = stopWorker(this.worker);
+    this.stopWorker(this.worker);
     const crashed = new AltoError("WORKER_CRASHED", "the Worker was restarted");
     this.document?.abortTool(crashed);
     this.rejectPending(crashed);
@@ -995,9 +1003,12 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     const replacement = this.makeCanvas();
     this.element.replaceWith(replacement);
     this.element = replacement;
-    // The old Worker's journal must be closed before the new one opens it.
-    await stopped;
     try {
+      // Every old Worker's journal must be closed before the new one opens it,
+      // including one left by an earlier failed restart.
+      await this.workersStopped;
+      if (this.disposed || this.suspended)
+        throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed or suspended during the restart");
       await this.start();
       if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
       if (this.document || this.recoveryWaiting) {
@@ -1034,7 +1045,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.setStatus("storage-failed", error);
         this.startLoop();
       } else {
-        void stopWorker(this.worker);
+        void this.stopWorker(this.worker);
         // Document listeners may have sent requests while the recovered state applied.
         this.rejectPending(error);
         this.setStatus("failed", error);
@@ -1048,7 +1059,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.suspended = true;
     cancelAnimationFrame(this.raf);
     ++this.workerGeneration;
-    const stopped = stopWorker(this.worker);
+    const stopped = this.stopWorker(this.worker);
     this.worker = null;
     const paused = new AltoError("WORKER_UNAVAILABLE", "the page was put in the back/forward cache");
     this.document?.abortTool(paused);
@@ -1073,7 +1084,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.disposed = true;
     ++this.workerGeneration;
     cancelAnimationFrame(this.raf);
-    const stopped = stopWorker(this.worker);
+    const stopped = this.stopWorker(this.worker);
     this.worker = null;
     this.releaseRecoveryLease(stopped);
     this.resizeObserver.disconnect();
