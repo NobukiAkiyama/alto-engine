@@ -155,6 +155,8 @@ function adoptDocument(epoch: number | undefined) {
  * Returns whether `error` was one.
  */
 let trapped = false;
+/** Set when the page is about to terminate this Worker (see stopForTermination). */
+let stopping = false;
 function trap(error: unknown): boolean {
   if (!(error instanceof WebAssembly.RuntimeError)) return false;
   if (!trapped) {
@@ -194,7 +196,7 @@ let runtime!: Runtime,
   prefetchSpentMs = 0,
   lastMessageAt = performance.now();
 function schedulePrefetch() {
-  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure || trapped)
+  if (prefetchTimer !== null || !frameSettled || prefetchDisabled || !runtime || storageFailure || trapped || stopping)
     return;
   const quietFor = performance.now() - lastMessageAt;
   const delay = prefetchSpentMs >= 4 ? Math.max(0, 100 - quietFor) : 0;
@@ -1473,7 +1475,7 @@ async function drain() {
   if (draining) return;
   draining = true;
   try {
-    while (queue.length || wantTick || pendingViewport || pendingResize) {
+    while (!stopping && (queue.length || wantTick || pendingViewport || pendingResize)) {
       pumpDecodes();
       applyPendingView();
       if (queue.length) {
@@ -1534,8 +1536,28 @@ async function drain() {
   }
 }
 
-self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage>) => {
-  if (trapped) return;
+/**
+ * The page is about to terminate this Worker. Safari 27 crashes the whole page when a
+ * nested Worker's message is delivered while this Worker is being torn down, so the
+ * nested Workers are terminated first, from here, and the page is told once their
+ * queued messages had a turn to drain. Nothing after this is answered.
+ */
+function stopForTermination() {
+  if (stopping) return;
+  stopping = true;
+  queue.length = 0;
+  for (const decoder of decoders) {
+    decoder.worker.onmessage = null;
+    decoder.worker.onerror = null;
+  }
+  stopDecoders();
+  journal.stop();
+  setTimeout(() => postMessage({ t: "stopped" }), 20);
+}
+
+self.onmessage = ({ data: m }: MessageEvent<Queued | StreamMessage | { t: "stop" }>) => {
+  if (m.t === "stop") return stopForTermination();
+  if (trapped || stopping) return;
   if (m.t === "cancelBrush" && (m.documentEpoch === undefined || m.documentEpoch===documentEpoch)) finishAbort?.cancel();
   if (m.t === "durable") {
     try {

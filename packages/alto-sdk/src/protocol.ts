@@ -301,6 +301,7 @@ export type Notice =
   | { t: "diagnostic"; value: Record<string, unknown> }
   | { t: "diagnostic-storage"; value: string }
   | { t: "gpuLost" }
+  | { t: "stopped" }
   | { t: "gpuRestored" }
   | { t: "error"; value: WireError };
 
