@@ -300,6 +300,7 @@ impl Engine {
         let no_op = changed_tiles == 0;
         node.kind = NodeKind::Raster { bounds, tiles };
         Ok(PreparedImageEdit {
+            engine: self.id,
             document: h,
             stage,
             revision,
