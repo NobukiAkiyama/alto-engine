@@ -275,6 +275,8 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       );
     });
     await test("low-zoom prefetch matches direct composite pixels", async () => {
+      // Viewport zoom is in CSS pixels; tile levels use device-pixel zoom.
+      const ratio = unstable(engine).pixelRatio();
       for (const size of [512, 300]) {
         doc = await engine.createDocument({ width: size, height: size });
         const red = await image(engine, "rgba(255,0,0,.5)", size, size);
@@ -283,17 +285,17 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
           tx.addRasterFromAsset(red);
           tx.addRasterFromAsset(blue);
         });
-        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0 });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5 / ratio, rotation: 0 });
         await testing(engine).request("setVisibleTileJobs", { enabled: false });
         await testing(engine).request("resetRenderCache", { cpu: true });
         const direct = await unstable(engine).readTileLevel(1, 0, 0);
         await testing(engine).request("setVisibleTileJobs", { enabled: true });
         await testing(engine).request("resetRenderCache", { cpu: true });
-        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5, rotation: 0.17 });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 0.5 / ratio, rotation: 0.17 });
         await settled(engine);
         assert(same(direct, await unstable(engine).readTileLevel(1, 0, 0)),
           `cold visible job differs from direct composite for ${size}px canvas`);
-        engine.viewport.set({ center: [size / 2, size / 2], zoom: 1, rotation: 0 });
+        engine.viewport.set({ center: [size / 2, size / 2], zoom: 1 / ratio, rotation: 0 });
         // Remove the parent used by the preceding parity probes so this must
         // actually prepare a new parent from the level-0 view.
         await testing(engine).request("resetRenderCache", { cpu: false });
@@ -304,7 +306,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
           frame = await settled(engine);
         }
         assert(frame.prefetch.candidates === 1 && frame.prefetch.ready === 1,
-          `low-zoom parent was not prepared for ${size}px canvas`);
+          `low-zoom parent was not prepared for ${size}px canvas: ${JSON.stringify(frame.prefetch)}`);
         assert(same(direct, await unstable(engine).readTileLevel(1, 0, 0)),
           `prefetched parent differs from direct composite for ${size}px canvas`);
       }
