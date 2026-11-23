@@ -527,14 +527,22 @@ impl Context<'_> {
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
                 out
             }
-            REffectKind::Curves { ref points } => {
+            REffectKind::Curves {
+                ref points,
+                channels,
+            } => {
                 let out = self.alloc(roi)?;
+                // Bit i set: the curve maps color channel i (red, green, blue).
+                let mask = channels
+                    .iter()
+                    .enumerate()
+                    .fold(0, |m, (i, on)| m | (i32::from(*on) << i));
                 let p = if self.resources.exact {
                     let mut p = Self::q14_params(
                         31,
                         roi,
                         [Some(input.roi), None],
-                        [points.len().min(16) as i32, 0, 0, 0],
+                        [points.len().min(16) as i32, mask, 0, 0],
                         None,
                     )?;
                     let words: &mut [u32] = bytemuck::cast_slice_mut(&mut p.curve);
@@ -550,6 +558,7 @@ impl Context<'_> {
                         p.curve[i * 4 + 1] = *y;
                     }
                     p.extra[0] = points.len().min(16) as f32;
+                    p.extra[1] = mask as f32;
                     p
                 };
                 self.dispatch(&out, &input, &input, &input, p, &[])?;
