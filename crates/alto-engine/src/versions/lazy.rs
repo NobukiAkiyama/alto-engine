@@ -3,6 +3,7 @@
 use super::branches::fail;
 use super::*;
 use serde::Deserialize;
+use unicode_normalization::UnicodeNormalization;
 
 /// Objects a document may leave in its folder.
 #[derive(Default)]
@@ -66,11 +67,16 @@ impl Engine {
             ObjectTarget::Commit { hash } => {
                 commits.insert(*hash);
             }
-            ObjectTarget::Branch { name } => {
-                commits.extend(s.refs.branches.get(name).map(|b| b.head))
-            }
+            // Branches are stored under their NFC spelling, as `ref_name` makes it.
+            ObjectTarget::Branch { name } => commits.extend(
+                s.refs
+                    .branches
+                    .get(&name.nfc().collect::<String>())
+                    .map(|b| b.head),
+            ),
             ObjectTarget::Merge { name } => {
-                let Some(theirs) = s.refs.branches.get(name).map(|b| b.head) else {
+                let name: String = name.nfc().collect();
+                let Some(theirs) = s.refs.branches.get(&name).map(|b| b.head) else {
                     return Ok(vec![]);
                 };
                 commits.insert(theirs);
@@ -550,6 +556,35 @@ mod tests {
             e.external_objects(d).unwrap(),
             BTreeSet::from([f.head_tile])
         );
+    }
+
+    #[test]
+    fn checkout_by_another_spelling_still_needs_the_branch_objects() {
+        let f = fixture();
+        let (mut e, d) = open(&f);
+        e.create_branch(d, "が", Some(f.old), false).unwrap();
+        let before = e.snapshot(d).unwrap();
+        for spelling in ["か\u{3099}", "が"] {
+            assert_eq!(
+                e.missing_objects(
+                    d,
+                    &ObjectTarget::Branch {
+                        name: spelling.into()
+                    }
+                )
+                .unwrap(),
+                e.missing_objects(d, &ObjectTarget::Commit { hash: f.old })
+                    .unwrap()
+            );
+            assert_eq!(code(e.checkout(d, spelling).unwrap_err()), "STORAGE");
+            assert_eq!(e.snapshot(d).unwrap(), before);
+        }
+        let target = ObjectTarget::Branch {
+            name: "か\u{3099}".into(),
+        };
+        provide(&mut e, d, &f, &target);
+        e.checkout(d, "か\u{3099}").unwrap();
+        assert_eq!(e.pick_color(d, f.layer, [0.0, 0.0]).unwrap().bytes, [10; 4]);
     }
 
     #[test]
