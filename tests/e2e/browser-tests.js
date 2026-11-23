@@ -557,7 +557,9 @@ export async function runTests(engine, benchmark, log) {
           [
             `let pendingWriter; self.onmessage = async ({data}) => {
           try {
-            pendingWriter = await data.file.createWritable();
+            // By name: Safari cannot post a FileSystemFileHandle to a Worker.
+            const file = await (await navigator.storage.getDirectory()).getFileHandle(data.name);
+            pendingWriter = await file.createWritable();
             await pendingWriter.write(new Uint8Array([99, 98, 97, 96]));
             postMessage({ready: true});
           } catch (error) { postMessage({error: String(error)}); }
@@ -581,7 +583,7 @@ export async function runTests(engine, benchmark, log) {
             clearTimeout(timeout);
             reject(error);
           };
-          interruptedWriter.postMessage({ file });
+          interruptedWriter.postMessage({ name: "alto-test-atomic-save.tmp" });
         });
       } finally {
         interruptedWriter.terminate();
