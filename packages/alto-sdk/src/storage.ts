@@ -155,7 +155,10 @@ export class FileSystemDirectoryProvider implements ObjectStorageProvider {
   protected async write(path: string, data: Uint8Array) {
     try {
       const w = await (await this.file(path, true)).createWritable();
-      try { await w.write(data as BufferSource); await w.close(); } catch (e) { await w.abort(); throw e; }
+      // Safari writes the whole underlying buffer of a view that covers only part of it,
+      // and folder saves pass subarrays of one framed buffer, so such a view is copied.
+      const whole = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();
+      try { await w.write(whole as BufferSource); await w.close(); } catch (e) { await w.abort(); throw e; }
     } catch (e) {
       throw e instanceof AltoError ? e : new AltoError("STORAGE", String(e));
     }
