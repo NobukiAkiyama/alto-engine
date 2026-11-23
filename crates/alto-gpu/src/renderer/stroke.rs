@@ -583,8 +583,16 @@ impl Renderer {
                 }
             }
             Damage::Sources { rects, sources } => {
-                for r in rects {
-                    self.invalidate(Some(*r));
+                // Version 3 discards by `exact_reach` alone: it is the exact set of
+                // display tiles a changed source can reach. `scene_damage` pairs every
+                // rect with a source box, and the f64 rects add the v1/v2 filter margin
+                // on every side, which discarded a 3x3 block around a one-tile edit
+                // instead of the 2x2 the 4-tap reaches. Rects without sources (not
+                // produced today) still discard conservatively.
+                if sources.is_empty() {
+                    for r in rects {
+                        self.invalidate(Some(*r));
+                    }
                 }
                 for s in sources {
                     if let Some(fixed) = s.fixed_world {

@@ -74,7 +74,47 @@ pub(super) fn cold_warm_cases() -> Vec<ColdWarmCase> {
             }],
         )
     };
+    // One source tile of a 3x3 layer changes. Every display tile around it, at
+    // levels 0 and 1, is read before the edit, so a tile kept by mistake reads stale.
+    let neighbours = |name: &'static str, transform: [f64; 6]| {
+        let grid = |center: i32| {
+            (0..3)
+                .flat_map(|y| (0..3).map(move |x| [x, y]))
+                .map(|k| {
+                    let seed = if k == [1, 1] {
+                        center
+                    } else {
+                        20 + k[0] + 3 * k[1]
+                    };
+                    (k, TileSpec::Raster(seed))
+                })
+                .collect::<Vec<_>>()
+        };
+        let layer = |center| vec![raster(grid(center), transform)];
+        ColdWarmCase {
+            name,
+            before: with([1024, 1024], layer(10)),
+            after: with([1024, 1024], layer(11)),
+            keys: (0..4)
+                .flat_map(|y| (0..4).map(move |x| ((0, x, y), None)))
+                .chain((0..2).flat_map(|y| (0..2).map(move |x| ((1, x, y), None))))
+                .collect(),
+        }
+    };
     vec![
+        neighbours("edited source tile: identity neighbours", ident()),
+        neighbours(
+            "edited source tile: fractional translation neighbours",
+            [1.0, 0.0, 0.0, 1.0, 0.5, 0.25],
+        ),
+        neighbours(
+            "edited source tile: scaled and rotated neighbours",
+            [1.2 * c, 1.2 * s, -1.2 * s, 1.2 * c, 300.25, 17.5],
+        ),
+        neighbours(
+            "edited source tile: negative translation neighbours",
+            [1.0, 0.0, 0.0, 1.0, -1.0, -255.0],
+        ),
         ColdWarmCase {
             name: "wide fixture: plain tile 32767 draws",
             before: blank(wide),

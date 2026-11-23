@@ -5,7 +5,10 @@ license = "MIT OR Apache-2.0"
 edition = "2024"
 
 [dependencies]
-blake3 = "1"
+# wasm32_simd only changes wasm32 builds: the same BLAKE3 digests from SIMD128
+# code. Every browser with WebGPU also runs WASM SIMD. Package open and recovery
+# verify every tile's hash, so the scalar version dominated those paths.
+blake3 = { version = "1", features = ["wasm32_simd"] }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["serde", "v7", "js"] }
 
