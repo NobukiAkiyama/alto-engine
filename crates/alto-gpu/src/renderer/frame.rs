@@ -161,7 +161,7 @@ impl Renderer {
             if now() - start >= budget_ms && self.profile.steps > 0 {
                 break;
             }
-            let step_start = now();
+            let mut step_start = now();
             if self.integer_cache && key.0 > 0 {
                 // Version 3 defines a parent only as the integer downsample of its
                 // children (cold == warm). Build it through the hierarchy: one leaf
@@ -243,7 +243,30 @@ impl Renderer {
                     .visible_job
                     .take()
                     .ok_or(RenderError::Internal("visible job".into()))?;
-                match self.advance_tile_job(&mut job, scene, store, false)? {
+                // Continue the job inside this frame's budget while each slice is
+                // CPU work. Decoded inputs arrive as Worker messages, so a job that
+                // waits on the decode pool still yields after its slice. Safari
+                // delays the Worker's next task after each submit by several
+                // milliseconds, so one yield per slice cost more than the slices.
+                let step = loop {
+                    let slice_start = now();
+                    // The profile below this loop times the final slice.
+                    step_start = slice_start;
+                    let step = self.advance_tile_job(&mut job, scene, store, false)?;
+                    if step != JobStep::Progress
+                        || self.decoder.as_ref().is_some_and(|d| !d.in_flight.is_empty())
+                        || now() - start >= budget_ms
+                    {
+                        break step;
+                    }
+                    let elapsed = now() - slice_start;
+                    self.profile.steps += 1;
+                    self.profile.max_step_ms = self.profile.max_step_ms.max(elapsed);
+                    if self.profiling {
+                        self.profile.compose_ms += elapsed;
+                    }
+                };
+                match step {
                     JobStep::Ready => {
                         composed += 1;
                     }
