@@ -156,6 +156,10 @@ jobs:
           # Optimized test builds keep debug assertions and overflow checks.
           CARGO_PROFILE_TEST_OPT_LEVEL: "2"
         run: sh scripts/check.sh native
+      # Any crate in a build can turn this serde_json feature on; strict JSON
+      # reading must give the same values with it (#178).
+      - name: Strict JSON with serde_json arbitrary_precision
+        run: cargo test -p alto-core --locked --features serde_json/arbitrary_precision --lib "json::"
       - name: Compile fuzz targets
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
       - name: Record Metal semi-transparent parity
