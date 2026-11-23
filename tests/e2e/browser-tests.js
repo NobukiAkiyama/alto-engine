@@ -768,6 +768,8 @@ export async function runTests(engine, benchmark, log) {
     });
     await test("simultaneous Worker restart requests share one recovery", async () => {
       const hash = (await doc.snapshotHash());
+      // A crash test must wait for the journal: the previous test ends with undos and redos.
+      await doc.durable();
       const canvas = engine.element;
       const container = canvas.parentElement;
       let nested;
