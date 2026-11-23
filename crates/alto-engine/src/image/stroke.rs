@@ -29,7 +29,10 @@ impl Stroke {
         self.points.iter().map(|p| point(*p)).collect()
     }
     /// Tip positions in order: the points, and steps of a quarter radius between them.
-    fn dabs(&self, points: &[[i32; 2]]) -> Result<Vec<[i32; 2]>, EngineError> {
+    /// More than `limit` positions are refused before a segment's are added, so a
+    /// stroke too costly for its tip never allocates them (`SMUDGE_OPS / span²`).
+    fn dabs(&self, points: &[[i32; 2]], limit: u64) -> Result<Vec<[i32; 2]>, EngineError> {
+        let limit = limit.min(SMUDGE_OPS);
         let spacing = (self.radius / 4.0).max(1.0);
         let mut out = vec![points[0]];
         for pair in points.windows(2) {
@@ -38,8 +41,8 @@ impl Stroke {
                 f64::from(pair[1][1]) - f64::from(pair[0][1]),
             );
             let steps = (dx.hypot(dy) / spacing).ceil() as u64;
-            if out.len() as u64 + steps > SMUDGE_OPS {
-                return Err(err("RESOURCE_LIMIT", "stroke is too long"));
+            if out.len() as u64 + steps > limit {
+                return Err(err("RESOURCE_LIMIT", "stroke touches too many pixels"));
             }
             for s in 1..=steps {
                 let t = s as f64 / steps as f64;
@@ -167,11 +170,8 @@ impl Engine {
                 // Each pixel takes its largest coverage once, so overlapping dabs do not
                 // build up a semi-transparent source.
                 let mut coverage: BTreeMap<(i32, i32), u8> = BTreeMap::new();
-                let dabs = stroke.dabs(&points)?;
                 let span = (2 * r + 1) as u64;
-                if dabs.len() as u64 * span * span > SMUDGE_OPS {
-                    return Err(err("RESOURCE_LIMIT", "stamp touches too many pixels"));
-                }
+                let dabs = stroke.dabs(&points, SMUDGE_OPS / (span * span))?;
                 for dab in dabs {
                     for y in i64::from(dab[1]) - r..=i64::from(dab[1]) + r {
                         for x in i64::from(dab[0]) - r..=i64::from(dab[0]) + r {
@@ -222,12 +222,9 @@ impl Engine {
                     return Err(err("INVALID_ARGUMENT", "smudge strength must be 0 to 1"));
                 }
                 let points = stroke.validate()?;
-                let dabs = stroke.dabs(&points)?;
                 let r = stroke.radius.ceil() as i64;
                 let span = (2 * r + 1) as usize;
-                if dabs.len() as u64 * (span * span) as u64 > SMUDGE_OPS {
-                    return Err(err("RESOURCE_LIMIT", "smudge touches too many pixels"));
-                }
+                let dabs = stroke.dabs(&points, SMUDGE_OPS / (span * span) as u64)?;
                 let strength = (strength * 255.0).round() as u32;
                 let inside = |x: i64, y: i64| -> Option<(i32, i32)> {
                     let (px, py) = (i32::try_from(x).ok()?, i32::try_from(y).ok()?);
@@ -316,5 +313,53 @@ impl Engine {
                 no_op,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn stroke(points: Vec<[f64; 2]>, radius: f64) -> Stroke {
+        Stroke {
+            points,
+            radius,
+            hardness: 1.0,
+        }
+    }
+    #[test]
+    fn a_long_thin_stroke_is_refused_before_its_dabs_are_built() {
+        let s = stroke(vec![[0.0, 0.0], [50_000_000.0, 0.0]], 1.0);
+        let points = s.validate().unwrap();
+        // 50,000,001 positions fit the old 64 Mi cap but not 64 Mi / 3² for this tip.
+        let error = s.dabs(&points, SMUDGE_OPS / 9).unwrap_err();
+        assert!(error.to_string().starts_with("RESOURCE_LIMIT"), "{error}");
+    }
+    #[test]
+    fn short_strokes_keep_their_dabs() {
+        let s = stroke(
+            vec![[0.0, 0.0], [37.0, -5.0], [37.0, 90.0], [-12.0, 3.0]],
+            6.0,
+        );
+        let points = s.validate().unwrap();
+        let dabs = s.dabs(&points, SMUDGE_OPS / 169).unwrap();
+        // The positions the walk always made: a quarter radius apart, rounded.
+        let mut expected = vec![points[0]];
+        for pair in points.windows(2) {
+            let (dx, dy) = (
+                f64::from(pair[1][0] - pair[0][0]),
+                f64::from(pair[1][1] - pair[0][1]),
+            );
+            let steps = (dx.hypot(dy) / 1.5).ceil() as u64;
+            for k in 1..=steps {
+                let t = k as f64 / steps as f64;
+                expected.push([
+                    (f64::from(pair[0][0]) + dx * t).round() as i32,
+                    (f64::from(pair[0][1]) + dy * t).round() as i32,
+                ]);
+            }
+        }
+        assert_eq!(dabs, expected);
+        assert_eq!(s.dabs(&points, dabs.len() as u64).unwrap(), expected);
+        assert!(s.dabs(&points, dabs.len() as u64 - 1).is_err());
     }
 }
