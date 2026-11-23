@@ -601,10 +601,25 @@ impl Engine {
     pub(crate) fn text_entry(&self, doc: &Document, content: &TextContent) -> Arc<TextEntry> {
         // Hash the full editable content so wrapping options such as hanging punctuation
         // invalidate layout and selection geometry together.
+        // A collection's faces share one file hash, so the face is part of the key.
         let mut key = serde_json::to_vec(content).unwrap_or_default();
+        // A font whose bytes have not arrived yet lays out without it. Whether the
+        // bytes are present is part of the key too, so that layout is not reused
+        // once they are installed.
         for id in content.font_ids() {
-            if let Some(a) = doc.assets.get(&id) {
-                key.extend_from_slice(&a.hash.0);
+            // Every id adds a part, so one missing record cannot pass for another.
+            let Some(a) = doc.assets.get(&id) else {
+                key.push(b'?');
+                continue;
+            };
+            key.extend_from_slice(&a.hash.0);
+            match a.kind {
+                AssetKind::Font { face_index, .. } => {
+                    key.push(b'F');
+                    key.extend_from_slice(&face_index.to_be_bytes());
+                    key.push(u8::from(self.blobs.contains_key(&a.hash)));
+                }
+                _ => key.push(b'-'),
             }
         }
         let key = ContentHash::of(&key);

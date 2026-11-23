@@ -843,3 +843,132 @@ fn new_format_document_saves_and_reopens() {
         assert!(!reopened.version_status(h).unwrap().changed);
     }
 }
+
+/// A two-face collection: face 0 is the Latin test font, face 1 the Japanese one.
+fn collection() -> Vec<u8> {
+    let faces = [LATIN, JP];
+    let mut offsets = vec![];
+    let mut at = 12 + 4 * faces.len();
+    for face in faces {
+        offsets.push(at);
+        at += face.len().div_ceil(4) * 4;
+    }
+    let mut out = b"ttcf\0\x01\0\0".to_vec();
+    out.extend((faces.len() as u32).to_be_bytes());
+    for o in &offsets {
+        out.extend((*o as u32).to_be_bytes());
+    }
+    for (face, base) in faces.iter().zip(&offsets) {
+        let mut sfnt = face.to_vec();
+        let tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        for i in 0..tables {
+            let p = 12 + i * 16 + 8;
+            let offset = u32::from_be_bytes(sfnt[p..p + 4].try_into().unwrap()) + *base as u32;
+            sfnt[p..p + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        sfnt.resize(face.len().div_ceil(4) * 4, 0);
+        out.extend(sfnt);
+    }
+    out
+}
+
+fn info_json(e: &Engine, d: DocHandle, id: NodeId) -> String {
+    serde_json::to_string(&e.text_info(d, id).unwrap()).unwrap()
+}
+
+#[test]
+fn switching_the_face_of_a_collection_refreshes_the_layout() {
+    let mut e = Engine::new();
+    let d = e.create_document(DocumentMeta::srgb_u8(1024, 768)).unwrap();
+    let font = e.import_font(collection(), 0).unwrap().record;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "font",
+        vec![Op::SetAsset {
+            id: font.id,
+            record: Some(font.clone()),
+        }],
+        rev,
+    )
+    .unwrap();
+    let id = insert(
+        &mut e,
+        d,
+        TextContent {
+            text: "AAAA".into(),
+            style: TextStyle {
+                fonts: vec![font.id],
+                size: 40.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let face0 = info_json(&e, d, id);
+    let mut second = font.clone();
+    let alto_doc::AssetKind::Font { face_index, .. } = &mut second.kind else {
+        panic!()
+    };
+    *face_index = 1;
+    let rev = e.document(d).unwrap().revision;
+    e.transact(
+        d,
+        "face",
+        vec![Op::SetAsset {
+            id: font.id,
+            record: Some(second),
+        }],
+        rev,
+    )
+    .unwrap();
+    // A fresh engine lays the same document out from scratch.
+    let mut fresh = Engine::new();
+    fresh.import_font(collection(), 0).unwrap();
+    let r = fresh.open_snapshot(&e.snapshot(d).unwrap()).unwrap();
+    let face1 = info_json(&fresh, r, id);
+    assert_ne!(
+        face0, face1,
+        "the faces lay out alike; the test needs them to differ"
+    );
+    assert_eq!(info_json(&e, d, id), face1);
+    // The glyph outlines follow the face too, not only the layout.
+    let paths = |e: &Engine, d: DocHandle| {
+        let doc = e.document(d).unwrap();
+        let NodeKind::Text { content, .. } = &doc.node(id).unwrap().kind else {
+            panic!()
+        };
+        format!("{:?}", e.text_entry(doc, content).paths)
+    };
+    assert_eq!(paths(&e, d), paths(&fresh, r));
+}
+
+#[test]
+fn a_layout_made_before_the_font_arrives_is_not_kept() {
+    let (mut e, d, latin, jp) = document();
+    let content = texts(latin, jp).remove(0).1;
+    let id = insert(&mut e, d, content.clone());
+    let mut fresh = Engine::new();
+    let r = fresh.open_snapshot(&e.snapshot(d).unwrap()).unwrap();
+    let missing = info_json(&fresh, r, id);
+    fresh.import_font(LATIN.to_vec(), 0).unwrap();
+    fresh.import_font(JP.to_vec(), 0).unwrap();
+    assert_ne!(missing, info_json(&e, d, id));
+    assert_eq!(info_json(&fresh, r, id), info_json(&e, d, id));
+    // An edit after the bytes arrive bakes with the font, not a placeholder.
+    let rev = fresh.document(r).unwrap().revision;
+    fresh
+        .transact(
+            r,
+            "edit",
+            vec![Op::SetText {
+                id,
+                content: Box::new(content),
+                bake: None,
+            }],
+            rev,
+        )
+        .unwrap();
+    let bake = decoded(&fresh, bake_of(&fresh, r, id).unwrap());
+    assert_eq!(bake.fonts[0].hash.to_string(), LATIN_BLAKE3);
+}
