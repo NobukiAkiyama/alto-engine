@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 import { unstable } from "../../packages/alto-sdk/dist/unstable.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
 const assert = (ok, m) => {
@@ -50,24 +51,6 @@ async function event(engine, name, action, match = () => true) {
   await action();
   await p;
 }
-/** Runs `action` and waits until the GPU device is restored. */
-async function gpuRestored(engine, action) {
-  let off;
-  const p = new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      off?.();
-      reject(Error("timeout gpuRestored"));
-    }, 15000);
-    off = unstable(engine).onGpu((e) => {
-      if (e !== "restored") return;
-      clearTimeout(t);
-      off();
-      resolve();
-    });
-  });
-  await action();
-  await p;
-}
 const ready = (s) => s.state === "ready";
 async function settled(engine) {
   return unstable(engine).settle();
@@ -93,7 +76,7 @@ async function decodeFixture(engine) {
     assets.push(await engine.assets.importImage(await c.convertToBlob()));
   }
   await doc.transact("layers", (tx) => assets.forEach((a) => tx.addRasterFromAsset(a)));
-  const view = { center: [512, 256], zoom: 0.5, rotation: 0 };
+  const view = { center: [512, 256], zoom: 0.5 / unstable(engine).pixelRatio(), rotation: 0 };
   const cold = async (workers, { keepPool = false } = {}) => {
     if (!keepPool && !(await testing(engine).request("setDecodeWorkers", { enabled: workers })) && workers)
       return null;
@@ -201,8 +184,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       await red(); await doc.undo(); await doc.redo(); await red();
       const bytes=await testing(engine).saveBytes();
       doc=await engine.open(new Blob([bytes])); await red();
-      const restored=new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{off();reject(Error("GPU recovery timeout"));},15000); const off=unstable(engine).onGpu(g=>{if(g==="restored"){clearTimeout(timer);off();resolve();}}); });
-      await testing(engine).destroyGpu(); await restored; await red();
+      await gpuRestored(engine); await red();
     });
     await test("empty scene GPU validation / Normal / Multiply / Screen / opacity / visibility", async () => {
       doc = await engine.createDocument({ width: 512, height: 256 });
@@ -301,8 +283,9 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
         await testing(engine).request("resetRenderCache", { cpu: false });
         await testing(engine).request("enablePrefetch");
         let frame = await settled(engine);
-        for (let i = 0; i < 20 && frame.prefetch.ready < frame.prefetch.candidates; i++) {
-          await delay(10);
+        const deadline = performance.now() + 5000;
+        while (frame.prefetch.ready !== 1 && performance.now() < deadline) {
+          await delay(125);
           frame = await settled(engine);
         }
         assert(frame.prefetch.candidates === 1 && frame.prefetch.ready === 1,
@@ -1337,6 +1320,8 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       assert(same(painted, await unstable(engine).readTile(0, 0)), "recovered pixels changed");
     });
     await test("failed append freezes edits and preserves live emergency export", async () => {
+      // An earlier edit can still have a queued append on slower OPFS implementations.
+      await doc.durable();
       const before = doc.getSnapshot().revision;
       const name = doc.getSnapshot().nodes.get(brushLayer).name;
       const baseline = await testing(engine).saveBytes();
@@ -1373,6 +1358,7 @@ export async function runTests(engine, benchmark, log, { decodeFaultInjection = 
       doc = await engine.open(new Blob([baseline]));
     });
     await test("lost append reply replays once and matches the display", async () => {
+      await doc.durable();
       const before = doc.getSnapshot().revision;
       await testing(engine).injectStorageFault("afterAppend");
       await doc.transact("reply lost", (tx) =>

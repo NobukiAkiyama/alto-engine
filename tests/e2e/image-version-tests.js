@@ -1,3 +1,4 @@
+import { gpuRestored } from "./gpu-recovery.js";
 import { FileSystemDirectoryProvider, MemoryObjectProvider, OpfsFolderProvider } from "../../packages/alto-sdk/dist/index.js";
 import { blobTarget, opfsFolder } from "../../packages/alto-sdk/dist/browser.js";
 import { testing } from "../../packages/alto-sdk/dist/testing.js";
@@ -214,9 +215,16 @@ export async function runImageVersionTests(engine, log) {
       const text = await addBakedText("A😀", [{ start: 1, end: 3, style: { fonts: [] } }]);
       const samples = Array.from({ length: 32 * 20 }, (_, i) => [246 + 2 * (i % 32), 7 + 2 * Math.floor(i / 32)]);
       const pixels = async () => {
-        const colors = [];
-        for (const point of samples) colors.push((await d.image.pickComposite(point)).bytes);
-        return colors;
+        // The samples span two display tiles. Read each tile once and compare
+        // straight RGBA, as pickComposite does for a single pixel.
+        const gpu = unstable(engine);
+        const tiles = [await gpu.readTile(0, 0), await gpu.readTile(1, 0)];
+        return samples.map(([x, y]) => {
+          const i = (y * 256 + x % 256) * 4;
+          const [r, g, b, a] = tiles[x >> 8].subarray(i, i + 4);
+          const straight = (value) => a === 0 ? 0 : Math.min(255, Math.round(value * 255 / a));
+          return [straight(r), straight(g), straight(b), a];
+        });
       };
       const before = await pixels();
       assert(before.some((p) => p[3] === 255) && before.some((p) => p[3] > 0 && p[3] < 255), "expected opaque and antialiased text");
@@ -645,8 +653,7 @@ export async function runImageVersionTests(engine, log) {
       await d.durable(); await testing(engine).crash(); d = engine.document;
       assert(d.versions.status().refs.current_branch === "recovery" && d.versions.status().head === commit.hash, "history recovery");
       assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 255, 255]), "CPU pixels lost");
-      const restored = new Promise((resolve, reject) => { const timeout = setTimeout(() => { off(); reject(Error("GPU recovery timeout")); }, 30000); const off = unstable(engine).onGpu((state) => { if (state === "restored") { clearTimeout(timeout); off(); resolve(); } }); });
-      await testing(engine).destroyGpu(); await restored;
+      await gpuRestored(engine);
       assert(d.versions.status().head === commit.hash, "GPU recovery lost head"); assert(eq((await d.image.pickColor(layer, [0, 0])).bytes, [255, 0, 255, 255]), "GPU recovery lost pixels");
     });
     await test("stash is private, durable, and undoable after opening a thin archive", async () => {
