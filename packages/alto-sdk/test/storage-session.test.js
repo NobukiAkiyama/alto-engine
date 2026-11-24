@@ -177,3 +177,28 @@ test("a failed inline fallback rejects requests instead of waiting forever", asy
   await assert.rejects(created.request("inspect"), /STORAGE: inline journal unavailable/);
   assert.equal(created.state, "failed");
 });
+
+test("stop terminates the worker, refuses waiting and later requests and reports no failure", async () => {
+  const failures = [];
+  const { worker, created } = session({ onFailure: (error) => failures.push(error) });
+  worker.reply({ id: 0, ok: true, value: true });
+  const save = created.request("checkpoint", { bytes: new Uint8Array([1]) });
+  created.stop();
+  assert.equal(worker.terminated, true);
+  assert.equal(worker.onmessage, null);
+  await assert.rejects(save, /stopped/);
+  await assert.rejects(created.request("inspect"), /stopped/);
+  assert.equal(created.state, "failed");
+  assert.deepEqual(failures, []);
+});
+
+test("stop while starting never falls back to the inline journal", async () => {
+  const { worker, timers, created, inlineLoads } = session();
+  const save = created.request("checkpoint", { bytes: new Uint8Array([2]) });
+  created.stop();
+  timers.advance(3000);
+  await assert.rejects(save, /stopped/);
+  assert.equal(worker.terminated, true);
+  assert.equal(inlineLoads(), 0);
+  assert.equal(created.state, "failed");
+});

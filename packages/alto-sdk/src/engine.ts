@@ -318,6 +318,8 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     if (event.persisted && this.suspended) void this.resume().catch((e) => this.emit("error", e));
   };
   private suspended = false;
+  /** Settles once every engine Worker this engine let go of has been terminated. */
+  private workersStopped: Promise<void> = Promise.resolve();
   /** @internal Set by `assets.baseURL` or a test; otherwise the bundled Worker is used. */
   workerURL: URL | string | null;
 
@@ -873,10 +875,12 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     }
   }
 
-  private releaseRecoveryLease() {
+  /** `workerStopped`: the namespace is held until the old Worker has let go of its journal. */
+  private releaseRecoveryLease(workerStopped?: Promise<void>) {
     const release = this.releaseLease;
     this.releaseLease = undefined;
-    if (this.recoveryLabelWrite) void this.recoveryLabelWrite.then(release);
+    if (this.recoveryLabelWrite || workerStopped)
+      void Promise.all([this.recoveryLabelWrite, workerStopped]).then(release, release);
     else release?.();
   }
 
@@ -982,10 +986,16 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     void task.then(clear, clear);
     return task;
   }
+  /** Stops `worker` (see stopWorker); a later start waits for it through `workersStopped`. */
+  private stopWorker(worker: Worker | null): Promise<void> {
+    const stopped = stopWorker(worker);
+    this.workersStopped = Promise.all([this.workersStopped, stopped]).then(() => {});
+    return stopped;
+  }
   private async performRestart(): Promise<void> {
     cancelAnimationFrame(this.raf);
     ++this.workerGeneration;
-    this.worker?.terminate();
+    this.stopWorker(this.worker);
     const crashed = new AltoError("WORKER_CRASHED", "the Worker was restarted");
     this.document?.abortTool(crashed);
     this.rejectPending(crashed);
@@ -994,6 +1004,11 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.element.replaceWith(replacement);
     this.element = replacement;
     try {
+      // Every old Worker's journal must be closed before the new one opens it,
+      // including one left by an earlier failed restart.
+      await this.workersStopped;
+      if (this.disposed || this.suspended)
+        throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed or suspended during the restart");
       await this.start();
       if (this.disposed) throw new AltoError("WORKER_UNAVAILABLE", "the engine was disposed");
       if (this.document || this.recoveryWaiting) {
@@ -1030,7 +1045,7 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
         this.setStatus("storage-failed", error);
         this.startLoop();
       } else {
-        this.worker?.terminate();
+        void this.stopWorker(this.worker);
         // Document listeners may have sent requests while the recovered state applied.
         this.rejectPending(error);
         this.setStatus("failed", error);
@@ -1044,12 +1059,12 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.suspended = true;
     cancelAnimationFrame(this.raf);
     ++this.workerGeneration;
-    this.worker?.terminate();
+    const stopped = this.stopWorker(this.worker);
     this.worker = null;
     const paused = new AltoError("WORKER_UNAVAILABLE", "the page was put in the back/forward cache");
     this.document?.abortTool(paused);
     this.rejectPending(paused);
-    this.releaseRecoveryLease();
+    this.releaseRecoveryLease(stopped);
     this.setStatus("restarting", null);
   }
   /** The page came back from the back/forward cache: take the namespace again and restart. */
@@ -1069,9 +1084,9 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     this.disposed = true;
     ++this.workerGeneration;
     cancelAnimationFrame(this.raf);
-    this.worker?.terminate();
+    const stopped = this.stopWorker(this.worker);
     this.worker = null;
-    this.releaseRecoveryLease();
+    this.releaseRecoveryLease(stopped);
     this.resizeObserver.disconnect();
     if (this.resizeTimer !== null) clearTimeout(this.resizeTimer);
     this.ratioQuery?.removeEventListener("change", this.onRatioChange);
@@ -1093,6 +1108,35 @@ export class EngineCore extends Emitter<EngineEvents> implements Engine {
     // Another engine may take the namespace as soon as this resolves.
     await this.leaseReleased;
   }
+}
+
+/**
+ * Terminates an engine Worker after it has terminated its nested decode and storage
+ * Workers itself. Safari 27 crashes the page (WebContent process) when a nested Worker's
+ * message reaches an engine Worker that is being terminated. A Worker that does not
+ * answer within `STOP_TIMEOUT_MS` (stuck in WASM, or already broken) is terminated anyway.
+ */
+const STOP_TIMEOUT_MS = 500;
+function stopWorker(worker: Worker | null): Promise<void> {
+  if (!worker) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      worker.removeEventListener("message", onMessage);
+      worker.terminate();
+      resolve();
+    };
+    const onMessage = ({ data }: MessageEvent) => {
+      if (data?.t === "stopped") done();
+    };
+    const timer = setTimeout(done, STOP_TIMEOUT_MS);
+    worker.addEventListener("message", onMessage);
+    try {
+      worker.postMessage({ t: "stop" });
+    } catch {
+      done();
+    }
+  });
 }
 
 /** Starts an engine in `options.container`. */

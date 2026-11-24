@@ -25,6 +25,11 @@ export interface StorageSessionOptions {
 export interface StorageSession {
   readonly state: "starting" | "running" | "inline" | "failed";
   request(t: string, payload?: Record<string, unknown>, transfer?: Transferable[]): Promise<unknown>;
+  /**
+   * Ends the session before its engine Worker is terminated: the nested Worker is
+   * terminated from this side and every waiting or later request is refused.
+   */
+  stop(): void;
 }
 export function createStorageSession({
   createWorker,
@@ -38,6 +43,7 @@ export function createStorageSession({
 }: StorageSessionOptions): StorageSession {
   let mode: StorageSession["state"] = "starting";
   let closing = false;
+  let stopped = false;
   let failure: Error | null = null;
   let worker: Worker | null = null;
   let inline: Inline | null = null;
@@ -89,12 +95,15 @@ export function createStorageSession({
     try {
       inline = await loadInline();
     } catch (error) {
+      if (stopped) return;
       failure = Error("STORAGE: inline journal unavailable: " + error);
       mode = "failed";
       resolveReady();
       try { onFailure(failure); } catch {}
       return;
     }
+    // stop() ran while the inline journal loaded.
+    if (stopped) return;
     const queued = [...pending.values()];
     pending.clear();
     mode = "inline";
@@ -152,6 +161,29 @@ export function createStorageSession({
   return {
     get state() {
       return mode;
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      closing = true;
+      stopTimer();
+      mode = "failed";
+      failure = Error("STORAGE: the storage session was stopped");
+      const dead = worker;
+      worker = null;
+      if (dead) {
+        dead.onmessage = null;
+        dead.onerror = null;
+        dead.onmessageerror = null;
+        dead.terminate();
+      }
+      for (const entry of pending.values()) {
+        clearTimer(entry.timer);
+        entry.reject(failure);
+      }
+      pending.clear();
+      // A request waiting for startup sees the failure.
+      resolveReady();
     },
     async request(t: string, payload: Record<string, unknown> = {}, transfer: Transferable[] = []) {
       const message: Message = { t, ...payload };

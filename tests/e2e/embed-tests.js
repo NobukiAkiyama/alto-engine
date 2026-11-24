@@ -1316,8 +1316,15 @@ export async function runEmbedTests(_playground, log) {
         }
         assert(Math.abs(exported[d + 3] - a) <= 1, `alpha at ${x},${y}`);
       }
-      const half = await createImageBitmap(await doc.exportImage({ scale: 0.5, type: "image/webp" }));
+      const half = await createImageBitmap(await doc.exportImage({ scale: 0.5 }));
       assert(half.width === 256 && half.height === 128, `half size ${half.width}×${half.height}`);
+      // Safari cannot encode WebP; the engine must say so instead of returning a PNG.
+      const webp = await doc.exportImage({ scale: 0.5, type: "image/webp" }).catch((e) => e);
+      if (webp instanceof Blob) {
+        assert(webp.type === "image/webp", "WebP export type " + webp.type);
+        const small = await createImageBitmap(webp);
+        assert(small.width === 256 && small.height === 128, `WebP half size ${small.width}×${small.height}`);
+      } else assert(webp?.code === "UNSUPPORTED", "WebP export failed: " + webp);
       const crop = await createImageBitmap(await doc.exportImage({ region: { x0: 256, y0: 0, x1: 384, y1: 64 } }));
       assert(crop.width === 128 && crop.height === 64, `crop size ${crop.width}×${crop.height}`);
       for (const scale of [0, 1.5, Number.NaN])
