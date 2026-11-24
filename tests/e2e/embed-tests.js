@@ -26,19 +26,32 @@ const run = Date.now().toString(36);
 let serial = 0;
 const name = (label) => `test-embed/${run}/${label}-${serial++}`;
 
+/**
+ * Replaces `indexedDB.open` while `run` is pending. The patch goes on the prototype:
+ * Safari can collect the `indexedDB` wrapper and hand back a new one that has lost
+ * properties set on the old one, so a patch on the instance can vanish mid-test.
+ */
+async function withIndexedDBOpen(open, run) {
+  const original = Object.getOwnPropertyDescriptor(IDBFactory.prototype, "open");
+  Object.defineProperty(IDBFactory.prototype, "open", { ...original, value: open });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(IDBFactory.prototype, "open", original);
+  }
+}
+
 /** Keep browser tests separate from the host's real recent list. */
 async function withRecentFiles(runTest) {
   const opfs = await navigator.storage.getDirectory();
   const fixture = `alto-recent-tests-${crypto.randomUUID()}`;
   const folder = await opfs.getDirectoryHandle(fixture, { create: true });
-  const originalOpen = indexedDB.open;
-  indexedDB.open = function (database, version) {
-    return originalOpen.call(this, database === "alto-engine-recent" ? fixture : database, version);
-  };
+  const originalOpen = IDBFactory.prototype.open;
   try {
-    await runTest(folder);
+    await withIndexedDBOpen(function (database, version) {
+      return originalOpen.call(this, database === "alto-engine-recent" ? fixture : database, version);
+    }, () => runTest(folder));
   } finally {
-    delete indexedDB.open;
     await new Promise((resolve, reject) => {
       const request = indexedDB.deleteDatabase(fixture);
       request.onsuccess = resolve;
@@ -307,15 +320,10 @@ export async function runEmbedTests(_playground, log) {
     }));
     await test("recent files fall back when IndexedDB is unavailable", async () => {
       const root = await navigator.storage.getDirectory();
-      const original = Object.getOwnPropertyDescriptor(indexedDB, "open");
-      try {
-        indexedDB.open = () => { throw new DOMException("disabled", "SecurityError"); };
+      await withIndexedDBOpen(() => { throw new DOMException("disabled", "SecurityError"); }, async () => {
         assert((await recentFiles()).length === 0, "no recent list without IndexedDB");
         assert(await rejectsWith(rememberFile(root), "UNSUPPORTED"), "remember needs IndexedDB");
-      } finally {
-        if (original) Object.defineProperty(indexedDB, "open", original);
-        else delete indexedDB.open;
-      }
+      });
     });
     await test("64/128/256 MiB budgets reserve at most half and preserve brush pixels", async () => {
       for (const [budget, fixed] of [[64,32],[128,64],[256,128]]) {
